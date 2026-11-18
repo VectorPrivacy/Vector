@@ -1,6 +1,5 @@
-# Hard-coded English left per file (820 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (588 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
-attachments.rs 26
 backend/account.rs 19
 backend/actions.rs 9
 backend/archive.rs 16
@@ -18,7 +17,6 @@ backend/inline.rs 3
 backend/market.rs 4
 backend/mediaport.rs 6
 backend/messaging.rs 5
-backend/network.rs 13
 backend/packs.rs 11
 backend/pivx.rs 1
 backend/prefs.rs 1
@@ -30,7 +28,6 @@ backend/stream.rs 13
 backend/sync.rs 2
 backend/transcribe.rs 1
 backend/transfer.rs 6
-backend/transport.rs 9
 backend/unfurl.rs 9
 backend/updates.rs 4
 backend/upload.rs 5
@@ -41,35 +38,28 @@ callvideo/camera.rs 5
 callvideo/screen.rs 13
 callvideo/vp8.rs 4
 composer.rs 10
-crop.rs 24
 cropper.rs 2
 downgrade.rs 9
 edithistory.rs 3
 fileclip.rs 8
-filepreview.rs 27
-golinks.rs 22
 inline.rs 7
-invite.rs 20
 kit.rs 2
 linkcard.rs 3
 main.rs 1
 markdown.rs 12
-media.rs 16
 mentions.rs 9
 miniapp/host_proc.rs 5
 miniapp/host_view.rs 2
-miniapp/mod.rs 27
 miniprofile.rs 7
 packdetails.rs 9
 packs.rs 9
 paste_md.rs 1
 payaddr.rs 2
 pic.rs 2
-picker.rs 26
+picker.rs 1
 pickers.rs 4
 pins.rs 7
 preview.rs 14
-profile.rs 23
 qr.rs 7
 rail.rs 10
 reactpop.rs 5

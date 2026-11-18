@@ -30,3 +30,15 @@ upload-unreachable = Media server unreachable
 upload-no-server = No media server configured
 upload-failed = File send failed
 upload-failed-text = Vector could not send this file. Check your connection and try again, or pick a different file.
+
+## What a file transfer is doing, over its progress ring
+
+file-stage-encrypting = Encrypting
+file-stage-starting = Starting upload
+file-stage-decrypting = Decrypting
+file-stage-verifying = Verifying
+file-stage-saving = Saving
+# The file is on the server and the message is going out.
+file-stage-sending = Sending
+# $stage is one of the words above; $percent is from 0 to 99.
+file-stage-stage-percent = { $stage } { $percent }%

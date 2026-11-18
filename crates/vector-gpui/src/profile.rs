@@ -9,6 +9,7 @@ use gpui::{AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedStri
 use crate::pic::img;
 
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 use crate::timeline::DANGER;
 
@@ -131,7 +132,7 @@ fn option(
     icon: &'static str,
     icon_size: f32,
     tint: u32,
-    label: &'static str,
+    label: SharedString,
     active: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let inset = (30. - icon_size) / 2.;
@@ -180,7 +181,7 @@ fn option(
 fn small_option(
     id: &'static str,
     icon: &'static str,
-    label: Option<&'static str>,
+    label: Option<SharedString>,
     edit: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let d = div()
@@ -286,7 +287,7 @@ pub fn pane(
     let name = store.name(&s.npub);
     let status = p.status.title.clone();
     let status_text = if status.is_empty() && mine {
-        "Set a Status".to_string()
+        t::profile_set_status().to_string()
     } else {
         status.clone()
     };
@@ -296,7 +297,7 @@ pub fn pane(
         .cloned()
         .unwrap_or_else(|| {
             if mine {
-                "Anonymous".into()
+                t::profile_anonymous().into()
             } else {
                 format!("{}…", &s.npub[..s.npub.len().min(10)])
             }
@@ -331,7 +332,7 @@ pub fn pane(
                         .text_size(px(18.))
                         .line_height(px(24.))
                         .text_color(c(0xf7f4f4))
-                        .child("My Profile"),
+                        .child(t::profile_mine()),
                 )
                 .child(
                     svg()
@@ -475,7 +476,7 @@ pub fn pane(
     if mine && editing.is_none() {
         banner_box = banner_box
             .child(
-                small_option("profile-edit-btn", "icons/edit.svg", Some("Edit"), true)
+                small_option("profile-edit-btn", "icons/edit.svg", Some(t::profile_edit()), true)
                     .left(px(18.5))
                     .on_click(click(on, Act::Edit)),
             )
@@ -487,7 +488,7 @@ pub fn pane(
                     } else {
                         "icons/share.svg"
                     },
-                    Some("Share"),
+                    Some(t::profile_share()),
                     false,
                 )
                 .right(px(16.))
@@ -496,7 +497,7 @@ pub fn pane(
     }
     if editing.is_none() {
         banner_box = banner_box.child(
-            small_option("profile-qr-btn", "ui/qr.svg", None, false).aria_label("Show profile QR code")
+            small_option("profile-qr-btn", "ui/qr.svg", None, false).aria_label(t::profile_show_qr())
                 .right(px(16.))
                 .top(px(if mine { 68. } else { 10. }))
                 .on_click(click(on, Act::Qr)),
@@ -667,13 +668,13 @@ pub fn pane(
                 "icons/dots-horizontal.svg",
                 33.,
                 0xffffff,
-                "More",
+                t::profile_more(),
                 s.more_open,
             )
             .on_click(click(on, Act::More));
             if s.more_open {
                 let item = |id: &'static str,
-                            label: &'static str,
+                            label: SharedString,
                             icon: &'static str,
                             danger: bool,
                             a: Act| {
@@ -728,14 +729,14 @@ pub fn pane(
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(item(
                                 "profile-more-nickname",
-                                "Nickname",
+                                t::profile_nickname(),
                                 "icons/edit.svg",
                                 false,
                                 Act::Nickname,
                             ))
                             .child(item(
                                 "profile-more-block",
-                                if p.is_blocked { "Unblock" } else { "Block" },
+                                if p.is_blocked { t::profile_unblock() } else { t::profile_block() },
                                 "icons/x-user.svg",
                                 true,
                                 Act::Block,
@@ -759,7 +760,7 @@ pub fn pane(
                         "icons/message.svg",
                         30.,
                         0xffffff,
-                        "Message",
+                        t::profile_message(),
                         false,
                     )
                     .on_click(click(on, Act::Message)),
@@ -774,7 +775,7 @@ pub fn pane(
                         },
                         30.,
                         0xffffff,
-                        if muted { "Unmute" } else { "Mute" },
+                        if muted { t::profile_unmute() } else { t::profile_mute() },
                         false,
                     )
                     .on_click(click(on, Act::ToggleMute)),
@@ -789,7 +790,7 @@ pub fn pane(
                         },
                         30.,
                         PRIMARY,
-                        "Share",
+                        t::profile_share(),
                         false,
                     )
                     .on_click(click(on, Act::Share)),
@@ -812,7 +813,7 @@ pub fn pane(
                 .flex()
                 .justify_center()
                 .child(if placeholder {
-                    "No description yet".into_any_element()
+                    t::profile_no_description().into_any_element()
                 } else {
                     // Line by line, each centred, as `text-align: center` lays the desktop's out.
                     div()
@@ -839,7 +840,7 @@ pub fn pane(
                 .text_size(px(18.72))
                 .line_height(px(24.))
                 .text_color(c(0xf7f4f4))
-                .child(if mine { "My nPub Key" } else { "nPub Key" }),
+                .child(if mine { t::profile_my_npub() } else { t::profile_npub() }),
         )
         .child(
             div().mt(px(5.)).mb(px(40.)).w(gpui::relative(0.85)).child(
@@ -869,7 +870,7 @@ pub fn pane(
                     .child(
                         div()
                             .id("profile-npub-copy")
-                            .tip("Copy npub")
+                            .tip(t::profile_copy_npub())
                             .size(px(28.))
                             .flex_shrink_0()
                             .rounded(px(8.))
@@ -923,7 +924,7 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
                 icon: &'static str,
                 size: f32,
                 tint: Hsla,
-                label: &'static str,
+                label: SharedString,
                 a: Act| {
         div()
             .id(id)
@@ -949,7 +950,7 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
             "icons/edit-x.svg",
             14.,
             c(DANGER),
-            "Exit",
+            t::profile_edit_exit(),
             Act::ExitEdit(true),
         ))
         .child(
@@ -964,9 +965,9 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
                 .text_color(white_a(0.6))
                 .opacity(0.8)
                 .child(if dirty {
-                    "Unsaved Changes Made"
+                    t::profile_edit_unsaved()
                 } else {
-                    "Edit Mode is Enabled"
+                    t::profile_edit_on()
                 }),
         )
         .child(side(
@@ -974,7 +975,7 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
             "icons/save.svg",
             16.,
             c(PRIMARY),
-            "Save",
+            t::profile_edit_save(),
             Act::ExitEdit(false),
         ))
 }
@@ -1019,7 +1020,7 @@ fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
                     .hover(|s| s.text_color(c(DANGER)))
                     .cursor_pointer()
                     .on_click(click(on, Act::RemoveBanner))
-                    .child("Remove Banner"),
+                    .child(t::profile_remove_banner()),
             )
         })
         .child(label(crate::t::profile_username().to_uppercase()))

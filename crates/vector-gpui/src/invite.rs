@@ -10,6 +10,7 @@ use gpui::{App, Entity, FontWeight, SharedString, Window, div, px, svg};
 
 use crate::composer::TextInput;
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 pub struct Link {
@@ -62,7 +63,7 @@ fn click(
 fn section_head(
     icon: &'static str,
     title: impl IntoElement,
-    desc: &'static str,
+    desc: SharedString,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -108,7 +109,7 @@ fn section_head(
 fn icon_btn(
     id: SharedString,
     icon: &'static str,
-    tip: &'static str,
+    tip: SharedString,
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -136,9 +137,9 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
     let pill = div()
         .id("cmt-visibility")
         .tip(if m.public {
-            "Anyone with a link can join"
+            t::invite_public_tip()
         } else {
-            "Invite-only — no public links"
+            t::invite_private_tip()
         })
         .h(px(26.))
         .px(px(8.))
@@ -177,18 +178,11 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                             .text_color(c(ACCENT))
                             .hover(|d| d.underline())
                             .on_click(click(on, || Act::Expand))
-                            .child(format!(
-                                "View {others_total} other invite{}",
-                                if others_total == 1 { "" } else { "s" }
-                            )),
+                            .child(t::invite_view_others(others_total)),
                     )
                 } else {
                     d.children(m.others.iter().map(|(npub, n)| {
-                        div().py(px(1.)).text_color(white_a(0.6)).child(format!(
-                            "{} has {n} active invite link{}",
-                            store.name(npub),
-                            if *n == 1 { "" } else { "s" }
-                        ))
+                        div().py(px(1.)).text_color(white_a(0.6)).child(t::invite_member_links(*n, store.name(npub)))
                     }))
                 }
             })
@@ -201,9 +195,9 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
             .line_height(px(18.))
             .text_color(white_a(0.4))
             .child(if m.others.is_empty() {
-                "No active links yet. Create one to start inviting."
+                t::invite_none_yet()
             } else {
-                "You have no links of your own yet. Create one to start inviting."
+                t::invite_none_own()
             })
     });
     let live = !m.busy;
@@ -216,9 +210,9 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child("Invite Links")
+                .child(t::invite_links_title())
                 .child(pill),
-            "Anyone with a link can join. Revoke every link to go private again.",
+            t::invite_links_text(),
         ))
         .child(
             div()
@@ -245,7 +239,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                             .into_iter()
                             .rev()
                             .collect();
-                            format!("Invite · {tail}")
+                            t::invite_link_unlabelled(tail).to_string()
                         });
                     let copied = m.copied.as_deref() == Some(link.token.as_str());
                     let revoking = m.revoking.as_deref() == Some(link.token.as_str());
@@ -293,11 +287,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                         .child(
                             div()
                                 .id(SharedString::from(format!("cmt-joins-{}", link.token)))
-                                .tip(format!(
-                                    "{} member{} joined via this link",
-                                    link.joins,
-                                    if link.joins == 1 { "" } else { "s" }
-                                ))
+                                .tip(t::invite_link_joins(link.joins))
                                 .mr(px(6.))
                                 .flex()
                                 .items_center()
@@ -321,7 +311,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                             } else {
                                 "icons/copy.svg"
                             },
-                            "Copy link",
+                            t::invite_copy_link(),
                             live,
                             click(on, move || Act::Copy(tok_c.clone())),
                         ))
@@ -332,7 +322,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                             } else {
                                 "icons/trash.svg"
                             },
-                            "Revoke link",
+                            t::invite_revoke_link(),
                             live,
                             click(on, move || Act::Revoke(tok_r.clone())),
                         ))
@@ -370,9 +360,9 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                         .text_color(c(ACCENT)),
                 )
                 .child(if m.creating {
-                    "Creating…"
+                    t::invite_creating_short()
                 } else {
-                    "Create invite link"
+                    t::invite_create_link()
                 }),
         )
 }
@@ -436,7 +426,7 @@ pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &
                                 .text_size(px(18.))
                                 .line_height(px(19.8))
                                 .text_color(c(TEXT))
-                                .child(format!("Invite to {}", m.name)),
+                                .child(t::invite_title(&*m.name)),
                         )
                         .child(
                             div()
@@ -444,7 +434,7 @@ pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &
                                 .line_height(px(16.9))
                                 .text_color(c(TEXT))
                                 .opacity(0.5)
-                                .child("Bring people into your community."),
+                                .child(t::invite_lead()),
                         ),
                 )
                 .child(
@@ -484,8 +474,8 @@ pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &
                         .flex_col()
                         .child(section_head(
                             "icons/add-user.svg",
-                            "Direct Invites",
-                            "Pick contacts to invite, or paste an npub to add someone new.",
+                            t::invite_direct_title(),
+                            t::invite_direct_text(),
                         ))
                         .child(
                             div()
@@ -574,9 +564,9 @@ pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &
                                     .size(px(15.))
                                     .text_color(c(0x000000)),
                             )
-                            .child(format!("Invite {n}"))
+                            .child(t::invite_send(n))
                         })
-                        .when(n == 0, |d| d.child("Done")),
+                        .when(n == 0, |d| d.child(t::invite_done())),
                 ),
         );
     let busy = m.busy;

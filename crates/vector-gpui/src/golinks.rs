@@ -9,6 +9,7 @@ use gpui::SharedString;
 use vector_core::golink::GoLink;
 
 use crate::data::Store;
+use crate::t;
 use crate::inline::{Look, Part, Pill, Target};
 
 /// The pill for `url`, when it is a Vector link; `here` is the community the message is in.
@@ -27,8 +28,8 @@ pub fn pill(store: &Store, url: &str, here: Option<&str>, look: &Look) -> Option
         (parts, Some(names.join(" › ")), false)
     } else if vector_core::golink::is_go_url(url) || url.starts_with("vector://go") {
         (
-            vec![Part::Icon("icons/vector_warning.svg"), text("Broken link".into())],
-            Some("This link is broken or incomplete".to_string()),
+            vec![Part::Icon("icons/vector_warning.svg"), text(t::golink_broken().into())],
+            Some(t::golink_broken_tip().into()),
             true,
         )
     } else {
@@ -131,12 +132,12 @@ fn go(store: &Store, link: &GoLink, here: Option<&str>) -> (Vec<Part>, Option<St
     };
     let Some(com) = store.community(cid) else {
         return (
-            vec![Part::Icon("icons/users-multi.svg"), text("Unknown community".into())],
-            Some("A community you're not in".into()),
+            vec![Part::Icon("icons/users-multi.svg"), text(t::golink_unknown_community().into())],
+            Some(t::golink_unknown_community_tip().into()),
             true,
         );
     };
-    let name = if com.name.is_empty() { "Community".to_string() } else { com.name.clone() };
+    let name = if com.name.is_empty() { t::community_unnamed().to_string() } else { com.name.clone() };
     let Some(chid) = channel else {
         return (vec![community_icon(store, cid), text(name.clone())], Some(name), false);
     };
@@ -148,17 +149,17 @@ fn go(store: &Store, link: &GoLink, here: Option<&str>) -> (Vec<Part>, Option<St
     }
     let Some(ch) = com.channel(chid) else {
         parts.push(Part::Icon("icons/channel-hash.svg"));
-        parts.push(text("Unknown channel".into()));
-        return (parts, Some("A channel that isn't available to you".into()), true);
+        parts.push(text(t::golink_unknown_channel().into()));
+        return (parts, Some(t::golink_unknown_channel_tip().into()), true);
     };
-    let room = if ch.name.is_empty() { "channel".to_string() } else { ch.name.clone() };
+    let room = if ch.name.is_empty() { t::golink_channel().to_string() } else { ch.name.clone() };
     let voice = ch.is_voice();
     let room_icon = if voice { "icons/volume-max.svg" } else { "icons/channel-hash.svg" };
     let room_ref = if voice { room.clone() } else { format!("#{room}") };
     if !ch.visible() {
         parts.push(Part::Icon("icons/locked.svg"));
         parts.push(text(room));
-        return (parts, Some(format!("Private channel in {name}")), true);
+        return (parts, Some(t::golink_private_channel_tip(&*name).into()), true);
     }
     parts.push(Part::Icon(room_icon));
     parts.push(text(room));
@@ -167,23 +168,23 @@ fn go(store: &Store, link: &GoLink, here: Option<&str>) -> (Vec<Part>, Option<St
         parts.push(Part::Icon("icons/chat-bubble.svg"));
         return match located(message) {
             Some(at) if at.chat.as_deref() != Some(chid.as_str()) && at.deleted => {
-                parts.push(text("deleted".into()));
-                (parts, Some("Deleted message".into()), true)
+                parts.push(text(t::golink_deleted().into()));
+                (parts, Some(t::golink_deleted_message().into()), true)
             }
-            Some(at) if at.chat.as_deref() != Some(chid.as_str()) => (parts, Some("Not on this device yet".into()), true),
-            _ => (parts, Some(format!("Message in {room_ref}, {name}")), false),
+            Some(at) if at.chat.as_deref() != Some(chid.as_str()) => (parts, Some(t::golink_not_here_yet().into()), true),
+            _ => (parts, Some(t::golink_message_in_tip(&*name, &*room_ref).into()), false),
         };
     }
-    (parts, Some(format!("{room_ref} in {name}")), false)
+    (parts, Some(t::golink_room_in_tip(&*name, &*room_ref).into()), false)
 }
 
 fn dm_message(store: &Store, message: &str) -> (Vec<Part>, Option<String>, bool) {
     match located(message) {
         Some(Located { chat: None, deleted: true }) => {
-            return (vec![Part::Icon("icons/chat-bubble.svg"), text("Deleted message".into())], Some("Deleted message".into()), true);
+            return (vec![Part::Icon("icons/chat-bubble.svg"), text(t::golink_deleted_message().into())], Some(t::golink_deleted_message().into()), true);
         }
         Some(Located { chat: None, deleted: false }) => {
-            return (vec![Part::Icon("icons/chat-bubble.svg"), text("Message".into())], Some("Not on this device yet".into()), true);
+            return (vec![Part::Icon("icons/chat-bubble.svg"), text(t::golink_message().into())], Some(t::golink_not_here_yet().into()), true);
         }
         _ => {}
     }
@@ -196,12 +197,12 @@ fn dm_message(store: &Store, message: &str) -> (Vec<Part>, Option<String>, bool)
             let name = store.name(&c.id);
             (
                 vec![text(format!("@{name}")), sep(), Part::Icon("icons/chat-bubble.svg")],
-                Some(format!("Message with {name}")),
+                Some(t::golink_message_with_tip(&*name).into()),
                 false,
             )
         }
         _ => (
-            vec![Part::Icon("icons/chat-bubble.svg"), text("Message".into())],
+            vec![Part::Icon("icons/chat-bubble.svg"), text(t::golink_message().into())],
             None,
             false,
         ),
@@ -235,13 +236,13 @@ fn place_names(store: &Store, path: &str) -> (Part, Vec<String>) {
                         .find(|a| a.id == id)
                         .map(|a| a.name.clone())
                         .unwrap_or_else(|| id.to_string());
-                    vec!["App Store".into(), name]
+                    vec![t::store_title().into(), name]
                 }
-                None => vec!["App Store".into()],
+                None => vec![t::store_title().into()],
             };
             (Part::Icon("icons/nexus.svg"), names)
         }
-        "requests" => (Part::Icon("icons/mail.svg"), vec!["Requests".into()]),
+        "requests" => (Part::Icon("icons/mail.svg"), vec![t::chats_tab_requests().into()]),
         _ => {
             let cats = crate::settings::categories(&crate::settings::Offers {
                 voice: true,
@@ -258,7 +259,7 @@ fn place_names(store: &Store, path: &str) -> (Part, Vec<String>) {
                     .flatten()
             });
             let Some(cat) = cat else {
-                return (icon, vec!["Settings".into()]);
+                return (icon, vec![t::settings_title().into()]);
             };
             let want = second.unwrap_or(if direct.is_some() { "" } else { first });
             match cat.anchors.iter().find(|a| a.id == want) {

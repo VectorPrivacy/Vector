@@ -64,14 +64,15 @@ const STALE: std::time::Duration = std::time::Duration::from_secs(1);
 const GLANCE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// `STAGE_WORDS`.
-fn stage_word(stage: &str) -> &str {
+fn stage_word(stage: &str) -> String {
+    use crate::t;
     match stage {
-        "encrypting" => "Encrypting",
-        "starting" => "Starting upload",
-        "decrypting" => "Decrypting",
-        "verifying" => "Verifying",
-        "saving" => "Saving",
-        other => other,
+        "encrypting" => t::file_stage_encrypting().into(),
+        "starting" => t::file_stage_starting().into(),
+        "decrypting" => t::file_stage_decrypting().into(),
+        "verifying" => t::file_stage_verifying().into(),
+        "saving" => t::file_stage_saving().into(),
+        other => other.to_string(),
     }
 }
 
@@ -85,22 +86,22 @@ impl Transfer {
     /// has held a moment (`transferStageText`), else nothing while the ring speaks for itself.
     pub fn upload_note(&self) -> String {
         if self.sent_at.is_some_and(|t| t.elapsed() >= GLANCE) {
-            return "Sending".into();
+            return crate::t::file_stage_sending().into();
         }
         let Some(stage) = self.stage.as_deref().filter(|_| self.stage_at.is_some_and(|t| t.elapsed() >= GLANCE)) else {
             return String::new();
         };
         let word = stage_word(stage);
         match self.stage_pct.filter(|&p| p < 100.) {
-            Some(p) => format!("{word} {}%", p as u32),
-            None => word.to_string(),
+            Some(p) => crate::t::file_stage_stage_percent(p as u32, &*word).into(),
+            None => word,
         }
     }
 
     /// `transferStageText`, else the rate.
     pub fn note(&self) -> String {
         if let Some(s) = &self.stage {
-            return stage_word(s).to_string();
+            return stage_word(s);
         }
         match self.bps.filter(|&b| b > 0.) {
             Some(b) => format!("{}/s", format_bytes_rate(b)),
@@ -257,11 +258,16 @@ impl Default for AutoDownload {
 impl Media {
     /// "Resume download · N%" for a download stopped part-way.
     pub fn resume_note(&self, id: &str, size: u64) -> Option<String> {
+        self.resume_progress(id, size).map(|p| crate::t::file_resume_note(p).into())
+    }
+
+    /// How much of a paused download is held: a percentage, or bytes when the size is unknown.
+    pub fn resume_progress(&self, id: &str, size: u64) -> Option<String> {
         let &(done, total) = self.paused.get(id)?;
         let total = total.or((size > 0).then_some(size)).filter(|&t| t > 0);
         Some(match total {
-            Some(t) => format!("Resume download · {}%", (done.saturating_mul(100) / t).min(99)),
-            None => format!("Resume download · {}", format_bytes(done)),
+            Some(t) => format!("{}%", (done.saturating_mul(100) / t).min(99)),
+            None => format_bytes(done),
         })
     }
 
@@ -524,11 +530,12 @@ impl Media {
             self.used.insert((3, url.to_string()), std::time::Instant::now());
             return c;
         }
-        self.custom(&format!("{url}{SMALL}"), false)
+        self.custom(&format!("{url}{SMALL}"), false) // i18n-exempt: cache key
     }
 
     /// Whether a custom emoji failed to load, at either size.
     pub fn custom_missing(&self, url: &str) -> bool {
+        // i18n-exempt: cache key
         [url.to_string(), format!("{url}{SMALL}")].iter().any(|k| matches!(self.custom.get(k), Some(Custom::Missing(_))))
     }
 
@@ -634,9 +641,9 @@ pub fn pump<V: 'static>(
             live.then(|| crate::backend::run(crate::backend::images::emoji(src.clone(), icon)));
         cx.spawn(async move |cx| {
             let res = match rx {
-                Some(rx) => rx.await.unwrap_or_else(|_| Err("Cancelled".into())),
+                Some(rx) => rx.await.unwrap_or_else(|_| Err(crate::t::emoji_why_cancelled().into())),
                 None if std::path::Path::new(&src).is_file() => Ok(src.clone()),
-                None => Err("Not found".into()),
+                None => Err(crate::t::emoji_why_not_found().into()),
             };
             let decoded = match res {
                 Ok(path) => {
@@ -654,7 +661,7 @@ pub fn pump<V: 'static>(
                             cx.background_executor()
                                 .spawn(async move { decode(&b, &ext, (max, max)) })
                                 .await
-                                .ok_or_else(|| "Invalid image".to_string())
+                                .ok_or_else(|| crate::t::emoji_why_invalid().to_string())
                         }
                         Err(e) => Err(e.to_string()),
                     }
@@ -1038,22 +1045,7 @@ fn format_bytes_rate(bps: f64) -> String {
 }
 
 pub fn format_bytes_with(n: f64, decimals: usize, pad: bool) -> String {
-    const UNITS: [&str; 5] = ["Bytes", "KB", "MB", "GB", "TB"];
-    if n == 0. {
-        return "0 Bytes".into();
-    }
-    let (mut v, mut i) = (n, 0);
-    while v >= 1024. && i < UNITS.len() - 1 {
-        v /= 1024.;
-        i += 1;
-    }
-    let s = format!("{v:.decimals$}");
-    let s = if !pad && s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    } else {
-        s
-    };
-    format!("{s} {}", UNITS[i])
+    vector_i18n::locale().bytes(n, decimals, pad)
 }
 
 thread_local! {

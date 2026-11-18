@@ -106,12 +106,12 @@ pub fn play(msg: String, title: String, url: String, audio: bool) -> Result<(), 
     if let Ok(mut p) = PLAYING.lock() {
         *p = Some(msg);
     }
-    let title = if title.is_empty() { "Player".to_string() } else { title };
+    let title = if title.is_empty() { crate::t::miniapp_player().to_string() } else { title };
     host::player(PlayerSpec { title, url, size: if audio { (520., 166.) } else { (640., 360.) } })
 }
 
 /// Listens for the player's `ended` and `error` relays, which post to the page's own window.
-const PLAYER_SHIM: &str = "addEventListener('message',function(e){var d=e.data;if(d&&(d.vectorPlayer==='ended'||d.vectorPlayer==='error'))window.ipc.postMessage(JSON.stringify(d))});";
+const PLAYER_SHIM: &str = "addEventListener('message',function(e){var d=e.data;if(d&&(d.vectorPlayer==='ended'||d.vectorPlayer==='error'))window.ipc.postMessage(JSON.stringify(d))});"; // i18n-exempt: script
 
 fn on_player(body: &str) {
     let Ok(news) = serde_json::from_str::<serde_json::Value>(body) else { return };
@@ -125,6 +125,7 @@ fn on_player(body: &str) {
 }
 
 /// `window.__TAURI__.core` over wry's message port: the desktop bridge script speaks it as is.
+// i18n-exempt: script
 const IPC_SHIM: &str = r#"(function () {
     if (window.__TAURI__) return;
     var pending = new Map(), channels = new Map(), next = 1;
@@ -257,7 +258,7 @@ pub async fn open(
             apps.get_or_load_package(&id, path, icon_dir()),
         )
         .await
-        .map_err(|_| "The Mini App took too long to load".to_string())?
+        .map_err(|_| crate::t::miniapp_load_timeout().to_string())?
         .map_err(|e| e.to_string())?;
         let store = partition(&package.hash_hex()).await;
         if package.cross_origin_isolated
@@ -305,7 +306,7 @@ pub async fn open(
                 }
                 Err(e) => {
                     apps.remove_instance_if(&label, instance.instance_id).await;
-                    return Err(format!("Mini App loopback host: {e}"));
+                    return Err(format!("Mini App loopback host: {e}")); // i18n-exempt: developer error
                 }
             }
         } else {
@@ -323,7 +324,7 @@ pub async fn open(
         let proxy = {
             let Some(sink) = core::network_sink() else {
                 apps.remove_instance_if(&label, instance.instance_id).await;
-                return Err("Network isolation unavailable for Mini Apps".into());
+                return Err(crate::t::miniapp_no_isolation().into());
             };
             Some((
                 sink.host_str().unwrap_or("127.0.0.1").to_string(),
@@ -366,9 +367,9 @@ pub async fn open(
 
 /// Starts the app's loopback host; None when another window already serves its store.
 async fn start_isolated(label: &str, store: &str, href: Option<&str>) -> Result<Option<Isolated>, String> {
-    let app = *vector_media::TAURI_APP.get().ok_or("The app isn't ready yet")?;
+    let app = *vector_media::TAURI_APP.get().ok_or_else(|| crate::t::miniapp_not_ready().to_string())?;
     #[cfg(target_os = "linux")]
-    let sink = core::network_sink().ok_or("Network isolation unavailable for Mini Apps")?.to_string();
+    let sink = core::network_sink().ok_or_else(|| crate::t::miniapp_no_isolation().to_string())?.to_string();
     #[cfg(not(target_os = "linux"))]
     let sink = String::new();
     let data_dir = tauri::Manager::path(&app)
@@ -435,7 +436,7 @@ async fn answer(label: String, body: String) {
             Err(e) => Err(e.to_string()),
         }
     } else {
-        Err(format!("Command {} not allowed by ACL", call.cmd))
+        Err(format!("Command {} not allowed by ACL", call.cmd)) // i18n-exempt: reply to the Mini App's script
     };
     let (ok, value) = match result {
         Ok(v) => (true, v),
@@ -443,7 +444,7 @@ async fn answer(label: String, body: String) {
     };
     host::eval(
         &label,
-        format!("window.__vectorIpc.done({}, {ok}, {value})", call.id),
+        format!("window.__vectorIpc.done({}, {ok}, {value})", call.id), // i18n-exempt: reply to the Mini App's script
     );
 }
 
@@ -460,7 +461,7 @@ async fn dispatch(
             let instance = apps
                 .get_instance(label)
                 .await
-                .ok_or("Could not find Mini App instance")?;
+                .ok_or("Could not find Mini App instance")?; // i18n-exempt: reply to the Mini App's script
             vector_core::db::miniapps::get_miniapp_granted_permissions(&instance.package.hash_hex())
                 .map(serde_json::Value::String)
         }
@@ -470,7 +471,7 @@ async fn dispatch(
         }
         MiniAppCall::SendRealtimeData { data } => {
             if data.len() > 128_000 {
-                return Err(format!("Data too large: {} bytes", data.len()));
+                return Err(format!("Data too large: {} bytes", data.len())); // i18n-exempt: reply to the Mini App's script
             }
             apps.realtime
                 .send(label, data)
@@ -481,9 +482,9 @@ async fn dispatch(
         MiniAppCall::JoinRealtimeChannel => {
             let id = channel
                 .and_then(|c| c.as_str())
-                .and_then(|c| c.strip_prefix("__CHANNEL__:"))
+                .and_then(|c| c.strip_prefix("__CHANNEL__:")) // i18n-exempt: reply to the Mini App's script
                 .and_then(|c| c.parse::<u64>().ok())
-                .ok_or("joining needs a channel")?;
+                .ok_or("joining needs a channel")?; // i18n-exempt: reply to the Mini App's script
             join(label, id).await
         }
     }
@@ -493,17 +494,17 @@ async fn dispatch(
 async fn join(label: &str, channel: u64) -> Result<serde_json::Value, String> {
     vector_core::db::scoped(async move {
         let apps = core::apps();
-        let instance = apps.get_instance(label).await.ok_or("Mini App instance not found")?;
+        let instance = apps.get_instance(label).await.ok_or("Mini App instance not found")?; // i18n-exempt: reply to the Mini App's script
         if let Some(mut rx) = apps.take_preconnect_signal(label).await {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(10), rx.wait_for(|r| *r)).await;
         }
         if apps.get_instance(label).await.map(|i| i.instance_id) != Some(instance.instance_id) {
-            return Err("Mini App instance not found".to_string());
+            return Err("Mini App instance not found".to_string()); // i18n-exempt: reply to the Mini App's script
         }
         apps.realtime.ensure_ws_started();
         let to = label.to_string();
         let sink = tauri::ipc::Channel::new(move |v: serde_json::Value| {
-            host::eval(&to, format!("window.__vectorIpc.chan({channel}, {v})"));
+            host::eval(&to, format!("window.__vectorIpc.chan({channel}, {v})")); // i18n-exempt: reply to the Mini App's script
             true
         });
         let topic = start_realtime(&instance, Some(realtime::EventTarget::TauriChannel(sink))).await?;
@@ -525,7 +526,7 @@ async fn start_realtime(
         apps.get_instance(&instance.window_label).await.map(|i| i.instance_id) == Some(instance.instance_id)
     };
     if !still_open().await {
-        return Err("the Mini App closed before joining".into());
+        return Err("the Mini App closed before joining".into()); // i18n-exempt: reply to the Mini App's script
     }
     let topic = instance.realtime_topic.unwrap_or_else(|| {
         realtime::derive_topic_id(&instance.package.name, &instance.chat_id, &instance.message_id)
@@ -550,7 +551,7 @@ async fn start_realtime(
     if !still_open().await {
         apps.remove_realtime_channel_if(&instance.window_label, instance.instance_id).await;
         apps.realtime.close(&instance.window_label, instance.instance_id).await;
-        return Err("the Mini App closed while joining".into());
+        return Err("the Mini App closed while joining".into()); // i18n-exempt: reply to the Mini App's script
     }
     let encoded = realtime::encode_topic_id(&topic);
     let me = vector_core::my_public_key()
@@ -654,7 +655,7 @@ fn emit_lobby(topic: &str, peers: Vec<String>, is_active: bool) {
 /// A package Vector holds (no file of its own) written out sealed, as the desktop keeps one.
 async fn held_package(hash: [u8; 32]) -> Result<String, String> {
     let dir = dirs::cache_dir()
-        .ok_or("No cache folder")?
+        .ok_or_else(|| crate::t::miniapp_no_cache().to_string())?
         .join("io.vectorapp")
         .join("exports")
         .join("apps");
@@ -662,9 +663,9 @@ async fn held_package(hash: [u8; 32]) -> Result<String, String> {
     if !file.is_file() {
         let bytes = crate::backend::attachments::bytes(Some(hash), String::new())
             .await
-            .ok_or("This app isn't on this device any more")?;
-        std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
-        vector_core::vcache::write(&file, &bytes).map_err(|e| format!("Couldn't prepare the app: {e}"))?;
+            .ok_or_else(|| crate::t::miniapp_gone().to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| crate::t::miniapp_prepare_failed(e.to_string()).to_string())?;
+        vector_core::vcache::write(&file, &bytes).map_err(|e| crate::t::miniapp_prepare_failed(e.to_string()).to_string())?;
     }
     Ok(file.to_string_lossy().into_owned())
 }
@@ -684,12 +685,12 @@ pub struct Info {
 /// `miniapp_load_info`: the package's listing, read once and kept by the package cache.
 pub async fn info(file_path: String) -> Result<Info, String> {
     if file_path.is_empty() {
-        return Err("Empty file path".into());
+        return Err(crate::t::miniapp_no_path().into());
     }
     let file_path = package_path(&file_path).await?;
     let path = PathBuf::from(&file_path);
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        return Err(format!("File not found: {file_path}"));
+        return Err(crate::t::miniapp_file_missing(&*file_path).to_string());
     }
     let id = format!("miniapp_{:x}", md5_hash(&file_path));
     let dir = icon_dir();
@@ -698,7 +699,7 @@ pub async fn info(file_path: String) -> Result<Info, String> {
         core::apps().get_or_load_package(&id, path, dir.clone()),
     )
     .await
-    .map_err(|_| "The Mini App took too long to read".to_string())?
+    .map_err(|_| crate::t::miniapp_read_timeout().to_string())?
     .map_err(|e| e.to_string())?;
     tokio::task::spawn_blocking(move || Info {
         name: package.name.to_string(),
@@ -715,7 +716,7 @@ pub async fn info(file_path: String) -> Result<Info, String> {
 
 /// A file, or a `vmedia:` ref to a package Vector holds, as a file the package loader reads.
 async fn package_path(path_or_ref: &str) -> Result<String, String> {
-    match vector_core::media::MediaRef::parse(path_or_ref).ok_or("Unknown file")? {
+    match vector_core::media::MediaRef::parse(path_or_ref).ok_or_else(|| crate::t::miniapp_unknown_file().to_string())? {
         vector_core::media::MediaRef::File(p) => Ok(p),
         vector_core::media::MediaRef::Held(h) => held_package(h).await,
     }

@@ -3,6 +3,7 @@
 //! says whether its bytes are here.
 
 use crate::kit::Tipped as _;
+use crate::t;
 use std::f32::consts::TAU;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -186,9 +187,9 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 6.,
             ),
             Phase::Idle if unsent => {
-                let label = if m.failed { "Not sent" } else { "Sending…" };
+                let label = if m.failed { t::file_not_sent() } else { t::file_sending() };
                 (
-                    file_box(ctx, &media, m, att, FileState::Remote, Some(label)),
+                    file_box(ctx, &media, m, att, FileState::Remote, Some(&label)),
                     6.,
                 )
             }
@@ -332,7 +333,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                                 .line_height(px(18.2))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(c(0xffffff))
-                                .child("Spoiler"),
+                                .child(t::file_spoiler()),
                         ),
                 )
                 .into_any_element(),
@@ -470,7 +471,7 @@ fn blur(
     } else if ctx.held {
         held_box(w, h)
     } else {
-        download_box(ctx, m, att, w, h, failed, media.resume_note(&att.id, att.size))
+        download_box(ctx, m, att, w, h, failed, media.resume_progress(&att.id, att.size))
     };
     Some(
         div()
@@ -500,7 +501,7 @@ fn held_box(w: f32, h: f32) -> AnyElement {
         .flex()
         .items_center()
         .gap(px(8.))
-        .when(compact, |d| d.p(px(7.)).tip("Accept to view"))
+        .when(compact, |d| d.p(px(7.)).tip(t::file_accept_to_view()))
         .when(!compact, |d| d.pl(px(10.)).pr(px(14.)).py(px(7.)))
         .border_1()
         .border_color(c(0x363636))
@@ -511,7 +512,7 @@ fn held_box(w: f32, h: f32) -> AnyElement {
         .text_color(white_a(0.92))
         .whitespace_nowrap()
         .child(svg().path("icons/shield-alert.svg").size(px(18.)).flex_shrink_0().text_color(c(PRIMARY)))
-        .when(!compact, |d| d.child(div().min_w_0().truncate().child("Accept to view")))
+        .when(!compact, |d| d.child(div().min_w_0().truncate().child(t::file_accept_to_view())))
         .into_any_element()
 }
 
@@ -563,20 +564,19 @@ fn download_box(
                 .text_color(color),
         );
     let title = match failed {
-        Some(_) if gone => "File Unavailable".to_string(),
-        Some(_) => "Download Failed".to_string(),
-        None if paused.is_some() => "Resume Download".to_string(),
-        None => format!("Download {}", att.extension.to_uppercase())
-            .trim()
-            .to_string(),
+        Some(_) if gone => t::file_unavailable().to_string(),
+        Some(_) => t::file_download_failed().to_string(),
+        None if paused.is_some() => t::file_resume_download().to_string(),
+        None if att.extension.trim().is_empty() => t::file_download().to_string(),
+        None => t::file_download_type(att.extension.trim().to_uppercase()).to_string(),
     };
     let sub = match failed {
-        Some(_) if gone => "Deleted, or lost by its server".to_string(),
+        Some(_) if gone => t::file_gone().to_string(),
         Some(e) if !e.is_empty() => e.chars().take(64).collect(),
-        Some(_) => "Tap to Retry".to_string(),
-        None if paused.is_some() => paused.unwrap_or_default().trim_start_matches("Resume download · ").to_string() + " done",
+        Some(_) => t::file_tap_retry().to_string(),
+        None if paused.is_some() => t::file_resume_done(paused.unwrap_or_default()).to_string(),
         None if att.size > 0 => media::format_bytes(att.size),
-        None => "Unknown Size".to_string(),
+        None => t::file_unknown_size().to_string(),
     };
     let base = div()
         .id(SharedString::from(format!("dl-{}", att.id)))
@@ -584,7 +584,7 @@ fn download_box(
         .on_click(act(ctx, m, Act::Download(att.id.clone())));
     if compact {
         return base
-            .tip(format!("{title} · {sub}"))
+            .tip(format!("{title} · {sub}")) // i18n-exempt: separator
             .child(
                 tile.bg(ca(12, 12, 12, 0.82))
                     .hover(|s| s.bg(ca(24, 24, 24, 0.88)).border_color(c(0x4a4a4a))),
@@ -813,11 +813,11 @@ pub fn xdc_url_card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         }
         XdcUrl::Fetching => file_box_on(ctx, &media, m, &att, FileState::Downloading, None, None),
         XdcUrl::Failed(e) => {
-            let label = format!("Failed: {} · Tap to Retry", e.chars().take(48).collect::<String>());
+            let label = t::file_failed_retry(e.chars().take(48).collect::<String>()).to_string();
             file_box_on(ctx, &media, m, &att, FileState::Failed, Some(&label), tap(Act::XdcUrl(url)))
         }
         XdcUrl::Probing | XdcUrl::Absent => {
-            let label = format!("Tap to Load · {host}");
+            let label = t::file_tap_to_load(&*host).to_string();
             file_box_on(ctx, &media, m, &att, FileState::Remote, Some(&label), tap(Act::XdcUrl(url)))
         }
     };
@@ -921,7 +921,7 @@ fn file_box_on(
                         .child(div().ml(px(4.5)).w(px(112.)).child(if note.is_empty() {
                             String::new()
                         } else {
-                            format!("· {note}")
+                            format!("· {note}") // i18n-exempt: separator
                         })),
                 ),
         )
@@ -930,7 +930,7 @@ fn file_box_on(
         let sub = match (label, state) {
             (Some(l), _) => l.to_string(),
             (None, FileState::Failed) if media.failed.get(&att.id).is_some_and(|r| r == crate::backend::attachments::GONE_EVERYWHERE) => {
-                "Unavailable · Deleted, or lost by its server".into()
+                t::file_unavailable_gone().into()
             }
             (None, FileState::Failed) => {
                 let reason: String = media
@@ -939,14 +939,14 @@ fn file_box_on(
                     .map(|r| r.chars().take(64).collect())
                     .unwrap_or_default();
                 if reason.is_empty() {
-                    "Download Failed · Tap to Retry".into()
+                    t::file_download_failed_retry().into()
                 } else {
-                    format!("Failed: {reason} · Tap to Retry")
+                    t::file_failed_retry(reason).into()
                 }
             }
             _ => match (media.resume_note(&att.id, att.size), &size) {
                 (Some(r), _) => r,
-                (None, Some(s)) => format!("{kind} — {s}"),
+                (None, Some(s)) => t::file_kind_size(&*kind, &**s).into(),
                 (None, None) => kind,
             },
         };
@@ -1085,11 +1085,11 @@ fn file_box_on(
 fn session_line(ctx: &Ctx, live: &crate::media::XdcLive) -> AnyElement {
     let players = live.peers.len();
     let label = if live.active {
-        "Playing"
+        t::file_app_playing()
     } else if players > 0 {
-        "Click to Join"
+        t::file_app_join()
     } else {
-        "Click to Play"
+        t::file_app_play()
     };
     let mut peers: Vec<&String> = live.peers.iter().collect();
     peers.sort();
@@ -1142,7 +1142,7 @@ fn session_line(ctx: &Ctx, live: &crate::media::XdcLive) -> AnyElement {
                                 d.child(svg().path("icons/group-placeholder.svg").size(px(14.)))
                             }),
                     )
-                    .child(format!("{players} online")),
+                    .child(t::file_app_online(players)),
             )
         })
         .into_any_element()

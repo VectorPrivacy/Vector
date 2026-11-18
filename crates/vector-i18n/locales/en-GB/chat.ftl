@@ -209,3 +209,7 @@ request-load-pictures = Accept to load media & profile
 request-load = Accept to load media
 request-block = Block
 request-accept = Accept
+# Reasons a custom emoji didn't load, shown as $why above.
+emoji-why-cancelled = Cancelled
+emoji-why-not-found = Not found
+emoji-why-invalid = Invalid image

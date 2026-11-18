@@ -3,6 +3,7 @@
 //! compressed send rarely waits.
 
 use crate::kit::Tipped as _;
+use crate::t;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -288,7 +289,7 @@ impl FilePreview {
                             return false;
                         }
                         if let Some(f) = done {
-                            p.compress_info = format!("Compressing... {}%", (f * 100.) as u32).into();
+                            p.compress_info = t::preview_compressing_percent((f * 100.) as u32);
                             cx.notify();
                         }
                         true
@@ -308,14 +309,12 @@ impl FilePreview {
                         p.dispatch(name, p.compress, cx);
                     }
                     p.compress_info = match &done {
-                        Some(c) if crate::message::savings_percent(c) > 0 => format!(
-                            "~{} ({}% smaller)",
+                        Some(c) if crate::message::savings_percent(c) > 0 => t::preview_compress_saving(
+                            crate::message::savings_percent(c),
                             crate::media::format_bytes(c.compressed_size),
-                            crate::message::savings_percent(c)
-                        )
-                        .into(),
-                        Some(_) => "No significant savings".into(),
-                        None => "Couldn't compress this file".into(),
+                        ),
+                        Some(_) => t::preview_compress_no_savings(),
+                        None => t::preview_compress_failed(),
                     };
                     cx.notify();
                 })
@@ -383,7 +382,7 @@ impl FilePreview {
             compress: true,
             held: None,
             media: None,
-            compress_info: "Compressing...".into(),
+            compress_info: t::preview_compressing(),
             compressed,
             cancel,
             metadata_offered: false,
@@ -468,17 +467,12 @@ impl FilePreview {
     ) {
         match done {
             Ok(z) => {
-                let plural =
-                    |n: u32, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
-                let mut label = format!(
-                    "{} ({}",
-                    crate::media::format_bytes(z.size),
-                    plural(z.file_count, "file")
-                );
-                if z.dir_count > 0 {
-                    label.push_str(&format!(", {}", plural(z.dir_count, "folder")));
-                }
-                label.push(')');
+                let size = crate::media::format_bytes(z.size);
+                let label = if z.dir_count > 0 {
+                    t::preview_zip_files_folders(z.file_count, z.dir_count, size).to_string()
+                } else {
+                    t::preview_zip_files(z.file_count, size).to_string()
+                };
                 let tree = Node::build(&z.entries);
                 let open = tree.dirs.iter().map(|d| d.path.clone()).collect();
                 self.path = z.path;
@@ -495,7 +489,7 @@ impl FilePreview {
                             this.update(cx, |p, cx| {
                                 p.too_large = true;
                                 if let Some(Zip::Done { label, .. }) = p.zip.as_mut() {
-                                    *label = format!("{} — Too Large", crate::media::format_bytes(size));
+                                    *label = t::preview_zip_too_large(crate::media::format_bytes(size)).to_string();
                                 }
                                 cx.notify();
                             })
@@ -645,7 +639,7 @@ impl FilePreview {
             let stem = if stem.to_uppercase().starts_with("SPOILER_") {
                 stem.to_string()
             } else {
-                format!("SPOILER_{stem}")
+                format!("SPOILER_{stem}") // i18n-exempt: filename convention
             };
             format!("{stem}{ext}")
         } else if self.edited {
@@ -713,7 +707,7 @@ pub fn neon_toggle(on: bool) -> gpui::Div {
 
 fn option(
     id: &'static str,
-    name: &'static str,
+    name: SharedString,
     label: gpui::AnyElement,
     sublabel: impl Into<SharedString>,
     on: bool,
@@ -783,9 +777,9 @@ impl Render for FilePreview {
                             .text_size(px(13.))
                             .text_color(white_a(0.6))
                             .child(if p > 0 {
-                                format!("Compressing... {p}%")
+                                t::preview_compressing_percent(p)
                             } else {
-                                "Compressing...".into()
+                                t::preview_compressing()
                             }),
                     )
                     .into_any_element()
@@ -844,7 +838,7 @@ impl Render for FilePreview {
                                         .text_center()
                                         .text_size(px(12.))
                                         .text_color(white_a(0.4))
-                                        .child(format!("...and {} more", *total as usize - listed)),
+                                        .child(t::preview_zip_more(*total as usize - listed)),
                                 )
                             }),
                     )
@@ -889,14 +883,14 @@ impl Render for FilePreview {
                                             .text_size(px(13.))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(c(0xffffff))
-                                            .child("Spoiler"),
+                                            .child(t::preview_spoiler()),
                                     ),
                             )
                         })
                         .child(
                             div()
                                 .id("spoiler-toggle")
-                                .tip(if self.spoiler { "Remove spoiler" } else { "Mark as spoiler" })
+                                .tip(if self.spoiler { t::preview_spoiler_remove() } else { t::preview_spoiler_mark() })
                                 .absolute()
                                 .bottom(px(8.))
                                 .right(px(8.))
@@ -1013,7 +1007,7 @@ impl Render for FilePreview {
                     .line_height(px(24.))
                     .text_color(white_a(0.6))
                     .child(match &self.zip {
-                        Some(Zip::Running(_)) => "Compressing...".to_string(),
+                        Some(Zip::Running(_)) => t::preview_compressing().to_string(),
                         Some(Zip::Done { label, .. }) => label.clone(),
                         None => crate::media::format_bytes(self.size),
                     }),
@@ -1027,11 +1021,11 @@ impl Render for FilePreview {
             .flex_col()
             .gap(px(12.))
             .when(self.compress_offered, |d| {
-                let name = if IMAGE_EXTS.contains(&self.ext.as_str()) { "Compress Image" } else { "Compress Video" };
+                let name = if IMAGE_EXTS.contains(&self.ext.as_str()) { t::preview_compress_image() } else { t::preview_compress_video() };
                 d.child(
                     option(
                         "fp-compress",
-                        name,
+                        name.clone(),
                         name.into_any_element(),
                         self.compress_info.clone(),
                         self.compress,
@@ -1046,7 +1040,7 @@ impl Render for FilePreview {
                 let label = div()
                     .flex()
                     .items_center()
-                    .child("Keep Metadata")
+                    .child(t::preview_keep_metadata())
                     .when(self.keep_metadata, |d| {
                         d.child(img("icons/warning_pink.png").ml(px(4.)).size(px(14.)))
                     })
@@ -1054,9 +1048,9 @@ impl Render for FilePreview {
                 d.child(
                     option(
                         "fp-metadata",
-                        "Keep Metadata",
+                        t::preview_keep_metadata(),
                         label,
-                        "Includes location, camera & date",
+                        t::preview_keep_metadata_hint(),
                         self.keep_metadata,
                     )
                     .on_click(cx.listener(|p, _, _, cx| {
@@ -1067,7 +1061,7 @@ impl Render for FilePreview {
             });
 
         let zipping = matches!(self.zip, Some(Zip::Running(_)));
-        let button = |id: &'static str, label: &'static str| {
+        let button = |id: &'static str, label: SharedString| {
             div()
                 .id(id)
                 .px(px(32.))
@@ -1086,7 +1080,7 @@ impl Render for FilePreview {
             .gap(px(12.))
             .when(self.publish && self.ext.eq_ignore_ascii_case("xdc"), |d| {
                 d.child(
-                    button("fp-publish", "Publish")
+                    button("fp-publish", t::preview_publish())
                         .flex()
                         .items_center()
                         .gap(px(8.))
@@ -1100,14 +1094,14 @@ impl Render for FilePreview {
                 )
             })
             .child(
-                button("fp-cancel", "Cancel")
+                button("fp-cancel", t::dialog_cancel())
                     .bg(white_a(0.1))
                     .hover(|s| s.bg(white_a(0.15)))
                     .text_color(white_a(0.9))
                     .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
             )
             .child(
-                button("fp-send", if zipping { "Compressing..." } else if self.too_large { "Too Large" } else if self.held.is_some() { "Sending when ready" } else { "Send" })
+                button("fp-send", if zipping { t::preview_compressing() } else if self.too_large { t::preview_too_large() } else if self.held.is_some() { t::preview_sending_when_ready() } else { t::preview_send() })
                     .when(zipping || self.too_large || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
                     .bg(linear_gradient(
                         90.,
@@ -1208,7 +1202,7 @@ fn tree_rows(
                 .text_center()
                 .text_size(px(12.))
                 .text_color(white_a(0.4))
-                .child("Deeply nested...")
+                .child(t::preview_zip_deep())
                 .into_any_element(),
         );
         return;

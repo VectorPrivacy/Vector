@@ -813,7 +813,7 @@ pub(crate) fn read_saved_bridges() -> Vec<String> {
         _ => Vec::new(),
     };
 
-    let needs_obfs4 = lines.iter().any(|l| l.to_ascii_lowercase().starts_with("obfs4 "));
+    let needs_obfs4 = lines.iter().any(|l| l.to_ascii_lowercase().starts_with("obfs4 ")); // i18n-exempt: bridge line syntax
     if needs_obfs4 && vector_core::tor::resolve_obfs4proxy().is_none() {
         vector_core::log_warn!("[Tor] obfs4 bridges configured but obfs4proxy not found — auto-disabling bridges; falling back to direct Tor.");
         // Persist the disable so the bridges UI agrees on next read.
@@ -834,8 +834,8 @@ pub(crate) async fn tor_data_dirs() -> Result<(std::path::PathBuf, std::path::Pa
     let base = vector_core::db::account_dir(&account)?.join("tor");
     let state = base.join("state");
     let cache = base.join("cache");
-    std::fs::create_dir_all(&state).map_err(|e| format!("create state dir: {e}"))?;
-    std::fs::create_dir_all(&cache).map_err(|e| format!("create cache dir: {e}"))?;
+    std::fs::create_dir_all(&state).map_err(|e| format!("create state dir: {e}"))?; // i18n-exempt: developer error
+    std::fs::create_dir_all(&cache).map_err(|e| format!("create cache dir: {e}"))?; // i18n-exempt: developer error
     // Never while a service may still be writing the install cache; the copy is MBs of disk I/O.
     if !vector_core::tor::is_active() && !vector_core::tor::is_bootstrapping() && !running_prelogin() {
         let dst = cache.clone();
@@ -884,23 +884,23 @@ fn current_status_string() -> String {
     // While the instance is bootstrapping nothing is installed yet: the flag covers that gap so
     // the UI renders "bootstrapping" instead of falling back to "disabled".
     if vector_core::tor::is_bootstrapping() {
-        return format!("bootstrapping {}%", vector_core::tor::bootstrap_progress());
+        return format!("bootstrapping {}%", vector_core::tor::bootstrap_progress()); // i18n-exempt: status protocol
     }
     if let Some(t) = vector_core::tor::external::active() {
         use vector_core::transport::Transport;
-        return if t.ready() { "connected".into() } else { "waiting for Tor".into() };
+        return if t.ready() { "connected".into() } else { "waiting for Tor".into() }; // i18n-exempt: status protocol
     }
     match vector_core::tor::current().map(|s| s.status()) {
         // Nothing installed: never started, or the last start failed. Surface the failure so
         // the toggle unlocks instead of looping on "Starting…".
         None => match vector_core::tor::last_bootstrap_error() {
-            Some(e) => format!("failed: {e}"),
+            Some(e) => format!("failed: {e}"), // i18n-exempt: status protocol
             None => "disabled".to_string(),
         },
         Some(TorStatus::Disabled) => "disabled".to_string(),
-        Some(TorStatus::Bootstrapping(p)) => format!("bootstrapping {p}%"),
+        Some(TorStatus::Bootstrapping(p)) => format!("bootstrapping {p}%"), // i18n-exempt: status protocol
         Some(TorStatus::Connected) => "connected".to_string(),
-        Some(TorStatus::Failed(e)) => format!("failed: {e}"),
+        Some(TorStatus::Failed(e)) => format!("failed: {e}"), // i18n-exempt: status protocol
     }
 }
 
@@ -988,7 +988,7 @@ pub async fn tor_set_bridges(enabled: bool, lines: String) -> Result<BridgesStat
     if enabled {
         let any_obfs4 = lines
             .lines()
-            .any(|l| l.trim().to_ascii_lowercase().starts_with("obfs4 "));
+            .any(|l| l.trim().to_ascii_lowercase().starts_with("obfs4 ")); // i18n-exempt: bridge line syntax
         if any_obfs4 && vector_core::tor::resolve_obfs4proxy().is_none() {
             return Err(vector_core::tor::obfs4proxy_missing_error());
         }

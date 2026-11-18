@@ -38,3 +38,31 @@ profile-status-failed-text = Failed to broadcast status update to the network.
 
 profile-username = Username
 profile-bio = Bio
+
+## A profile
+
+profile-set-status = Set a Status
+# Your own profile when it has no name.
+profile-anonymous = Anonymous
+profile-mine = My Profile
+profile-edit = Edit
+profile-share = Share
+profile-show-qr = Show profile QR code
+profile-more = More
+profile-block = Block
+profile-unblock = Unblock
+profile-message = Message
+profile-mute = Mute
+profile-unmute = Unmute
+profile-no-description = No description yet
+profile-my-npub = My nPub Key
+profile-npub = nPub Key
+profile-copy-npub = Copy npub
+
+## Editing your profile
+
+profile-edit-exit = Exit
+profile-edit-unsaved = Unsaved Changes Made
+profile-edit-on = Edit Mode is Enabled
+profile-edit-save = Save
+profile-remove-banner = Remove Banner

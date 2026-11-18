@@ -4,6 +4,7 @@
 //! `GifGrid.svelte` over `gifs.js`.
 
 use crate::kit::Tipped as _;
+use crate::t;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -128,22 +129,14 @@ impl Pack {
     }
 
     /// `deadPackMessage`: picked by the id so it never shuffles between opens.
-    fn dead_message(&self) -> &'static str {
-        const REVOKED: [&str; 3] = [
-            "The creator has taken this pack down.",
-            "This pack was removed by its creator.",
-            "The creator of this pack has retired it.",
-        ];
-        const MISSING: [&str; 3] = [
-            "This pack is no longer available.",
-            "This pack seems to have disappeared.",
-            "This pack couldn't be found anymore.",
-        ];
+    fn dead_message(&self) -> SharedString {
+        const REVOKED: [fn() -> SharedString; 3] = [t::picker_pack_revoked_1, t::picker_pack_revoked_2, t::picker_pack_revoked_3];
+        const MISSING: [fn() -> SharedString; 3] = [t::picker_pack_missing_1, t::picker_pack_missing_2, t::picker_pack_missing_3];
         let h = self
             .id
             .encode_utf16()
             .fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
-        (if self.status == 1 { REVOKED } else { MISSING })[h as usize % 3]
+        (if self.status == 1 { REVOKED } else { MISSING })[h as usize % 3]()
     }
 }
 
@@ -209,12 +202,22 @@ pub enum Cell {
 }
 
 impl Section {
-    fn title(self) -> &'static str {
+    /// For element ids.
+    fn id(self) -> &'static str {
         match self {
-            Section::Results => "Search Results",
-            Section::Recents => "Recently Used",
-            Section::All => "Emojis",
+            Section::Results => "results",
+            Section::Recents => "recents",
+            Section::All => "all",
             Section::Pack(_) => "",
+        }
+    }
+
+    fn title(self) -> SharedString {
+        match self {
+            Section::Results => t::picker_search_results(),
+            Section::Recents => t::picker_recently_used(),
+            Section::All => t::picker_emojis(),
+            Section::Pack(_) => SharedString::default(),
         }
     }
 
@@ -427,7 +430,7 @@ impl EmojiPicker {
             ..Default::default()
         };
         let search = cx.new(|cx| {
-            TextInput::new("Search Emojis...", cx)
+            TextInput::new(t::picker_search_emojis(), cx)
                 .with_look(look)
                 .keep_on_submit()
                 .submit_empty()
@@ -569,9 +572,9 @@ impl EmojiPicker {
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.mode = mode;
         let placeholder = match mode {
-            Mode::Emoji => "Search Emojis...",
-            Mode::Gif => "Search GIFs...",
-            Mode::Kaomoji => "Search Kaomoji...",
+            Mode::Emoji => t::picker_search_emojis(),
+            Mode::Gif => t::picker_search_gifs(),
+            Mode::Kaomoji => t::picker_search_kaomoji(),
         };
         self.search
             .update(cx, |s, cx| s.set_placeholder(placeholder, cx));
@@ -694,7 +697,7 @@ impl EmojiPicker {
                     Ok(_) => {
                         g.more = false;
                         g.phase = GifPhase::Empty(if query.is_empty() {
-                            "No trending GIFs found".into()
+                            t::picker_gifs_no_trending().into()
                         } else {
                             let shown: String = query.chars().take(32).collect();
                             let ellipsis = if query.chars().count() > 32 {
@@ -702,15 +705,15 @@ impl EmojiPicker {
                             } else {
                                 ""
                             };
-                            format!("No GIFs found for \"{shown}{ellipsis}\"")
+                            t::picker_gifs_none(format!("{shown}{ellipsis}")).into()
                         });
                     }
                     Err(_) => {
                         g.more = false;
                         g.phase = GifPhase::Empty(if query.is_empty() {
-                            "Failed to load GIFs".into()
+                            t::picker_gifs_failed().into()
                         } else {
-                            "Search failed".into()
+                            t::picker_gifs_search_failed().into()
                         });
                     }
                 }
@@ -1072,7 +1075,7 @@ impl EmojiPicker {
                 .gap(px(6.))
                 .children(faces.into_iter().map(|k| this.kaomoji_item(k, cx)))
         };
-        let header = |icon: Option<&'static str>, title: &'static str| {
+        let header = |icon: Option<&'static str>, title: SharedString| {
             div()
                 .pt(px(8.))
                 .pb(px(4.))
@@ -1121,7 +1124,7 @@ impl EmojiPicker {
                     .font_family(INTER)
                     .text_size(px(13.))
                     .text_color(white_a(0.5))
-                    .child(format!("No kaomoji for “{}”", self.query))
+                    .child(t::picker_kaomoji_none(&*self.query))
             } else {
                 items(self, hits, cx)
             });
@@ -1130,12 +1133,12 @@ impl EmojiPicker {
             if !recents.is_empty() {
                 list = list.child(
                     div()
-                        .child(header(Some("icons/clock.svg"), "Recently Used"))
+                        .child(header(Some("icons/clock.svg"), t::picker_recently_used()))
                         .child(items(self, recents, cx)),
                 );
             }
             for cat in emoji::KAOMOJI {
-                list = list.child(div().child(header(None, cat.name)).child(items(
+                list = list.child(div().child(header(None, cat.name.into())).child(items(
                     self,
                     cat.items.iter().collect(),
                     cx,
@@ -1442,7 +1445,7 @@ impl EmojiPicker {
         }
         let collapsed = self.collapsed.contains(&s);
         div()
-            .id(SharedString::from(format!("picker-h-{}", s.title())))
+            .id(SharedString::from(format!("picker-h-{}", s.id())))
             .h(px(32. + if collapsed { 3. } else { 6. }))
             .pb(px(if collapsed { 3. } else { 6. }))
             .flex()
@@ -1468,7 +1471,7 @@ impl EmojiPicker {
                     .ml(px(2.))
                     .text_color(white_a(0.5))
                     .with_transformation(crate::kit::turn(
-                        format!("picker-caret-{}", s.title()),
+                        format!("picker-caret-{}", s.id()),
                         collapsed,
                         -std::f32::consts::FRAC_PI_2,
                         0.2,
@@ -1548,7 +1551,7 @@ impl EmojiPicker {
                 d.child(
                     div()
                         .id(SharedString::from(format!("picker-pack-edit-{i}")))
-                        .tip("Edit Pack")
+                        .tip(t::picker_edit_pack())
                         .ml_auto()
                         .px(px(4.))
                         .flex_shrink_0()
@@ -1730,7 +1733,7 @@ impl EmojiPicker {
                     .text_size(px(11.5))
                     .line_height(px(11.5 * 1.35))
                     .text_color(white_a(0.55))
-                    .child("Old messages will still show its emojis."),
+                    .child(t::picker_pack_dead_note()),
             )
             .child(
                 div()
@@ -1749,7 +1752,7 @@ impl EmojiPicker {
                             .update(cx, |_, cx| cx.emit(RemovePack(id.clone())))
                             .ok();
                     })
-                    .child("Remove Pack"),
+                    .child(t::picker_pack_remove()),
             )
             .into_any_element()
     }
@@ -1958,10 +1961,10 @@ impl Render for EmojiPicker {
             self.rebuild();
         }
         let tight = vw <= 480.;
-        let mode_btn = |label: &'static str, mode: Mode, cx: &mut Context<Self>| {
+        let mode_btn = |id: &'static str, label: SharedString, mode: Mode, cx: &mut Context<Self>| {
             let active = self.mode == mode;
             div()
-                .id(label)
+                .id(id)
                 .h(px(27.))
                 .px(px(if tight { 8. } else { 12. }))
                 .flex()
@@ -2013,10 +2016,10 @@ impl Render for EmojiPicker {
                     .flex()
                     .flex_shrink_0()
                     .gap(px(if tight { 2. } else { 4. }))
-                    .child(mode_btn("Emoji", Mode::Emoji, cx))
-                    .when(!self.no_gifs, |d| d.child(mode_btn("GIF", Mode::Gif, cx)))
+                    .child(mode_btn("Emoji", t::picker_emoji(), Mode::Emoji, cx))
+                    .when(!self.no_gifs, |d| d.child(mode_btn("GIF", "GIF".into(), Mode::Gif, cx)))
                     .when(!self.reaction, |d| {
-                        d.child(mode_btn("(◕‿◕)", Mode::Kaomoji, cx))
+                        d.child(mode_btn("(◕‿◕)", "(◕‿◕)".into(), Mode::Kaomoji, cx))
                     }),
             );
 
@@ -2052,9 +2055,9 @@ impl Render for EmojiPicker {
             let on = level(s);
             div()
                 .id(icon)
-                .when(s.is_none(), |d| d.tip("Create new pack"))
-                .when(s == Some(Section::Recents), |d| d.aria_label("Recently used"))
-                .when(s == Some(Section::All), |d| d.aria_label("All emojis"))
+                .when(s.is_none(), |d| d.tip(t::picker_create_pack()))
+                .when(s == Some(Section::Recents), |d| d.aria_label(t::picker_rail_recents()))
+                .when(s == Some(Section::All), |d| d.aria_label(t::picker_rail_all()))
                 .relative()
                 .size(px(30.))
                 .my(px(3.))

@@ -29,41 +29,41 @@ fn decode_webp_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, Stri
     reader.limits(vector_core::crypto::bounded_image_limits());
     let img = reader
         .decode()
-        .map_err(|e| format!("webp still: {}", e))?
+        .map_err(|e| format!("webp still: {}", e))? // i18n-exempt: decoder diagnostic
         .into_rgba8();
     Ok(vec![(img, 100)])
 }
 
 fn decode_gif_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
     let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
-        .map_err(|e| format!("gif decoder: {}", e))?;
+        .map_err(|e| format!("gif decoder: {}", e))?; // i18n-exempt: decoder diagnostic
     let frames: Vec<image::Frame> = decoder
         .into_frames()
         .collect_frames()
-        .map_err(|e| format!("gif frames: {}", e))?;
+        .map_err(|e| format!("gif frames: {}", e))?; // i18n-exempt: decoder diagnostic
     Ok(frames.into_iter().map(extract_frame).collect())
 }
 
 fn decode_apng_frames(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
     let decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes))
-        .map_err(|e| format!("png decoder: {}", e))?
+        .map_err(|e| format!("png decoder: {}", e))? // i18n-exempt: decoder diagnostic
         .apng()
-        .map_err(|e| format!("apng: {}", e))?;
+        .map_err(|e| format!("apng: {}", e))?; // i18n-exempt: decoder diagnostic
     let frames: Vec<image::Frame> = decoder
         .into_frames()
         .collect_frames()
-        .map_err(|e| format!("apng frames: {}", e))?;
+        .map_err(|e| format!("apng frames: {}", e))?; // i18n-exempt: decoder diagnostic
     Ok(frames.into_iter().map(extract_frame).collect())
 }
 
 fn decode_static_fallback(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, String> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| format!("sniff: {}", e))?;
+        .map_err(|e| format!("sniff: {}", e))?; // i18n-exempt: decoder diagnostic
     reader.limits(vector_core::crypto::bounded_image_limits());
     let img = reader
         .decode()
-        .map_err(|e| format!("decode: {}", e))?
+        .map_err(|e| format!("decode: {}", e))? // i18n-exempt: decoder diagnostic
         .into_rgba8();
     Ok(vec![(img, 100)])
 }
@@ -92,7 +92,7 @@ pub(crate) fn crop_image(
     h: u32,
 ) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 {
-        return Err("crop must be non-empty".to_string());
+        return Err("crop must be non-empty".to_string()); // i18n-exempt: decoder diagnostic
     }
     let mime = vector_core::crypto::mime_from_magic_bytes(&bytes).to_string();
     crop_and_reencode_blocking(
@@ -114,11 +114,11 @@ pub(crate) fn crop_emoji(
     crop: vector_core::image_crop::CropRect,
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
-    let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;
+    let dims = vector_core::image_crop::upright_dims(&bytes).ok_or_else(|| crate::t::crop_unreadable().to_string())?;
     let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
     let side = w.min(h);
     if side == 0 {
-        return Err("crop must be non-empty".to_string());
+        return Err("crop must be non-empty".to_string()); // i18n-exempt: decoder diagnostic
     }
     let mime = vector_core::crypto::mime_from_magic_bytes(&bytes).to_string();
     crop_and_reencode_blocking(
@@ -139,7 +139,7 @@ pub(crate) fn crop_drawn(
     bytes: Vec<u8>,
     crop: vector_core::image_crop::CropRect,
 ) -> Result<Vec<u8>, String> {
-    let dims = vector_core::image_crop::upright_dims(&bytes).ok_or("Couldn't read the image")?;
+    let dims = vector_core::image_crop::upright_dims(&bytes).ok_or_else(|| crate::t::crop_unreadable().to_string())?;
     let (x, y, w, h) = vector_core::image_crop::map_crop(crop, dims);
     crop_image(bytes, x, y, w, h)
 }
@@ -173,7 +173,7 @@ fn crop_and_reencode_blocking(
         }
         "webp"
     } else {
-        return Err(format!("unsupported mime: {}", mime));
+        return Err(format!("unsupported mime: {}", mime)); // i18n-exempt: decoder diagnostic
     };
 
     if format == "gif" {
@@ -182,16 +182,16 @@ fn crop_and_reencode_blocking(
 
     let mut reader = image::ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
-        .map_err(|e| format!("sniff: {}", e))?;
+        .map_err(|e| format!("sniff: {}", e))?; // i18n-exempt: decoder diagnostic
     reader.limits(vector_core::crypto::bounded_image_limits());
     // Upright, as the cropper showed it: a webview applies EXIF orientation, so the
     // rectangle is in rotated pixels.
     let mut decoder = reader
         .into_decoder()
-        .map_err(|e| format!("decode: {}", e))?;
+        .map_err(|e| format!("decode: {}", e))?; // i18n-exempt: decoder diagnostic
     let orientation = image::ImageDecoder::orientation(&mut decoder).ok();
     let mut dynimg =
-        image::DynamicImage::from_decoder(decoder).map_err(|e| format!("decode: {}", e))?;
+        image::DynamicImage::from_decoder(decoder).map_err(|e| format!("decode: {}", e))?; // i18n-exempt: decoder diagnostic
     if let Some(o) = orientation {
         dynimg.apply_orientation(o);
     }
@@ -273,7 +273,7 @@ fn crop_animated_webp(
     // disposal + blend logic is handled inside libwebp).
     let frames = decode_webp_frames(bytes)?;
     if frames.is_empty() {
-        return Err("webp: no frames".to_string());
+        return Err("webp: no frames".to_string()); // i18n-exempt: decoder diagnostic
     }
     let (fw, fh) = (frames[0].0.width(), frames[0].0.height());
     validate_crop_bounds(x, y, w, h, fw, fh)?;
@@ -313,7 +313,7 @@ fn crop_gif(
     }
     let frames = decode_gif_frames(bytes)?;
     if frames.is_empty() {
-        return Err("gif: no frames".to_string());
+        return Err("gif: no frames".to_string()); // i18n-exempt: decoder diagnostic
     }
     let (fw, fh) = (frames[0].0.width(), frames[0].0.height());
     validate_crop_bounds(x, y, w, h, fw, fh)?;
@@ -336,13 +336,13 @@ fn crop_gif(
             let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 10);
             encoder
                 .set_repeat(image::codecs::gif::Repeat::Infinite)
-                .map_err(|e| format!("gif repeat: {}", e))?;
+                .map_err(|e| format!("gif repeat: {}", e))?; // i18n-exempt: decoder diagnostic
             for (rgba, duration_ms) in scaled {
                 let delay = image::Delay::from_numer_denom_ms((*duration_ms).max(20), 1);
                 let frame = image::Frame::from_parts(rgba.clone(), 0, 0, delay);
                 encoder
                     .encode_frame(frame)
-                    .map_err(|e| format!("gif frame: {}", e))?;
+                    .map_err(|e| format!("gif frame: {}", e))?; // i18n-exempt: decoder diagnostic
             }
         }
         Ok(out)
@@ -351,7 +351,7 @@ fn crop_gif(
 
 fn validate_crop_bounds(x: u32, y: u32, w: u32, h: u32, sw: u32, sh: u32) -> Result<(), String> {
     if x.saturating_add(w) > sw || y.saturating_add(h) > sh {
-        return Err("crop outside source bounds".to_string());
+        return Err("crop outside source bounds".to_string()); // i18n-exempt: decoder diagnostic
     }
     Ok(())
 }
@@ -380,7 +380,7 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
                 rgba.height(),
                 image::ExtendedColorType::Rgba8,
             )
-            .map_err(|e| format!("png encode: {}", e))?;
+            .map_err(|e| format!("png encode: {}", e))?; // i18n-exempt: decoder diagnostic
         }
         "jpeg" => {
             // JPEG has no alpha — composite onto white before encode so
@@ -400,9 +400,9 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
                     rgb.height(),
                     image::ExtendedColorType::Rgb8,
                 )
-                .map_err(|e| format!("jpeg encode: {}", e))?;
+                .map_err(|e| format!("jpeg encode: {}", e))?; // i18n-exempt: decoder diagnostic
         }
-        _ => return Err(format!("encode: unsupported format {}", format)),
+        _ => return Err(format!("encode: unsupported format {}", format)), // i18n-exempt: decoder diagnostic
     }
     Ok(out)
 }

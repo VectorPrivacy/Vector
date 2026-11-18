@@ -133,7 +133,7 @@ fn load_json_setting<T: serde::de::DeserializeOwned + Default>(key: &str) -> Res
     }
     match db::get_sql_setting(key.to_string())? {
         Some(json) => {
-            serde_json::from_str(&json).map_err(|e| format!("Failed to parse {key}: {e}"))
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse {key}: {e}")) // i18n-exempt: developer error
         }
         None => Ok(T::default()),
     }
@@ -141,10 +141,10 @@ fn load_json_setting<T: serde::de::DeserializeOwned + Default>(key: &str) -> Res
 
 fn save_json_setting<T: serde::Serialize + ?Sized>(key: &str, value: &T) -> Result<(), String> {
     if db::get_current_account().is_err() {
-        return Err("No account selected".to_string());
+        return Err("No account selected".to_string()); // i18n-exempt: developer error
     }
     let json =
-        serde_json::to_string(value).map_err(|e| format!("Failed to serialize {key}: {e}"))?;
+        serde_json::to_string(value).map_err(|e| format!("Failed to serialize {key}: {e}"))?; // i18n-exempt: developer error
     db::set_sql_setting(key.to_string(), json)
 }
 
@@ -223,7 +223,7 @@ async fn restore_discovery_role(client: &Client, url: &str) {
 }
 
 pub async fn get_relays() -> Result<Value, String> {
-    let client = state::nostr_client().ok_or("Nostr client not initialized")?;
+    let client = state::nostr_client().ok_or("Nostr client not initialized")?; // i18n-exempt: developer error
     let customs = load_custom_relays().unwrap_or_default();
     let disabled = disabled_default_relays().unwrap_or_default();
     let pool = client.relays().await;
@@ -399,7 +399,7 @@ pub async fn add_configured_relays(client: &Client) {
         .iter()
         .filter(|d| disabled.iter().any(|x| x.eq_ignore_ascii_case(d)))
     {
-        add_relay_log(url, "info", "Skipped (disabled by user)");
+        add_relay_log(url, "info", "Skipped (disabled by user)"); // i18n-exempt: relay log, copied for bug reports
     }
     let wanted = desired_enabled_relays();
     for (url, mode) in &wanted {
@@ -408,10 +408,10 @@ pub async fn add_configured_relays(client: &Client) {
             .capabilities(capabilities_for_mode(mode))
             .await
         {
-            Ok(_) => add_relay_log(url, "info", &format!("Added to relay pool (mode: {mode})")),
+            Ok(_) => add_relay_log(url, "info", &format!("Added to relay pool (mode: {mode})")), // i18n-exempt: relay log, copied for bug reports
             Err(e) => {
                 vector_core::log_warn!("[Relay] add {url} failed: {e}");
-                add_relay_log(url, "error", &format!("Failed to add: {e}"));
+                add_relay_log(url, "error", &format!("Failed to add: {e}")); // i18n-exempt: relay log, copied for bug reports
             }
         }
     }
@@ -559,7 +559,7 @@ async fn apply_inbound_reconcile(
         if let Err(e) = add_relay(client, url, capabilities_for_mode("both")).await {
             vector_core::log_warn!("[Relay] Adopted relay add failed for {url}: {e}");
         }
-        add_relay_log(url, "info", "Adopted from your DM relay list");
+        add_relay_log(url, "info", "Adopted from your DM relay list"); // i18n-exempt: relay log, copied for bug reports
     }
     for url in &revived {
         let mode = customs
@@ -575,7 +575,7 @@ async fn apply_inbound_reconcile(
         add_relay_log(
             url,
             "info",
-            "Disabled (removed from your DM relay list elsewhere)",
+            "Disabled (removed from your DM relay list elsewhere)", // i18n-exempt: relay log, copied for bug reports
         );
     }
 
@@ -610,7 +610,7 @@ pub fn start_relay_monitor(client: &Client) {
                 add_relay_log(
                     &url,
                     level,
-                    &format!("Status changed to {}", status_label(status)),
+                    &format!("Status changed to {}", status_label(status)), // i18n-exempt: relay log, copied for bug reports
                 );
                 vector_core::emit_event(
                     "relay_status_change",
@@ -670,7 +670,7 @@ pub fn start_relay_monitor(client: &Client) {
                             m.last_check = Some(now_secs());
                         });
                     } else {
-                        add_relay_log(url.as_str(), "warn", "Health check failed; reconnecting");
+                        add_relay_log(url.as_str(), "warn", "Health check failed; reconnecting"); // i18n-exempt: relay log, copied for bug reports
                         relay.disconnect();
                         let _ = relay
                             .try_connect()
@@ -710,7 +710,7 @@ pub fn start_relay_monitor(client: &Client) {
                     add_relay_log(
                         &url,
                         "info",
-                        "Reconcile: re-added missing relay; connecting...",
+                        "Reconcile: re-added missing relay; connecting...", // i18n-exempt: relay log, copied for bug reports
                     );
                     if let Ok(Some(relay)) = client.relay(url.as_str()).await {
                         let _ = relay.try_connect().timeout(Duration::from_secs(8)).await;
@@ -731,7 +731,7 @@ pub fn start_relay_monitor(client: &Client) {
                         .entry(key.clone())
                         .or_insert_with(std::time::Instant::now);
                     if since.elapsed() >= Duration::from_secs(15) {
-                        add_relay_log(url.as_str(), "warn", "Wedged in Pending; forcing reconnect");
+                        add_relay_log(url.as_str(), "warn", "Wedged in Pending; forcing reconnect"); // i18n-exempt: relay log, copied for bug reports
                         relay.disconnect();
                         let _ = relay.try_connect().timeout(Duration::from_secs(5)).await;
                         pending_since.insert(key, std::time::Instant::now());

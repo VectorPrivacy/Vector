@@ -8,3 +8,4 @@ crop-avatar-title = Crop Profile Picture
 crop-avatar-hint = Drag to move, or drag a corner to resize.
 # Above the cropped picture. Shown in capitals.
 crop-preview = Preview
+crop-unreadable = Couldn't read the image
