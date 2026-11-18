@@ -410,11 +410,11 @@ pub fn clock(ms: u64) -> String {
     let s = ms / 1000;
     let m = s / 60;
     let h = m / 60;
-    if h > 0 {
+    crate::lang::digits(if h > 0 {
         format!("{h}:{:02}:{:02}", m % 60, s % 60)
     } else {
         format!("{:02}:{:02}", m % 60, s % 60)
-    }
+    })
 }
 
 fn lost_word(v: f32) -> SharedString {

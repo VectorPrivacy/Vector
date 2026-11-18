@@ -21,7 +21,12 @@ const PACK_EXT: &str = "vpack";
 
 /// A count shown on its own (a badge, a tally) in the language's digits.
 pub fn num(n: impl std::fmt::Display) -> gpui::SharedString {
-    vector_i18n::locale().native(n.to_string()).into()
+    digits(n.to_string()).into()
+}
+
+/// Text built in code (a clock, `4:05`) with its digits in the language's own.
+pub fn digits(s: String) -> String {
+    vector_i18n::locale().native(s)
 }
 
 /// Where downloaded packs live, beside the device settings.

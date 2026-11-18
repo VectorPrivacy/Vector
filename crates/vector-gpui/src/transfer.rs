@@ -765,7 +765,7 @@ impl SecurityFlow {
                     .saturating_duration_since(Instant::now())
                     .as_secs_f32()
                     .ceil() as u64;
-                let clock = format!("{}:{:02}", left / 60, left % 60);
+                let clock = crate::lang::digits(format!("{}:{:02}", left / 60, left % 60));
                 body = body.child(lead(
                     if x.sender {
                         t::transfer_code_lead_send()

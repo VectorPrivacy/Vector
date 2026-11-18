@@ -272,7 +272,7 @@ impl Recorder {
 
     pub fn elapsed(&self) -> String {
         let s = self.started.map_or(0, |t| t.elapsed().as_secs());
-        format!("{}:{:02}", s / 60, s % 60)
+        crate::lang::digits(format!("{}:{:02}", s / 60, s % 60))
     }
 
     fn cancelling(&self) -> bool {

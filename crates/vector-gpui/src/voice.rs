@@ -976,7 +976,7 @@ pub fn stage(
 
 fn clock(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+    crate::lang::digits(if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") })
 }
 
 /// `.voice-bar`: the call we are in, as the 1:1 call's pill, off its own channel's screen.

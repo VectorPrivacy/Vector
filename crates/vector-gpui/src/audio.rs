@@ -948,7 +948,7 @@ mod edition_tests {
 
 pub fn format_time(ms: u64) -> String {
     let s = ms / 1000;
-    format!("{}:{:02}", s / 60, s % 60)
+    crate::lang::digits(format!("{}:{:02}", s / 60, s % 60))
 }
 
 /// `.audio-album.is-full`: the art beside the head, then the songs; the caller adds the

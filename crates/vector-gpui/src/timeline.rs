@@ -1426,7 +1426,7 @@ pub fn countdown(secs: u64) -> String {
     } else if secs >= 3600 {
         crate::t::countdown_hours(secs / 3600, secs % 3600 / 60).into()
     } else {
-        format!("{}:{:02}", secs / 60, secs % 60)
+        crate::lang::digits(format!("{}:{:02}", secs / 60, secs % 60))
     }
 }
 

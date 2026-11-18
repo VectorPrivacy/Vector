@@ -1128,7 +1128,7 @@ fn video_state(env: &Env, v: &Media) -> (Option<i64>, Option<crate::audio::Audio
 
 fn duration(secs: f64) -> String {
     let s = secs.max(0.).round() as u64;
-    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+    crate::lang::digits(if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) })
 }
 
 /// `.ne-video`: a poster with its play button. A video fetches, then plays in place; a page
