@@ -139,22 +139,12 @@ pub async fn remove_failed(message_id: &str, drop_files: bool) -> Result<(), Str
             }
         }
     }
-    let urls: Vec<String> = msg
-        .attachments
-        .iter()
-        .flat_map(|a| a.all_urls().map(str::to_string))
-        .collect();
-    let urls = db::attachments::urls_unreferenced_elsewhere(&urls, &message_id).unwrap_or_default();
-    if !urls.is_empty() {
-        if let Ok(signer) = vector_core::signer::active_signer() {
-            vector_core::blossom::delete_blobs_best_effort(signer, urls);
-        }
-    }
     let _ = db::events::delete_event(&message_id).await;
     emit_removed(&message_id, &chat_id);
-    // A Community message that went unconfirmed may have landed anyway: take it back.
+    // A message that went unconfirmed may have landed anyway: it is taken back first, and its
+    // uploads go only once nothing signed can still be read with them.
     db::spawn_bound(async move {
-        vector_core::community::v2::service::discard_unconfirmed(&chat_id, &message_id).await;
+        vector_core::sending::abandon_failed_send(&chat_id, &message_id, &msg.attachments).await;
     });
     Ok(())
 }

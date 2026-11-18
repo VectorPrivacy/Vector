@@ -444,7 +444,7 @@ async fn dispatch(
             tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message(
+        let sent = vector_core::community::v2::service::try_send_chat_message(
             &transport, &community, &ch, &content, quote_ref, &emoji, tags,
         )
         .await;
@@ -472,9 +472,13 @@ async fn dispatch(
                 }
                 Ok(uploaded.iter().find_map(|a| a.webxdc_topic.clone()))
             }
-            Err(e) => {
-                mark_failed(&channel, &pending_id).await;
-                Err(e)
+            Err(unsent) => {
+                // Signed and kept: the bubble becomes that message, so a retry sends it again
+                // as itself and a delete takes it back, with the files it names left alone.
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel, &pending_id, &unsent).await {
+                    Callback.on_failed(&channel, &pending_id, &msg);
+                }
+                Err(unsent.error)
             }
         }
     })

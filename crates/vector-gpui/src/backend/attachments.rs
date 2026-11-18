@@ -75,6 +75,48 @@ fn emit(event: &str, payload: serde_json::Value) {
     vector_core::emit_event(event, &payload);
 }
 
+/// What a download reports once every server its message names holds no such file.
+pub const GONE_EVERYWHERE: &str = "No longer on any media server";
+
+/// Whether every source the message itself names answers that it holds no such file. A guessed
+/// mirror can rescue a file, never keep it in doubt, so only the named ones are asked.
+async fn gone_everywhere(att: &vector_core::Attachment) -> bool {
+    let Ok(client) = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::transfer_stall()), true) else {
+        return false;
+    };
+    let mut named = att.all_urls().peekable();
+    if named.peek().is_none() {
+        return false;
+    }
+    for url in named {
+        if vector_core::net::validate_url_not_private(url).is_err() {
+            return false;
+        }
+        let asked = vector_core::net::proxied_request(&client, reqwest::Method::GET, url).await.send();
+        let Ok(Ok(res)) = tokio::time::timeout(std::time::Duration::from_secs(15), asked).await else {
+            return false;
+        };
+        if !not_on_server(res).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// A 404 or 410, from the server itself or passed on by the privacy proxy from its source.
+async fn not_on_server(res: vector_core::net::Resp) -> bool {
+    let status = res.status().as_u16();
+    if matches!(status, 404 | 410) {
+        return true;
+    }
+    status == 502
+        && res.content_length().is_some_and(|n| n <= 4096)
+        && res
+            .json::<serde_json::Value>()
+            .await
+            .is_ok_and(|b| matches!(b.get("source_status").and_then(serde_json::Value::as_u64), Some(404 | 410)))
+}
+
 fn fail(chat: &str, msg_id: &str, attachment_id: &str, reason: &str) -> bool {
     vector_core::log_warn!("attachment {attachment_id} of {msg_id}: {reason}");
     emit(
@@ -221,6 +263,14 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
             emit(
                 "attachment_download_result",
                 json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "cancelled": true, "result": DownloadError::Cancelled.to_string(), "partial": partial(&attachment_id) }),
+            );
+            return false;
+        }
+        Err(e @ (DownloadError::Unusable(_) | DownloadError::Unreachable(_))) if gone_everywhere(&attachment).await => {
+            vector_core::log_warn!("attachment {attachment_id} of {msg_id}: {e}, and every named server says it is gone");
+            emit(
+                "attachment_download_result",
+                json!({ "profile_id": chat, "msg_id": msg_id, "id": attachment_id, "success": false, "gone": true, "result": GONE_EVERYWHERE, "partial": partial(&attachment_id) }),
             );
             return false;
         }

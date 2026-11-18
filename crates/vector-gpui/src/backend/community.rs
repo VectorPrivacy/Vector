@@ -261,7 +261,7 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
         Callback.on_pending(&channel_id, &pending);
 
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message_at(
+        let sent = vector_core::community::v2::service::try_send_chat_message_at(
             &transport,
             &community,
             &ch,
@@ -291,15 +291,12 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
                 }
                 Ok(())
             }
-            Err(e) => {
-                let failed = STATE.lock().await.update_message(&message_id, |m| {
-                    m.set_failed(true);
-                    m.set_pending(false);
-                });
-                if let Some((_, msg)) = failed {
+            Err(unsent) => {
+                // Failed under the id it was signed with when an epoch rolled since the precompute.
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &message_id, &unsent).await {
                     Callback.on_failed(&channel_id, &message_id, &msg);
                 }
-                Err(e)
+                Err(unsent.error)
             }
         }
     })

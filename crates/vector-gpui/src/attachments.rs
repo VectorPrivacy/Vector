@@ -525,13 +525,19 @@ fn download_box(
     failed: Option<&str>,
     paused: Option<String>,
 ) -> AnyElement {
-    let compact = w < 205. || h < 76.;
+    // Every server the message names says the file is gone: nothing on this side is at fault.
+    let gone = failed == Some(crate::backend::attachments::GONE_EVERYWHERE);
+    // A failure says why even where the row won't fit: the words go under the icon.
+    let stacked = failed.is_some() && (w < 205. || h < 76.) && w >= 120. && h >= 140.;
+    let compact = (w < 205. || h < 76.) && !stacked;
     let color = if failed.is_some() {
         c(DANGER)
     } else {
         c(PRIMARY)
     };
-    let icon = if failed.is_some() {
+    let icon = if gone {
+        "icons/file-minus.svg"
+    } else if failed.is_some() {
         "icons/refresh.svg"
     } else {
         "icons/download.svg"
@@ -557,6 +563,7 @@ fn download_box(
                 .text_color(color),
         );
     let title = match failed {
+        Some(_) if gone => "File Unavailable".to_string(),
         Some(_) => "Download Failed".to_string(),
         None if paused.is_some() => "Resume Download".to_string(),
         None => format!("Download {}", att.extension.to_uppercase())
@@ -564,6 +571,7 @@ fn download_box(
             .to_string(),
     };
     let sub = match failed {
+        Some(_) if gone => "Deleted, or lost by its server".to_string(),
         Some(e) if !e.is_empty() => e.chars().take(64).collect(),
         Some(_) => "Tap to Retry".to_string(),
         None if paused.is_some() => paused.unwrap_or_default().trim_start_matches("Resume download · ").to_string() + " done",
@@ -593,11 +601,13 @@ fn download_box(
         .rounded(px(12.))
         .bg(ca(12, 12, 12, 0.82))
         .hover(|s| s.bg(ca(24, 24, 24, 0.88)).border_color(c(0x4a4a4a)))
+        .when(stacked, |d| d.flex_col().gap(px(8.)))
         .child(tile)
         .child(
             div()
                 .min_w_0()
-                .pr(px(4.))
+                .when(!stacked, |d| d.pr(px(4.)))
+                .when(stacked, |d| d.items_center().text_center())
                 .flex()
                 .flex_col()
                 .child(
@@ -605,9 +615,7 @@ fn download_box(
                         .text_size(px(14.))
                         .line_height(px(17.5))
                         .text_color(white_a(0.92))
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
+                        .when(!stacked, |d| d.whitespace_nowrap().overflow_hidden().text_ellipsis())
                         .child(title),
                 )
                 .child(
@@ -616,9 +624,7 @@ fn download_box(
                         .text_size(px(12.))
                         .line_height(px(15.))
                         .text_color(white_a(0.34))
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
+                        .when(!stacked, |d| d.whitespace_nowrap().overflow_hidden().text_ellipsis())
                         .child(sub),
                 ),
         )
@@ -923,6 +929,9 @@ fn file_box_on(
     } else {
         let sub = match (label, state) {
             (Some(l), _) => l.to_string(),
+            (None, FileState::Failed) if media.failed.get(&att.id).is_some_and(|r| r == crate::backend::attachments::GONE_EVERYWHERE) => {
+                "Unavailable · Deleted, or lost by its server".into()
+            }
             (None, FileState::Failed) => {
                 let reason: String = media
                     .failed
