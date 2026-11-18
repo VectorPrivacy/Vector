@@ -1627,6 +1627,7 @@ pub fn view(
     let controls = div()
         .flex()
         .items_center()
+        .keep_ltr()
         .when(chapters.is_some(), |d| d.child(skip("prev", "icons/skip-back.svg", AlbumAct::Prev)))
         .child(button)
         .when(chapters.is_some(), |d| d.child(skip("next", "icons/skip-forward.svg", AlbumAct::Next)))

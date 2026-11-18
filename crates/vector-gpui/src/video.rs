@@ -1070,6 +1070,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                 .flex()
                 .items_center()
                 .gap(px(4.))
+                .keep_ltr()
                 .child(button(
                     if playing { "icons/pause.svg" } else { "icons/play.svg" },
                     "vplay",

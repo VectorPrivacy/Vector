@@ -675,6 +675,7 @@ pub fn preview(r: &Recorder, on: On) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .gap(px(10.))
+                .keep_ltr()
                 .child(round(
                     "voice-preview-play",
                     if r.playing { "icons/pause.svg" } else { "icons/play.svg" },

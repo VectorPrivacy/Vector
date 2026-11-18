@@ -571,6 +571,7 @@ impl VectorApp {
                         .flex()
                         .items_center()
                         .gap(px(12.))
+                        .keep_ltr()
                         .when_some(play_single, |d, play| d.child(div().w(px(44.)).flex().justify_center().child(play)))
                         .when_some(play_album, |d, play_album| {
                             let skip = |key: &'static str, icon: &'static str, act: Act| {

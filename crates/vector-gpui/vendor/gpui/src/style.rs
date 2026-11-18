@@ -193,7 +193,7 @@ pub struct Style {
     /// Whether both x and y axis should be scrollable at the same time.
     pub allow_concurrent_scroll: bool,
     /// Lays the element and its children out left to right even while layout is mirrored:
-    /// code, digit entry, a picture panned under the pointer.
+    /// code, digit entry, a picture panned under the pointer, playback controls.
     pub keep_ltr: bool,
     /// Whether scrolling should be restricted to the input gesture's axis.
     ///
