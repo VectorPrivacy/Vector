@@ -298,12 +298,12 @@ pub fn relay_address(raw: &str, list: &[String], except: Option<usize>) -> Resul
         .unwrap_or("")
         .to_ascii_lowercase();
     if host.is_empty() || host.contains(char::is_whitespace) {
-        return Err("That isn't a relay address.".into());
+        return Err(t::community_settings_relay_invalid().into());
     }
     let native = host.ends_with(".onion") || host.ends_with(".i2p");
     let scheme = scheme.to_ascii_lowercase();
     if !(scheme == "wss" || (scheme == "ws" && native)) {
-        return Err("Use wss://, or ws:// for an .onion or .i2p address.".into());
+        return Err(t::community_settings_relay_scheme().into());
     }
     let address = text.trim_end_matches('/').to_string();
     let same = |a: &String| a.trim_end_matches('/').eq_ignore_ascii_case(&address);
@@ -312,7 +312,7 @@ pub fn relay_address(raw: &str, list: &[String], except: Option<usize>) -> Resul
         .enumerate()
         .any(|(i, r)| Some(i) != except && same(r))
     {
-        return Err("That relay is already listed.".into());
+        return Err(t::community_settings_relay_listed().into());
     }
     Ok(address)
 }
@@ -328,17 +328,17 @@ pub fn voice_address(raw: &str, list: &[String]) -> Result<String, String> {
     }
     let (scheme, rest) = text.split_once("://").unwrap_or(("", ""));
     if !scheme.eq_ignore_ascii_case("https") {
-        return Err("A voice relay is an https:// address.".into());
+        return Err(t::community_settings_voice_relay_scheme().into());
     }
     if rest.split(['/', '?', '#']).next().unwrap_or("").is_empty() {
-        return Err("That isn't a relay address.".into());
+        return Err(t::community_settings_relay_invalid().into());
     }
     let normal = format!("{}/", text.trim_end_matches('/'));
     if list.contains(&normal) {
-        return Err("That relay is already listed.".into());
+        return Err(t::community_settings_relay_listed().into());
     }
     if list.len() >= VOICE_RELAYS_MAX {
-        return Err(format!("At most {VOICE_RELAYS_MAX} voice relays."));
+        return Err(t::community_settings_voice_relays_max(VOICE_RELAYS_MAX).into());
     }
     Ok(normal)
 }
@@ -504,12 +504,12 @@ fn new_tag() -> gpui::Div {
         .font_weight(FontWeight::BOLD)
         .text_size(px(10.))
         .line_height(px(16.))
-        .child("New")
+        .child(t::community_settings_new())
 }
 
 fn remove_btn(
     id: &'static str,
-    label: &'static str,
+    label: SharedString,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -623,11 +623,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                         div()
                             .text_size(px(12.5))
                             .line_height(px(15.))
-                            .child(if editable {
-                                "Add a banner"
-                            } else {
-                                "No banner"
-                            }),
+                            .child(if editable { t::community_settings_add_banner() } else { t::community_settings_no_banner() }),
                     )
                     .when(editable, |d| {
                         d.child(
@@ -644,7 +640,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
     div()
         .child(block(
             true,
-            div().child(heading("Icon & Name")).child(
+            div().child(heading(t::community_settings_section_identity())).child(
                 div()
                     .flex()
                     .when(compact, |d| d.flex_col())
@@ -660,7 +656,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                             .child(
                                 div()
                                     .id("cs-icon")
-                                    .when(editable, |d| d.tip("Change icon"))
+                                    .when(editable, |d| d.tip(t::community_settings_change_icon()))
                                     .group("cs-icon")
                                     .relative()
                                     .size(px(88.))
@@ -671,7 +667,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                                     .when(editable, |d| d.cursor_pointer().on_click(click(on, || Act::PickIcon)).child(edit_veil().group_hover("cs-icon", |d| d.visible())))
                                     .when(m.icon_pick.is_some(), |d| d.child(new_tag())),
                             )
-                            .when(editable && has_icon, |d| d.child(remove_btn("cs-icon-x", "Remove", click(on, || Act::RemoveIcon)))),
+                            .when(editable && has_icon, |d| d.child(remove_btn("cs-icon-x", t::community_settings_remove(), click(on, || Act::RemoveIcon)))),
                     )
                     .child(
                         div()
@@ -680,15 +676,15 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(field_head("Community Name", Some((name_len, NAME_MAX, name_len == 0))))
+                            .child(field_head(t::community_settings_name(), Some((name_len, NAME_MAX, name_len == 0))))
                             .child(input_box(&m.name, 42., editable))
-                            .child(hint("The icon shows on the rail and beside every invite. Square images crop best.").mt(px(10.))),
+                            .child(hint(t::community_settings_icon_hint()).mt(px(10.))),
                     ),
             ),
         ))
         .child(block(
             false,
-            div().child(heading("Banner")).child(
+            div().child(heading(t::community_settings_section_banner())).child(
                 div()
                     .flex()
                     .flex_col()
@@ -697,7 +693,7 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                     .child(
                         div()
                             .id("cs-banner")
-                            .when(editable, |d| d.tip(if has_banner { "Change banner" } else { "Add a banner" }))
+                            .when(editable, |d| d.tip(if has_banner { t::community_settings_change_banner() } else { t::community_settings_add_banner() }))
                             .group("cs-banner")
                             .relative()
                             .w(px(238.))
@@ -709,14 +705,14 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                             .when(editable && has_banner, |d| d.child(edit_veil().group_hover("cs-banner", |d| d.visible())))
                             .when(m.banner_pick.is_some(), |d| d.child(new_tag())),
                     )
-                    .when(editable && has_banner, |d| d.child(remove_btn("cs-banner-x", "Remove Banner", click(on, || Act::RemoveBanner)))),
+                    .when(editable && has_banner, |d| d.child(remove_btn("cs-banner-x", t::community_settings_remove_banner(), click(on, || Act::RemoveBanner)))),
             ),
         ))
         .child(block(
             false,
             div()
-                .child(heading("Description"))
-                .child(field_head("What this community is about", Some((desc_len, DESCRIPTION_MAX, false))))
+                .child(heading(t::community_settings_section_description()))
+                .child(field_head(t::community_settings_description_hint(), Some((desc_len, DESCRIPTION_MAX, false))))
                 .child(
                     div()
                         .h(px(136.5))
@@ -733,21 +729,21 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
         ))
         .child(block(
             false,
-            div().child(heading("System Messages")).child(channel_select(
+            div().child(heading(t::community_settings_section_system_messages())).child(channel_select(
                 m,
                 "cs-lines",
-                "Join and leave messages",
-                "In a private channel, only the members who can read it see them.",
+                t::community_settings_system_messages(),
+                t::community_settings_system_messages_hint(),
                 on,
             )),
         ))
         .child(block(
             false,
-            div().child(heading("Landing Channel")).child(channel_select(
+            div().child(heading(t::community_settings_section_landing_channel())).child(channel_select(
                 m,
                 "cs-landing",
-                "Where new members start",
-                "It opens first after joining, until they pick another channel.",
+                t::community_settings_landing(),
+                t::community_settings_landing_hint(),
                 on,
             )),
         ))
@@ -755,13 +751,13 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
 }
 
 /// The System Messages or Landing Channel picker: its label, the `.vselect-fill`, a hint.
-fn channel_select(m: &CommSettings, id: &'static str, label: &'static str, help: &'static str, on: &OnAct) -> AnyElement {
+fn channel_select(m: &CommSettings, id: &'static str, label: SharedString, help: SharedString, on: &OnAct) -> AnyElement {
     let editable = m.can("manage_metadata");
     let lines = id == "cs-lines";
     let mut choices = Vec::with_capacity(m.pick.len() + 1);
     let mut marks: Vec<(&'static str, &'static str)> = Vec::with_capacity(m.pick.len() + 1);
     if !lines {
-        choices.push(crate::kit::Choice { value: "", label: "First channel they can read" });
+        choices.push(crate::kit::Choice { value: "", label: crate::kit::interned(&t::community_settings_landing_first()) });
         marks.push(("", "icons/list.svg"));
     }
     // A joiner holds no private channel's key on arrival.
@@ -770,7 +766,7 @@ fn channel_select(m: &CommSettings, id: &'static str, label: &'static str, help:
         marks.push((ch.id, if ch.private { "icons/locked.svg" } else { "icons/channel-hash.svg" }));
     }
     if lines {
-        choices.push(crate::kit::Choice { value: "", label: "Off" });
+        choices.push(crate::kit::Choice { value: "", label: crate::kit::interned(&t::community_settings_system_messages_off()) });
         marks.push(("", "icons/eye-off.svg"));
     }
     let lead = move |v: &'static str| {
@@ -904,7 +900,7 @@ fn relay_row(
                 d.child(
                     div()
                         .id("cs-relay-auth")
-                        .tip("What AUTH means")
+                        .tip(t::community_settings_auth_tip())
                         .h(px(22.))
                         .px(px(8.))
                         .flex_shrink_0()
@@ -961,7 +957,7 @@ fn add_row(
         .flex()
         .gap(px(8.))
         .child(input_box(input, 35., !full).px(px(12.)).flex_1())
-        .child(save_btn(id, "Add", live && !full, on).into_any_element())
+        .child(save_btn(id, t::community_settings_add(), live && !full, on).into_any_element())
 }
 
 fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
@@ -997,7 +993,7 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
             relay_row(i == 0, "icons/globe.svg", url, editing, actions, info)
         }))
         .when(m.relays.is_empty(), |d| {
-            d.child(hint("No relays recorded for this community.").mx(px(16.)).my(px(14.)))
+            d.child(hint(t::community_settings_no_relays()).mx(px(16.)).my(px(14.)))
         });
     let voice = div()
         .rounded(px(12.))
@@ -1013,7 +1009,7 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                         .flex()
                         .items_center()
                         .gap(px(4.))
-                        .child(hint("Using iroh's public relays, run by n0."))
+                        .child(hint(t::community_settings_iroh_relays()))
                         .child(
                             div()
                                 .id("cs-iroh")
@@ -1024,7 +1020,7 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                                 .text_color(c(ACCENT))
                                 .hover(|d| d.underline())
                                 .on_click(click(on, || Act::Learn))
-                                .child("Learn more"),
+                                .child(t::community_settings_learn_more()),
                         ),
                 )
             } else {
@@ -1048,20 +1044,20 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
         .child(block(
             true,
             div()
-                .child(heading("Hosting Relays"))
-                .child(lede("Every message, channel and member list in this community lives on these relays, end-to-end encrypted."))
+                .child(heading(t::community_settings_section_relay_list()))
+                .child(lede(t::community_settings_relays_lede()))
                 .child(list)
                 .when(editable, |d| {
                     d.child(add_row("cs-relay-add", &m.relay_input, m.relays.len() >= RELAYS_MAX, relay_text, click(on, || Act::AddRelay)))
                         .children(m.relay_error.clone().map(|e| hint(e).mt(px(10.)).text_color(c(crate::timeline::DANGER))))
-                        .child(hint("A new relay is checked and given this community's whole history before anyone moves to it, and the old relays tell members where everyone went.").mt(px(10.)))
+                        .child(hint(t::community_settings_relays_hint()).mt(px(10.)))
                 }),
         ))
         .child(block(
             false,
             div()
-                .child(heading("Voice Relays"))
-                .child(lede("Voice channels connect through these relays, end-to-end encrypted. Each relay sees where callers connect from."))
+                .child(heading(t::community_settings_section_voice_relays()))
+                .child(lede(t::community_settings_voice_relays_lede()))
                 .child(voice)
                 .when(editable, |d| {
                     d.child(add_row("cs-voice-add", &m.voice_input, m.voice.len() >= VOICE_RELAYS_MAX, voice_text, click(on, || Act::AddVoice)))
@@ -1181,11 +1177,7 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             .text_size(px(12.5))
             .line_height(px(18.))
             .text_color(white_a(0.4))
-            .child(if querying {
-                "No matches."
-            } else {
-                "Nobody is banned from this community."
-            })
+            .child(if querying { t::community_settings_no_matches() } else { t::community_settings_no_bans() })
             .into_any_element()
     } else {
         div()
@@ -1206,12 +1198,12 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .text_size(px(13.))
                             .line_height(px(24.))
                             .text_color(c(0x9a9a9a))
-                            .child(format!(
-                                "{} {} ({})",
-                                if all { "Deselect" } else { "Select" },
-                                if querying { "matches" } else { "all" },
-                                rows.len()
-                            )),
+                            .child(match (all, querying) {
+                                (false, false) => t::community_settings_select_all(rows.len()),
+                                (true, false) => t::community_settings_deselect_all(rows.len()),
+                                (false, true) => t::community_settings_select_matches(rows.len()),
+                                (true, true) => t::community_settings_deselect_matches(rows.len()),
+                            }),
                     )
                     .child(indicator(all)),
             )
@@ -1231,15 +1223,15 @@ fn bans(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     block(
         true,
         div()
-            .child(heading("Banned Members"))
-            .child(lede("A banned member is silenced everywhere in this community and can't rejoin until they're unbanned."))
+            .child(heading(t::community_settings_section_ban_list()))
+            .child(lede(t::community_settings_bans_lede()))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(14.))
                     .child(search_box(&m.ban_query))
-                    .child(div().text_size(px(12.)).line_height(px(24.)).text_color(if m.bans.len() >= BANS_MAX { c(crate::timeline::DANGER) } else { c(0x6f6f6f) }).child(format!("{} of {BANS_MAX}", m.bans.len()))),
+                    .child(div().text_size(px(12.)).line_height(px(24.)).text_color(if m.bans.len() >= BANS_MAX { c(crate::timeline::DANGER) } else { c(0x6f6f6f) }).child(t::community_settings_bans_count(m.bans.len(), BANS_MAX))),
             )
             .child(div().mt(px(8.)).when(m.unbanning, |d| d.opacity(0.5)).child(list)),
     )
@@ -1283,7 +1275,7 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     let pick = on.clone();
     let toggle = on.clone();
     let list: AnyElement = if a.loading && a.entries.is_empty() {
-        audit_empty("Reading this community's history…").into_any_element()
+        audit_empty(t::community_settings_audit_reading()).into_any_element()
     } else if let Some(e) = a.error.clone().filter(|_| a.entries.is_empty()) {
         hint(e)
             .my(px(18.))
@@ -1299,11 +1291,7 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             .gap(px(2.))
             .when(a.loading, |d| d.opacity(0.55));
         if rows.is_empty() {
-            list = list.child(audit_empty(if querying {
-                "No matches."
-            } else {
-                "Nothing has happened here yet."
-            }));
+            list = list.child(audit_empty(if querying { t::community_settings_no_matches() } else { t::community_settings_audit_empty() }));
         }
         for e in rows.iter().take(a.shown) {
             let id = e["id"].as_str().unwrap_or("").to_string();
@@ -1439,8 +1427,8 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
         let more = rows.len() > a.shown;
         div()
             .child(list)
-            .when(more, |d| d.child(div().flex().justify_center().mb(px(12.)).child(text_btn("audit-more", "Show more", true, click(on, || Act::AuditMore)))))
-            .when(a.compacted, |d| d.child(hint("Some history from before a key rotation this device didn't live through can't be read back.")))
+            .when(more, |d| d.child(div().flex().justify_center().mb(px(12.)).child(text_btn("audit-more", t::community_settings_show_more(), true, click(on, || Act::AuditMore)))))
+            .when(a.compacted, |d| d.child(hint(t::community_settings_audit_compacted())))
             .into_any_element()
     };
     let filter = crate::kit::select_look(
@@ -1471,7 +1459,7 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .line_height(px(28.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(c(0xffffff))
-                            .child("Audit Log"),
+                            .child(t::community_settings_section_audit_list()),
                     )
                     .child(
                         div()
@@ -1480,22 +1468,20 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                             .when(m.advanced, |d| {
                                 d.child(text_btn(
                                     "audit-report",
-                                    "Sync Report",
+                                    t::community_settings_sync_report(),
                                     !m.report.as_ref().is_some_and(|r| r.loading),
                                     click(on, || Act::SyncReport),
                                 ))
                             })
                             .child(text_btn(
                                 "audit-refresh",
-                                "Refresh",
+                                t::community_settings_refresh(),
                                 !a.loading,
                                 click(on, || Act::AuditRefresh),
                             )),
                     ),
             )
-            .child(lede(
-                "Every change to this community, signed by whoever made it.",
-            ))
+            .child(lede(t::community_settings_audit_lede()))
             .child(
                 div()
                     .flex()
@@ -1509,7 +1495,7 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     .into_any_element()
 }
 
-fn audit_empty(text: &'static str) -> impl IntoElement {
+fn audit_empty(text: SharedString) -> impl IntoElement {
     div()
         .my(px(18.))
         .text_center()
@@ -1552,22 +1538,14 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
         return None;
     }
     let n = m.ban_sel.len();
-    let (text, actions): (String, Vec<AnyElement>) = if unban {
-        let label = if n == m.bans.len() && n > 1 {
-            "Unban All".to_string()
-        } else {
-            format!("Unban {n}")
-        };
+    let (text, actions): (SharedString, Vec<AnyElement>) = if unban {
+        let label = if n == m.bans.len() && n > 1 { t::community_settings_unban_all() } else { t::community_settings_unban(n) };
         (
-            if m.unbanning {
-                format!("Unbanning {n}...")
-            } else {
-                format!("{n} {} selected", if n == 1 { "member" } else { "members" })
-            },
+            if m.unbanning { t::community_settings_unbanning(n) } else { t::community_settings_selected(n) },
             vec![
                 text_btn(
                     "cs-clear-bans",
-                    "Clear",
+                    t::community_settings_clear(),
                     !m.unbanning,
                     click(on, || Act::ClearBans),
                 ),
@@ -1579,20 +1557,17 @@ fn save_bar(m: &CommSettings, on: &OnAct, cx: &App) -> Option<AnyElement> {
         let name_empty = m.name.read(cx).text().trim().is_empty();
         (
             if m.saving {
-                m.progress
-                    .map(|p| format!("Saving {p}%"))
-                    .unwrap_or_else(|| "Saving...".into())
-                    .into()
+                m.progress.map(t::community_settings_saving_progress).unwrap_or_else(t::community_settings_saving)
             } else if warn {
-                "Save or reset your changes before closing".into()
+                t::community_settings_save_before_closing()
             } else {
-                "You have unsaved changes".into()
+                t::community_settings_unsaved()
             },
             vec![
-                text_btn("cs-reset", "Reset", !m.saving, click(on, || Act::Reset)),
+                text_btn("cs-reset", t::community_settings_reset(), !m.saving, click(on, || Act::Reset)),
                 save_btn(
                     "cs-save",
-                    "Save Changes",
+                    t::community_settings_save(),
                     !m.saving && !name_empty,
                     click(on, || Act::Save),
                 )
@@ -1736,7 +1711,7 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
         .community(&m.community)
         .map(|c| c.name.clone())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "Community".into());
+        .unwrap_or_else(|| t::community_settings_unnamed().into());
     let head = div()
         .mx(px(10.))
         .mb(px(17.))
@@ -1963,26 +1938,27 @@ pub(crate) fn tab_strip(
         .into_any_element()
 }
 
+// i18n-exempt: Sync Report findings stay in the copied report's English
 const REPORT_KINDS: &[(u64, &str)] = &[
     (0, "community"),
     (1, "role"),
     (2, "channel"),
     (3, "grant"),
     (4, "banlist"),
-    (8, "invite links"),
+    (8, "invite links"), // i18n-exempt: report English
     (10, "dissolved"),
     (11, "pins"),
     (13, "role"),
     (14, "permissions"),
     (15, "category"),
     (16, "tenure"),
-    (17, "channel sync"),
+    (17, "channel sync"), // i18n-exempt: report English
     (18, "writers"),
 ];
 
 fn kind_name(k: &serde_json::Value) -> String {
     let n = k.as_u64().unwrap_or(u64::MAX);
-    REPORT_KINDS.iter().find(|(id, _)| *id == n).map(|(_, s)| s.to_string()).unwrap_or_else(|| format!("kind {k}"))
+    REPORT_KINDS.iter().find(|(id, _)| *id == n).map(|(_, s)| s.to_string()).unwrap_or_else(|| format!("kind {k}")) // i18n-exempt: report English
 }
 
 fn truthy(v: &serde_json::Value) -> bool {
@@ -2024,26 +2000,27 @@ fn report_row(e: &serde_json::Value) -> String {
     let v = |x: &serde_json::Value| x["version"].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "–".into());
     let shown = |x: &serde_json::Value| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string());
     let mut out = format!(
+        // i18n-exempt: report English
         " {}{} · held v{} · newest v{}",
         shown(&e["entity"]),
-        if truthy(&e["mine"]) { " (yours)" } else { "" },
+        if truthy(&e["mine"]) { " (yours)" } else { "" }, // i18n-exempt: report English
         v(&e["floor"]),
         v(&e["newest"]),
     );
     if truthy(&e["newest"]) {
-        out += &format!(" by {}", shown(&e["newest"]["author"]));
+        out += &format!(" by {}", shown(&e["newest"]["author"])); // i18n-exempt: report English
     }
     if truthy(&e["refused"]) {
-        out += &format!(" · refused: {}", shown(&e["refused"]));
+        out += &format!(" · refused: {}", shown(&e["refused"])); // i18n-exempt: report English
     }
     if truthy(&e["carried"]) {
-        out += "· kept, refused";
+        out += "· kept, refused"; // i18n-exempt: report English
     }
     if truthy(&e["kept"]) {
-        out += "· kept";
+        out += "· kept"; // i18n-exempt: report English
     }
     if truthy(&e["newest"]) && !truthy(&e["newest"]["admitted"]) {
-        out += "· not admitted";
+        out += "· not admitted"; // i18n-exempt: report English
     }
     out
 }
@@ -2062,7 +2039,7 @@ fn report_chip(text: impl Into<SharedString>, bad: bool) -> impl IntoElement {
         .child(text.into())
 }
 
-fn report_label(text: &'static str) -> impl IntoElement {
+fn report_label(text: SharedString) -> impl IntoElement {
     div()
         .mt(px(16.))
         .mb(px(6.))
@@ -2083,7 +2060,7 @@ fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
         .px(px(18.))
         .py(px(14.));
     if r.loading {
-        body = body.child(div().p(px(2.)).mb(px(11.)).text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child("Reading the control plane…"));
+        body = body.child(div().p(px(2.)).mb(px(11.)).text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child(t::community_settings_report_reading()));
     } else if let Some(err) = &r.error {
         body = body.child(div().text_size(px(13.)).text_color(c(crate::timeline::DANGER)).child(err.clone()));
     } else if let Some(d) = &r.data {
@@ -2097,24 +2074,25 @@ fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
             let settled = truthy(&ctl["converged"]);
             let cut = truthy(&ctl["truncated"]);
             chips = chips
-                .child(report_chip(format!("Epoch {}", shown(&ctl["root_epoch"])), false))
-                .child(report_chip(if settled { "Authority settled" } else { "Authority unsettled" }, !settled))
-                .child(report_chip(if cut { "Read cut short" } else { "Read whole" }, cut))
+                .child(report_chip(format!("Epoch {}", shown(&ctl["root_epoch"])), false)) // i18n-exempt: report English
+                .child(report_chip(if settled { "Authority settled" } else { "Authority unsettled" }, !settled)) // i18n-exempt: report English
+                .child(report_chip(if cut { "Read cut short" } else { "Read whole" }, cut)) // i18n-exempt: report English
                 .child(report_chip(
+                    // i18n-exempt: report English
                     format!("{} edits, {} pages", shown(&ctl["editions"]), shown(&ctl["pages_read"])),
                     false,
                 ))
-                .when(truthy(&ctl["would_update"]), |d| d.child(report_chip("Unsaved changes", true)));
+                .when(truthy(&ctl["would_update"]), |d| d.child(report_chip("Unsaved changes", true))); // i18n-exempt: report English
         } else if truthy(&ctl["error"]) {
-            chips = chips.child(report_chip(format!("Control: {}", shown(&ctl["error"])), true));
+            chips = chips.child(report_chip(format!("Control: {}", shown(&ctl["error"])), true)); // i18n-exempt: report English
         }
         if truthy(&ep["error"]) {
-            chips = chips.child(report_chip(format!("Epoch: {}", shown(&ep["error"])), true));
+            chips = chips.child(report_chip(format!("Epoch: {}", shown(&ep["error"])), true)); // i18n-exempt: report English
         }
         body = body.child(chips);
         let flagged = report_flagged(d);
         if !flagged.is_empty() {
-            body = body.child(report_label("Worth a look")).child(
+            body = body.child(report_label(t::community_settings_report_flagged())).child(
                 div().pl(px(18.)).flex().flex_col().children(flagged.into_iter().map(|e| {
                     div()
                         .relative()
@@ -2132,7 +2110,7 @@ fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
                 })),
             );
         }
-        body = body.child(report_label("Full report")).child(
+        body = body.child(report_label(t::community_settings_report_full())).child(
             div()
                 .id("sr-pre")
                 .max_h(px(342.))
@@ -2179,14 +2157,14 @@ fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
                 .border_color(ca(57, 57, 57, 0.5))
                 .child(
                     div()
-                        .child(div().text_size(px(17.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(c(0xf6f6f6)).child("Sync Report"))
+                        .child(div().text_size(px(17.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(c(0xf6f6f6)).child(t::community_settings_sync_report()))
                         .child(
                             div()
                                 .mt(px(4.))
                                 .text_size(px(13.))
                                 .line_height(px(24.))
                                 .text_color(white_a(0.55))
-                                .child("How this device reads the community. Versions and short IDs only, safe to share."),
+                                .child(t::community_settings_report_lede()),
                         ),
                 )
                 .child(
@@ -2225,8 +2203,8 @@ fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
                 .py(px(12.))
                 .border_t_1()
                 .border_color(ca(57, 57, 57, 0.5))
-                .child(text_btn("sr-done", "Close", true, click(on, || Act::ReportClose)))
-                .child(save_btn("sr-copy", "Copy Report", !r.text.is_empty(), click(on, || Act::ReportCopy))),
+                .child(text_btn("sr-done", t::community_settings_report_close(), true, click(on, || Act::ReportClose)))
+                .child(save_btn("sr-copy", t::community_settings_report_copy(), !r.text.is_empty(), click(on, || Act::ReportCopy))),
         );
     let dismiss = on.clone();
     div()
