@@ -2591,6 +2591,13 @@ impl VectorApp {
                 self.start = None;
                 self.nav_to(id, window, cx);
             }
+            Act::SearchNexus(query) => {
+                self.start = None;
+                self.show_nexus(None, window, cx);
+                if let Some(n) = self.nexus.as_ref() {
+                    n.search.update(cx, |i, cx| i.set_text(&query, cx));
+                }
+            }
             Act::Open(key) => {
                 self.start = None;
                 let parts: Vec<&str> = key.split('/').collect();

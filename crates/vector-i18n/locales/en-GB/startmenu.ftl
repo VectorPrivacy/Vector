@@ -46,11 +46,12 @@ start-you = You
 
 start-results = Results
 start-add-pins = Add Pins
-# $query is what was typed.
-start-no-results = No results for “{ $query }”
+# $query is what was typed; <b> sets it brighter.
+start-no-results = No results for <b>“{ $query }”</b>
     .hint = Try a name, a community, a Mini App or a setting.
-# While choosing what to pin. $query is what was typed.
-start-nothing-to-pin = Nothing to pin called “{ $query }”
+    .action = Search the App Store
+# While choosing what to pin. $query is what was typed; <b> sets it brighter.
+start-nothing-to-pin = Nothing to pin called <b>“{ $query }”</b>
     .hint = Pin a Mini App, a chat, a community or a place in Settings.
 # Beside a person found by their npub: opens a chat with them.
 start-message = Message

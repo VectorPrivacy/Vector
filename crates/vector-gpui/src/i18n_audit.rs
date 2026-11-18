@@ -240,7 +240,12 @@ mod tests {
                 }
             }
         }
-        let unused: Vec<&str> = vector_i18n::ids().iter().copied().filter(|id| !all.contains(&format!("t::{}(", vector_i18n::function_name(id)))).collect();
+        // Called, or passed as a function: `t::name(` or `t::name,`, never `t::name_more`.
+        let used = |f: &str| {
+            let needle = format!("t::{f}");
+            all.match_indices(&needle).any(|(i, _)| !all[i + needle.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+        };
+        let unused: Vec<&str> = vector_i18n::ids().iter().copied().filter(|id| !used(&vector_i18n::function_name(id))).collect();
         assert!(unused.is_empty(), "en-GB messages nothing calls: {unused:?}");
     }
 

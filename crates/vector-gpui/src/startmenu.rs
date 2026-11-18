@@ -79,6 +79,8 @@ pub enum Act {
     Drop(RailDrag, RailDrop),
     /// A pin's or folder's own menu; the key, or the folder id.
     Menu(gpui::Point<gpui::Pixels>, Option<String>, Option<String>),
+    /// The App Store, searching for what the menu found nothing for.
+    SearchNexus(String),
 }
 
 /// What a drag carries: the pin or folder, and what its ghost shows.
@@ -520,12 +522,23 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
     }
     if hits.is_empty() {
         let q = query.trim();
+        // The query ellipsises in one line beside the words.
+        let shown = match q.char_indices().nth(40) {
+            Some((i, _)) => format!("{}…", &q[..i]),
+            None => q.to_string(),
+        };
+        let shown = crate::kit::escape(&shown);
+        let title = if sm.adding { t::start_nothing_to_pin(&shown) } else { t::start_no_results(&shown) };
+        let (said, _) = crate::kit::untag(&title);
+        let bright = gpui::HighlightStyle { color: Some(c(0xffffff).into()), ..Default::default() };
+        let search = (!sm.adding && !q.is_empty()).then(|| q.to_string());
         return col
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
+                    .text_center()
                     .gap(px(6.))
                     .pt(px(56.))
                     .px(px(20.))
@@ -549,16 +562,41 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                     )
                     .child(
                         div()
+                            .max_w_full()
                             .text_size(px(15.))
-                            .text_color(c(0xffffff))
-                            .child(if sm.adding { t::start_nothing_to_pin(q) } else { t::start_no_results(q) }),
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(c(0xe6e6e6))
+                            .child(crate::kit::rich_with(&title, bright))
+                            .spoken(said),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(white_a(0.5))
+                            .text_color(c(0x7a7a7a))
                             .child(if sm.adding { t::start_nothing_to_pin_hint() } else { t::start_no_results_hint() }),
-                    ),
+                    )
+                    .children(search.map(|query| {
+                        div()
+                            .id("stm-none-action")
+                            .mt(px(16.))
+                            .py(px(9.))
+                            .px(px(16.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .rounded(px(20.))
+                            .border_1()
+                            .border_color(c(0x2c2c2c))
+                            .bg(c(0x222222))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(c(0xe6e6e6))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(c(0x2a2a2a)).border_color(c(0x3a3a3a)))
+                            .on_click(click(on, move || Act::SearchNexus(query.clone())))
+                            .child(svg().path("icons/nexus.svg").size(px(16.)).text_color(c(PRIMARY)))
+                            .child(t::start_no_results_action())
+                    })),
             )
             .into_any_element();
     }

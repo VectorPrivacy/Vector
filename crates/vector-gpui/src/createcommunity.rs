@@ -14,6 +14,7 @@ use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 pub const NAME_MAX: usize = 32;
@@ -56,7 +57,7 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
-const STEPS: [&str; 3] = ["Name", "Access", "Invite"];
+const STEPS: [fn() -> SharedString; 3] = [t::create_community_step_name, t::create_community_step_access, t::create_community_step_invite];
 
 fn click(
     on: &OnAct,
@@ -110,7 +111,7 @@ fn steps(step: u8) -> impl IntoElement {
                 .line_height(px(24.))
                 .text_color(if current { c(0xffffff) } else { white_a(0.4) })
                 .child(dot)
-                .child(*label)
+                .child(label())
         }))
 }
 
@@ -134,8 +135,8 @@ fn radio(on: bool) -> gpui::Div {
 fn choice(
     id: &'static str,
     icon: &'static str,
-    title: &'static str,
-    desc: &'static str,
+    title: SharedString,
+    desc: SharedString,
     on_it: bool,
     act: Act,
     on: &OnAct,
@@ -253,7 +254,7 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
         .child(
             div()
                 .id("cg-share-qr")
-                .when(ready, |d| d.tip("Enlarge QR code"))
+                .when(ready, |d| d.tip(t::create_community_link_enlarge()))
                 .size(px(132.))
                 .flex_shrink_0()
                 .rounded(px(12.))
@@ -269,32 +270,32 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .when(narrow, |d| d.w_full().items_center())
-                .child(crate::kit::spaced("INVITE LINK", 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
+                .child(crate::kit::spaced(t::create_community_link().to_uppercase(), 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
                 .child(match (&m.link, &m.link_error) {
                     (Some(link), _) => share_in("cg-share-url-in", div().id("cg-share-url").tip(link.to_string()).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link))),
-                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(format!("Couldn't create the link. {e}")).into_any_element(),
+                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(t::create_community_link_failed(e)).into_any_element(),
                     (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(match &m.progress {
                         Some((label, pct)) => crate::kit::stage_progress(label.clone(), *pct, 16.),
-                        None => crate::kit::stage_progress("Getting ready", 0., 16.),
+                        None => crate::kit::stage_progress(t::create_community_link_preparing(), 0., 16.),
                     }).into_any_element(),
                 })
                 .child(
                     div().mt(px(10.)).flex().gap(px(8.)).map(|d| {
                         if m.link_error.is_some() {
-                            d.child(pill("cg-retry", true).cursor_pointer().on_click(click(on, || Act::RetryLink)).child("Try Again"))
+                            d.child(pill("cg-retry", true).cursor_pointer().on_click(click(on, || Act::RetryLink)).child(t::create_community_link_retry()))
                         } else {
                             d.child(
                                 pill("cg-copy", true)
                                     .when(!ready, |d| d.opacity(0.45))
                                     .when(ready, |d| d.cursor_pointer().on_click(click(on, || Act::Copy)))
                                     .child(svg().path(if m.copied { "icons/check.svg" } else { "icons/copy.svg" }).size(px(16.)).text_color(c(0x000000)))
-                                    .child(if m.copied { "Copied" } else { "Copy Link" }),
+                                    .child(if m.copied { t::create_community_link_copied() } else { t::create_community_link_copy() }),
                             )
-                            .child(pill("cg-qr", false).when(!ready, |d| d.opacity(0.45)).when(ready, |d| d.cursor_pointer().on_click(click(on, || Act::ShowQr))).child("Show QR"))
+                            .child(pill("cg-qr", false).when(!ready, |d| d.opacity(0.45)).when(ready, |d| d.cursor_pointer().on_click(click(on, || Act::ShowQr))).child(t::create_community_link_qr()))
                         }
                     }),
                 )
-                .child(div().mt(px(10.)).text_size(px(12.5)).line_height(px(17.5)).text_color(white_a(0.42)).child("You can make more links, or turn this one off, anytime in Invite People.")),
+                .child(div().mt(px(10.)).text_size(px(12.5)).line_height(px(17.5)).text_color(white_a(0.42)).child(t::create_community_link_note())),
         )
 }
 
@@ -512,22 +513,10 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
     let name = m.name.read(cx).text().to_string();
     let name_ok = !name.trim().is_empty();
     let (title, lead) = match m.step {
-        1 => (
-            "Name your community",
-            "Pick a name and, if you like, an icon. You can change both later.",
-        ),
-        2 => (
-            "Who can join?",
-            "You can change this later from Invite People.",
-        ),
-        _ if m.public => (
-            "Share your invite link",
-            "Your community is live. Send this link wherever your people are.",
-        ),
-        _ => (
-            "Invite your friends",
-            "Only the people you invite can join. Pick some now, or invite them later.",
-        ),
+        1 => (t::create_community_name_title(), t::create_community_name_title_lead()),
+        2 => (t::create_community_access_title(), t::create_community_access_title_lead()),
+        _ if m.public => (t::create_community_share_title(), t::create_community_share_title_lead()),
+        _ => (t::create_community_invite_title(), t::create_community_invite_title_lead()),
     };
     let body: AnyElement = match m.step {
         1 => div()
@@ -552,7 +541,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                             .border_color(white_a(0.2))
                             .hover(|s| s.border_color(c(PRIMARY)))
                     })
-                    .tip("Choose community icon")
+                    .tip(t::create_community_icon())
                     .on_click(click(on, || Act::PickIcon))
                     .child(match &m.icon {
                         Some(p) => div()
@@ -622,8 +611,8 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .child(choice(
                 "cg-private",
                 "icons/locked.svg",
-                "Private",
-                "Only members can invite other people in.",
+                t::create_community_private(),
+                t::create_community_private_desc(),
                 !m.public,
                 Act::Public(false),
                 on,
@@ -631,8 +620,8 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .child(choice(
                 "cg-public",
                 "icons/globe.svg",
-                "Public",
-                "Anyone with an invite link can join. You'll get one to share right away.",
+                t::create_community_public(),
+                t::create_community_public_desc(),
                 m.public,
                 Act::Public(true),
                 on,
@@ -644,10 +633,10 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
     let n = m.picked.len();
     let buttons: Vec<AnyElement> = match m.step {
         1 => vec![
-            button("cg-next", "Next".into(), true, name_ok, Some(Act::Next), on).into_any_element(),
+            button("cg-next", t::create_community_next().into(), true, name_ok, Some(Act::Next), on).into_any_element(),
             button(
                 "cg-cancel",
-                "Cancel".into(),
+                t::dialog_cancel().into(),
                 false,
                 true,
                 Some(Act::Cancel),
@@ -658,7 +647,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
         2 => vec![
             button(
                 "cg-create",
-                "Create Community".into(),
+                t::create_community_create().into(),
                 true,
                 !m.busy,
                 Some(Act::Create),
@@ -667,7 +656,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .into_any_element(),
             button(
                 "cg-back",
-                "Back".into(),
+                t::create_community_back().into(),
                 false,
                 !m.busy,
                 Some(Act::Back),
@@ -678,7 +667,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
         _ if m.public => vec![
             button(
                 "cg-open",
-                "Open Community".into(),
+                t::create_community_open().into(),
                 true,
                 true,
                 Some(Act::Finish),
@@ -689,11 +678,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
         _ => vec![
             button(
                 "cg-invite",
-                if n > 0 {
-                    format!("Invite {n}")
-                } else {
-                    "Invite".into()
-                },
+                if n > 0 { t::create_community_invite(n) } else { t::create_community_invite_none() }.into(),
                 true,
                 !m.busy && n > 0,
                 Some(Act::Invite),
@@ -702,7 +687,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
             .into_any_element(),
             button(
                 "cg-skip",
-                "Skip for now".into(),
+                t::create_community_skip().into(),
                 false,
                 !m.busy,
                 Some(Act::Finish),
