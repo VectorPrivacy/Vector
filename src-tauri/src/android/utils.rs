@@ -1,6 +1,35 @@
 use jni::{JavaVM, JNIEnv};
-use jni::objects::JObject;
+use jni::objects::{GlobalRef, JObject};
 use ndk_context::AndroidContext;
+use std::sync::{Mutex, OnceLock};
+
+/// The live Activity, for calls an Application context rejects: the ndk context holds the Application.
+static ACTIVITY: Mutex<Option<GlobalRef>> = Mutex::new(None);
+static ACTIVITY_VM: OnceLock<JavaVM> = OnceLock::new();
+
+/// Called from MainActivity.onCreate; a recreated Activity replaces the old one.
+pub fn set_activity(env: &mut JNIEnv<'_>, activity: &JObject<'_>) {
+    if ACTIVITY_VM.get().is_none() {
+        match env.get_java_vm() {
+            Ok(vm) => { let _ = ACTIVITY_VM.set(vm); }
+            Err(e) => { vector_core::log_warn!("[JNI] set_activity: no JavaVM: {:?}", e); return; }
+        }
+    }
+    match env.new_global_ref(activity) {
+        Ok(global) => { if let Ok(mut slot) = ACTIVITY.lock() { *slot = Some(global); } }
+        Err(e) => vector_core::log_warn!("[JNI] set_activity: no global ref: {:?}", e),
+    }
+}
+
+/// Called from MainActivity.onDestroy. Only drops the Activity it was given: a recreated one may
+/// already have taken the slot.
+pub fn clear_activity(env: &mut JNIEnv<'_>, activity: &JObject<'_>) {
+    if let Ok(mut slot) = ACTIVITY.lock() {
+        if slot.as_ref().is_some_and(|held| env.is_same_object(held.as_obj(), activity).unwrap_or(false)) {
+            *slot = None;
+        }
+    }
+}
 
 /// `ndk_context::android_context()` without the abort: the upstream getter
 /// PANICS before tao registers the context, and tao 0.35 registers LATER in
@@ -91,31 +120,26 @@ fn clear_pending_exception<R>(env: &mut JNIEnv<'_>, out: &Result<R, String>) {
     }
 }
 
-/// Execute a function with the Android **Activity** JNI context specifically.
+/// Execute a function with the live Activity.
 ///
-/// Unlike `with_android_context`, this never substitutes the background
-/// service's Application context — it always resolves the live Activity via
-/// `ndk_context`. Activity-only APIs (`requestPermissions`,
-/// `startActivityForResult`, ...) throw `NoSuchMethodError` on an Application
-/// context, so those callers MUST use this. Only valid while an Activity
-/// exists (any foreground, user-driven action qualifies); `android_context()`
-/// panics in the Activity-less service-only process, so never call this from a
-/// background path.
+/// Unlike `with_android_context`, this never substitutes an Application context: Activity-only
+/// APIs (`requestPermissions`, `startActivityForResult`, window flags) throw on one, so those
+/// callers MUST use this. Fails soft when no Activity exists (the service-only process, or after
+/// the Activity is destroyed).
 pub fn with_android_activity<F, R>(f: F) -> Result<R, String>
 where
     F: for<'a> FnOnce(&mut JNIEnv<'a>, &JObject<'a>) -> Result<R, String>,
 {
-    let ctx = try_android_context()
-        .ok_or("No Activity context (service-only process, or before tao registers)")?;
-    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
-        .map_err(|e| format!("Failed to get JavaVM: {:?}", e))?;
-
+    let activity = ACTIVITY
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .ok_or("No Activity (service-only process, or not created yet)")?;
+    let vm = ACTIVITY_VM.get().ok_or("No JavaVM for the Activity")?;
     let mut env = vm.attach_current_thread()
         .map_err(|e| format!("Failed to attach thread: {:?}", e))?;
 
-    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-
-    let out = f(&mut env, &activity);
+    let out = f(&mut env, activity.as_obj());
     clear_pending_exception(&mut env, &out);
     out
 }

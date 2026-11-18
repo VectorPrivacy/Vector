@@ -13,7 +13,7 @@
     // h: getChannels, getCategories, canAddChannels, sectionClosed, toggleSection, chatById,
     //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelChat, openChannelMenu,
     //    inviteToCommunity, editChannel,
-    //    openCategoryMenu, attachLongPressContextMenu, createChannel, moveChannel, moveCategory
+    //    openCategoryMenu, openChannelsMenu, attachLongPressContextMenu, createChannel, moveChannel, moveCategory
 
     const state = $derived.by(() => {
         communityVersion(communityId);
@@ -124,6 +124,18 @@
         return { update(next) { r.update(of(next)); }, destroy: r.destroy };
     }
 
+    // The pane's empty space belongs to the scroller around it, so the menu listens there.
+    function emptySpaceMenu(node) {
+        const host = node.parentElement;
+        const onMenu = (e) => {
+            if (e.defaultPrevented || e.target.closest('.chatlist-channel, .chatlist-channel-section-head, .chatlist-voice-member')) return;
+            e.preventDefault();
+            h.openChannelsMenu(communityId, e.clientX, e.clientY);
+        };
+        host.addEventListener('contextmenu', onMenu);
+        return { destroy() { host.removeEventListener('contextmenu', onMenu); } };
+    }
+
     // Collapsed sections: seeded from the persisted set, flipped here so the fold is
     // immediate; the app persists the change.
     let closed = $state({});
@@ -221,7 +233,7 @@
 
 {#if state}
     {#key state.canManage}
-    <div class="chatlist-channels chatlist-channels-pane" class:is-organising={!!dragging}>
+    <div class="chatlist-channels chatlist-channels-pane" class:is-organising={!!dragging} use:emptySpaceMenu>
         {#each sections as section (section.id)}
             {#if section.headless}
                 <div class="chatlist-channel-section chatlist-channel-section-loose">

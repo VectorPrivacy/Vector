@@ -6,10 +6,12 @@
  *   data-status:       pending | sent | failed
  *   data-pinged:       true (when message mentions current user)
  *   data-replying-to:  true (when this row is the active reply target)
- *   data-jumped:       true (ephemeral; flash animation, removed after ~1500ms)
+ *   data-jumped:       true (ephemeral; flash animation, removed when it ends)
  */
 
-const _DMSG_JUMP_FLASH_MS = 1500;
+// Ended by animationend, not a timer: a late first frame would cut a timed flash short. The
+// timer only catches a row that never animates.
+const _DMSG_JUMP_FALLBACK_MS = 4000;
 
 // Track the active jump flash at module scope rather than as a property on the
 // row element — that way if the row is removed while the timer is pending, we
@@ -17,6 +19,20 @@ const _DMSG_JUMP_FLASH_MS = 1500;
 // different row can correctly cancel the previous flash.
 let _dmsgActiveJumpRow = null;
 let _dmsgActiveJumpTimer = null;
+
+function _dmsgEndJump() {
+    const row = _dmsgActiveJumpRow;
+    if (!row) return;
+    row.removeEventListener('animationend', _dmsgOnJumpEnd);
+    clearTimeout(_dmsgActiveJumpTimer);
+    clearHighlight(row, 'jumped');
+    _dmsgActiveJumpRow = null;
+    _dmsgActiveJumpTimer = null;
+}
+
+function _dmsgOnJumpEnd(e) {
+    if (e.target === e.currentTarget && e.animationName === 'highlightMessage') _dmsgEndJump();
+}
 
 function applyHighlight(rowEl, kind) {
     if (!rowEl || !kind) return;
@@ -27,15 +43,13 @@ function applyHighlight(rowEl, kind) {
             // a *different* row cancel the prior flash so two rows can't be
             // simultaneously animating.
             if (_dmsgActiveJumpRow === rowEl) return;
-            if (_dmsgActiveJumpRow) clearHighlight(_dmsgActiveJumpRow, 'jumped');
-            if (_dmsgActiveJumpTimer) clearTimeout(_dmsgActiveJumpTimer);
+            _dmsgEndJump();
             _dmsgActiveJumpRow = rowEl;
-            rowEl.dataset.jumped = 'true';
-            _dmsgActiveJumpTimer = setTimeout(() => {
-                clearHighlight(_dmsgActiveJumpRow, 'jumped');
-                _dmsgActiveJumpRow = null;
-                _dmsgActiveJumpTimer = null;
-            }, _DMSG_JUMP_FLASH_MS);
+            rowEl.addEventListener('animationend', _dmsgOnJumpEnd);
+            // Started on the next frame: the jump's own scroll and layout would otherwise
+            // spend the flash before it is first painted.
+            requestAnimationFrame(() => { if (_dmsgActiveJumpRow === rowEl) rowEl.dataset.jumped = 'true'; });
+            _dmsgActiveJumpTimer = setTimeout(_dmsgEndJump, _DMSG_JUMP_FALLBACK_MS);
             break;
         }
     }
