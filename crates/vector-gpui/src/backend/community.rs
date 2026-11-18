@@ -811,7 +811,7 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
         vector_core::community::v2::invite::parse_invite_link(&url).map_err(|e| e.to_string())?;
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         let bundle =
-            vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
+            vector_core::community::v2::service::fetch_public_bundle_for_preview(&transport, &url).await?;
         let community_id = bundle.community_id.clone();
         let logo = |c: &CommunityV2| c.icon.as_ref().map(|i| i.to_community_image());
         if let Ok(local) = load(&community_id) {
