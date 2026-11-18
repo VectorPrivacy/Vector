@@ -1932,4 +1932,18 @@ mod rtl_tests {
         }
         assert!(f32::from(line.width) >= x(11), "width {:?} short of the last glyph", line.width);
     }
+
+    #[test]
+    fn the_platform_shaper_reads_a_hebrew_first_line_right_to_left() {
+        let ts = platform_text();
+        ts.add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Rubik-Regular.ttf"))]).unwrap();
+        let id = ts.font_id(&gpui::font("Rubik")).unwrap(); // i18n-exempt: font name
+        let text = "\u{5d0}\u{5d1} ab \u{5d2}\u{5d3}";
+        let line = ts.layout_line(text, px(16.), &[gpui::FontRun { len: text.len(), font_id: id }]);
+        let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+        let x = |i: usize| glyphs.iter().find(|g| g.index == i).map(|g| f32::from(g.position.x)).unwrap_or_else(|| panic!("no glyph at {i}: {glyphs:?}"));
+        let order = [x(10), x(8), x(5), x(6), x(2), x(0)];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "\u{5d3} \u{5d2} a b \u{5d1} \u{5d0} at {order:?}");
+        assert!(x(10) > -0.5 && f32::from(line.width) >= x(0), "line off its 0..{:?} span: {order:?}", line.width);
+    }
 }

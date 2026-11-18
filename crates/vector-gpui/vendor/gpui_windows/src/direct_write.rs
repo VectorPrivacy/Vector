@@ -572,6 +572,15 @@ impl DirectWriteState {
                 break_ligatures = !break_ligatures;
             }
 
+            if starts_right_to_left(text) {
+                // Right-aligned in a box exactly as wide as the line, which then spans 0..width.
+                text_layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                text_layout.SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT)?;
+                let mut metrics = DWRITE_TEXT_METRICS::default();
+                text_layout.GetMetrics(&mut metrics)?;
+                text_layout.SetMaxWidth(metrics.widthIncludingTrailingWhitespace)?;
+            }
+
             let mut runs = Vec::new();
             let mut renderer_context = RendererContext {
                 text_system: self,
@@ -1534,6 +1543,23 @@ unsafe fn slice_from_nullable<'a, T>(
     } else {
         Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
     }
+}
+
+/// Whether the first letter with a direction reads right to left (UAX #9 P2), so a line takes
+/// the paragraph direction the other platforms' shapers give it.
+fn starts_right_to_left(text: &str) -> bool {
+    for c in text.chars() {
+        match c as u32 {
+            0x200F => return true,
+            0x200E => return false,
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF if c.is_alphabetic() => {
+                return true;
+            }
+            _ if c.is_alphabetic() => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 struct StringIndexConverter<'a> {
