@@ -17,6 +17,7 @@ use gpui::{
 };
 use vector_media::audio_engine::{AudioEngine, AudioInput};
 
+use crate::t;
 use crate::theme::*;
 
 pub const EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "aac", "m4a", "ogg"];
@@ -96,15 +97,15 @@ impl AudioInputSpec {
                 if p.exists() {
                     Ok(AudioInput::File(p.clone()))
                 } else {
-                    Err("Audio file not found".into())
+                    Err(t::audio_not_found().into())
                 }
             }
             AudioInputSpec::Sealed(p, mime) => vector_core::vcache::open(p, mime)
                 .map(AudioInput::Held)
-                .ok_or_else(|| "Video file not found".into()),
+                .ok_or_else(|| t::audio_video_not_found().into()),
             AudioInputSpec::Held(h) => vector_core::media::open(h)
                 .map(AudioInput::Held)
-                .ok_or_else(|| "Audio file not found".into()),
+                .ok_or_else(|| t::audio_not_found().into()),
             AudioInputSpec::Stream(s) => Ok(AudioInput::Held(s.clone())),
         }
     }
@@ -349,7 +350,7 @@ impl Audio {
                 if !crate::backend::transcribe::downloaded(&model) {
                     self.transcripts.download = Some(crate::transcript::Download {
                         pct: 0,
-                        text: "Downloading model...".into(),
+                        text: t::audio_model_downloading().into(),
                         failed: false,
                         until: None,
                     });
@@ -908,6 +909,7 @@ fn edition(t: &str) -> Option<(usize, &str)> {
     };
     let dash = t.match_indices('-').find_map(|(d, _)| {
         let note = t[d + 1..].trim();
+        // i18n-exempt: tag words in track titles
         (lit_i(note, 0, "live") == Some(note.len()) || lit_i(note, 0, "radio edit") == Some(note.len()) || remaster(note))
             .then(|| (ws_from(d), note))
     });
@@ -921,9 +923,12 @@ fn edition(t: &str) -> Option<(usize, &str)> {
 mod edition_tests {
     #[test]
     fn edition_matches_the_pattern_it_replaces() {
+        // i18n-exempt: test pattern
         let re = regex::Regex::new(r"(?i)\s*(?:\(([^()]*\b(?:remaster(?:ed)?|remix|live|mono|stereo|edit|version|demo|acoustic|deluxe|bonus)\b[^()]*)\)|-\s*((?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?|live|radio edit))\s*$").unwrap();
         const PARTS: &[&str] = &[
+            // i18n-exempt: test input
             "Song", " ", "  ", "(", ")", "-", " - ", "Remastered", "remaster", "REMASTER", "ed", "2011", "201", "Live",
+            // i18n-exempt: test input
             "live", "Radio Edit", "radio  edit", "mono", "x", "liver", "\u{3000}", "ſtereo", "deluxe", "é", "edition",
         ];
         let mut seed = 0x7777_1234u64;
@@ -973,13 +978,13 @@ fn album_view(
         .join(" \u{b7} ");
     let n = t.chapters.len();
     let stats = if duration > 0 {
-        format!("{n} songs \u{b7} {} min", (duration as f64 / 60000.).round())
+        t::audio_album_stats(n, (duration as f64 / 60000.).round() as i64)
     } else {
-        format!("{n} songs")
+        t::audio_album_songs(n)
     };
     let shuffle_on = album.is_some_and(|a| a.shuffle);
     let repeat = album.map_or(crate::album::Repeat::Off, |a| a.repeat);
-    let pill = |key: &str, act: AlbumAct, primary: bool, icon: &'static str, label: &'static str| {
+    let pill = |key: &str, act: AlbumAct, primary: bool, icon: &'static str, label: SharedString| {
         let on = on.clone();
         div()
             .id(SharedString::from(format!("album-{key}-{id}")))
@@ -1017,10 +1022,10 @@ fn album_view(
     let toggle = |key: &str, act: AlbumAct, lit: bool, icon: &'static str| {
         let on = on.clone();
         let tip = match (key, repeat) {
-            ("shuffle", _) => "Shuffle",
-            (_, crate::album::Repeat::One) => "Repeat one",
-            (_, crate::album::Repeat::All) => "Repeat all",
-            _ => "Repeat",
+            ("shuffle", _) => t::audio_shuffle(),
+            (_, crate::album::Repeat::One) => t::audio_repeat_one(),
+            (_, crate::album::Repeat::All) => t::audio_repeat_all(),
+            _ => t::audio_repeat(),
         };
         div()
             .id(SharedString::from(format!("album-{key}-{id}")))
@@ -1090,8 +1095,8 @@ fn album_view(
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(pill("play", AlbumAct::Play(false), true, "icons/play.svg", "Play"))
-                .child(pill("shuffle-play", AlbumAct::Play(true), false, "icons/shuffle.svg", "Shuffle"))
+                .child(pill("play", AlbumAct::Play(false), true, "icons/play.svg", t::audio_play()))
+                .child(pill("shuffle-play", AlbumAct::Play(true), false, "icons/shuffle.svg", t::audio_shuffle()))
                 .child(
                     div()
                         .ml_auto()
@@ -1187,7 +1192,7 @@ fn album_view(
                 cx.stop_propagation();
                 on(AlbumAct::More, w, cx)
             })
-            .child(if all { "Show fewer".to_string() } else { format!("Show all {n} songs") })
+            .child(if all { t::audio_show_fewer() } else { t::audio_show_all(n) })
     });
     div()
         .relative()
@@ -1203,7 +1208,7 @@ fn album_view(
                     d.child(
                         div()
                             .id(SharedString::from(format!("album-art-{id}")))
-                            .aria_label("View cover art")
+                            .aria_label(t::audio_cover_art())
                             .size(px(art_px))
                             .flex_shrink_0()
                             .rounded(px(10.))
@@ -1286,7 +1291,7 @@ fn waveform(
     let spoken = format!("{} / {}", format_time(p.map_or(0, |p| p.position().saturating_sub(start))), format_time(total));
     div()
         .id(id)
-        .as_slider("Seek", spoken, progress)
+        .as_slider(t::audio_seek(), spoken, progress)
         .when(seekable, |d| {
             let on = on_seek.clone();
             d.slider_keys(progress, 0.05, move |f, w, cx| on(f, true, w, cx))
@@ -1439,7 +1444,7 @@ pub fn view(
         let on = on.clone();
         div()
             .id(SharedString::from(format!("audio-lyrics-{}", att.id)))
-            .tip(if open { "Hide lyrics" } else { "Lyrics" })
+            .tip(if open { t::audio_lyrics_hide() } else { t::audio_lyrics() })
             .size(px(34.))
             .ml(px(10.))
             .flex_shrink_0()
@@ -1497,7 +1502,7 @@ pub fn view(
     };
     let button = div()
         .id(SharedString::from(format!("audio-play-{id}")))
-        .aria_label(if playing { "Pause" } else { "Play" })
+        .aria_label(if playing { t::audio_pause() } else { t::audio_play() })
         .size(px(40.))
         .flex_shrink_0()
         .rounded_full()
@@ -1530,7 +1535,7 @@ pub fn view(
     // `artist — track`, else the file's name.
     let title = match tags.and_then(|t| t.title.as_deref()) {
         Some(track) => match tags.and_then(|t| t.artist.as_deref()) {
-            Some(artist) => format!("{artist} \u{2014} {track}"),
+            Some(artist) => format!("{artist} \u{2014} {track}"), // i18n-exempt: two names
             None => track.to_string(),
         },
         None => att.name.clone(),
@@ -1603,7 +1608,7 @@ pub fn view(
         let on = on_album.clone();
         div()
             .id(SharedString::from(format!("audio-{dir}-{}", att.id)))
-            .aria_label(if dir == "prev" { "Previous" } else { "Next" })
+            .aria_label(if dir == "prev" { t::audio_previous() } else { t::audio_next() })
             .size(px(30.))
             .mx(px(2.))
             .flex_shrink_0()
@@ -1696,7 +1701,7 @@ pub fn view(
                         .child(
                     div()
                         .id(SharedString::from(format!("audio-art-{}", att.id)))
-                        .aria_label("View cover art")
+                        .aria_label(t::audio_cover_art())
                         .size(px(art_px))
                         .flex_shrink_0()
                         .rounded(px(10.))

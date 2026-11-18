@@ -8,6 +8,7 @@ use gpui::{AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, P
 use crate::pic::img;
 
 use crate::textcolor;
+use crate::t;
 use crate::theme::*;
 
 pub const SYSTEM: &str = "system";
@@ -77,17 +78,18 @@ pub fn system_commands(effects: bool) -> Vec<Cmd> {
         builtin: Some(builtin),
         aliases,
     };
-    let text = || arg("text", ArgType::String, true, format!("The message to {w}"));
-    let message = || arg("message", ArgType::String, false, "What to say before it".into());
+    let ws = format!("{w}s");
+    let text = || arg("text", ArgType::String, true, t::command_text_arg(w).into());
+    let message = || arg("message", ArgType::String, false, t::command_message_arg().into());
     let mut out = Vec::new();
     if effects {
-        out.push(sys("rainbow", format!("Send your message in rainbow {w}s"), vec![text()], Builtin::Effect, &[]));
+        out.push(sys("rainbow", t::command_rainbow(ws.as_str()).into(), vec![text()], Builtin::Effect, &[]));
         out.push(sys(
             "gradient",
-            format!("Fade your message from one {w} to another"),
+            t::command_gradient(w).into(),
             vec![
-                arg("from", ArgType::Color, true, format!("The {w} it starts in: a name or #hex")),
-                arg("to", ArgType::Color, true, format!("The {w} it ends in: a name or #hex")),
+                arg("from", ArgType::Color, true, t::command_gradient_from(w).into()),
+                arg("to", ArgType::Color, true, t::command_gradient_to(w).into()),
                 text(),
             ],
             Builtin::Effect,
@@ -95,29 +97,29 @@ pub fn system_commands(effects: bool) -> Vec<Cmd> {
         ));
         out.push(sys(
             w,
-            format!("Send your message in one {w}"),
-            vec![arg(w, ArgType::Color, true, format!("Its {w}: a name or #hex")), text()],
+            t::command_colour(w).into(),
+            vec![arg(w, ArgType::Color, true, t::command_colour_arg(w).into()), text()],
             Builtin::Effect,
             &[],
         ));
     }
     out.push(sys(
         "time",
-        "A time everyone sees in their own zone".into(),
-        vec![arg("when", ArgType::String, true, "Like “friday 8pm” or “in 2 hours”".into())],
+        t::command_time().into(),
+        vec![arg("when", ArgType::String, true, t::command_time_arg().into())],
         Builtin::Time,
         &[],
     ));
-    out.push(sys("shrug", "Add ¯\\_(ツ)_/¯ to your message".into(), vec![message()], Builtin::Face("¯\\_(ツ)_/¯"), &[]));
+    out.push(sys("shrug", t::command_face("¯\\_(ツ)_/¯").into(), vec![message()], Builtin::Face("¯\\_(ツ)_/¯"), &[]));
     out.push(sys(
         "flip",
-        "Add (╯°□°)╯︵ ┻━┻ to your message".into(),
+        t::command_face("(╯°□°)╯︵ ┻━┻").into(),
         vec![message()],
         Builtin::Face("(╯°□°)╯︵ ┻━┻"),
         &["tableflip"],
     ));
-    out.push(sys("unflip", "Add ┬─┬ノ( º _ ºノ) to your message".into(), vec![message()], Builtin::Face("┬─┬ノ( º _ ºノ)"), &[]));
-    out.push(sys("coinflip", "Flip a coin: heads or tails".into(), Vec::new(), Builtin::Coinflip, &[]));
+    out.push(sys("unflip", t::command_face("┬─┬ノ( º _ ºノ)").into(), vec![message()], Builtin::Face("┬─┬ノ( º _ ºノ)"), &[]));
+    out.push(sys("coinflip", t::command_coinflip().into(), Vec::new(), Builtin::Coinflip, &[]));
     out
 }
 
@@ -125,11 +127,11 @@ pub fn system_commands(effects: bool) -> Vec<Cmd> {
 fn builtin_text(b: Builtin, rest: &str) -> Option<String> {
     match b {
         Builtin::Face(face) if rest.is_empty() => Some(face.into()),
-        Builtin::Face(face) => Some(format!("{rest} {face}")),
+        Builtin::Face(face) => Some(format!("{rest} {face}")), // i18n-exempt: the text, then the face
         // Decided on the sender's device, as any dice roll in a chat is.
         Builtin::Coinflip => {
             let heads = rand::random::<bool>();
-            Some(format!("🪙 Coin flip: **{}**", if heads { "Heads" } else { "Tails" }))
+            Some(if heads { t::command_coinflip_heads() } else { t::command_coinflip_tails() }.into())
         }
         _ => None,
     }
@@ -221,20 +223,23 @@ fn parse_args(cmd: &Cmd, rest: &str) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
-pub fn arg_error(a: &Arg, v: &str) -> Option<String> {
+/// Why `v` doesn't fit `a`, naming the argument.
+pub fn arg_error(a: &Arg, v: &str) -> Option<SharedString> {
+    let n = a.name.as_str();
     if v.len() > 1024 {
-        return Some("is too long (max 1024 characters)".into());
+        return Some(t::command_arg_too_long(n));
     }
     let bad = match a.kind {
         ArgType::Int => {
             let d = v.strip_prefix(['+', '-']).unwrap_or(v);
-            (d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit())).then(|| "must be a whole number".into())
+            (d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit())).then(|| t::command_arg_whole_number(n))
         }
-        ArgType::Number => (v.trim().is_empty() || !v.trim().parse::<f64>().is_ok_and(f64::is_finite)).then(|| "must be a number".into()),
-        ArgType::Bool => (!["true", "false", "yes", "no", "1", "0"].contains(&v.to_lowercase().as_str())).then(|| "must be true or false".into()),
-        ArgType::User => (!v.starts_with("npub1") || v.len() > 70).then(|| "must be a user (npub)".into()),
-        ArgType::Choice => (!a.choices.iter().any(|c| c == v)).then(|| format!("must be one of: {}", a.choices.join(", "))),
-        ArgType::Color => vector_core::text_color::hex(v).is_none().then(|| format!("must be a {} name or #hex", textcolor::color_word())),
+        ArgType::Number => (v.trim().is_empty() || !v.trim().parse::<f64>().is_ok_and(f64::is_finite)).then(|| t::command_arg_number(n)),
+        // i18n-exempt: accepted input words
+        ArgType::Bool => (!["true", "false", "yes", "no", "1", "0"].contains(&v.to_lowercase().as_str())).then(|| t::command_arg_bool(n)),
+        ArgType::User => (!v.starts_with("npub1") || v.len() > 70).then(|| t::command_arg_user(n)),
+        ArgType::Choice => (!a.choices.iter().any(|c| c == v)).then(|| t::command_arg_choice(a.choices.join(", "), n)),
+        ArgType::Color => vector_core::text_color::hex(v).is_none().then(|| t::command_arg_colour(textcolor::color_word(), n)),
         ArgType::String => None,
     };
     bad
@@ -243,11 +248,11 @@ pub fn arg_error(a: &Arg, v: &str) -> Option<String> {
 fn validate(cmd: &Cmd, parsed: &[(String, String)]) -> Option<String> {
     for a in &cmd.args {
         match parsed.iter().find(|(n, _)| *n == a.name) {
-            None if a.required => return Some(format!("Missing required argument \"{}\"", a.name)),
+            None if a.required => return Some(t::command_arg_missing(a.name.as_str()).into()),
             None => {}
             Some((_, v)) => {
                 if let Some(e) = arg_error(a, v) {
-                    return Some(format!("\"{}\" {e}", a.name));
+                    return Some(e.into());
                 }
             }
         }
@@ -405,9 +410,9 @@ impl Picker {
             if snap.is_none() || (ctx.loading && snap.is_some_and(|s| s.bots != 0)) {
                 let n = snap.map_or(0, |s| s.bots);
                 let label = if n > 0 {
-                    format!("Loading {n} bot{}…", if n == 1 { "" } else { "s" })
+                    t::command_loading_bots(n).into()
                 } else {
-                    "Looking for bots…".into()
+                    t::command_finding_bots().into()
                 };
                 self.view = Some(View::Loading(label));
             } else {
@@ -433,7 +438,7 @@ impl Picker {
             sections.push(Section { key, title, avatar, refreshing, rows });
         };
         if !recent.is_empty() {
-            section("recent".into(), "Recently Used".into(), None, recent, true, false);
+            section("recent".into(), t::command_recent(), None, recent, true, false);
         }
         let refreshing = ctx.snapshot.is_some_and(|s| !s.fresh);
         let mut bots: Vec<String> = Vec::new();
@@ -445,7 +450,7 @@ impl Picker {
         for bot in bots {
             let cmds: Vec<Cmd> = matches.iter().filter(|c| c.bot == bot).cloned().collect();
             let (title, avatar) = if bot == SYSTEM {
-                ("Vector".into(), Some(Face::Mark))
+                ("Vector".into(), Some(Face::Mark)) // i18n-exempt: the app's name
             } else {
                 let (name, path) = (ctx.bot_name)(&bot);
                 (name, Some(path.map_or(Face::Placeholder, Face::Path)))
@@ -524,8 +529,8 @@ impl Picker {
             let cut = text.rfind(char::is_whitespace).map_or(0, |i| i + 1);
             text[..cut].to_string()
         };
-        let base = if base.starts_with('/') { base } else if text.ends_with(' ') { text.into() } else { format!("{text} ") };
-        format!("{base}{value} ")
+        let base = if base.starts_with('/') { base } else if text.ends_with(' ') { text.into() } else { format!("{text} ") }; // i18n-exempt: joins typed text
+        format!("{base}{value} ") // i18n-exempt: joins typed text
     }
 
     pub fn first_choice(&self) -> Option<String> {
@@ -575,10 +580,10 @@ impl Picker {
             return Route::Plain;
         }
         let Some(parsed) = parse_args(&cmd, after) else {
-            return Route::Error(format!("Unclosed quote in /{name}"));
+            return Route::Error(t::command_unclosed_quote(name).into());
         };
         if let Some(e) = validate(&cmd, &parsed) {
-            return Route::Error(format!("/{name}: {e}"));
+            return Route::Error(t::command_error(name, e).into());
         }
         self.bump(&cmd);
         self.armed = None;
@@ -711,7 +716,7 @@ pub fn view(
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(ca(255, 255, 255, 0.42))
                                 .child(spinner(9.))
-                                .child("Checking for Updates"),
+                                .child(t::command_checking_updates()),
                         )
                     });
                 div().flex().flex_col().child(header).children(s.rows.iter().map(|r| {
@@ -721,7 +726,7 @@ pub fn view(
                     let (face, tip) = if !r.show_bot {
                         (None, None)
                     } else if r.cmd.is_system() {
-                        (Some(avatar(&Face::Mark)), Some(SharedString::from("Vector")))
+                        (Some(avatar(&Face::Mark)), Some(SharedString::from("Vector"))) // i18n-exempt: the app's name
                     } else {
                         let (name, path) = bot_face(&r.cmd.bot);
                         (Some(avatar(&path.map_or(Face::Placeholder, Face::Path))), Some(name))

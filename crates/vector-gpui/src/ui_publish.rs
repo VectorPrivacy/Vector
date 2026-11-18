@@ -8,6 +8,7 @@ use gpui::{AnyElement, Context, Entity, Focusable, FontWeight, SharedString, Tas
 
 use super::{VectorApp, backend};
 use crate::composer::{InputChanged, TextInput};
+use crate::t;
 use crate::theme::*;
 
 pub(super) struct PublishForm {
@@ -31,8 +32,6 @@ pub(super) struct PublishForm {
     busy: bool,
     prefill: Option<Task<()>>,
 }
-
-const ID_HINT: &str = "Unique identifier (lowercase, no spaces)";
 
 /// `splitControlTags`: the free tags, and the controls as switches (an `-only` tag stays free).
 fn split_controls(tags: &[String]) -> (Vec<String>, bool, bool, bool) {
@@ -174,25 +173,25 @@ impl VectorApp {
                     file: Some(path),
                     icon: info.as_ref().and_then(|i| i.icon.clone()),
                     id: PublishForm::field(cx, "my-awesome-game", &id, false),
-                    name: PublishForm::field(cx, "My Awesome Game", &name, false),
-                    description: PublishForm::field(cx, "A line or two about what it is", &desc, true),
+                    name: PublishForm::field(cx, &t::publish_name_placeholder(), &name, false),
+                    description: PublishForm::field(cx, &t::publish_description_placeholder(), &desc, true),
                     version: PublishForm::field(cx, "1.0.0", &version, false),
-                    categories: PublishForm::field(cx, "multiplayer, arcade, 2d", "", false),
-                    developer: PublishForm::field(cx, "Who made it", "", false),
+                    categories: PublishForm::field(cx, &t::publish_categories_placeholder(), "", false),
+                    developer: PublishForm::field(cx, &t::publish_developer_placeholder(), "", false),
                     source: PublishForm::field(cx, "https://github.com/...", &source, false),
-                    changelog: PublishForm::field(cx, "What changed in this version", "", true),
+                    changelog: PublishForm::field(cx, &t::publish_whats_new_placeholder(), "", true),
                     game: true,
                     touch: false,
                     pad: false,
                     keys: false,
                     perms: all_perms(),
-                    hint: (ID_HINT.into(), false),
+                    hint: (t::publish_app_id_hint(), false),
                     busy: false,
                     prefill: None,
                 };
                 cx.subscribe_in(&form.id, window, |this, _, _: &InputChanged, _, cx| {
                     let Some(f) = this.publish.as_mut() else { return };
-                    f.hint = (ID_HINT.into(), false);
+                    f.hint = (t::publish_app_id_hint(), false);
                     f.prefill = Some(cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
                         this.update(cx, |this, cx| this.publish_prefill(cx)).ok();
@@ -237,7 +236,7 @@ impl VectorApp {
         let Some(app) = apps.iter().find(|a| a.id == id && a.publisher == me) else { return };
         let Some(f) = self.publish.as_mut() else { return };
         f.fill_from(app, cx);
-        f.hint = ("✓ Pre-filled from your existing app. Update the version and changelog!".into(), true);
+        f.hint = (t::publish_prefilled(), true);
         cx.notify();
     }
 
@@ -250,13 +249,13 @@ impl VectorApp {
             file: None,
             icon,
             id: PublishForm::field(cx, "my-awesome-game", &app.id, false),
-            name: PublishForm::field(cx, "My Awesome Game", &app.name, false),
-            description: PublishForm::field(cx, "A line or two about what it is", "", true),
+            name: PublishForm::field(cx, &t::publish_name_placeholder(), &app.name, false),
+            description: PublishForm::field(cx, &t::publish_description_placeholder(), "", true),
             version: PublishForm::field(cx, "1.0.0", "", false),
-            categories: PublishForm::field(cx, "multiplayer, arcade, 2d", "", false),
-            developer: PublishForm::field(cx, "Who made it", "", false),
+            categories: PublishForm::field(cx, &t::publish_categories_placeholder(), "", false),
+            developer: PublishForm::field(cx, &t::publish_developer_placeholder(), "", false),
             source: PublishForm::field(cx, "https://github.com/...", "", false),
-            changelog: PublishForm::field(cx, "What changed in this version", "", true),
+            changelog: PublishForm::field(cx, &t::publish_whats_new_placeholder(), "", true),
             game: crate::nexus::is_game(&app),
             touch: false,
             pad: false,
@@ -288,10 +287,10 @@ impl VectorApp {
         let [id, name, description, version, _, developer, source, changelog] = f.texts(cx);
         let editing = f.file.is_none();
         if !editing && id.is_empty() {
-            return self.show_toast("App ID is required", cx);
+            return self.show_toast(&t::publish_need_id(), cx);
         }
         if name.is_empty() {
-            return self.show_toast(if editing { "A listing needs a name" } else { "Name is required" }, cx);
+            return self.show_toast(&if editing { t::publish_need_name_edit() } else { t::publish_need_name() }, cx);
         }
         let permissions: Vec<&str> = f.perms.iter().filter(|p| p.3).map(|p| p.0.as_str()).collect();
         let listing = backend::market::Listing {
@@ -326,12 +325,12 @@ impl VectorApp {
                                 if let Some(n) = this.nexus.as_mut() {
                                     n.apps = apps;
                                 }
-                                this.show_toast("Listing Updated", cx);
+                                this.show_toast(&t::publish_updated(), cx);
                             }
                             None => {
-                                let mut p = crate::kit::Popup::notice("Published!");
+                                let mut p = crate::kit::Popup::notice(t::publish_done());
                                 p.icon = Some("icons/vector-check.svg");
-                                p.text = Some(format!("{name} has been published to the App Store.").into());
+                                p.text = Some(t::publish_done_text(name.as_str()));
                                 this.popup = Some((p, super::PopupAct::Notice));
                             }
                         }
@@ -340,7 +339,7 @@ impl VectorApp {
                         if let Some(f) = this.publish.as_mut() {
                             f.busy = false;
                         }
-                        let msg = if editing { e } else { format!("Failed to publish: {e}") };
+                        let msg = if editing { e } else { t::publish_failed(e).to_string() };
                         this.show_toast(&msg, cx);
                     }
                 }
@@ -375,7 +374,7 @@ impl VectorApp {
             }
         };
 
-        let label = |text: &'static str, optional: bool| {
+        let label = |text: SharedString, optional: bool| {
             div()
                 .flex()
                 .gap(px(4.))
@@ -384,7 +383,7 @@ impl VectorApp {
                 .font_weight(FontWeight::BOLD)
                 .text_color(white_a(0.45))
                 .child(text.to_uppercase())
-                .when(optional, |d| d.child(div().font_weight(FontWeight::MEDIUM).text_color(white_a(0.35)).child("(optional)")))
+                .when(optional, |d| d.child(div().font_weight(FontWeight::MEDIUM).text_color(white_a(0.35)).child(t::publish_optional())))
         };
         let hint = |text: SharedString, accent: bool| {
             div()
@@ -475,13 +474,13 @@ impl VectorApp {
                             .text_size(px(18.))
                             .line_height(px(22.))
                             .font_weight(FontWeight::BOLD)
-                            .child(if editing { "Edit Listing" } else { "Publish to App Store" }),
+                            .child(if editing { t::publish_title_edit() } else { t::publish_title() }),
                     )
                     .child(div().truncate().text_size(px(13.)).line_height(px(19.5)).text_color(white_a(0.55)).child(
                         if editing {
-                            "Changes go live without uploading the app again"
+                            t::publish_lead_edit()
                         } else {
-                            "Everyone on Vector can find and install it"
+                            t::publish_lead()
                         },
                     )),
             )
@@ -505,7 +504,7 @@ impl VectorApp {
                     ),
             );
 
-        let kind_btn = |id: &'static str, text: &'static str, on: bool, set: bool| {
+        let kind_btn = |id: &'static str, text: SharedString, on: bool, set: bool| {
             let me = me.clone();
             div()
                 .id(id)
@@ -530,7 +529,7 @@ impl VectorApp {
                 })
                 .child(text)
         };
-        let control = |id: &'static str, glyph: &'static str, text: &'static str, on: bool, click| {
+        let control = |id: &'static str, glyph: &'static str, text: SharedString, on: bool, click| {
             div()
                 .id(id)
                 .h(px(36.))
@@ -604,12 +603,12 @@ impl VectorApp {
             .gap(px(14.))
             .child(
                 field()
-                    .child(label("App ID", false))
+                    .child(label(t::publish_app_id(), false))
                     .child(if editing { fixed(&f.id) } else { boxed(&f.id, false) })
                     .when(!editing, |d| d.child(hint(f.hint.0.clone(), f.hint.1))),
             )
-            .child(field().child(label("Name", false)).child(boxed(&f.name, false)))
-            .child(field().child(label("Description", false)).child(boxed(&f.description, true)))
+            .child(field().child(label(t::publish_name(), false)).child(boxed(&f.name, false)))
+            .child(field().child(label(t::publish_description(), false)).child(boxed(&f.description, true)))
             .child(
                 div()
                     .flex()
@@ -617,15 +616,15 @@ impl VectorApp {
                     .child(
                         field()
                             .flex_1()
-                            .child(label("Version", false))
+                            .child(label(t::publish_version(), false))
                             .child(if editing {
-                                fixed(&f.version).id("pub-version").tip("A new version is a new upload").into_any_element()
+                                fixed(&f.version).id("pub-version").tip(t::publish_version_fixed()).into_any_element()
                             } else {
                                 boxed(&f.version, false).into_any_element()
                             }),
                     )
                     .child(
-                        field().child(label("Kind", false)).child(
+                        field().child(label(t::publish_kind(), false)).child(
                             div()
                                 .flex()
                                 .gap(px(3.))
@@ -635,49 +634,46 @@ impl VectorApp {
                                 .border_1()
                                 .border_color(c(0x2c2e2f))
                                 .bg(c(0x161718))
-                                .child(kind_btn("ma-kind-game", "Game", f.game, true))
-                                .child(kind_btn("ma-kind-app", "App", !f.game, false)),
+                                .child(kind_btn("ma-kind-game", t::publish_kind_game(), f.game, true))
+                                .child(kind_btn("ma-kind-app", t::publish_kind_app(), !f.game, false)),
                         ),
                     ),
             )
             .child(
                 field()
-                    .child(label("Plays With", false))
+                    .child(label(t::publish_plays_with(), false))
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
                             .gap(px(8.))
-                            .child(control("ma-c-touch", "touch", "Touch", f.touch, flip(|f| &mut f.touch)))
-                            .child(control("ma-c-pad", "gamepad", "Controller", f.pad, flip(|f| &mut f.pad)))
-                            .child(control("ma-c-keys", "keyboard", "Keyboard", f.keys, flip(|f| &mut f.keys))),
+                            .child(control("ma-c-touch", "touch", t::publish_touch(), f.touch, flip(|f| &mut f.touch)))
+                            .child(control("ma-c-pad", "gamepad", t::publish_controller(), f.pad, flip(|f| &mut f.pad)))
+                            .child(control("ma-c-keys", "keyboard", t::publish_keyboard(), f.keys, flip(|f| &mut f.keys))),
                     )
-                    .child(hint("Devices with these get it recommended, and phones need Touch to list it.".into(), false)),
+                    .child(hint(t::publish_plays_with_hint(), false)),
             )
             .child(
                 field()
-                    .child(label("Categories", false))
+                    .child(label(t::publish_categories(), false))
                     .child(boxed(&f.categories, false))
-                    .child(hint("Comma-separated".into(), false)),
+                    .child(hint(t::publish_categories_hint(), false)),
             )
-            .child(field().child(label("Developer", true)).child(boxed(&f.developer, false)))
-            .child(field().child(label("Source or Website", true)).child(boxed(&f.source, false)))
-            .child(field().child(label("What's New", true)).child(boxed(&f.changelog, true)))
+            .child(field().child(label(t::publish_developer(), true)).child(boxed(&f.developer, false)))
+            .child(field().child(label(t::publish_source(), true)).child(boxed(&f.source, false)))
+            .child(field().child(label(t::publish_whats_new(), true)).child(boxed(&f.changelog, true)))
             .child(
                 field()
-                    .child(label("Permissions", true))
-                    .child(hint(
-                        "Each one is asked for on first launch. Leave them all off unless the app needs one.".into(),
-                        false,
-                    ))
+                    .child(label(t::publish_permissions(), true))
+                    .child(hint(t::publish_permissions_hint(), false))
                     .child(perms),
             );
 
         let submit = match (f.busy, editing) {
-            (true, true) => "Saving…",
-            (true, false) => "Publishing…",
-            (false, true) => "Save Changes",
-            (false, false) => "Publish",
+            (true, true) => t::publish_saving(),
+            (true, false) => t::publish_submitting(),
+            (false, true) => t::publish_save(),
+            (false, false) => t::publish_submit(),
         };
         let card = crate::security::card("ma-publish")
             .w(px(520.))
