@@ -17,6 +17,8 @@
 //! - `dev:move:<x>,<y>` / `dev:click:<x>,<y>` / `dev:rclick:<x>,<y>`: the mouse, in window points;
 //!   `dev:click:<x>,<y>,<n>` presses as the nth click of a run (2 = double-click)
 //! - `dev:drag:<x1>,<y1>,<x2>,<y2>`: press at the first point, move with the button held, release at the second
+//! - `dev:press:<x>,<y>` / `dev:hold:<x>,<y>` / `dev:release:<x>,<y>`: one drag in steps, so a test can
+//!   look between them: the left button down, moved with it held, then up
 //! - `dev:drop:<channel|category>:<id>:<before|after|into>:<target id>`: a sidebar drop, as a drag lands it
 //! - `dev:leave`: the pointer leaves the window, as the platform reports it
 //! - `dev:device:<key>=<value>`: set a device preference (`ws_nav=navbar` turns the Main Menu off)
@@ -311,6 +313,26 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 }
                 _ => {}
             }
+            later(window, cx, move |window, cx| {
+                for e in events {
+                    window.dispatch_event(e, cx);
+                }
+            });
+        }
+        "press" | "hold" | "release" => {
+            let n: Vec<f32> = rest.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let Some((&x, &y)) = n.first().zip(n.get(1)) else {
+                return answer(json!({ "error": "expected x,y" }));
+            };
+            let (at, left) = (point(px(x), px(y)), MouseButton::Left);
+            let events = match verb {
+                "press" => vec![
+                    PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }),
+                    PlatformInput::MouseDown(MouseDownEvent { button: left, position: at, click_count: 1, ..Default::default() }),
+                ],
+                "hold" => vec![PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: Some(left), modifiers: Modifiers::default() })],
+                _ => vec![PlatformInput::MouseUp(MouseUpEvent { button: left, position: at, click_count: 1, ..Default::default() })],
+            };
             later(window, cx, move |window, cx| {
                 for e in events {
                     window.dispatch_event(e, cx);
