@@ -16,11 +16,12 @@ use zeroize::Zeroizing;
 use crate::backend::{self, security::MigrationProgress};
 use crate::composer::{CancelInput, Look, SendText, TextInput};
 use crate::kit;
+use crate::t;
 use crate::theme::*;
 
 const INCORRECT: &str = "CREDENTIAL_INCORRECT";
 const REQUIRED: &str = "CREDENTIAL_REQUIRED";
-const LOCKED: &str = "CREDENTIAL_LOCKED:";
+const LOCKED: &str = "CREDENTIAL_LOCKED:"; // i18n-exempt: core error code
 
 pub enum Event {
     /// Local Encryption as it now stands, for the toggle to follow.
@@ -88,21 +89,9 @@ pub struct SecurityFlow {
 
 impl EventEmitter<Event> for SecurityFlow {}
 
-/// A credential as it reads mid-sentence: "PIN" keeps its capitals, "password" doesn't.
-pub(crate) fn noun(kind: &str) -> &'static str {
-    if kind == "password" {
-        "password"
-    } else {
-        "PIN"
-    }
-}
-
-fn label(kind: &str) -> &'static str {
-    if kind == "password" {
-        "Password"
-    } else {
-        "PIN"
-    }
+/// A message's PIN or password form, by the credential's kind.
+pub(crate) fn by(kind: &str, pin: fn() -> SharedString, password: fn() -> SharedString) -> SharedString {
+    if kind == "password" { password() } else { pin() }
 }
 
 fn mode_of(kind: &str) -> Mode {
@@ -121,7 +110,7 @@ impl SecurityFlow {
             ..kit::field_look()
         };
         let password = cx.new(|cx| {
-            TextInput::new("Password", cx)
+            TextInput::new(t::security_password(), cx)
                 .with_look(look)
                 .keep_on_submit()
         });
@@ -392,29 +381,16 @@ impl SecurityFlow {
         } else {
             0
         };
-        let (done, total) = (thousands(p.completed), thousands(p.total));
+        let (done, total) = (p.completed, p.total);
         m.phase = match p.phase.as_str() {
-            "decrypting" => format!("Decrypting messages... {done} / {total}"),
-            "encrypting" => format!("Encrypting messages... {done} / {total}"),
-            "rekeying" => format!("Re-encrypting messages... {done} / {total}"),
-            "finalizing" => "Finalizing...".into(),
-            other => other.to_string(),
-        }
-        .into();
+            "decrypting" => t::security_phase_decrypting(done, total),
+            "encrypting" => t::security_phase_encrypting(done, total),
+            "rekeying" => t::security_phase_rekeying(done, total),
+            "finalizing" => t::security_phase_finalizing(),
+            other => other.to_string().into(),
+        };
         cx.notify();
     }
-}
-
-pub(crate) fn thousands(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 // ── Flows ─────────────────────────────────────────────────────────────────────
@@ -484,7 +460,7 @@ pub(crate) async fn with_current<T: Send + 'static>(
             title.to_string(),
             prompt.clone(),
             mistake,
-            "Confirm",
+            &t::dialog_confirm(),
         )
         .await
         else {
@@ -493,7 +469,7 @@ pub(crate) async fn with_current<T: Send + 'static>(
         mistake = true;
         let title = SharedString::from(title.to_string());
         this.update(cx, |f, cx| {
-            f.checking(title, format!("Checking your {}…", noun(&kind)), cx)
+            f.checking(title, by(&kind, t::security_checking_pin, t::security_checking_password).into(), cx)
         })
         .ok();
         let result = attempt(entered)
@@ -504,14 +480,14 @@ pub(crate) async fn with_current<T: Send + 'static>(
             Ok(v) => return Ok(Some(v)),
             Err(e) => {
                 if let Some(secs) = e.strip_prefix(LOCKED).and_then(|s| s.parse::<u64>().ok()) {
-                    let wait = if secs >= 60 {
-                        format!("{} min", secs.div_ceil(60))
+                    prompt = if secs >= 60 {
+                        t::security_locked_minutes(secs.div_ceil(60))
                     } else {
-                        format!("{secs} s")
-                    };
-                    prompt = format!("Too many wrong tries. Try again in {wait}.");
+                        t::security_locked_seconds(secs)
+                    }
+                    .into();
                 } else if e == INCORRECT {
-                    prompt = format!("Incorrect {}, try again.", noun(&kind));
+                    prompt = by(&kind, t::security_incorrect_pin, t::security_incorrect_password).into();
                 } else {
                     return Err(e);
                 }
@@ -544,7 +520,7 @@ async fn current(
     match result {
         Ok(c) => c,
         Err(e) => {
-            notice(this, cx, "Could not verify", e).await;
+            notice(this, cx, &t::security_verify_failed(), e).await;
             None
         }
     }
@@ -564,30 +540,25 @@ async fn new_credential(
         title.to_string(),
         message.to_string(),
         false,
-        "Continue",
+        &t::security_continue(),
     )
     .await?
     .to_string();
-    let label = label(&kind);
-    let mut lead = if kind == "pin" {
-        "Enter a 6-digit PIN.".to_string()
-    } else {
-        "Enter a password (4+ characters).".to_string()
-    };
+    let mut lead = if kind == "pin" { t::security_pin_rules() } else { t::security_password_rules() };
     let mut error = false;
     loop {
         let first = ask(
             this,
             cx,
             mode_of(&kind),
-            format!("Create {label}"),
+            by(&kind, t::security_create_pin, t::security_create_password),
             lead.clone(),
             error,
-            "Confirm",
+            &t::dialog_confirm(),
         )
         .await?;
         if kind == "password" && first.chars().count() < 4 {
-            lead = "Too short. Use at least 4 characters.".into();
+            lead = t::security_password_short();
             error = true;
             continue;
         }
@@ -595,14 +566,14 @@ async fn new_credential(
             this,
             cx,
             mode_of(&kind),
-            format!("Confirm {label}"),
-            format!("Re-enter your {}.", noun(&kind)),
+            by(&kind, t::security_confirm_pin, t::security_confirm_password),
+            by(&kind, t::security_reenter_pin, t::security_reenter_password),
             false,
-            "Confirm",
+            &t::dialog_confirm(),
         )
         .await?;
         if *again != *first {
-            lead = format!("{label}s didn't match. Try again.");
+            lead = by(&kind, t::security_mismatch_pin, t::security_mismatch_password);
             error = true;
             continue;
         }
@@ -614,7 +585,7 @@ async fn new_credential(
 async fn migrate(
     this: &This,
     cx: &mut AsyncApp,
-    title: &'static str,
+    title: SharedString,
     run: impl FnOnce(
         Box<dyn Fn(MigrationProgress) + Send + Sync>,
     ) -> oneshot::Receiver<Result<(), String>>,
@@ -622,8 +593,8 @@ async fn migrate(
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     this.update(cx, |f, cx| {
         f.migration = Some(Migration {
-            title: title.into(),
-            phase: "Preparing...".into(),
+            title,
+            phase: t::security_preparing(),
             pct: 0,
         });
         cx.notify();
@@ -667,15 +638,15 @@ async fn enable(this: &This, cx: &mut AsyncApp) {
     let Some((cred, kind)) = new_credential(
         this,
         cx,
-        "Set Up Encryption",
-        "Choose how to protect your local data. There is no recovery if you forget!",
+        &t::security_enable_title(),
+        &t::security_enable_text(),
     )
     .await
     else {
         return;
     };
     let k = kind.clone();
-    let result = migrate(this, cx, "Enabling Encryption", move |report| {
+    let result = migrate(this, cx, t::security_enabling(), move |report| {
         backend::run(backend::security::enable(cred, k, report))
     })
     .await;
@@ -684,7 +655,7 @@ async fn enable(this: &This, cx: &mut AsyncApp) {
             this.update(cx, |f, cx| {
                 f.enabled = true;
                 f.kind = kind;
-                cx.emit(Event::Toast("Encryption enabled".into()));
+                cx.emit(Event::Toast(t::security_enabled().into()));
             })
             .ok();
         }
@@ -692,8 +663,8 @@ async fn enable(this: &This, cx: &mut AsyncApp) {
             notice(
                 this,
                 cx,
-                "Encryption Failed",
-                format!("Failed to enable encryption: {e}"),
+                &t::security_enable_failed(),
+                t::security_enable_failed_text(e).into(),
             )
             .await
         }
@@ -701,10 +672,10 @@ async fn enable(this: &This, cx: &mut AsyncApp) {
 }
 
 async fn disable(this: &This, cx: &mut AsyncApp) {
-    let mut popup = kit::Popup::notice("Disable Encryption?");
-    popup.text = Some("This will decrypt all your local data and remove PIN protection.<br><br><b>Your messages and keys will be stored in plain text.</b><br><br>This is useful for faster app startup on personal devices, but reduces security if your device is lost or stolen.".into());
-    popup.confirm = "Confirm".into();
-    popup.cancel = Some("Cancel".into());
+    let mut popup = kit::Popup::notice(t::security_disable_title());
+    popup.text = Some(t::security_disable_text());
+    popup.confirm = t::dialog_confirm();
+    popup.cancel = Some(t::dialog_cancel());
     if !confirm(this, cx, popup).await {
         return;
     }
@@ -712,14 +683,14 @@ async fn disable(this: &This, cx: &mut AsyncApp) {
     let Some(cred) = current(
         this,
         cx,
-        &format!("Enter {}", label(&kind)),
-        format!("Enter your {} to turn off Local Encryption.", noun(&kind)),
+        &by(&kind, t::security_disable_enter_pin, t::security_disable_enter_password),
+        by(&kind, t::security_disable_lead_pin, t::security_disable_lead_password).into(),
     )
     .await
     else {
         return;
     };
-    let result = migrate(this, cx, "Disabling Encryption", move |report| {
+    let result = migrate(this, cx, t::security_disabling(), move |report| {
         backend::run(backend::security::disable(Some(cred), report))
     })
     .await;
@@ -728,7 +699,7 @@ async fn disable(this: &This, cx: &mut AsyncApp) {
             this.update(cx, |f, cx| {
                 f.enabled = false;
                 f.kind = "pin".into();
-                cx.emit(Event::Toast("Encryption disabled".into()));
+                cx.emit(Event::Toast(t::security_disabled().into()));
             })
             .ok();
         }
@@ -736,8 +707,8 @@ async fn disable(this: &This, cx: &mut AsyncApp) {
             notice(
                 this,
                 cx,
-                "Decryption Failed",
-                format!("Failed to disable encryption: {e}"),
+                &t::security_disable_failed(),
+                t::security_disable_failed_text(e).into(),
             )
             .await
         }
@@ -746,12 +717,11 @@ async fn disable(this: &This, cx: &mut AsyncApp) {
 
 async fn change(this: &This, cx: &mut AsyncApp) {
     let kind = kind(this, cx);
-    let label = label(&kind);
     let Some(old) = current(
         this,
         cx,
-        &format!("Enter Current {label}"),
-        format!("Please enter your current {} to continue.", noun(&kind)),
+        &by(&kind, t::security_current_pin, t::security_current_password),
+        by(&kind, t::security_current_lead_pin, t::security_current_lead_password).into(),
     )
     .await
     else {
@@ -760,15 +730,15 @@ async fn change(this: &This, cx: &mut AsyncApp) {
     let Some((new, new_kind)) = new_credential(
         this,
         cx,
-        &format!("Change {label}"),
-        "Choose a new security type and credential.",
+        &by(&kind, t::security_change_pin, t::security_change_password),
+        &t::security_change_text(),
     )
     .await
     else {
         return;
     };
     let k = new_kind.clone();
-    let result = migrate(this, cx, "Changing Credential", move |report| {
+    let result = migrate(this, cx, t::security_changing(), move |report| {
         backend::run(backend::security::rekey(old, new, k, report))
     })
     .await;
@@ -776,7 +746,7 @@ async fn change(this: &This, cx: &mut AsyncApp) {
         Ok(()) => {
             this.update(cx, |f, cx| {
                 f.kind = new_kind;
-                cx.emit(Event::Toast("Unlock method updated".into()));
+                cx.emit(Event::Toast(t::security_changed().into()));
             })
             .ok();
         }
@@ -784,8 +754,8 @@ async fn change(this: &This, cx: &mut AsyncApp) {
             notice(
                 this,
                 cx,
-                "Re-keying Failed",
-                format!("Failed to change credential: {e}"),
+                &t::security_change_failed(),
+                t::security_change_failed_text(e).into(),
             )
             .await
         }
@@ -823,8 +793,8 @@ async fn show_keys(this: &This, cx: &mut AsyncApp) {
             with_current(
                 this,
                 cx,
-                "Show Private Keys",
-                format!("Enter your {} to show your keys.", noun(&kind)),
+                &t::security_keys_enter(),
+                by(&kind, t::security_keys_lead_pin, t::security_keys_lead_password).into(),
                 |cred| backend::run(backend::security::export(Some(cred))),
             )
             .await
@@ -853,7 +823,7 @@ async fn show_keys(this: &This, cx: &mut AsyncApp) {
         }
         Err(e) => {
             this.update(cx, |f, cx| f.close_keys(cx)).ok();
-            notice(this, cx, "Export Failed", e).await;
+            notice(this, cx, &t::security_export_failed(), e).await;
         }
     }
 }
@@ -863,6 +833,7 @@ fn fixture_keys() -> (Zeroizing<String>, Option<Zeroizing<String>>) {
     (
         Zeroizing::new("nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5".into()),
         Some(Zeroizing::new(
+            // i18n-exempt: fixture
             "abandon ability able about above absent absorb abstract absurd abuse access accident"
                 .into(),
         )),
@@ -991,7 +962,7 @@ pub(crate) fn head_tinted(
         .children(close.map(|close| {
             div()
                 .id("vcard-x")
-                .aria_label("Close")
+                .aria_label(t::dialog_close())
                 .group("vcard-x")
                 .self_start()
                 .w(px(23.7))
@@ -1019,24 +990,9 @@ pub(crate) fn lead(text: impl IntoElement, error: bool) -> gpui::Div {
         .child(text)
 }
 
-/// A lead with some runs in white: `(text, white)` pairs.
-pub(crate) fn lead_mixed(parts: &[(&str, bool)]) -> gpui::Div {
-    let mut text = String::new();
-    let mut runs = Vec::new();
-    for (part, white) in parts {
-        let start = text.len();
-        text.push_str(part);
-        if *white {
-            runs.push((
-                start..text.len(),
-                gpui::HighlightStyle {
-                    color: Some(c(0xffffff)),
-                    ..Default::default()
-                },
-            ));
-        }
-    }
-    lead(gpui::StyledText::new(text).with_highlights(runs), false)
+/// A lead whose `<b>` runs are white.
+pub(crate) fn lead_rich(html: &str) -> gpui::Div {
+    lead(kit::rich_with(html, gpui::HighlightStyle { color: Some(c(0xffffff)), ..Default::default() }), false)
 }
 
 pub(crate) fn button(
@@ -1142,7 +1098,7 @@ impl SecurityFlow {
         }
         match p.mode {
             Mode::Choose => {
-                let tile = |id: &'static str, title: &'static str, desc: &'static str| {
+                let tile = |id: &'static str, title: SharedString, desc: SharedString| {
                     let on = p.picked == id;
                     let me = me.clone();
                     div()
@@ -1193,12 +1149,8 @@ impl SecurityFlow {
                     div()
                         .flex()
                         .gap(px(10.))
-                        .child(tile("pin", "PIN", "A 6-digit code. Quick and convenient."))
-                        .child(tile(
-                            "password",
-                            "Password",
-                            "A text password. More secure, but slower to enter.",
-                        )),
+                        .child(tile("pin", t::security_pin(), t::security_pin_desc()))
+                        .child(tile("password", t::security_password(), t::security_password_desc())),
                 );
             }
             Mode::Pin => {
@@ -1280,7 +1232,7 @@ impl SecurityFlow {
             }
             _ => {}
         }
-        row = row.child(button("cred-cancel", "Cancel", true, true, cancel));
+        row = row.child(button("cred-cancel", t::dialog_cancel(), true, true, cancel));
         Some(overlay("cred-overlay", 14, card.child(row)))
     }
 
@@ -1294,27 +1246,23 @@ impl SecurityFlow {
             }
         };
         let title = if k.secrets.is_some() {
-            "Your Keys"
+            t::security_keys_title()
         } else {
-            "Show Private Keys?"
+            t::security_keys_ask()
         };
         let mut card = card("keys-card").child(head(
             "icons/key.svg",
-            title.into(),
+            title,
             Some(Box::new(on(Self::close_keys))),
         ));
         let Some((nsec, words)) = k.secrets.as_ref() else {
             card = card
-                .child(lead_mixed(&[
-                    ("To use Vector on another device, use ", false),
-                    ("Sign in on Another Device", true),
-                    (" instead. It's quicker, and your keys never leave this device in a form anyone else can read.", false),
-                ]))
-                .child(lead("Only show your keys to back them up offline or to use them in another Nostr app. Anyone who sees them can read your messages and act as you.", false))
+                .child(lead_rich(&t::security_keys_transfer_hint(kit::escape(&t::security_keys_transfer()))))
+                .child(lead(t::security_keys_warning(), false))
                 .child(
                     actions()
-                        .child(button("keys-transfer", "Sign in on Another Device", false, true, on(Self::transfer)))
-                        .child(button("keys-proceed", "Show Keys Anyway", true, true, on(|f, cx| {
+                        .child(button("keys-transfer", t::security_keys_transfer(), false, true, on(Self::transfer)))
+                        .child(button("keys-proceed", t::security_keys_proceed(), true, true, on(|f, cx| {
                             if let Some(tx) = f.keys.as_mut().and_then(|k| k.proceed.take()) {
                                 let _ = tx.send(true);
                             }
@@ -1323,11 +1271,8 @@ impl SecurityFlow {
                 );
             return Some(overlay("keys-overlay", 12, card));
         };
-        card = card.child(lead_mixed(&[
-            ("Your keys are your account. Anyone who has them can read your messages and speak as you. ", false),
-            ("Write them down offline and never share them.", true),
-        ]));
-        let section_head = |which: &'static str, title: &'static str| {
+        card = card.child(lead_rich(&t::security_keys_lead()));
+        let section_head = |which: &'static str, title: SharedString| {
             let done = k.copied.is_some_and(|(w, _)| w == which);
             let me = cx.entity().downgrade();
             div()
@@ -1372,7 +1317,7 @@ impl SecurityFlow {
                                 .size(px(13.))
                                 .text_color(if done { c(ACCENT) } else { white_a(0.8) }),
                         )
-                        .child(if done { "Copied" } else { "Copy" }),
+                        .child(if done { t::copied() } else { t::security_keys_copy() }),
                 )
         };
         let veil = |which: &'static str| {
@@ -1407,7 +1352,7 @@ impl SecurityFlow {
                         .size(px(16.))
                         .text_color(c(0xffffff)),
                 )
-                .child("Tap to reveal")
+                .child(t::security_keys_reveal())
         };
         // A veiled secret is drawn as smudges, never as glyphs: blur is the browser's.
         let smudge = |w: f32, h: f32| div().w(px(w)).h(px(h)).rounded(px(h / 2.)).bg(white_a(0.1));
@@ -1470,7 +1415,7 @@ impl SecurityFlow {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(section_head("seed", "Seed Phrase"))
+                    .child(section_head("seed", t::security_keys_seed()))
                     .child(
                         boxed()
                             .child(grid)
@@ -1501,7 +1446,7 @@ impl SecurityFlow {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(section_head("nsec", "Private Key"))
+                .child(section_head("nsec", t::security_keys_nsec()))
                 .child(
                     boxed()
                         .child(nsec_body)
@@ -1512,7 +1457,7 @@ impl SecurityFlow {
             actions()
                 .child(button(
                     "keys-done",
-                    "Done",
+                    t::security_keys_done(),
                     false,
                     true,
                     on(Self::close_keys),
@@ -1530,7 +1475,7 @@ impl SecurityFlow {
                         .hover(|d| d.text_color(c(0xffffff)))
                         .cursor_pointer()
                         .on_click(on(Self::transfer))
-                        .child("Moving to another device? Sign in there with a code instead"),
+                        .child(t::security_keys_moving()),
                 ),
         );
         Some(overlay("keys-overlay", 12, card))
@@ -1665,7 +1610,7 @@ impl SecurityFlow {
                                     .opacity(0.5),
                             ),
                     )
-                    .child("Do not close the app during this process"),
+                    .child(t::security_dont_close()),
             );
         Some(
             gpui::deferred(

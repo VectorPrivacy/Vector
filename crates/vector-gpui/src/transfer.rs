@@ -14,11 +14,13 @@ use serde_json::Value;
 use crate::backend;
 use crate::composer::{InputChanged, Look, SendText, TextInput};
 use crate::security::{
-    Event, SecurityFlow, actions, button, card, head, lead, lead_mixed, noun, overlay,
+    Event, SecurityFlow, actions, button, by, card, head, lead, lead_rich, overlay,
 };
+use crate::t;
 use crate::theme::*;
 
 const CODE_LIFE: Duration = Duration::from_secs(5 * 60);
+// i18n-exempt: the QR's protocol prefix
 const CODE_LABEL: &str = "vector transfer code:";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -214,7 +216,7 @@ impl SecurityFlow {
             let _ = tx.send(Ok(backend::transfer::Started {
                 id: 1,
                 code: shown.then(|| "7-orbit-lemon-stage".into()),
-                qr: shown.then(|| "Vector transfer code: 7-orbit-lemon-stage".into()),
+                qr: shown.then(|| "Vector transfer code: 7-orbit-lemon-stage".into()), // i18n-exempt: fixture
             }));
             rx
         };
@@ -237,7 +239,7 @@ impl SecurityFlow {
         cx.spawn(async move |this, cx| {
             let result = rx
                 .await
-                .unwrap_or_else(|_| Err("The transfer stopped before it began".into()));
+                .unwrap_or_else(|_| Err(t::transfer_stopped_early().into()));
             this.update(cx, |f, cx| {
                 let Some(x) = f.xfer.as_mut().filter(|x| x.seq == seq) else {
                     return;
@@ -322,7 +324,7 @@ impl SecurityFlow {
         cx.spawn(async move |this, cx| {
             let result = rx
                 .await
-                .unwrap_or_else(|_| Err("The transfer stopped before it began".into()));
+                .unwrap_or_else(|_| Err(t::transfer_stopped_early().into()));
             this.update(cx, |f, cx| {
                 let Some(x) = f.xfer.as_mut().filter(|x| x.seq == seq) else {
                     return;
@@ -355,7 +357,7 @@ impl SecurityFlow {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(x.code.to_string()));
         let at = Instant::now();
         x.copied = Some(at);
-        cx.emit(Event::Toast("Copied Code".into()));
+        cx.emit(Event::Toast(t::transfer_code_copied().into()));
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(1500))
@@ -437,7 +439,7 @@ impl SecurityFlow {
             let checked = if live {
                 backend::run(backend::transfer::check_number(number))
                     .await
-                    .unwrap_or(Err(Err("The transfer has ended".into())))
+                    .unwrap_or(Err(Err(t::transfer_ended().into())))
             } else {
                 Ok(())
             };
@@ -450,10 +452,7 @@ impl SecurityFlow {
                     x.busy = false;
                     x.number.clear();
                     x.error = match e {
-                        Ok(left) => format!(
-                            "That isn't the number on the new device. {left} {} left.",
-                            if left == 1 { "try" } else { "tries" }
-                        ),
+                        Ok(left) => t::transfer_wrong_number(left).into(),
                         Err(e) => e,
                     };
                     cx.notify();
@@ -477,11 +476,8 @@ impl SecurityFlow {
                     crate::security::with_current(
                         &this,
                         cx,
-                        "Approve the Transfer",
-                        format!(
-                            "Enter your {} to send this account to the new device.",
-                            noun(&k)
-                        ),
+                        &t::transfer_approve_title(),
+                        by(&k, t::transfer_approve_pin, t::transfer_approve_password).into(),
                         |cred| backend::run(backend::transfer::approve(Some(cred))),
                     )
                     .await
@@ -538,13 +534,14 @@ impl SecurityFlow {
         match result {
             Ok(()) => self.xfer = None,
             Err(e) => {
+                // i18n-exempt: core's error text
                 let gone = e.contains("Nothing has arrived");
                 x.stage = Stage::Error;
                 x.finish_failed = !gone;
                 x.error = if gone {
-                    "The account that arrived has expired. Start again.".into()
+                    t::transfer_arrival_expired().into()
                 } else {
-                    format!("Couldn't finish signing in: {e}")
+                    t::transfer_finish_failed(e).into()
                 };
             }
         }
@@ -603,7 +600,7 @@ impl SecurityFlow {
             }
             _ => {
                 x.stage = Stage::Error;
-                x.error = text("error").unwrap_or_else(|| "The transfer stopped.".into());
+                x.error = text("error").unwrap_or_else(|| t::transfer_stopped().into());
                 x.busy = false;
             }
         }
@@ -634,14 +631,14 @@ impl SecurityFlow {
             }
         };
         let title = match x.stage {
-            Stage::Match => "Check the number",
-            Stage::Approve => "Sign in on a new device?",
-            Stage::Finishing => "Signing in",
-            Stage::Sent if x.unconfirmed => "Sent",
-            Stage::Sent => "All set",
-            Stage::Error => "Transfer stopped",
-            _ if x.sender => "Sign in on another device",
-            _ => "Sign in with another device",
+            Stage::Match => t::transfer_title_match(),
+            Stage::Approve => t::transfer_title_approve(),
+            Stage::Finishing => t::transfer_title_finishing(),
+            Stage::Sent if x.unconfirmed => t::transfer_title_sent(),
+            Stage::Sent => t::transfer_title_done(),
+            Stage::Error => t::transfer_title_stopped(),
+            _ if x.sender => t::transfer_title_send(),
+            _ => t::transfer_title_receive(),
         };
         let close = x.closable().then(|| {
             Box::new(on(Self::close_transfer))
@@ -649,7 +646,7 @@ impl SecurityFlow {
         });
         let mut body = card("xfer-card").child(head("icons/devices.svg", title.into(), close));
         let link = |id: &'static str,
-                    text: &'static str,
+                    text: SharedString,
                     enabled: bool,
                     f: fn(&mut SecurityFlow, &mut Context<SecurityFlow>)| {
             div()
@@ -679,7 +676,7 @@ impl SecurityFlow {
                 .text_color(c(0xff7a8a))
                 .child(SharedString::from(text.to_string()))
         };
-        let spinner = |text: &'static str| {
+        let spinner = |text: SharedString| {
             window.request_animation_frame();
             div()
                 .id("xfer-wait")
@@ -734,11 +731,11 @@ impl SecurityFlow {
                             div()
                                 .text_size(px(16.))
                                 .font_weight(FontWeight::BOLD)
-                                .child(SharedString::from(if x.name.is_empty() {
-                                    "Unnamed account".to_string()
+                                .child(if x.name.is_empty() {
+                                    t::transfer_unnamed()
                                 } else {
-                                    x.name.clone()
-                                })),
+                                    SharedString::from(x.name.clone())
+                                }),
                         )
                         .when(!x.from.is_empty(), |d| {
                             d.child(
@@ -771,9 +768,9 @@ impl SecurityFlow {
                 let clock = format!("{}:{:02}", left / 60, left % 60);
                 body = body.child(lead(
                     if x.sender {
-                        "On the new device, tap Login, then Sign in with another device, and scan this or type the code."
+                        t::transfer_code_lead_send()
                     } else {
-                        "On your signed-in device, open Settings and choose Sign in on another device, then scan this or type the code."
+                        t::transfer_code_lead_receive()
                     },
                     false,
                 ));
@@ -819,7 +816,7 @@ impl SecurityFlow {
                                 .child(
                                     div()
                                         .id("xfer-copy")
-                                        .tip("Copy")
+                                        .tip(t::transfer_copy())
                                         .w(px(38.))
                                         .h(px(37.))
                                         .flex()
@@ -854,9 +851,9 @@ impl SecurityFlow {
                                     white_a(0.45)
                                 })
                                 .child(if left > 0 {
-                                    format!("Expires in {clock}")
+                                    t::transfer_expires(clock)
                                 } else {
-                                    "Expired".into()
+                                    t::transfer_expired()
                                 }),
                         ),
                 );
@@ -864,7 +861,7 @@ impl SecurityFlow {
                 if left == 0 {
                     a = a.child(button(
                         "xfer-new",
-                        "Get a New Code",
+                        t::transfer_new_code(),
                         false,
                         true,
                         on(Self::show_code),
@@ -872,7 +869,7 @@ impl SecurityFlow {
                 }
                 body = body.child(a.child(link(
                     "xfer-type",
-                    "Type the other device's code instead",
+                    t::transfer_type_instead(),
                     true,
                     Self::enter_code,
                 )));
@@ -881,7 +878,7 @@ impl SecurityFlow {
                 let focused = x.entry.focus_handle(cx).is_focused(window);
                 let typed = !x.entry.read(cx).text().trim().is_empty();
                 body = body.child(lead(
-                    "Type the code shown on your other device. It's a number and three words.",
+                    t::transfer_enter_lead(),
                     false,
                 ));
                 let mut form = div().flex().flex_col().gap(px(12.)).child(
@@ -896,24 +893,24 @@ impl SecurityFlow {
                     actions()
                         .child(button(
                             "xfer-connect",
-                            if x.busy { "Connecting…" } else { "Connect" },
+                            if x.busy { t::transfer_connecting() } else { t::transfer_connect() },
                             false,
                             !x.busy && typed,
                             on(Self::connect),
                         ))
                         .child(link(
                             "xfer-show",
-                            "Show a code on this device instead",
+                            t::transfer_show_instead(),
                             !x.busy,
                             Self::show_code,
                         )),
                 );
                 body = body.child(form);
             }
-            Stage::Connecting => body = body.child(spinner("Connecting…")),
+            Stage::Connecting => body = body.child(spinner(t::transfer_connecting())),
             Stage::Match => {
                 body = body.child(div().flex().justify_center().child(lead(
-                    "On your other device, type this number to approve.",
+                    t::transfer_match_lead(),
                     false,
                 )));
                 let digit = |d: char| {
@@ -952,33 +949,20 @@ impl SecurityFlow {
                                 .justify_center()
                                 .text_size(px(12.))
                                 .text_color(white_a(0.45))
-                                .child("Signing in as"),
+                                .child(t::transfer_signing_in_as()),
                         )
                         .child(identity());
                 }
                 body = body.child(actions().child(button(
                     "xfer-cancel",
-                    "Cancel",
+                    t::dialog_cancel(),
                     true,
                     true,
                     on(Self::close_transfer),
                 )));
             }
             Stage::Approve => {
-                body = body.child(lead_mixed(&[
-                    (
-                        "You're giving full, permanent control of this account to another device. ",
-                        false,
-                    ),
-                    (
-                        "Only continue if you're setting up your own device right now.",
-                        true,
-                    ),
-                    (
-                        " Vector never asks for this to verify, unlock or join anything.",
-                        false,
-                    ),
-                ]));
+                body = body.child(lead_rich(&t::transfer_approve_warning()));
                 let focused = x.number_focus.is_focused(window);
                 let shown = if x.number.len() > 3 {
                     format!("{} {}", &x.number[..3], &x.number[3..])
@@ -998,7 +982,7 @@ impl SecurityFlow {
                             .text_size(px(11.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(white_a(0.45))
-                            .child(crate::kit::spaced("NUMBER SHOWN ON THE NEW DEVICE", 0.6)),
+                            .child(crate::kit::spaced(t::transfer_number_label().to_uppercase(), 0.6)),
                     )
                     .child(
                         field(focused)
@@ -1027,33 +1011,33 @@ impl SecurityFlow {
                     actions()
                         .child(button(
                             "xfer-approve",
-                            "Approve",
+                            t::transfer_approve(),
                             false,
                             ready,
                             on(Self::approve),
                         ))
-                        .child(button("xfer-deny", "Deny", true, !x.busy, on(Self::deny))),
+                        .child(button("xfer-deny", t::transfer_deny(), true, !x.busy, on(Self::deny))),
                 );
                 body = body.child(form);
             }
-            Stage::Sending => body = body.child(spinner("Sending your account…")),
+            Stage::Sending => body = body.child(spinner(t::transfer_sending())),
             Stage::Sent => {
                 body = body
                     .child(lead(
                         if x.unconfirmed {
-                            "Your account is on its way. Check the new device to finish signing in."
+                            t::transfer_sent_unconfirmed()
                         } else {
-                            "Your new device is signing in. Your chats and communities will sync there on their own."
+                            t::transfer_sent()
                         },
                         false,
                     ))
-                    .child(actions().child(button("xfer-done", "Done", false, true, on(Self::close_transfer))));
+                    .child(actions().child(button("xfer-done", t::transfer_done(), false, true, on(Self::close_transfer))));
             }
             Stage::Finishing => {
                 if !x.from.is_empty() {
                     body = body.child(identity());
                 }
-                body = body.child(spinner("Signing in…"));
+                body = body.child(spinner(t::transfer_signing_in()));
             }
             Stage::Error => {
                 body = body
@@ -1062,14 +1046,14 @@ impl SecurityFlow {
                         actions()
                             .child(button(
                                 "xfer-retry",
-                                "Try Again",
+                                t::transfer_try_again(),
                                 false,
                                 true,
                                 on(Self::retry),
                             ))
                             .child(button(
                                 "xfer-close",
-                                "Close",
+                                t::dialog_close(),
                                 true,
                                 true,
                                 on(Self::close_transfer),

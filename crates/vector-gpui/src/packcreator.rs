@@ -4,6 +4,7 @@
 //! abandoned edit costs no network.
 
 use crate::kit::Tipped as _;
+use crate::t;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -88,9 +89,9 @@ struct Naming {
 }
 
 struct Confirm {
-    title: &'static str,
-    detail: &'static str,
-    ok: &'static str,
+    title: SharedString,
+    detail: SharedString,
+    ok: SharedString,
     done: Option<oneshot::Sender<bool>>,
 }
 
@@ -152,10 +153,10 @@ impl EmojiPicker {
         if pack.is_none() && self.own_pack_count() >= self.max_equipped() {
             let max = self.max_equipped();
             self.show_error(
-                "Pack Slots Full!",
-                &format!("Vector supports up to {max} equipped packs. Remove one to add another."),
-                "Remove a Pack First.",
-                "GOT IT",
+                &t::packs_full_title(),
+                &t::packs_full_text(max),
+                &t::packs_full_hint(),
+                &t::packs_got_it().to_uppercase(),
                 cx,
             );
             return;
@@ -170,7 +171,7 @@ impl EmojiPicker {
             ..Default::default()
         };
         let name = cx.new(|cx| {
-            TextInput::new("Pack name", cx)
+            TextInput::new(t::packs_name_placeholder(), cx)
                 .with_look(look)
                 .max_chars(NAME_MAX)
                 .keep_on_submit()
@@ -319,13 +320,13 @@ impl EmojiPicker {
         self.overlays.error = Some(ErrorBox {
             pretitle: pretitle.into(),
             title: if title.is_empty() {
-                "Please Try Again.".into()
+                t::packs_error_title().to_string()
             } else {
                 title.into()
             },
             detail: detail.into(),
             button: if button.is_empty() {
-                "TRY AGAIN".into()
+                t::packs_try_again().to_uppercase()
             } else {
                 button.into()
             },
@@ -335,9 +336,9 @@ impl EmojiPicker {
 
     fn confirm(
         &mut self,
-        title: &'static str,
-        detail: &'static str,
-        ok: &'static str,
+        title: SharedString,
+        detail: SharedString,
+        ok: SharedString,
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
@@ -442,7 +443,7 @@ impl EmojiPicker {
         };
         let sc = sanitize(n.input.read(cx).text());
         if sc.is_empty() {
-            n.error = Some("Letters, numbers, and underscores only.".into());
+            n.error = Some(t::packs_shortcode_rules().into());
             cx.notify();
             return;
         }
@@ -454,15 +455,13 @@ impl EmojiPicker {
         });
         if taken {
             if let Some(n) = self.overlays.naming.as_mut() {
-                n.error = Some(format!(":{sc}: is already used in this pack."));
+                n.error = Some(t::packs_shortcode_used(sc.as_str()).into());
             }
             self.show_error(
-                "Oops! Name Already Taken!",
-                &format!(
-                    ":{sc}: is already used by another emoji in this pack. Pick a different name."
-                ),
-                "Duplicate Shortcode.",
-                "GOT IT",
+                &t::packs_shortcode_taken(),
+                &t::packs_shortcode_taken_text(sc.as_str()),
+                &t::packs_shortcode_taken_title(),
+                &t::packs_got_it().to_uppercase(),
                 cx,
             );
             return;
@@ -580,7 +579,7 @@ impl EmojiPicker {
                         }
                         Ok(out) => out,
                         Err(e) => {
-                            this.update(cx, |this, cx| this.show_error("Oops! Couldn’t Crop That!", &e, "", "", cx)).ok();
+                            this.update(cx, |this, cx| this.show_error(&t::packs_crop_failed(), &e, "", "", cx)).ok();
                             continue;
                         }
                     }
@@ -607,20 +606,19 @@ impl EmojiPicker {
             }
             this.update(cx, |this, cx| {
                 if size {
-                    this.show_error("Oops! File Size Exceeded!", "File Size must be under 256Kb.", "", "", cx);
+                    this.show_error(&t::packs_too_big(), &t::packs_too_big_text(), "", "", cx);
                 } else if crop_size {
                     this.show_error(
-                        "Oops! Too Big After Cropping!",
-                        "Cropping this to a square re-encoded it over the 256 KB limit. Try an already-square version, or shrink it a little before adding.",
-                        "Crop Pushed It Over.",
-                        "GOT IT",
+                        &t::packs_crop_too_big(),
+                        &t::packs_crop_too_big_text(),
+                        &t::packs_crop_too_big_title(),
+                        &t::packs_got_it().to_uppercase(),
                         cx,
                     );
                 } else if format {
-                    this.show_error("Oops! Unsupported Format!", "Use PNG, JPG, GIF, or WebP.", "", "", cx);
+                    this.show_error(&t::packs_bad_format(), &t::packs_bad_format_text(), "", "", cx);
                 } else if failed > 0 {
-                    let what = if failed == 1 { "That image couldn’t be imported.".to_string() } else { format!("{failed} images couldn’t be imported.") };
-                    this.show_error("Oops! Couldn’t Read That!", &format!("{what} Try PNG, JPG, GIF, or WebP."), "Unsupported Image.", "GOT IT", cx);
+                    this.show_error(&t::packs_unreadable(), &t::packs_unreadable_text(failed), &t::packs_unreadable_title(), &t::packs_got_it().to_uppercase(), cx);
                 }
             })
             .ok();
@@ -676,17 +674,17 @@ impl EmojiPicker {
                 this.update(cx, |this, cx| this.show_error(pre, detail, "", "", cx)).ok();
             };
             if !IMPORT_EXTS.contains(&ext.as_str()) {
-                return error(&this, cx, "Oops! Unsupported Format!", "Use PNG, JPG, GIF, or WebP.");
+                return error(&this, cx, &t::packs_bad_format(), &t::packs_bad_format_text());
             }
             let p = path.clone();
             let Ok(bytes) = cx.background_executor().spawn(async move { crate::backend::packs::import(&p) }).await else {
-                return error(&this, cx, "Oops! Unsupported Format!", "Use PNG, JPG, GIF, or WebP.");
+                return error(&this, cx, &t::packs_bad_format(), &t::packs_bad_format_text());
             };
             if bytes.len() > MAX_EMOJI_BYTES {
-                return error(&this, cx, "Oops! File Size Exceeded!", "File Size must be under 256Kb.");
+                return error(&this, cx, &t::packs_too_big(), &t::packs_too_big_text());
             }
             let Some((w, h)) = crate::backend::packs::dims(&bytes) else {
-                return error(&this, cx, "Oops! Unsupported Format!", "Use PNG, JPG, GIF, or WebP.");
+                return error(&this, cx, &t::packs_bad_format(), &t::packs_bad_format_text());
             };
             let bytes = if w != h {
                 let Some(rect) = Self::crop(&this, &bytes, cx).await else { return };
@@ -695,17 +693,17 @@ impl EmojiPicker {
                     Ok(_) => {
                         this.update(cx, |this, cx| {
                             this.show_error(
-                                "Oops! Too Big After Cropping!",
-                                "Cropping this to a square re-encoded it over the 256 KB limit. Try an already-square version, or shrink it a little before adding.",
-                                "Crop Pushed It Over.",
-                                "GOT IT",
+                                &t::packs_crop_too_big(),
+                                &t::packs_crop_too_big_text(),
+                                &t::packs_crop_too_big_title(),
+                                &t::packs_got_it().to_uppercase(),
                                 cx,
                             )
                         })
                         .ok();
                         return;
                     }
-                    Err(e) => return error(&this, cx, "Oops! Couldn’t Crop That!", &e),
+                    Err(e) => return error(&this, cx, &t::packs_crop_failed(), &e),
                 }
             } else {
                 bytes
@@ -776,20 +774,21 @@ impl EmojiPicker {
     }
 
     fn broken_error(&mut self, reason: &str, cx: &mut Context<Self>) {
+        // i18n-exempt: core's error text
         if reason.to_lowercase().contains("too large") {
             self.show_error(
-                "Oops! Emoji Too Large!",
-                "This emoji is over the 1 MB size limit, so it cannot be used. Compress it under 1 MB, then delete this one and upload the smaller version.",
-                "Compress & Re-upload.",
-                "GOT IT",
+                &t::packs_emoji_large(),
+                &t::packs_emoji_large_text(),
+                &t::packs_emoji_large_title(),
+                &t::packs_got_it().to_uppercase(),
                 cx,
             );
         } else {
             self.show_error(
-                "Oops! Emoji Unavailable!",
-                "This emoji has been deleted by its host. Re-uploading will fix it: delete this emoji, then upload it again.",
-                "Delete It & Re-upload.",
-                "GOT IT",
+                &t::packs_emoji_unavailable(),
+                &t::packs_emoji_unavailable_text(),
+                &t::packs_emoji_unavailable_title(),
+                &t::packs_got_it().to_uppercase(),
                 cx,
             );
         }
@@ -835,13 +834,13 @@ impl EmojiPicker {
                 cr.dirty = false;
                 return gpui::Task::ready(Ok(None));
             }
-            self.show_error("Oops! Add an Emoji First!", "A pack needs at least one emoji. Add one to save it, or delete it to discard the draft.", "", "", cx);
+            self.show_error(&t::packs_need_emoji(), &t::packs_need_emoji_text(), "", "", cx);
             return gpui::Task::ready(Err(()));
         }
         if name.is_empty() {
             self.show_error(
-                "Oops! Name Your Pack First!",
-                "Give it a name to save it, or delete it to discard the draft.",
+                &t::packs_need_name(),
+                &t::packs_need_name_text(),
                 "",
                 "",
                 cx,
@@ -860,8 +859,8 @@ impl EmojiPicker {
             .collect();
         if jobs.is_empty() {
             self.show_error(
-                "Oops! Your Emojis Need Names!",
-                "Give each emoji a name, then save.",
+                &t::packs_need_shortcodes(),
+                &t::packs_need_shortcodes_text(),
                 "",
                 "",
                 cx,
@@ -947,7 +946,7 @@ impl EmojiPicker {
                     }
                 }
                 let kept: std::collections::HashSet<String> = emojis.iter().map(|(_, u)| u.clone()).chain(Some(logo_url.clone())).collect();
-                let pack = crate::backend::run(crate::backend::packs::publish(identifier, name, logo_url, emojis)).await.map_err(|_| "Cancelled".to_string())??;
+                let pack = crate::backend::run(crate::backend::packs::publish(identifier, name, logo_url, emojis)).await.map_err(|_| t::cancelled().to_string())??;
                 let queue: Vec<String> = this
                     .update(cx, |this, _| this.creator.as_mut().map(|cr| std::mem::take(&mut cr.pending_deletes)).unwrap_or_default())
                     .unwrap_or_default()
@@ -970,10 +969,11 @@ impl EmojiPicker {
                 }
                 if let Err(e) = &result {
                     this.show_error(
-                        "Couldn’t Save Pack",
-                        &format!("Your emojis are safe, nothing was lost. An upload didn’t finish (usually a passing network glitch). Tap Done to retry.\n\n({e})"),
-                        "Your Progress Is Safe.",
-                        "GOT IT",
+                        &t::packs_save_failed(),
+                        // i18n-exempt: a paragraph break, then the raw error
+                        &format!("{}\n\n({e})", t::packs_save_failed_text()),
+                        &t::packs_save_failed_title(),
+                        &t::packs_got_it().to_uppercase(),
                         cx,
                     );
                 }
@@ -993,16 +993,16 @@ impl EmojiPicker {
         let live = self.live();
         let rx = if editing.is_none() {
             self.confirm(
-                "Discard This Pack?",
-                "This pack was never saved. The emojis you added will be lost.",
-                "DISCARD",
+                t::packs_discard_title(),
+                t::packs_discard_text(),
+                t::packs_discard().to_uppercase().into(),
                 cx,
             )
         } else {
             self.confirm(
-                "Delete This Pack?",
-                "This action permanently removes the emoji files from your media servers and the pack from Nostr. This action cannot be undone.",
-                "DELETE",
+                t::packs_delete_title(),
+                t::packs_delete_text(),
+                t::packs_delete().to_uppercase().into(),
                 cx,
             )
         };
@@ -1040,14 +1040,11 @@ impl EmojiPicker {
                     cr.saving = true;
                     let total = cells.len() + usize::from(logo.is_some()) + extras.len();
                     let detail = if total > 0 {
-                        format!(
-                            "Removing {total} file{} from media servers…",
-                            if total == 1 { "" } else { "s" }
-                        )
+                        t::packs_deleting_files(total)
                     } else {
-                        "Removing from Nostr…".into()
+                        t::packs_deleting_nostr()
                     };
-                    this.overlays.progress = Some(("Deleting Pack".into(), detail));
+                    this.overlays.progress = Some((t::packs_deleting().into(), detail.into()));
                     cx.notify();
                 }
                 (cells, logo, extras)
@@ -1090,7 +1087,7 @@ impl EmojiPicker {
                 progress(
                     &this,
                     cx,
-                    format!("Deleting emoji {done} of {total} from media servers…"),
+                    t::packs_deleting_emoji(done, total).into(),
                 );
                 this.update(cx, |this, _| {
                     if let Some(cr) = this.creator.as_mut() {
@@ -1111,7 +1108,7 @@ impl EmojiPicker {
                 progress(
                     &this,
                     cx,
-                    format!("Deleting pack icon ({done} of {total})…"),
+                    t::packs_deleting_icon(done, total).into(),
                 );
                 let _ = crate::backend::run(crate::backend::packs::delete_blob(url)).await;
             }
@@ -1120,19 +1117,16 @@ impl EmojiPicker {
                 progress(
                     &this,
                     cx,
-                    format!(
-                        "Cleaning up {n} orphan file{}…",
-                        if n == 1 { "" } else { "s" }
-                    ),
+                    t::packs_deleting_orphans(n).into(),
                 );
                 for url in extras {
                     let _ = crate::backend::run(crate::backend::packs::delete_blob(url)).await;
                 }
             }
-            progress(&this, cx, "Removing pack from Nostr…".into());
+            progress(&this, cx, t::packs_deleting_pack().into());
             let res = crate::backend::run(crate::backend::packs::delete(id))
                 .await
-                .unwrap_or_else(|_| Err("Cancelled".into()));
+                .unwrap_or_else(|_| Err(t::cancelled().into()));
             this.update(cx, |this, cx| {
                 this.overlays.progress = None;
                 if let Some(cr) = this.creator.as_mut() {
@@ -1192,7 +1186,7 @@ impl EmojiPicker {
         let has_logo = cr.logo_preview.is_some() || (cr.logo_url.is_some() && !cr.logo_dead);
         let logo = div()
             .id("creator-logo")
-            .when(cr.logo_dead, |d| d.tip("This pack icon is no longer available (it may have been deleted)."))
+            .when(cr.logo_dead, |d| d.tip(t::packs_icon_gone()))
             .size(px(26.))
             .flex_shrink_0()
             .rounded(px(6.))
@@ -1215,8 +1209,8 @@ impl EmojiPicker {
                 .id(id)
                 .when_some(
                     match id {
-                        "creator-done" => Some("Save Pack"),
-                        "creator-delete" => Some("Remove Pack"),
+                        "creator-done" => Some(t::packs_save()),
+                        "creator-delete" => Some(t::packs_remove()),
                         _ => None,
                     },
                     |d, t| d.tip(t),
@@ -1503,9 +1497,9 @@ impl EmojiPicker {
                     .text_color(if dragover { c(PRIMARY) } else { white_a(0.7) }),
             )
             .child(if at_cap {
-                format!("Maximum {} reached", cr.max)
+                t::packs_upload_full(cr.max)
             } else {
-                "Upload Emoji".into()
+                t::packs_upload()
             });
 
         div()
@@ -1587,7 +1581,7 @@ impl EmojiPicker {
                                     .text_size(px(18.))
                                     .font_weight(FontWeight::EXTRA_BOLD)
                                     .text_color(c(DANGER))
-                                    .child(cf.title),
+                                    .child(cf.title.clone()),
                             )
                             .child(
                                 div()
@@ -1596,14 +1590,14 @@ impl EmojiPicker {
                                     .line_height(px(18.))
                                     .text_center()
                                     .text_color(c(0xffffff))
-                                    .child(cf.detail),
+                                    .child(cf.detail.clone()),
                             )
                             .child(
                                 div()
                                     .flex()
                                     .gap(px(8.))
                                     .child(
-                                        btn("pc-confirm-cancel", "CANCEL".into())
+                                        btn("pc-confirm-cancel", t::dialog_cancel().to_uppercase().into())
                                             .bg(ca(3, 3, 3, 0.56))
                                             .border_color(c(DANGER))
                                             .text_color(c(0xffffff))
@@ -1612,7 +1606,7 @@ impl EmojiPicker {
                                             })),
                                     )
                                     .child(
-                                        btn("pc-confirm-ok", cf.ok.into())
+                                        btn("pc-confirm-ok", cf.ok.clone())
                                             .bg(c(DANGER))
                                             .border_color(c(DANGER))
                                             .text_color(c(0x000000))
@@ -1695,13 +1689,13 @@ impl EmojiPicker {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .children(n.batch.filter(|(_, t)| *t > 1).map(|(i, t)| {
+                            .children(n.batch.filter(|(_, total)| *total > 1).map(|(i, total)| {
                                 div()
                                     .mb(px(8.))
                                     .text_size(px(11.))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(c(PRIMARY))
-                                    .child(format!("{i} OF {t}"))
+                                    .child(t::packs_name_progress(i, total).to_uppercase())
                             }))
                             .child(
                                 div()
@@ -1724,9 +1718,9 @@ impl EmojiPicker {
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(c(0xffffff))
                                     .child(if n.edit {
-                                        "Rename Emoji"
+                                        t::packs_emoji_rename()
                                     } else {
-                                        "Name This Emoji"
+                                        t::packs_name_title()
                                     }),
                             )
                             .child(
@@ -1786,7 +1780,7 @@ impl EmojiPicker {
                                     .child(
                                         btn(
                                             "pc-naming-skip",
-                                            if n.edit { "CANCEL" } else { "SKIP" }.into(),
+                                            if n.edit { t::dialog_cancel() } else { t::packs_skip() }.to_uppercase().into(),
                                         )
                                         .bg(ca(3, 3, 3, 0.56))
                                         .border_color(white_a(0.2))
@@ -1798,7 +1792,7 @@ impl EmojiPicker {
                                         ),
                                     )
                                     .child(
-                                        btn("pc-naming-save", "SAVE".into())
+                                        btn("pc-naming-save", t::dialog_save().to_uppercase().into())
                                             .bg(c(PRIMARY))
                                             .border_color(c(PRIMARY))
                                             .text_color(c(0x000000))
@@ -1889,8 +1883,8 @@ impl Creator {
     }
 }
 
-fn gone_message() -> &'static str {
-    "This emoji is no longer available (it may have been deleted)."
+fn gone_message() -> SharedString {
+    t::packs_emoji_gone()
 }
 
 async fn upload_retrying(bytes: Arc<Vec<u8>>, icon: bool) -> Result<String, String> {
@@ -1900,23 +1894,16 @@ async fn upload_retrying(bytes: Arc<Vec<u8>>, icon: bool) -> Result<String, Stri
             Ok(Ok(url)) => return Ok(url),
             Ok(Err(e)) => {
                 let m = e.to_lowercase();
-                let permanent = [
-                    "max is",
-                    "is empty",
-                    "account swap",
-                    "no blossom",
-                    "too large",
-                    "too detailed",
-                    "couldn't be read",
-                ]
-                .iter()
-                .any(|p| m.contains(p));
+                // i18n-exempt: core's error texts
+                let permanent = ["max is", "is empty", "account swap", "no blossom", "too large", "too detailed", "couldn't be read"]
+                    .iter()
+                    .any(|p| m.contains(p));
                 last = e;
                 if permanent {
                     break;
                 }
             }
-            Err(_) => return Err("Cancelled".into()),
+            Err(_) => return Err(t::cancelled().into()),
         }
         let wait = 400 * (attempt + 1);
         let _ = crate::backend::run(async move {
