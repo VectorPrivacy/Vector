@@ -185,6 +185,18 @@ pub struct Choice {
     pub label: &'static str,
 }
 
+/// A select's choices in the language in use, built once per language.
+pub fn choices(key: &'static str, build: impl FnOnce() -> Vec<Choice>) -> &'static [Choice] {
+    thread_local!(static BUILT: std::cell::RefCell<std::collections::HashMap<(&'static str, u64), &'static [Choice]>> = Default::default());
+    let at = (key, vector_i18n::generation());
+    if let Some(c) = BUILT.with(|b| b.borrow().get(&at).copied()) {
+        return c;
+    }
+    let c: &'static [Choice] = Box::leak(build().into_boxed_slice());
+    BUILT.with(|b| b.borrow_mut().insert(at, c));
+    c
+}
+
 /// Text made at runtime for a select's `&'static` choices, kept once per distinct string.
 pub fn interned(text: &str) -> &'static str {
     thread_local!(static SEEN: std::cell::RefCell<std::collections::HashSet<&'static str>> = Default::default());

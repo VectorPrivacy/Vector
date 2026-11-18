@@ -151,7 +151,7 @@ pub enum Home {
 
 pub struct Toggle {
     pub key: &'static str,
-    pub label: &'static str,
+    pub label: Label,
     pub help: &'static str,
     pub home: Home,
     group: &'static str,
@@ -159,7 +159,7 @@ pub struct Toggle {
 
 const fn t(
     key: &'static str,
-    label: &'static str,
+    label: Label,
     help: &'static str,
     home: Home,
     group: &'static str,
@@ -175,185 +175,47 @@ const fn t(
 
 /// `Display.svelte`'s rows in widescreen.
 pub const DISPLAY: [Toggle; 8] = [
-    t(
-        "ws_nav",
-        "Main Menu",
-        "startMenu",
-        Home::Device("start", "navbar", true),
-        "Navigation",
-    ),
-    t(
-        "display_image_types",
-        "Display Image Types",
-        "imageTypes",
-        Home::Sql(false),
-        "Chat",
-    ),
-    t(
-        "chat_bg_enabled",
-        "Background Wallpaper",
-        "chatBg",
-        Home::Sql(true),
-        "Chat",
-    ),
-    t(
-        "emoticon_suggestions",
-        "Emoticon Suggestions",
-        "emoticons",
-        Home::Sql(true),
-        "Composer",
-    ),
-    t(
-        "time_suggestions",
-        "Time Suggestions",
-        "timeSuggestions",
-        Home::Sql(true),
-        "Composer",
-    ),
-    t(
-        "autocorrect",
-        "Autocorrect",
-        "autocorrect",
-        Home::Sql(true),
-        "Composer",
-    ),
-    t(
-        "send_on_enter",
-        "Send on Enter",
-        "sendOnEnter",
-        Home::Device("true", "false", true),
-        "Composer",
-    ),
-    t(
-        "floating_player",
-        "Floating Player",
-        "floatingPlayer",
-        Home::Sql(true),
-        "Media",
-    ),
+    t("ws_nav", t::settings_toggle_ws_nav, "startMenu", Home::Device("start", "navbar", true), "navigation"),
+    t("display_image_types", t::settings_toggle_display_image_types, "imageTypes", Home::Sql(false), "chat"),
+    t("chat_bg_enabled", t::settings_toggle_chat_bg_enabled, "chatBg", Home::Sql(true), "chat"),
+    t("emoticon_suggestions", t::settings_toggle_emoticon_suggestions, "emoticons", Home::Sql(true), "composer"),
+    t("time_suggestions", t::settings_toggle_time_suggestions, "timeSuggestions", Home::Sql(true), "composer"),
+    t("autocorrect", t::settings_toggle_autocorrect, "autocorrect", Home::Sql(true), "composer"),
+    t("send_on_enter", t::settings_toggle_send_on_enter, "sendOnEnter", Home::Device("true", "false", true), "composer"),
+    t("floating_player", t::settings_toggle_floating_player, "floatingPlayer", Home::Sql(true), "media"),
 ];
 
 /// Display's slim-only row: the rail folded with nothing to pull it out.
-pub const RAIL_HIDDEN: Toggle = t(
-    "cc_rail_hidden",
-    "Hide Community Rail",
-    "hideRail",
-    Home::Device("true", "false", false),
-    "Chat List",
-);
+pub const RAIL_HIDDEN: Toggle = t("cc_rail_hidden", t::settings_toggle_cc_rail_hidden, "hideRail", Home::Device("true", "false", false), "chat-list");
 
 pub const PRIVACY: [Toggle; 4] = [
-    t(
-        "web_previews",
-        "Display Web Previews",
-        "webPreviews",
-        Home::Sql(true),
-        "",
-    ),
-    t(
-        "strip_tracking",
-        "Prevent URL Tracking",
-        "stripTracking",
-        Home::Sql(true),
-        "",
-    ),
-    t(
-        "send_typing_indicators",
-        "Send Typing Indicators",
-        "sendTyping",
-        Home::Sql(true),
-        "",
-    ),
-    t(
-        "privacy_proxy_media",
-        "Proxy Previews & Media",
-        "proxyMedia",
-        Home::Sql(true),
-        "",
-    ),
+    t("web_previews", t::settings_toggle_web_previews, "webPreviews", Home::Sql(true), ""),
+    t("strip_tracking", t::settings_toggle_strip_tracking, "stripTracking", Home::Sql(true), ""),
+    t("send_typing_indicators", t::settings_toggle_send_typing_indicators, "sendTyping", Home::Sql(true), ""),
+    t("privacy_proxy_media", t::settings_toggle_privacy_proxy_media, "proxyMedia", Home::Sql(true), ""),
 ];
 
-pub const PLAYERS: Toggle = t("players", "Video Players", "players", Home::Synced, "");
+pub const PLAYERS: Toggle = t("players", t::settings_toggle_players, "players", Home::Synced, "");
 
 pub const OTHER: [Toggle; 4] = [
-    t(
-        "streamer_on",
-        "Streamer Mode",
-        "streamerMode",
-        Home::Synced,
-        "",
-    ),
-    t(
-        "stream_consent",
-        "Show me on streams",
-        "streamConsent",
-        Home::Profile,
-        "",
-    ),
-    t(
-        "streamer_wallpapers",
-        "Hide chat wallpapers",
-        "streamerWallpapers",
-        Home::Synced,
-        "",
-    ),
-    t(
-        "advanced",
-        "Advanced Mode",
-        "advancedMode",
-        Home::Synced,
-        "",
-    ),
+    t("streamer_on", t::settings_toggle_streamer_on, "streamerMode", Home::Synced, ""),
+    t("stream_consent", t::settings_toggle_stream_consent, "streamConsent", Home::Profile, ""),
+    t("streamer_wallpapers", t::settings_toggle_streamer_wallpapers, "streamerWallpapers", Home::Synced, ""),
+    t("advanced", t::settings_toggle_advanced, "advancedMode", Home::Synced, ""),
 ];
 
 pub const NOTIFY: [Toggle; 2] = [
-    t(
-        "notif_global_mute",
-        "Mute All Notification Sounds",
-        "mute",
-        Home::Sql(false),
-        "",
-    ),
-    t(
-        "notif_mute_everyone",
-        "Mute @Everyone Pings",
-        "everyone",
-        Home::Sql(false),
-        "",
-    ),
+    t("notif_global_mute", t::settings_toggle_notif_global_mute, "mute", Home::Sql(false), ""),
+    t("notif_mute_everyone", t::settings_toggle_notif_mute_everyone, "everyone", Home::Sql(false), ""),
 ];
 
 pub const STORAGE: [Toggle; 3] = [
-    t(
-        "auto_download_enabled",
-        "Auto-Download Media",
-        "autoDownload",
-        Home::Sql(true),
-        "",
-    ),
-    t(
-        "keep_media",
-        "Keep Files on This Device",
-        "keepMedia",
-        Home::Sql(false),
-        "",
-    ),
-    t(
-        "keep_unencrypted",
-        "Keep Unencrypted",
-        "keepUnencrypted",
-        Home::Sql(false),
-        "",
-    ),
+    t("auto_download_enabled", t::settings_toggle_auto_download_enabled, "autoDownload", Home::Sql(true), ""),
+    t("keep_media", t::settings_toggle_keep_media, "keepMedia", Home::Sql(false), ""),
+    t("keep_unencrypted", t::settings_toggle_keep_unencrypted, "keepUnencrypted", Home::Sql(false), ""),
 ];
 
-pub const CLOCK: Toggle = t(
-    "clock_decentralised",
-    "Decentralised Clock",
-    "clock",
-    Home::Sql(true),
-    "",
-);
+pub const CLOCK: Toggle = t("clock_decentralised", t::settings_toggle_clock_decentralised, "clock", Home::Sql(true), "");
 
 pub fn toggles() -> impl Iterator<Item = &'static Toggle> {
     DISPLAY
@@ -471,37 +333,37 @@ pub struct Theme {
 pub const THEMES: [Theme; 7] = [
     Theme {
         value: "vector",
-        label: "Vector",
+        label: "Vector", // i18n-exempt: a theme is named, not described
         swatch: &[],
     },
     Theme {
         value: "pivx",
-        label: "Keep it Purple",
+        label: "Keep it Purple", // i18n-exempt: a theme is named, not described
         swatch: &[0x560ec4, 0x1c0244],
     },
     Theme {
         value: "satoshi",
-        label: "サトシ",
+        label: "サトシ", // i18n-exempt: a theme is named, not described
         swatch: &[0xe5953c, 0xae712c],
     },
     Theme {
         value: "chatstr",
-        label: "Chatstr",
+        label: "Chatstr", // i18n-exempt: a theme is named, not described
         swatch: &[0xb949cd, 0x5949db],
     },
     Theme {
         value: "gifverse",
-        label: "Cosmic",
+        label: "Cosmic", // i18n-exempt: a theme is named, not described
         swatch: &[0xeab1d3, 0xf0febd],
     },
     Theme {
         value: "monero",
-        label: "XMR",
+        label: "XMR", // i18n-exempt: a theme is named, not described
         swatch: &[0xed702d, 0xed702d],
     },
     Theme {
         value: "cyberpunk",
-        label: "Neon",
+        label: "Neon", // i18n-exempt: a theme is named, not described
         swatch: &[0x8bf2f0, 0xe46aad],
     },
 ];
@@ -798,7 +660,7 @@ pub fn info(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id.into())
-        .aria_label("More info")
+        .aria_label(t::settings_more_info())
         .size(px(16.))
         .flex_shrink_0()
         .cursor_pointer()
@@ -830,7 +692,7 @@ pub fn toggle_row(
         .text_color(c(0xffffff))
         .child(label.clone());
     if let Some(explain) = explain {
-        name = name.child(info(SharedString::from(format!("{id}-info")), explain).aria_label(format!("About {label}")));
+        name = name.child(info(SharedString::from(format!("{id}-info")), explain).aria_label(t::settings_about(&label)));
     }
     div()
         .min_h(px(36.))
@@ -844,6 +706,18 @@ pub fn toggle_row(
 }
 
 /// `.st-group.section-label`. Its 36px top margin collapses with the 5px under the row above.
+/// A Display switch group's heading, by its id.
+fn group_name(id: &str) -> SharedString {
+    match id {
+        "navigation" => t::settings_group_navigation(),
+        "chat" => t::settings_group_chat(),
+        "composer" => t::settings_group_composer(),
+        "media" => t::settings_group_media(),
+        "chat-list" => t::settings_group_chat_list(),
+        _ => SharedString::default(),
+    }
+}
+
 fn group_label(text: &str, first: bool) -> impl IntoElement {
     div()
         .mt(px(if first { 0. } else { 31. }))
@@ -915,7 +789,7 @@ fn row(s: &Settings, key: &'static str, on: &OnAct, grouped: bool) -> AnyElement
     );
     toggle_row(
         key,
-        t.label,
+        (t.label)(),
         Some(Box::new(click(on, move || Act::Help(help)))),
         switch,
         grouped,
@@ -927,7 +801,7 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
     let mut col = div()
         .flex()
         .flex_col()
-        .child(group_label("Appearance", true))
+        .child(group_label(&t::settings_group_appearance(), true))
         .child(
             div()
                 .min_h(px(36.))
@@ -941,7 +815,7 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
                         .text_size(px(16.))
                         .line_height(px(19.))
                         .text_color(c(0xffffff))
-                        .child("Theme"),
+                        .child(t::settings_theme()),
                 )
                 .child(theme_picker(s, on)),
         );
@@ -953,7 +827,7 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
     };
     for t in rows {
         if t.group != last {
-            col = col.child(group_label(t.group, false));
+            col = col.child(group_label(&group_name(t.group), false));
             last = t.group;
         }
         col = col.child(row(s, t.key, on, true));
@@ -974,7 +848,7 @@ fn privacy_block(s: &Settings, on: &OnAct) -> AnyElement {
 /// A `.st-line`: a label, its explainer, and a control flush right.
 fn line(
     id: &str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     help: Option<&'static str>,
     control: AnyElement,
     on: &OnAct,
@@ -988,7 +862,7 @@ fn line(
         .text_size(px(16.))
         .line_height(px(19.))
         .text_color(c(0xffffff))
-        .child(div().min_w_0().flex_shrink(1.).child(label));
+        .child(div().min_w_0().flex_shrink(1.).child(label.into()));
     if let Some(help) = help {
         name = name.child(info(
             SharedString::from(format!("{id}-info")),
@@ -1016,43 +890,24 @@ fn notif_bits(level: &str) -> u8 {
     }
 }
 
-const STREAMER_LEVELS: [crate::kit::Choice; 4] = [
-    crate::kit::Choice {
-        value: "none",
-        label: "Nothing extra",
-    },
-    crate::kit::Choice {
-        value: "hide_content",
-        label: "Messages",
-    },
-    crate::kit::Choice {
-        value: "hide_sender",
-        label: "Names",
-    },
-    crate::kit::Choice {
-        value: "hide_all",
-        label: "Names and messages",
-    },
-];
+fn streamer_levels() -> &'static [crate::kit::Choice] {
+    crate::kit::choices("streamer_levels", || vec![
+        crate::kit::Choice { value: "none", label: crate::kit::interned(&t::settings_streamer_hide_none()) },
+        crate::kit::Choice { value: "hide_content", label: crate::kit::interned(&t::settings_streamer_hide_content()) },
+        crate::kit::Choice { value: "hide_sender", label: crate::kit::interned(&t::settings_streamer_hide_sender()) },
+        crate::kit::Choice { value: "hide_all", label: crate::kit::interned(&t::settings_streamer_hide_all()) },
+    ])
+}
 
 fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
     let live = s.on.get("streamer_on").copied().unwrap_or(false);
     let base = notif_bits(&s.notif_privacy);
     let bits = base | notif_bits(&s.streamer_notif);
-    let caption = format!(
-        "Notifications while streaming: {}, {}",
-        if bits & 1 != 0 {
-            "name hidden"
-        } else {
-            "name shown if they allow streams"
-        },
-        if bits & 2 != 0 {
-            "message hidden"
-        } else {
-            "message shown"
-        }
+    let caption = t::settings_streamer_caption(
+        &if bits & 2 != 0 { t::settings_streamer_message_hidden() } else { t::settings_streamer_message_shown() },
+        &if bits & 1 != 0 { t::settings_streamer_name_hidden() } else { t::settings_streamer_name_shown() },
     );
-    let disabled: Vec<&'static str> = STREAMER_LEVELS
+    let disabled: Vec<&'static str> = streamer_levels()
         .iter()
         .filter(|o| o.value != "none" && notif_bits(o.value) & !base == 0)
         .map(|o| o.value)
@@ -1098,7 +953,7 @@ fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
                         .text_size(px(15.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(white_a(0.92))
-                        .child("Streamer Mode"),
+                        .child(t::settings_streamer()),
                 )
                 .child(info(
                     "streamer-card-info",
@@ -1115,7 +970,7 @@ fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
         "streamer-notif",
         f32::INFINITY,
         12.,
-        &STREAMER_LEVELS,
+        streamer_levels(),
         &disabled,
         &s.streamer_notif,
         s.open_select == Some("streamer-notif"),
@@ -1137,7 +992,7 @@ fn streamer_block(s: &Settings, on: &OnAct) -> AnyElement {
         .child(row(s, "streamer_wallpapers", on, false))
         .child(line(
             "streamer-notif",
-            "While streaming, also hide",
+            t::settings_streamer_also_hide(),
             Some("streamerNotif"),
             select,
             on,
@@ -1163,7 +1018,7 @@ fn blocked_block(s: &Settings, on: &OnAct) -> AnyElement {
             .my(px(13.))
             .text_size(px(13.))
             .text_color(c(0x666666))
-            .child("No blocked users")
+            .child(t::settings_blocked_none())
             .into_any_element();
     }
     div()
@@ -1239,7 +1094,7 @@ fn blocked_block(s: &Settings, on: &OnAct) -> AnyElement {
                         .hover(|d| d.bg(c(crate::timeline::DANGER).opacity(0.15)))
                         .cursor_pointer()
                         .on_click(click(on, move || Act::Unblock(npub.clone())))
-                        .child("Unblock"),
+                        .child(t::settings_unblock()),
                 )
         }))
         .into_any_element()
@@ -1248,7 +1103,7 @@ fn blocked_block(s: &Settings, on: &OnAct) -> AnyElement {
 /// `.st-page .cancel-btn`: the small grey button.
 fn small_button(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     act: impl Fn() -> Act + 'static,
     on: &OnAct,
 ) -> AnyElement {
@@ -1267,7 +1122,7 @@ fn small_button(
         .text_color(c(0xffffff))
         .cursor_pointer()
         .on_click(click(on, act))
-        .child(label)
+        .child(label.into())
         .into_any_element()
 }
 
@@ -1295,47 +1150,27 @@ fn danger_button(on: &OnAct) -> AnyElement {
                 .mt(px(-2.))
                 .text_color(c(crate::timeline::DANGER)),
         )
-        .child("Logout")
+        .child(t::settings_logout())
         .into_any_element()
 }
 
-const NOTIF_PRIVACY: [crate::kit::Choice; 4] = [
-    crate::kit::Choice {
-        value: "full",
-        label: "Show sender and message",
-    },
-    crate::kit::Choice {
-        value: "hide_content",
-        label: "Hide message",
-    },
-    crate::kit::Choice {
-        value: "hide_sender",
-        label: "Hide sender",
-    },
-    crate::kit::Choice {
-        value: "hide_all",
-        label: "Hide sender and message",
-    },
-];
+fn notif_privacy() -> &'static [crate::kit::Choice] {
+    crate::kit::choices("notif_privacy", || vec![
+        crate::kit::Choice { value: "full", label: crate::kit::interned(&t::settings_notif_privacy_full()) },
+        crate::kit::Choice { value: "hide_content", label: crate::kit::interned(&t::settings_notif_privacy_hide_content()) },
+        crate::kit::Choice { value: "hide_sender", label: crate::kit::interned(&t::settings_notif_privacy_hide_sender()) },
+        crate::kit::Choice { value: "hide_all", label: crate::kit::interned(&t::settings_notif_privacy_hide_all()) },
+    ])
+}
 
-const SOUNDS: [crate::kit::Choice; 4] = [
-    crate::kit::Choice {
-        value: "default",
-        label: "Prélude",
-    },
-    crate::kit::Choice {
-        value: "techno",
-        label: "Techno",
-    },
-    crate::kit::Choice {
-        value: "none",
-        label: "None",
-    },
-    crate::kit::Choice {
-        value: "custom",
-        label: "Custom...",
-    },
-];
+fn sounds() -> &'static [crate::kit::Choice] {
+    crate::kit::choices("sounds", || vec![
+        crate::kit::Choice { value: "default", label: "Prélude" /* i18n-exempt: a sound is named */ },
+        crate::kit::Choice { value: "techno", label: "Techno" /* i18n-exempt */ },
+        crate::kit::Choice { value: "none", label: crate::kit::interned(&t::settings_notif_sound_none()) },
+        crate::kit::Choice { value: "custom", label: crate::kit::interned(&t::settings_notif_sound_custom()) },
+    ])
+}
 
 impl Settings {
     /// The sound dropdown's value: Custom while a file is still being picked.
@@ -1390,11 +1225,11 @@ fn dropdown_w(
 }
 
 fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
-    let privacy = dropdown("notif-privacy", &NOTIF_PRIVACY, &s.notif_privacy, s, on);
+    let privacy = dropdown("notif-privacy", notif_privacy(), &s.notif_privacy, s, on);
     let choice = s.sound_choice();
     let preview = div()
         .id("notif-preview")
-        .tip("Preview Sound")
+        .tip(t::settings_notif_sound_preview())
         .w(px(28.))
         .h(px(36.))
         .flex()
@@ -1431,7 +1266,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                         .text_size(px(16.))
                         .line_height(px(19.))
                         .text_color(c(0xffffff))
-                        .child("Content Privacy")
+                        .child(t::settings_notif_privacy())
                         .child(info(
                             "notif-privacy-info",
                             click(on, || Act::Help("notifPrivacy")),
@@ -1453,10 +1288,10 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                         .text_size(px(16.))
                         .line_height(px(24.))
                         .text_color(c(0xffffff))
-                        .child("Notification Sound"),
+                        .child(t::settings_notif_sound()),
                 )
                 .child(preview)
-                .child(dropdown("notif-sound", &SOUNDS, choice, s, on)),
+                .child(dropdown("notif-sound", sounds(), choice, s, on)),
         );
     if choice == "custom" {
         let name = s
@@ -1466,7 +1301,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                 let file = std::path::Path::new(p)
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Unknown file".into());
+                    .unwrap_or_else(|| t::settings_notif_sound_unknown().into());
                 // `name_48000.raw` is the cache form; show the name as picked.
                 match file
                     .strip_suffix(".raw")
@@ -1477,12 +1312,12 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                     None => file,
                 }
             })
-            .unwrap_or_else(|| "No file selected".into());
+            .unwrap_or_else(|| t::settings_notif_sound_unpicked().into());
         // `.notif-custom-container`: its 20px top margin swallows the row's 15.
         col = col.child(
             div()
                 .id("notif-sound-chip")
-                .tip("Click to change sound")
+                .tip(t::settings_notif_sound_change())
                 .mt(px(5.))
                 .mb(px(15.))
                 .flex()
@@ -1518,7 +1353,7 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .child(
                     div()
                         .id("notif-sound-clear")
-                        .tip("Remove custom sound")
+                        .tip(t::settings_notif_sound_remove())
                         .size(px(20.))
                         .flex_shrink_0()
                         .flex()
@@ -1547,70 +1382,79 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
 }
 
 pub struct StoreCat {
-    pub name: &'static str,
+    pub name: Label,
     pub exts: &'static [&'static str],
     /// A synthetic bucket: `/cache` or `/ai_models`.
     pub key: Option<&'static str>,
-    pub title: &'static str,
-    pub noun: &'static str,
+    pub title: Label,
+    /// The delete popup's first paragraph, given the slice's size.
+    pub text: fn(&str) -> SharedString,
+    pub again: Label,
 }
 
 pub const STORE_CATS: [StoreCat; 7] = [
     StoreCat {
-        name: "Images",
+        name: t::settings_storage_images,
         exts: &[
             "jpg", "jpeg", "png", "gif", "bmp", "webp", "jxl", "svg", "avif", "heic", "heif", "tif",
             "tiff", "ico",
         ],
         key: None,
-        title: "Delete all Images?",
-        noun: "downloaded images",
+        title: t::settings_storage_images_ask,
+        text: |size| t::settings_storage_images_text(size),
+        again: t::settings_storage_images_again,
     },
     StoreCat {
-        name: "Video",
+        name: t::settings_storage_video,
         exts: &[
             "mp4", "mov", "avi", "mkv", "flv", "wmv", "3gp", "webm", "m4v", "mpeg", "mpg",
         ],
         key: None,
-        title: "Delete all Videos?",
-        noun: "downloaded videos",
+        title: t::settings_storage_video_ask,
+        text: |size| t::settings_storage_video_text(size),
+        again: t::settings_storage_video_again,
     },
     StoreCat {
-        name: "Audio",
+        name: t::settings_storage_audio,
         exts: &[
             "mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac", "weba", "wma", "aiff",
         ],
         key: None,
-        title: "Delete all Audio?",
-        noun: "downloaded audio and voice messages",
+        title: t::settings_storage_audio_ask,
+        text: |size| t::settings_storage_audio_text(size),
+        again: t::settings_storage_audio_again,
     },
     StoreCat {
-        name: "Apps",
+        name: t::settings_storage_apps,
         exts: &["xdc", "jsdos"],
         key: None,
-        title: "Delete all Mini Apps?",
-        noun: "downloaded Mini Apps",
+        title: t::settings_storage_apps_ask,
+        text: |size| t::settings_storage_apps_text(size),
+        again: t::settings_storage_apps_again,
     },
     StoreCat {
-        name: "AI",
+        name: t::settings_storage_ai,
         exts: &[],
         key: Some("/ai_models"),
-        title: "Delete AI Models?",
-        noun: "",
+        title: t::settings_storage_ai_ask,
+        text: |size| t::settings_storage_ai_text(size),
+        again: t::settings_storage_ai_again,
     },
     StoreCat {
-        name: "Cache",
+        name: t::settings_storage_cache,
         exts: &[],
         key: Some("/cache"),
-        title: "Clear the Cache?",
-        noun: "",
+        title: t::settings_storage_cache_ask,
+        text: |size| t::settings_storage_cache_text(size),
+        again: t::settings_storage_cache_again,
     },
     StoreCat {
-        name: "Files",
+        name: t::settings_storage_files,
         exts: &[],
         key: None,
-        title: "Delete all Files?",
-        noun: "downloaded files",
+        title: t::settings_storage_files_ask,
+        text: |size| t::settings_storage_files_text(size),
+        again: t::settings_storage_files_again,
     },
 ];
 
@@ -1739,17 +1583,15 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
     let (value, label) = match view {
         Some(i) => {
             let g = &segs[i];
-            let pct = if g.pct < 1. {
-                "<1".to_string()
+            let name = (STORE_CATS[g.cat].name)();
+            let label = if g.pct < 1. {
+                t::settings_storage_slice(&name, "<1")
             } else {
-                format!("{}", g.pct.round() as u32)
+                t::settings_storage_slice(&name, g.pct.round() as u32)
             };
-            (
-                ring_size(g.size),
-                format!("{} · {pct}%", STORE_CATS[g.cat].name),
-            )
+            (ring_size(g.size), label)
         }
-        None => (ring_size(total), "Total".into()),
+        None => (ring_size(total), t::settings_storage_total()),
     };
     let paint: Vec<(f32, f32, u32, bool, bool)> = segs
         .iter()
@@ -1929,9 +1771,9 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
                                 b.cursor_pointer().on_click(click(on, || Act::DonutDelete))
                             })
                             .child(if s.donut.busy {
-                                "Deleting..."
+                                t::settings_storage_deleting()
                             } else {
-                                "Delete"
+                                t::settings_storage_delete()
                             }),
                     )
                 }),
@@ -1969,7 +1811,7 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
                                 .flex_shrink_0()
                                 .bg(c(g.color)),
                         )
-                        .child(STORE_CATS[g.cat].name)
+                        .child((STORE_CATS[g.cat].name)())
                 }))
         }));
     div()
@@ -1988,40 +1830,27 @@ fn donut(s: &Settings, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
-/// The auto-download limits on offer.
-const LIMITS: [crate::kit::Choice; 6] = [
-    crate::kit::Choice {
-        value: "1048576",
-        label: "1 MB",
-    },
-    crate::kit::Choice {
-        value: "5242880",
-        label: "5 MB",
-    },
-    crate::kit::Choice {
-        value: "10485760",
-        label: "10 MB",
-    },
-    crate::kit::Choice {
-        value: "26214400",
-        label: "25 MB",
-    },
-    crate::kit::Choice {
-        value: "52428800",
-        label: "50 MB",
-    },
-    crate::kit::Choice {
-        value: "104857600",
-        label: "100 MB",
-    },
-];
+/// The auto-download limits on offer, in MB.
+fn limits() -> &'static [crate::kit::Choice] {
+    crate::kit::choices("limits", || {
+        [("1048576", 1), ("5242880", 5), ("10485760", 10), ("26214400", 25), ("52428800", 50), ("104857600", 100)]
+            .into_iter()
+            .map(|(value, mb)| crate::kit::Choice { value, label: crate::kit::interned(&t::settings_storage_megabytes(mb)) })
+            .collect()
+    })
+}
 
-const VIDEO_QUALITIES: [crate::kit::Choice; 4] = [
-    crate::kit::Choice { value: "small", label: "Small" },
-    crate::kit::Choice { value: "balanced", label: "Balanced" },
-    crate::kit::Choice { value: "high", label: "High" },
-    crate::kit::Choice { value: "original", label: "Original" },
-];
+fn video_qualities() -> &'static [crate::kit::Choice] {
+    crate::kit::choices("video_qualities", || {
+        let q = |value, label: SharedString| crate::kit::Choice { value, label: crate::kit::interned(&label) };
+        vec![
+            q("small", t::settings_video_quality_small()),
+            q("balanced", t::settings_video_quality_balanced()),
+            q("high", t::settings_video_quality_high()),
+            q("original", t::settings_video_quality_original()),
+        ]
+    })
+}
 
 fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
     let auto = s.on.get("auto_download_enabled").copied().unwrap_or(true);
@@ -2030,7 +1859,7 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
         "auto-limit",
         120.,
         12.,
-        &LIMITS,
+        limits(),
         &[],
         &limit,
         auto && s.open_select == Some("auto-limit"),
@@ -2045,7 +1874,7 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
     );
     let clear = small_button(
         "clear-storage",
-        if s.clearing { "Clearing..." } else { "Clear" },
+        if s.clearing { t::settings_storage_clearing() } else { t::settings_storage_clear() },
         || Act::ClearStorage,
         on,
     );
@@ -2059,7 +1888,7 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .when(!auto, |d| d.opacity(0.45).block_mouse_except_scroll())
                 .child(line(
                     "auto-limit",
-                    "Auto-Download Limit",
+                    t::settings_auto_download_limit(),
                     Some("autoDownloadLimit"),
                     select,
                     on,
@@ -2073,7 +1902,7 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
                 "video-quality",
                 120.,
                 12.,
-                &VIDEO_QUALITIES,
+                video_qualities(),
                 &[],
                 &s.video_quality,
                 s.open_select == Some("video-quality"),
@@ -2086,12 +1915,12 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
                     move |v, w, cx| on(Act::Pick("video-quality", v), w, cx)
                 },
             );
-            d.child(line("video-quality", "Video Quality", Some("videoQuality"), select, on))
+            d.child(line("video-quality", t::settings_video_quality(), Some("videoQuality"), select, on))
         })
         .when_some(s.moving.as_ref(), |d, (count, plain)| {
             d.child(line(
                 "moving",
-                if *plain { "Decrypting your kept files" } else { "Moving your files into Vector" },
+                if *plain { t::settings_storage_decrypting() } else { t::settings_storage_moving() },
                 None,
                 div().child(count.clone()).into_any_element(),
                 on,
@@ -2099,7 +1928,7 @@ fn storage_block(s: &Settings, on: &OnAct) -> AnyElement {
         })
         .child(line(
             "clear",
-            "Clear Storage",
+            t::settings_clear_storage(),
             Some("clearStorage"),
             clear,
             on,
@@ -2116,7 +1945,7 @@ fn shows_plain(s: &Settings) -> bool {
 /// `.st-btn`: the small grey button.
 fn st_btn(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     act: impl Fn() -> Act + 'static,
     on: &OnAct,
 ) -> AnyElement {
@@ -2126,7 +1955,7 @@ fn st_btn(
 /// `.st-row`: a label with its explainer, an action flush right.
 fn st_row(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     help: &'static str,
     action: AnyElement,
     on: &OnAct,
@@ -2146,7 +1975,7 @@ fn st_row(
                 .text_size(px(16.))
                 .line_height(px(24.))
                 .text_color(c(0xffffff))
-                .child(label)
+                .child(label.into())
                 .child(info(
                     SharedString::from(format!("{id}-info")),
                     click(on, move || Act::Help(help)),
@@ -2189,14 +2018,38 @@ pub fn relay_status(tone: &str, text: impl Into<SharedString>) -> AnyElement {
 }
 
 /// The relay list's word for a socket state.
-pub fn said(status: &str) -> String {
-    if status == "disconnected" {
-        return "Not Connected".into();
+pub fn said(status: &str) -> SharedString {
+    match status {
+        "initialized" => return t::settings_relay_initialized(),
+        "pending" => return t::settings_relay_pending(),
+        "connecting" => return t::settings_relay_connecting(),
+        "connected" => return t::settings_relay_connected(),
+        "disconnected" => return t::settings_relay_disconnected(),
+        "terminated" => return t::settings_relay_terminated(),
+        "shutdown" => return t::settings_relay_shutdown(),
+        "banned" => return t::settings_relay_banned(),
+        "sleeping" => return t::settings_relay_sleeping(),
+        "disabled" => return t::settings_relay_disabled(),
+        _ => {}
     }
     let mut ch = status.chars();
     ch.next()
         .map(|f| f.to_uppercase().collect::<String>() + ch.as_str())
         .unwrap_or_default()
+        .into()
+}
+
+/// A media server's state in words; core's own label for one this doesn't know.
+fn server_said(state: &str, label: &str) -> SharedString {
+    match state {
+        "online" => t::settings_server_online(),
+        "offline" => t::settings_server_offline(),
+        "maxed" => t::settings_server_maxed(),
+        "no_access" => t::settings_server_no_access(),
+        "untested" => t::settings_server_untested(),
+        "disabled" => t::settings_server_disabled(),
+        _ => label.to_string().into(),
+    }
 }
 
 /// Where a row came from: `default` outlined, `custom` filled.
@@ -2215,7 +2068,7 @@ fn origin_pill(default: bool) -> impl IntoElement {
         .when(!default, |d| d.border_color(c(0x333333)).bg(c(0x333333)))
         .text_size(px(12.))
         .text_color(c(0xb2b2b2))
-        .child(if default { "Default" } else { "Custom" })
+        .child(if default { t::settings_origin_default() } else { t::settings_origin_custom() })
 }
 
 pub fn host(url: &str) -> String {
@@ -2249,9 +2102,9 @@ fn net_row(
 fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
     let mut col = div().flex().flex_col().child(st_row(
         "relays",
-        "Add Custom Relay",
+        t::settings_add_relay(),
         "relays",
-        st_btn("add-relay", "Add Relay", || Act::AddRelay, on),
+        st_btn("add-relay", t::settings_add_relay_button(), || Act::AddRelay, on),
         on,
     ));
     for r in s.relays.iter().flatten() {
@@ -2339,9 +2192,9 @@ fn relays_block(s: &Settings, on: &OnAct) -> AnyElement {
 fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
     let mut col = div().flex().flex_col().child(st_row(
         "servers",
-        "Add Custom Server",
+        t::settings_add_server(),
         "servers",
-        st_btn("add-server", "Add Server", || Act::AddServer, on),
+        st_btn("add-server", t::settings_add_server_button(), || Act::AddServer, on),
         on,
     ));
     for sv in s.servers.iter().flatten() {
@@ -2380,11 +2233,11 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .line_height(px(24.))
                     .opacity(0.45)
                     .text_color(c(0xffffff))
-                    .child(format!("{ms} ms")),
+                    .child(t::settings_latency(ms)),
             );
         }
         if tag.is_none() {
-            right = right.child(relay_status(sv.status.tone, sv.status.label));
+            right = right.child(relay_status(sv.status.tone, server_said(sv.status.state, sv.status.label)));
         }
         col = col.child(
             net_row(
@@ -2403,41 +2256,30 @@ fn servers_block(s: &Settings, on: &OnAct) -> AnyElement {
     col.into_any_element()
 }
 
-fn span(ms: i64) -> String {
+fn span(ms: i64) -> SharedString {
     let s = (ms.unsigned_abs() as f64 / 1000.).round() as u64;
-    let (n, unit) = if s < 90 {
-        (s, "second")
+    if s < 90 {
+        t::time_seconds(s)
     } else if s < 5400 {
-        ((s as f64 / 60.).round() as u64, "minute")
+        t::time_minutes((s as f64 / 60.).round() as u64)
     } else {
-        ((s as f64 / 3600.).round() as u64, "hour")
-    };
-    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+        t::time_hours((s as f64 / 3600.).round() as u64)
+    }
 }
 
 fn clock_block(s: &Settings, on: &OnAct) -> AnyElement {
     let note = match &s.clock {
-        Some(c) if c.checked_at == 0 => "Checking the time with your relays…".to_string(),
-        None => "Checking the time with your relays…".to_string(),
-        Some(c) if c.agreeing < 3 => {
-            "Fewer than three of your relays agreed on the time, so this device’s clock is in use."
-                .into()
-        }
-        Some(c) if c.measured_offset_ms == 0 => "This device’s clock matches your relays.".into(),
+        Some(c) if c.checked_at == 0 => t::settings_clock_checking(),
+        None => t::settings_clock_checking(),
+        Some(c) if c.agreeing < 3 => t::settings_clock_too_few(),
+        Some(c) if c.measured_offset_ms == 0 => t::settings_clock_matches(),
         Some(c) => {
-            let apart = format!(
-                "{} {}",
-                span(c.measured_offset_ms),
-                if c.measured_offset_ms > 0 {
-                    "slow"
-                } else {
-                    "fast"
-                }
-            );
-            if c.decentralised {
-                format!("This device’s clock is {apart}. Vector is using your relays’ time.")
-            } else {
-                format!("Your relays say this device’s clock is {apart}.")
+            let apart = span(c.measured_offset_ms);
+            match (c.measured_offset_ms > 0, c.decentralised) {
+                (true, true) => t::settings_clock_slow_fixed(&apart),
+                (false, true) => t::settings_clock_fast_fixed(&apart),
+                (true, false) => t::settings_clock_slow(&apart),
+                (false, false) => t::settings_clock_fast(&apart),
             }
         }
     };
@@ -2481,7 +2323,7 @@ fn advanced_fold(open: bool, on: &OnAct) -> AnyElement {
                 .text_color(c(0xb2b2b2))
                 .with_transformation(crate::kit::turn("sec-advanced-chevron", open, std::f32::consts::PI, 0.2, crate::kit::css_ease())),
         )
-        .child("Advanced")
+        .child(t::settings_security_advanced())
         .into_any_element()
 }
 
@@ -2548,10 +2390,10 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(15.2))
                         .child(dot)
-                        .child("Remote Signer"),
+                        .child(t::settings_signer()),
                 )
                 .child(
-                    st_btn("signer-reauth", "Re-authorize", || Act::Reauthorize, on),
+                    st_btn("signer-reauth", t::settings_signer_reauthorize(), || Act::Reauthorize, on),
                 ),
         )
         .child(
@@ -2562,7 +2404,7 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                 .gap(px(10.))
                 .text_size(px(13.6))
                 .line_height(px(24.))
-                .child(div().w(px(70.)).flex_none().text_color(white_a(0.45)).child("Signer key"))
+                .child(div().w(px(70.)).flex_none().text_color(white_a(0.45)).child(t::settings_signer_key()))
                 .child(
                     div()
                         .id("signer-npub")
@@ -2580,7 +2422,7 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                 .text_size(px(12.5))
                 .line_height(px(17.5))
                 .text_color(white_a(0.45))
-                .child("Your identity key lives on your signer app. Vector only holds a device pairing key."),
+                .child(t::settings_signer_note()),
         )
         .into_any_element()
 }
@@ -2599,22 +2441,22 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
         .children(s.signer.as_ref().map(|(npub, dot)| signer_card(npub, dot, on)))
         .child(toggle_row(
         "encryption",
-        "Local Encryption",
+        t::settings_encryption(),
         Some(Box::new(click(on, || Act::Help("encryption")))),
         switch,
         false,
     ));
     if enabled {
         let (label, help) = if s.sec_kind == "password" {
-            ("Change Password", "changePassword")
+            (t::settings_change_password(), "changePassword")
         } else {
-            ("Change PIN", "changePin")
+            (t::settings_change_pin(), "changePin")
         };
         col = col.child(st_row(
             "change-cred",
             label,
             help,
-            st_btn("change-cred-btn", "Change", || Act::ChangeCredential, on),
+            st_btn("change-cred-btn", t::settings_change(), || Act::ChangeCredential, on),
             on,
         ));
     }
@@ -2624,9 +2466,9 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
     }
     col = col.child(st_row(
         "transfer",
-        "Sign in on Another Device",
+        t::settings_transfer(),
         "transfer",
-        st_btn("transfer-btn", "Start", || Act::Transfer, on),
+        st_btn("transfer-btn", t::settings_transfer_start(), || Act::Transfer, on),
         on,
     ));
     col = col.child(advanced_fold(s.sec_advanced, on));
@@ -2634,7 +2476,7 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
         // `blockedFadeIn`
         col = col.child(crate::kit::rise(
             "sec-advanced-row",
-            st_row("keys", "Private Keys", "exportAccount", st_btn("keys-btn", "Show", || Act::ShowKeys, on), on),
+            st_row("keys", t::settings_private_keys(), "exportAccount", st_btn("keys-btn", t::settings_private_keys_show(), || Act::ShowKeys, on), on),
             200,
             (0., -8., 1.),
             crate::kit::bezier(0.25, 0.1, 0.25, 1.),
@@ -2755,7 +2597,7 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child("Current Version")
+                .child(t::settings_update_current())
                 .child(info("upd-info", click(on, || Act::Help("updates")))),
         )
         .child(
@@ -2772,11 +2614,11 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
         .items_start()
         .child(div().w_full().child(version_row));
     col = match standing {
-        "outdated" => col.child(upd_card(None, &format!("Your client is currently out of date. The latest version is {}.", found.map(|f| f.0.as_str()).unwrap_or("")))),
-        "latest" => col.child(upd_card(Some(("Your client is up to date.", c(ACCENT))), "It is currently on the latest release.")),
+        "outdated" => col.child(upd_card(None, &t::settings_update_outdated(found.map(|f| f.0.as_str()).unwrap_or("")))),
+        "latest" => col.child(upd_card(Some((&t::settings_update_latest(), c(ACCENT))), &t::settings_update_latest_more())),
         "preview" => col.child(upd_card(
-            Some(("This is a Preview Build.", c(crate::timeline::DANGER))),
-            "It is released ahead of the official version. Preview Builds are public prototypes used to test new features and surface bugs, so feedback from users helps improve the final release. Expect bugs, unfinished features, and occasional instability.",
+            Some((&t::settings_update_preview(), c(crate::timeline::DANGER))),
+            &t::settings_update_preview_more(),
         )),
         _ => col,
     };
@@ -2802,7 +2644,7 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                                 .line_height(px(24.))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(c(0xf6f6f6))
-                                .child("What's New:"),
+                                .child(t::settings_update_whats_new()),
                         )
                         .child(
                             div()
@@ -2827,7 +2669,7 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
         // `.form-group`'s 15px under the row, which brings its own 10.
         div().w_full().mb(px(5.)).child(toggle_row(
             "beta",
-            "Beta Updates",
+            t::settings_update_beta(),
             Some(Box::new(click(on, || Act::Help("beta")))),
             toggle(
                 "tg-beta",
@@ -2839,10 +2681,10 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
         )),
     );
     let (label, enabled) = match u.phase {
-        UpdPhase::Checking => ("Checking...", false),
-        UpdPhase::Available => ("Download Update", true),
-        UpdPhase::Downloading(_) => ("Downloading...", false),
-        _ => ("Check for Updates", true),
+        UpdPhase::Checking => (t::settings_update_button_checking(), false),
+        UpdPhase::Available => (t::settings_update_download(), true),
+        UpdPhase::Downloading(_) => (t::settings_update_downloading(), false),
+        _ => (t::settings_update_check(), true),
     };
     col = col.when(u.phase != UpdPhase::Ready, |col| col.child(
         div()
@@ -2865,14 +2707,10 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
             }),
     ));
     let status = match &u.phase {
-        UpdPhase::Checking => Some(("Checking for updates...".to_string(), white_a(0.8))),
-        UpdPhase::Ready => Some(("Update ready! Restart to apply.".to_string(), white_a(0.8))),
-        UpdPhase::Error(e) => Some((e.clone(), c(0xff5252))),
-        UpdPhase::NoUpdates if current.preview.is_some() => Some((
-            "No newer build yet. You'll be offered the official build as soon as it releases."
-                .to_string(),
-            c(ACCENT),
-        )),
+        UpdPhase::Checking => Some((t::settings_update_checking(), white_a(0.8))),
+        UpdPhase::Ready => Some((t::settings_update_ready(), white_a(0.8))),
+        UpdPhase::Error(e) => Some((e.clone().into(), c(0xff5252))),
+        UpdPhase::NoUpdates if current.preview.is_some() => Some((t::settings_update_no_newer(), c(ACCENT))),
         _ => None,
     };
     if let Some((text, color)) = status {
@@ -2909,7 +2747,7 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .text_color(c(0xffffff))
                 .cursor_pointer()
                 .on_click(click(on, || Act::RestartUpdate))
-                .child("Restart Now"),
+                .child(t::settings_update_restart()),
         );
     }
     col.into_any_element()
@@ -2947,7 +2785,7 @@ fn progress_bar(pct: u8) -> impl IntoElement {
                 .text_size(px(11.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(c(0xffffff))
-                .child(format!("{pct}%")),
+                .child(t::percent(pct)),
         )
 }
 
@@ -3015,7 +2853,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
         .when(!can_translate, |d| d.opacity(0.45))
         .child(toggle_row(
             "voice-translate",
-            "Auto-Translate",
+            t::settings_voice_translate(),
             Some(Box::new(click(on, || Act::Help("voiceTranslate")))),
             switch("voiceTranslate", can_translate && v.auto_translate, can_translate),
             false,
@@ -3030,12 +2868,12 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
             .text_size(px(13.))
             .text_color(c(0xFCE459))
             .child(svg().path("icons/vector_warning.svg").size(px(16.)).flex_shrink_0().text_color(c(0xFCE459)))
-            .child("Selected model does not support translation")
+            .child(t::settings_voice_no_translate())
             .mb(px(10.))
     });
     let transcribe = toggle_row(
         "voice-transcribe",
-        "Auto-Transcribe",
+        t::settings_voice_transcribe(),
         Some(Box::new(click(on, || Act::Help("voiceTranscribe")))),
         switch("voiceTranscribe", v.auto_transcribe, true),
         false,
@@ -3046,13 +2884,13 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
         .iter()
         .map(|m| crate::kit::Choice {
             value: m.name,
-            label: crate::kit::interned(&if v.memory_mb < m.ram as u64 {
-                format!("{} (Insufficient RAM)", m.display)
+            label: if v.memory_mb < m.ram as u64 {
+                crate::kit::interned(&t::settings_voice_model_low_ram(m.display))
             } else if m.name == recommended {
-                format!("{} [Recommended]", m.display)
+                crate::kit::interned(&t::settings_voice_model_recommended(m.display))
             } else {
-                m.display.to_string()
-            }),
+                m.display
+            },
         })
         .collect();
     let disabled: Vec<&str> = v.models.iter().filter(|m| v.memory_mb < m.ram as u64).map(|m| m.name).collect();
@@ -3099,7 +2937,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
         .text_size(px(16.))
         .line_height(px(24.))
         .text_color(c(0xffffff))
-        .child("Whisper Model")
+        .child(t::settings_voice_model())
         .child(info("voice-model-info", click(on, || Act::Help("voiceModel"))));
     let warn = |text: SharedString| {
         div()
@@ -3136,15 +2974,15 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
                                 ),
                         ),
                 )
-                .child(format!(" Downloading... {d}"))
+                .child(SharedString::from(format!(" {}", t::settings_voice_downloading(d))))
                 .into_any_element(),
         )
     } else if !v.error.is_empty() {
         Some(warn(v.error.clone().into()))
     } else if current.is_some_and(|m| m.downloaded) {
-        Some(div().text_color(c(0x59FCB3)).child("Vector AI is ready").into_any_element())
+        Some(div().text_color(c(0x59FCB3)).child(t::settings_voice_ready()).into_any_element())
     } else if current.is_some() {
-        Some(warn("Model not downloaded".into()))
+        Some(warn(t::settings_voice_not_downloaded()))
     } else {
         None
     };
@@ -3163,7 +3001,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
         Some(
             div()
                 .mt(px(16.))
-                .child(small_button("cancel-download", "Cancel Download", || Act::VoiceCancel, on))
+                .child(small_button("cancel-download", t::settings_voice_cancel_download(), || Act::VoiceCancel, on))
                 .into_any_element(),
         )
     } else {
@@ -3188,7 +3026,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .cursor_pointer()
                 .hover(|d| d.opacity(0.75))
                 .on_click(click(on, || Act::VoiceDownload))
-                .child(format!("Download Model ({})", crate::media::format_bytes(m.size as u64 * 1024 * 1024)))
+                .child(t::settings_voice_download(crate::media::format_bytes(m.size as u64 * 1024 * 1024)))
                 .into_any_element()
         })
     };
@@ -3224,7 +3062,7 @@ fn vselect_tag() -> impl IntoElement {
         .line_height(px(13.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(c(0x9a9a9a))
-        .child("Default")
+        .child(t::settings_device_default())
 }
 
 /// A device `.vselect-fill`: the system default first, named for what it is now.
@@ -3242,7 +3080,7 @@ fn device_select(
     let mut rows: Vec<(Option<String>, String, bool)> = vec![(
         None,
         if default.is_empty() {
-            "System Default".into()
+            t::settings_device_system_default().to_string()
         } else {
             default.to_string()
         },
@@ -3415,10 +3253,10 @@ fn slider(key: &'static str, value: f32, s: &Settings, on: &OnAct) -> AnyElement
         .absolute()
         .inset_0()
     };
-    let name = if key == "mic" { "Microphone Volume" } else { "Speaker Volume" };
+    let name = if key == "mic" { t::settings_mic_volume() } else { t::settings_speaker_volume() };
     div()
         .id(key)
-        .as_slider(name, format!("{}%", (value * 100.).round()), value)
+        .as_slider(name, t::percent((value * 100.).round()), value)
         .slider_keys(value, 0.05, {
             let on = on.clone();
             move |f, w, cx| on(Act::Volume(key, f), w, cx)
@@ -3509,7 +3347,7 @@ pub fn voice_meter(level: f32, active: bool) -> impl IntoElement {
         )
 }
 
-fn calls_field(label: &'static str, control: AnyElement) -> impl IntoElement {
+fn calls_field(label: SharedString, control: AnyElement) -> impl IntoElement {
     div()
         .flex_1()
         .min_w_0()
@@ -3541,7 +3379,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .gap(px(20.))
                 .mb(px(28.))
                 .child(calls_field(
-                    "Microphone",
+                    t::settings_microphone(),
                     device_select(
                         "dev-input",
                         "input",
@@ -3554,7 +3392,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
                     ),
                 ))
                 .child(calls_field(
-                    "Speaker",
+                    t::settings_speaker(),
                     device_select(
                         "dev-output",
                         "output",
@@ -3575,11 +3413,11 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .gap(px(20.))
             .mb(px(28.))
             .child(calls_field(
-                "Microphone Volume",
+                t::settings_mic_volume(),
                 slider("mic", a.settings.mic_volume, s, on),
             ))
             .child(calls_field(
-                "Speaker Volume",
+                t::settings_speaker_volume(),
                 slider("speaker", a.settings.speaker_volume, s, on),
             )),
     );
@@ -3590,7 +3428,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
             .gap(px(22.))
             .mb(px(16.))
             .when_some(a.call, |d, _| {
-                d.child(div().flex_none().text_size(px(14.)).text_color(c(0xb2b2b2)).child("On a call"))
+                d.child(div().flex_none().text_size(px(14.)).text_color(c(0xb2b2b2)).child(t::settings_mic_on_call()))
             })
             .when(a.call.is_none(), |d| d.child(
                 div()
@@ -3608,7 +3446,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
                     .text_color(c(0xffffff))
                     .cursor_pointer()
                     .on_click(click(on, || Act::MicTest))
-                    .child(if a.testing { "Stop Test" } else { "Test Mic" }),
+                    .child(if a.testing { t::settings_mic_test_stop() } else { t::settings_mic_test() }),
             ))
             .child(match a.call {
                 Some(level) => voice_meter(level, true),
@@ -3616,15 +3454,11 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
             }),
     );
     // `.st-group`'s 36px margin swallows the bench's 16.
-    col = col.child(div().mt(px(20.)).child(group_label("Microphone", true)));
+    col = col.child(div().mt(px(20.)).child(group_label(&t::settings_group_microphone(), true)));
     for (key, label, on_) in [
-        ("autoGain", "Automatic Gain", a.settings.auto_gain),
-        ("echoCancel", "Echo Cancellation", a.settings.echo_cancel),
-        (
-            "noiseSuppress",
-            "Noise Suppression",
-            a.settings.noise_suppress,
-        ),
+        ("autoGain", t::settings_toggle_auto_gain(), a.settings.auto_gain),
+        ("echoCancel", t::settings_toggle_echo_cancel(), a.settings.echo_cancel),
+        ("noiseSuppress", t::settings_toggle_noise_suppress(), a.settings.noise_suppress),
     ] {
         let switch = toggle(
             SharedString::from(format!("tg-{key}")),
@@ -3640,7 +3474,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
             true,
         ));
     }
-    col = col.child(group_label("Connection", false));
+    col = col.child(group_label(&t::settings_group_connection(), false));
     let direct = a.direct;
     let switch = toggle(
         "tg-direct",
@@ -3650,7 +3484,7 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
     );
     col.child(toggle_row(
         "direct",
-        "Direct Connection",
+        t::settings_toggle_direct(),
         Some(Box::new(click(on, || Act::Help("direct")))),
         switch,
         true,
@@ -3677,14 +3511,14 @@ fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
         "advanced" => row(s, "advanced", on, false),
         "logs" => line(
             "logs",
-            "Copy Logs",
+            t::settings_copy_logs(),
             Some("crashLog"),
-            small_button("copy-logs", "Copy", || Act::CopyLogs, on),
+            small_button("copy-logs", t::settings_copy_logs_button(), || Act::CopyLogs, on),
             on,
         )
         .into_any_element(),
         "logout" => {
-            line("logout", "Logout", Some("logout"), danger_button(on), on).into_any_element()
+            line("logout", t::settings_logout(), Some("logout"), danger_button(on), on).into_any_element()
         }
         _ => return None,
     })
@@ -3912,7 +3746,7 @@ pub fn section_nav(
                 .my(px(12.))
                 .text_size(px(13.))
                 .text_color(c(0x6f6f6f))
-                .child("No matches"),
+                .child(t::settings_search_none()),
         );
     }
     let has_query = !query.is_empty();
@@ -4003,7 +3837,7 @@ fn nav(
     on: &OnAct,
     cx: &App,
 ) -> AnyElement {
-    let link = |label: &'static str, key: &'static str| {
+    let link = |label: SharedString, key: &'static str| {
         div()
             .id(key)
             .text_size(px(12.))
@@ -4024,7 +3858,7 @@ fn nav(
         .line_height(px(24.))
         .font_weight(FontWeight::BOLD)
         .text_color(c(0xffffff))
-        .child("Settings")
+        .child(t::settings_title())
         .into_any_element();
     let footer = div()
         .mt(px(12.))
@@ -4036,9 +3870,9 @@ fn nav(
         .flex_wrap()
         .gap_x(px(16.))
         .gap_y(px(6.))
-        .child(link("Donate", "donate"))
-        .child(link("Docs", "gitbook"))
-        .child(link("Privacy Policy", "privacy"))
+        .child(link(t::settings_link_donate(), "donate"))
+        .child(link(t::settings_link_docs(), "gitbook"))
+        .child(link(t::settings_link_privacy(), "privacy"))
         .into_any_element();
     let (a, b, c_) = (on.clone(), on.clone(), on.clone());
     let nav_on = NavOn {
@@ -4092,7 +3926,7 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
                         .child(
                             div()
                                 .id(SharedString::from(format!("cs-link-{}", a.id)))
-                                .tip("Copy Link")
+                                .tip(t::settings_copy_link())
                                 .ml(px(6.))
                                 .p(px(5.))
                                 .rounded(px(6.))

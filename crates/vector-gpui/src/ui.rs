@@ -17629,29 +17629,18 @@ impl VectorApp {
         };
         let cat = &crate::settings::STORE_CATS[seg.cat];
         let size = crate::media::format_bytes(seg.size);
-        let text = match cat.key {
-            Some("/ai_models") => format!(
-                "This will delete {size} of downloaded AI models from this device.<br><br>Voice transcription will download a model again when needed."
-            ),
-            Some(_) => format!(
-                "This will delete {size} of cached avatars, banners and images.<br><br>Vector rebuilds this cache automatically over time."
-            ),
-            None => format!(
-                "This will delete {size} of {} from this device.<br><br>You can download them again from their chats later, if they are still available.",
-                cat.noun
-            ),
-        };
+        let text = format!("{}<br><br>{}", kit::escape(&(cat.text)(&size)), kit::escape(&(cat.again)()));
         let category = match cat.key {
             Some("/ai_models") => "ai",
             Some(_) => "cache",
             None => "files",
         };
         let exts = crate::settings::slice_exts(seg.cat, dist);
-        let mut popup = kit::Popup::notice(cat.title);
+        let mut popup = kit::Popup::notice((cat.title)());
         popup.icon = Some("icons/vector_warning.svg");
         popup.text = Some(text.into());
-        popup.confirm = "Confirm".into();
-        popup.cancel = Some("Cancel".into());
+        popup.confirm = t::dialog_confirm();
+        popup.cancel = Some(t::dialog_cancel());
         self.popup = Some((popup, PopupAct::DeleteSlice { category, exts }));
     }
 
