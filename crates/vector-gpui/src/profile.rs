@@ -338,11 +338,13 @@ pub fn pane(
                         .path("ui/switcher-chevron.svg")
                         .size(px(14.))
                         .text_color(white_a(0.7))
-                        .when(s.switcher.is_some(), |i| {
-                            i.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                std::f32::consts::PI,
-                            )))
-                        }),
+                        .with_transformation(crate::kit::turn(
+                            "profile-switcher-chevron",
+                            s.switcher.is_some(),
+                            std::f32::consts::PI,
+                            0.16,
+                            crate::kit::css_ease(),
+                        )),
                 )
                 .into_any_element()
         } else {

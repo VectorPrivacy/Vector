@@ -728,6 +728,58 @@ fn tween(key: &SharedString, to: [f32; 6], secs: f32) -> ([f32; 6], bool) {
     })
 }
 
+/// Frames of a white wash, `alpha(x, t)` across `w` pixels at each of `frames` steps of a
+/// `ms` loop: stretched over a box and stepped like any animated picture, so a looping
+/// placeholder swaps a tile instead of redrawing what holds it.
+fn wash(w: u32, frames: u32, ms: u32, alpha: impl Fn(f32, f32) -> f32) -> std::sync::Arc<gpui::RenderImage> {
+    let frames: Vec<image::Frame> = (0..frames)
+        .map(|f| {
+            let t = f as f32 / frames as f32;
+            let mut buf = image::RgbaImage::new(w, 1);
+            for (x, _, px) in buf.enumerate_pixels_mut() {
+                let a = (alpha((x as f32 + 0.5) / w as f32, t).clamp(0., 1.) * 255.).round() as u8;
+                *px = image::Rgba([0xff, 0xff, 0xff, a]);
+            }
+            image::Frame::from_parts(buf, 0, 0, image::Delay::from_numer_denom_ms(ms / frames, 1))
+        })
+        .collect();
+    std::sync::Arc::new(gpui::RenderImage::new(frames))
+}
+
+/// `.pack-skel`: a placeholder shape with a light sweeping across it and back every 1.6 s.
+pub fn skeleton(radius: f32) -> gpui::Div {
+    thread_local! {
+        static SHIMMER: std::sync::Arc<gpui::RenderImage> = wash(48, 48, 1600, |u, t| {
+            let ease = bezier(0.42, 0., 0.58, 1.);
+            // `background-position` 200% to -200% and back, over a 200%-wide gradient.
+            let p = if t < 0.5 { 2. - 4. * ease(t * 2.) } else { -2. + 4. * ease(t * 2. - 1.) };
+            0.03 + 0.06 * (1. - (u - (1. - p)).abs()).max(0.)
+        });
+    }
+    let sheen = SHIMMER.with(|s| s.clone());
+    div().relative().rounded(px(radius)).child(
+        gpui::StyledImage::object_fit(crate::pic::img(gpui::ImageSource::Render(sheen)), gpui::ObjectFit::Fill)
+            .absolute()
+            .inset_0()
+            .rounded(px(radius)),
+    )
+}
+
+/// `img.emoji-img-loading`: a custom emoji's place while it loads, a soft pulse every 1.4 s.
+pub fn emoji_loading(size: f32) -> gpui::Div {
+    thread_local! {
+        static PULSE: std::sync::Arc<gpui::RenderImage> = wash(1, 28, 1400, |_, t| {
+            0.04 + 0.06 * bezier(0.42, 0., 0.58, 1.)(1. - (2. * t - 1.).abs())
+        });
+    }
+    let pulse = PULSE.with(|s| s.clone());
+    div().size(px(size)).flex_shrink_0().child(
+        gpui::StyledImage::object_fit(crate::pic::img(gpui::ImageSource::Render(pulse)), gpui::ObjectFit::Fill)
+            .size_full()
+            .rounded(px(4.)),
+    )
+}
+
 thread_local! {
     static EASES: std::cell::RefCell<std::collections::HashMap<SharedString, (f32, f32, std::time::Instant)>> = Default::default();
     static EASING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -750,6 +802,31 @@ pub fn ease(key: SharedString, to: f32, secs: f32, curve: impl Fn(f32) -> f32) -
             to
         }
     })
+}
+
+/// A glyph's `transition: transform` turn: `to` radians while `on`, eased there and back.
+pub fn turn(key: impl Into<SharedString>, on: bool, to: f32, secs: f32, curve: impl Fn(f32) -> f32) -> gpui::Transformation {
+    gpui::Transformation::rotate(gpui::radians(to * ease(key.into(), on as u8 as f32, secs, curve)))
+}
+
+/// CSS `ease`.
+pub fn css_ease() -> impl Fn(f32) -> f32 {
+    bezier(0.25, 0.1, 0.25, 1.)
+}
+
+/// Last in a view that builds rows at layout (a list's): asks for the next frame while an
+/// [`ease`] they drew still moves.
+pub fn pump() -> impl IntoElement {
+    gpui::canvas(
+        |_, window, _| {
+            if easing() {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_0()
 }
 
 /// Whether an [`ease`] built since the last call is still moving: its view wants another frame.
@@ -998,7 +1075,7 @@ impl gpui::Render for Tip {
     ) -> impl gpui::IntoElement {
         use gpui::{ParentElement, Styled};
         if self.0.is_empty() {
-            return gpui::div();
+            return gpui::div().into_any_element();
         }
         gpui::div()
             .px(gpui::px(8.))
@@ -1011,6 +1088,9 @@ impl gpui::Render for Tip {
             .text_size(gpui::px(12.))
             .text_color(crate::theme::white_a(0.9))
             .child(self.0.clone())
+            // `.global-tooltip`: fades in over 0.15 s.
+            .with_animation("tip-in", gpui::Animation::new(std::time::Duration::from_millis(150)).with_easing(css_ease()), |d, t| d.opacity(t))
+            .into_any_element()
     }
 }
 
@@ -1689,7 +1769,8 @@ pub fn context_menu(
                 gpui::anchored()
                     .position(at)
                     .snap_to_window_with_margin(px(8.))
-                    .child(list),
+                    // `.context-menu.is-visible`: down from 4px above, fading in over 0.12 s.
+                    .child(rise(SharedString::from(format!("ctx-in-{:?}", at)), list, 120, (0., -4., 1.), css_ease())),
             ),
     )
     .with_priority(20)

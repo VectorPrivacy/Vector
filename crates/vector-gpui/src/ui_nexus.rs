@@ -22,6 +22,7 @@ impl VectorApp {
                         n.details = None;
                     }
                     n.turned = std::time::Instant::now();
+                    n.returning = false;
                     n.scroll.set_offset(gpui::Point::default());
                 }
                 cx.notify();
@@ -343,6 +344,7 @@ impl VectorApp {
             Act::ClearSearch => {
                 n.search.update(cx, |s, cx| s.set_text("", cx));
                 n.turned = std::time::Instant::now();
+                n.returning = false;
             }
             Act::EditListing(id) => return self.open_edit_listing(id, window, cx),
             Act::Perm(perm, on) => self.nexus_set_perm(perm, on, cx),

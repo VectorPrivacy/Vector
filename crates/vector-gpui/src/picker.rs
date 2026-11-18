@@ -1461,11 +1461,13 @@ impl EmojiPicker {
                     .size(px(18.))
                     .ml(px(2.))
                     .text_color(white_a(0.5))
-                    .when(collapsed, |i| {
-                        i.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            -std::f32::consts::FRAC_PI_2,
-                        )))
-                    }),
+                    .with_transformation(crate::kit::turn(
+                        format!("picker-caret-{}", s.title()),
+                        collapsed,
+                        -std::f32::consts::FRAC_PI_2,
+                        0.2,
+                        crate::kit::css_ease(),
+                    )),
             )
             .into_any_element()
     }
@@ -1528,11 +1530,13 @@ impl EmojiPicker {
                     .ml(px(-2.))
                     .flex_shrink_0()
                     .text_color(white_a(0.5))
-                    .when(collapsed, |i| {
-                        i.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            -std::f32::consts::FRAC_PI_2,
-                        )))
-                    }),
+                    .with_transformation(crate::kit::turn(
+                        format!("picker-pack-caret-{}", p.id),
+                        collapsed,
+                        -std::f32::consts::FRAC_PI_2,
+                        0.2,
+                        crate::kit::css_ease(),
+                    )),
             )
             .when(p.own, |d| {
                 d.child(
@@ -2279,5 +2283,6 @@ impl Render for EmojiPicker {
             .child(search)
             .child(body)
             .children(overlays)
+            .child(crate::kit::pump())
     }
 }

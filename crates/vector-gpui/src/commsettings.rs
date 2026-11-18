@@ -1315,11 +1315,13 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                                         .path("icons/chevron-down.svg")
                                         .size(px(10.))
                                         .text_color(white_a(0.38))
-                                        .when(open, |s| {
-                                            s.with_transformation(gpui::Transformation::rotate(
-                                                gpui::radians(std::f32::consts::PI),
-                                            ))
-                                        }),
+                                        .with_transformation(crate::kit::turn(
+                                            format!("audit-caret-{id}"),
+                                            open,
+                                            std::f32::consts::PI,
+                                            0.15,
+                                            crate::kit::css_ease(),
+                                        )),
                                 ),
                         )
                     }),

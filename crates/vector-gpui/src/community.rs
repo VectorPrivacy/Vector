@@ -599,14 +599,13 @@ pub fn sidebar(
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon("icons/chevron-down.svg", 11.7, white_a(0.38)).when(
+                            .child(icon("icons/chevron-down.svg", 11.7, white_a(0.38)).with_transformation(crate::kit::turn(
+                                format!("caret-cat-{}", cat.category_id),
                                 closed,
-                                |s| {
-                                    s.with_transformation(gpui::Transformation::rotate(
-                                        gpui::radians(-std::f32::consts::FRAC_PI_2),
-                                    ))
-                                },
-                            )),
+                                -std::f32::consts::FRAC_PI_2,
+                                0.15,
+                                crate::kit::css_ease(),
+                            ))),
                     ),
             )
             .when(owner, |d| {
@@ -1104,14 +1103,13 @@ pub fn roster<E: ParentElement>(
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(icon("icons/chevron-down.svg", 10.4, white_a(0.32)).when(
+                                .child(icon("icons/chevron-down.svg", 10.4, white_a(0.32)).with_transformation(crate::kit::turn(
+                                    format!("caret-{key}"),
                                     closed,
-                                    |s| {
-                                        s.with_transformation(gpui::Transformation::rotate(
-                                            gpui::radians(-std::f32::consts::FRAC_PI_2),
-                                        ))
-                                    },
-                                )),
+                                    -std::f32::consts::FRAC_PI_2,
+                                    0.15,
+                                    crate::kit::css_ease(),
+                                ))),
                         ),
                 )
                 .when(!closed, |d| {

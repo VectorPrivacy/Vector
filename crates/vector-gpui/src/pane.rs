@@ -21,9 +21,14 @@ impl Render for Pane {
         let Some(build) = self.build.clone() else {
             return div().into_any_element();
         };
-        self.app
+        let el = self
+            .app
             .update(cx, |app, cx| build(app, window, cx))
-            .unwrap_or_else(|_| div().into_any_element())
+            .unwrap_or_else(|_| div().into_any_element());
+        if crate::kit::easing() {
+            window.request_animation_frame();
+        }
+        el
     }
 }
 

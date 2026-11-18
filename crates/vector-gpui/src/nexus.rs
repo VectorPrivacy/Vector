@@ -85,6 +85,8 @@ pub struct Nexus {
     pub shelves: HashMap<&'static str, ScrollHandle>,
     /// When the page last changed: it rises in.
     pub turned: Instant,
+    /// The page turned back to the list an app opened over (`.nx-page.pop`).
+    pub returning: bool,
     pub opened: Instant,
     /// Where the list was when an app opened over it, so Back lands there.
     pub list_top: Option<(String, gpui::Point<gpui::Pixels>)>,
@@ -371,6 +373,7 @@ impl Nexus {
             scroll: ScrollHandle::new(),
             shelves: HashMap::new(),
             turned: Instant::now(),
+            returning: false,
             opened: Instant::now(),
             list_top: None,
             root,
@@ -432,11 +435,13 @@ impl Nexus {
         self.details = None;
         let back = self.list_top.take().filter(|(k, _)| *k == self.page_key(cx));
         self.turned = Instant::now();
+        self.returning = back.is_some();
         self.scroll.set_offset(back.map_or(gpui::Point::default(), |(_, at)| at));
     }
 
     fn turn(&mut self) {
         self.turned = Instant::now();
+        self.returning = false;
         self.scroll.set_offset(gpui::Point::default());
     }
 
@@ -2203,12 +2208,19 @@ pub fn view(
     }
     let page = page.with_animation(
         SharedString::from(format!("nx-page-{:?}", n.turned)),
-        gpui::Animation::new(std::time::Duration::from_millis(if app.is_some() { 340 } else { 320 })),
+        gpui::Animation::new(std::time::Duration::from_millis(if app.is_some() { 340 } else if n.slim && n.returning { 300 } else { 320 })),
         {
             let push = n.slim && app.is_some();
+            let pop = n.slim && app.is_none() && n.returning;
             move |d, t| {
                 let e = crate::kit::bezier(0.22, 1., 0.36, 1.)(t);
-                if push { d.opacity(e).ml(px(32. * (1. - e))) } else { d.opacity(e).mt(px(8. * (1. - e))) }
+                if push {
+                    d.opacity(e).ml(px(32. * (1. - e)))
+                } else if pop {
+                    d.opacity(e).ml(px(-20. * (1. - e)))
+                } else {
+                    d.opacity(e).mt(px(8. * (1. - e)))
+                }
             }
         },
     );

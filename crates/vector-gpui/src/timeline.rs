@@ -753,7 +753,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                     .object_fit(gpui::ObjectFit::Contain)
                     .flex_shrink_0()
                     .into_any_element(),
-                Jumbo::Custom(None) => div().size(px(50.)).flex_shrink_0().into_any_element(),
+                Jumbo::Custom(None) => crate::kit::emoji_loading(50.).into_any_element(),
             });
         }
         return div()
@@ -1470,7 +1470,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .aspect_ratio(1.)
                 .object_fit(gpui::ObjectFit::Contain)
                 .into_any_element(),
-            (Some(crate::media::Custom::Pending), _) => div().size(px(16.)).into_any_element(),
+            (Some(crate::media::Custom::Pending), _) => crate::kit::emoji_loading(16.).into_any_element(),
             (_, Some(src)) => img(src).size(px(16.)).into_any_element(),
             _ => div()
                 .text_size(px(12.))

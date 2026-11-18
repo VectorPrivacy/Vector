@@ -1183,6 +1183,7 @@ impl Render for FilePreview {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|p, _, _, cx| p.close(cx)))
             .child(card)
+            .child(crate::kit::pump())
             .with_animation(
                 "fp-fade",
                 gpui::Animation::new(Duration::from_millis(200)),
@@ -1246,13 +1247,13 @@ fn tree_rows(
                         .size(px(12.))
                         .flex_shrink_0()
                         .text_color(white_a(0.35))
-                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            if is_open {
-                                0.
-                            } else {
-                                -std::f32::consts::FRAC_PI_2
-                            },
-                        ))),
+                        .with_transformation(crate::kit::turn(
+                            format!("zip-chevron-{}", d.path),
+                            !is_open,
+                            -std::f32::consts::FRAC_PI_2,
+                            0.15,
+                            crate::kit::css_ease(),
+                        )),
                 )
                 .child(
                     svg()

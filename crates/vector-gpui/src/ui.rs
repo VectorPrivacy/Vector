@@ -6381,6 +6381,16 @@ impl VectorApp {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let el = self.render_root(window, cx);
+        if kit::easing() {
+            window.request_animation_frame();
+        }
+        el
+    }
+}
+
+impl VectorApp {
+    fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         #[cfg(feature = "devctl")]
         let _timed = crate::devctl::Timed::start();
         let me = cx.entity().downgrade();
@@ -7908,11 +7918,13 @@ fn rail(
                                     .path("icons/chevron-double-left.svg")
                                     .size(px(28.))
                                     .text_color(c(0xffffff))
-                                    .when(slim, |s| {
-                                        s.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                            std::f32::consts::PI,
-                                        )))
-                                    }),
+                                    .with_transformation(kit::turn(
+                                        "ws-rail-collapse",
+                                        slim,
+                                        std::f32::consts::PI,
+                                        0.18,
+                                        kit::bezier(0.33, 1., 0.68, 1.),
+                                    )),
                             ),
                     )
                     .when(!slim, |d| {
@@ -8348,7 +8360,8 @@ fn chat_list(
                         }
                     })
                     .size_full(),
-                ),
+                )
+                .child(kit::pump()),
         )
 }
 
@@ -9315,7 +9328,7 @@ impl VectorApp {
         let store = store.borrow();
         let rail_mode = self.rail_mode(window);
         let on_community = self.on_community_act(cx);
-        let el = rail(
+        rail(
             &store,
             &self.rail_open,
             self.open.as_ref(),
@@ -9363,11 +9376,7 @@ impl VectorApp {
                     }),
                 }
             }),
-        ).into_any_element();
-        if kit::easing() {
-            window.request_animation_frame();
-        }
-        el
+        ).into_any_element()
     }
 
     fn on_community_act(&self, cx: &mut Context<Self>) -> crate::community::OnAct {
@@ -9913,7 +9922,10 @@ impl VectorApp {
                                 }),
                             )
                         })
-                    })).or_else(|| self.time_chip_view(cx)),
+                    }))
+                    // `.mention-selector.visible` and its kin: up from 8px below as it fades in.
+                    .map(|p| kit::rise("composer-popup-in", p, 250, (0., 8., 1.), kit::bezier(0.4, 0., 0.2, 1.)))
+                    .or_else(|| self.time_chip_view(cx)),
                 self.composer_box.clone(),
                 (
                     self.send_shown || matches!(self.mode, Mode::Edit { .. }) || self.cmd_form.is_some(),
@@ -10124,7 +10136,7 @@ fn unread_jump_pill(j: &UnreadJump, cx: &mut Context<VectorApp>) -> AnyElement {
     };
     let busy = j.status.is_some();
     let app = cx.entity().downgrade();
-    div()
+    let pill = div()
         .absolute()
         .top(px(12.))
         .left_0()
@@ -10155,9 +10167,21 @@ fn unread_jump_pill(j: &UnreadJump, cx: &mut Context<VectorApp>) -> AnyElement {
                         app.update(cx, |app, cx| app.jump_to_unread(cx)).ok();
                     }
                 })
+                .flex()
+                .items_center()
+                .when(busy, |d| {
+                    d.child(
+                        div()
+                            .size(px(11.))
+                            .mr(px(7.))
+                            .flex_shrink_0()
+                            .child(crate::attachments::spinner(11., 2., 0.7, 0.25, ca(12, 12, 12, 0.3), c(0x0c0c0c))),
+                    )
+                })
                 .child(label),
         )
-        .into_any_element()
+        .into_any_element();
+    kit::rise("unread-jump-in", pill, 200, (0., -8., 1.), kit::bezier(0.25, 0.1, 0.25, 1.))
 }
 
 /// A short chat sits at the top, as the Tauri list does; a long one opens at its end and

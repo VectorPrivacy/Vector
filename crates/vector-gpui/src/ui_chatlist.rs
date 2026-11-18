@@ -348,9 +348,13 @@ impl VectorApp {
                                             .path("icons/chevron-down.svg")
                                             .size(px(16.))
                                             .text_color(white_a(0.75))
-                                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                                if expanded { std::f32::consts::PI } else { 0. },
-                                            ))),
+                                            .with_transformation(crate::kit::turn(
+                                                "chatlist-expander",
+                                                expanded,
+                                                std::f32::consts::PI,
+                                                0.16,
+                                                crate::kit::bezier(0.33, 1., 0.68, 1.),
+                                            )),
                                     ),
                             ),
                     ),

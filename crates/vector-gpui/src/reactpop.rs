@@ -6,6 +6,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
+use gpui::AnimationExt as _;
 use gpui::{AnyElement, App, Bounds, FontWeight, ImageSource, Pixels, SharedString, Size, Window, div, point, px};
 use crate::pic::img;
 
@@ -70,12 +71,23 @@ fn place(pop: &Pop, anchor: Bounds<Pixels>, pane: Bounds<Pixels>, gap: f32, cent
     (left.min(max).max(min), top)
 }
 
-fn shell(pop: &Pop, at: (f32, f32), body: gpui::Stateful<gpui::Div>) -> AnyElement {
+fn shell(pop: &Pop, at: (f32, f32), body: gpui::Stateful<gpui::Div>, fade_ms: u64) -> AnyElement {
     let probe = pop.size.clone();
     let measured = probe.get().is_some();
+    let body = if measured {
+        // `popupFadeIn`, from the first frame it is placed.
+        body.with_animation(
+            SharedString::from(format!("{}-in-{}", fade_ms, pop.key)),
+            gpui::Animation::new(std::time::Duration::from_millis(fade_ms)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+            |d, t| d.opacity(t),
+        )
+        .into_any_element()
+    } else {
+        body.invisible().into_any_element()
+    };
     gpui::deferred(
         gpui::anchored().position(point(px(at.0), px(at.1))).child(
-            body.when(!measured, |d| d.invisible()).child(
+            div().relative().child(body).child(
                 gpui::canvas(
                     move |b, window, _| {
                         if probe.get() != Some(b.size) {
@@ -141,7 +153,7 @@ pub fn tip(pop: &Pop, store: &Store, custom: Option<ImageSource>, anchor: Bounds
                 .text_color(white_a(0.4))
                 .child("Right-click for details"),
         );
-    Some(shell(pop, place(pop, anchor, pane, 6., true), body))
+    Some(shell(pop, place(pop, anchor, pane, 6., true), body, 150))
 }
 
 pub fn details(
@@ -234,5 +246,5 @@ pub fn details(
                 })),
         )
         .child(div().id("reaction-details-list").overflow_y_scroll().max_h(px(200.)).children(rows));
-    Some(shell(pop, place(pop, anchor, pane, 4., false), body))
+    Some(shell(pop, place(pop, anchor, pane, 4., false), body, 200))
 }

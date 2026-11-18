@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::prelude::*;
+use gpui::AnimationExt as _;
 use gpui::{AnyElement, App, Bounds, Hsla, Pixels, Point, SharedString, Size, Window, div, point, px, svg};
 use crate::pic::img;
 use serde_json::Value;
@@ -329,11 +330,18 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 })
                 .flex()
                 .child(role.name.clone());
-            list = list.child(
-                pill(div().flex().items_center().gap(px(5.)).min_w_0().child(dot).child(label))
-                    .group(group)
-                    .when(m.busy.as_deref() == Some(role.id.as_str()), |d| d.opacity(0.45)),
-            );
+            let row = pill(div().flex().items_center().gap(px(5.)).min_w_0().child(dot).child(label)).group(group);
+            list = list.child(if m.busy.as_deref() == Some(role.id.as_str()) {
+                // `miniProfileRolePulse`: 0.45 to 0.25 and back, a second each way.
+                row.with_animation(
+                    SharedString::from(format!("mp-busy-{}", role.id)),
+                    gpui::Animation::new(std::time::Duration::from_secs(2)).repeat(),
+                    |d, t| d.opacity(0.45 - 0.2 * crate::kit::bezier(0.42, 0., 0.58, 1.)(1. - (2. * t - 1.).abs())),
+                )
+                .into_any_element()
+            } else {
+                row.into_any_element()
+            });
         }
         if r.addable {
             let (on, spot) = (on.clone(), anchors.clone());
@@ -484,6 +492,8 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
             .child(card.w(px(340f32.min(f32::from(window.width) - 32.))))
             .into_any_element(),
     };
+    // `popupFadeIn`, the backdrop and the card together.
+    let fade = gpui::Animation::new(std::time::Duration::from_millis(180)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.));
     gpui::deferred(
         div()
             .absolute()
@@ -492,7 +502,8 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
             .occlude()
             .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| close(Act::Close, w, cx))
             .on_scroll(|_, _, cx| cx.stop_propagation())
-            .child(placed),
+            .child(placed)
+            .with_animation(SharedString::from(format!("mp-in-{}", m.npub)), fade, |d, t| d.opacity(t)),
     )
     .with_priority(12)
     .into_any_element()

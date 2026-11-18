@@ -175,7 +175,7 @@ pub fn strip(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 fn skel() -> gpui::Div {
-    div().rounded(px(6.)).bg(white_a(0.06))
+    crate::kit::skeleton(6.)
 }
 
 /// `_packPreviewLayout`: as many 32px cells as the column fits, three rows (two when narrow).
@@ -223,14 +223,13 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(skel().size(px(22.)).rounded_full())
-                    .child(skel().w(px(meta_w * 0.6)).h(px(14.)).rounded(px(4.)))
+                    .child(crate::kit::skeleton(11.).size(px(22.)))
+                    .child(crate::kit::skeleton(4.).w(px(meta_w * 0.6)).h(px(14.)))
                     .into_any_element(),
-                skel()
+                crate::kit::skeleton(4.)
                     .w(px(meta_w * 0.38))
                     .h(px(11.))
                     .mt(px(6.))
-                    .rounded(px(4.))
                     .into_any_element(),
                 skel().w_full().h(px(28.)).mt(px(10.)).into_any_element(),
             ],

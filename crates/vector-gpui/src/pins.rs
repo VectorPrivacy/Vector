@@ -235,7 +235,7 @@ fn row(pins: &Pins, pin: &Pin, store: &Store, revealed: &HashMap<String, HashSet
                         .path("icons/chevron-down.svg")
                         .size_full()
                         .text_color(c(ICON_MUTED))
-                        .when(up, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+                        .with_transformation(crate::kit::turn(format!("pin-more-{}", pin.id), up, std::f32::consts::PI, 0.25, crate::kit::css_ease())),
                 ),
         );
     }

@@ -544,16 +544,13 @@ impl VectorApp {
                 .into_any_element(),
             None => self.slim_pane(store, &query, window, cx),
         };
-        let el = div()
+        div()
             .flex_1()
             .min_h_0()
             .flex()
             .when(rail, |d| d.child(self.slim_rail(store, on_community, cx)))
-            .child(pane);
-        if crate::kit::easing() {
-            window.request_animation_frame();
-        }
-        el.into_any_element()
+            .child(pane)
+            .into_any_element()
     }
 
     /// `.cc-rail`: the Messages door, the communities, a tile to make one and the fold.
@@ -1274,9 +1271,13 @@ impl VectorApp {
                                             .path("icons/chevron-down.svg")
                                             .size(px(16.))
                                             .text_color(white_a(0.75))
-                                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                                if expanded { std::f32::consts::PI } else { 0. },
-                                            ))),
+                                            .with_transformation(crate::kit::turn(
+                                                "chatlist-expander",
+                                                expanded,
+                                                std::f32::consts::PI,
+                                                0.16,
+                                                crate::kit::bezier(0.33, 1., 0.68, 1.),
+                                            )),
                                     ),
                             ),
                     ),

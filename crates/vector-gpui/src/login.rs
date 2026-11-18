@@ -1233,8 +1233,7 @@ impl LoginView {
                 .into_any_element();
         }
         if let Some(what) = self.wrong {
-            block = block.child(
-                div()
+            let aggro = div()
                     .id("lg-aggro")
                     .alert()
                     .flex()
@@ -1281,10 +1280,17 @@ impl LoginView {
                         .mt(px(8.))
                         .text_size(px(24.))
                         .font_weight(FontWeight::BOLD),
-                    )
-                    // `.lg-aggro`: comes in over 0.32 s (Tauri also scales it up, which a div can't).
-                    .with_animation("lg-aggro-in", gpui::Animation::new(std::time::Duration::from_millis(320)).with_easing(gpui::ease_out_quint()), |d, t| d.opacity(t)),
-            );
+                    );
+            // `lgAggroIn`: up from 0.9 with a little overshoot, over 0.32 s.
+            let ease = crate::kit::bezier(0.34, 1.56, 0.64, 1.);
+            block = block.child(gpui::zoom(aggro).with_animation(
+                "lg-aggro-in",
+                gpui::Animation::new(std::time::Duration::from_millis(320)),
+                move |z, t| {
+                    let e = ease(t);
+                    z.scale(0.9 + 0.1 * e).opacity(e.min(1.))
+                },
+            ));
         } else if self.busy {
             window.request_animation_frame();
             let phase = (self.born.elapsed().as_secs_f32() / 6.).fract();

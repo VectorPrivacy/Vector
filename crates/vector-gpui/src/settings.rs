@@ -2711,11 +2711,7 @@ fn advanced_fold(open: bool, on: &OnAct) -> AnyElement {
                 .path("icons/chevron-down.svg")
                 .size(px(14.))
                 .text_color(c(0xb2b2b2))
-                .when(open, |d| {
-                    d.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                        std::f32::consts::PI,
-                    )))
-                }),
+                .with_transformation(crate::kit::turn("sec-advanced-chevron", open, std::f32::consts::PI, 0.2, crate::kit::css_ease())),
         )
         .child("Advanced")
         .into_any_element()
