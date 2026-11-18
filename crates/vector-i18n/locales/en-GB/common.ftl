@@ -49,5 +49,5 @@ main-menu-unpin = Unpin
 
 ## Numbers
 
-# A percentage, such as a volume. $value is a whole number from 0 to 200.
+# A percentage, such as a volume or a share of lost audio. $value is the number.
 percent = { $value }%

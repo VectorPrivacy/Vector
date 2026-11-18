@@ -4,20 +4,23 @@
 use crate::kit::Tipped as _;
 use std::time::Instant;
 
-use gpui::{AnyElement, InteractiveElement, IntoElement, ObjectFit, ParentElement, StatefulInteractiveElement, Styled, StyledImage, div, prelude::FluentBuilder, px, svg};
+use gpui::{AnyElement, InteractiveElement, SharedString, IntoElement, ObjectFit, ParentElement, StatefulInteractiveElement, Styled, StyledImage, div, prelude::FluentBuilder, px, svg};
 use crate::pic::img;
 
 use crate::call::{Act, Call, OnAct, Quality, Seen, call_btn, dot, label, toggle};
 use crate::data::Store;
+use crate::t;
 use crate::theme::{ACCENT, c, ca, white_a};
 
-const QUALITY: [&[(&str, u32)]; 2] = [
-    &[("Low", 1), ("Medium", 3), ("High", 5), ("Best", 6)],
-    &[("Low", 1), ("Medium", 3), ("High", 5), ("Best", 7), ("Ultra", 8)],
+type Label = fn() -> SharedString;
+
+const QUALITY: [&[(Label, u32)]; 2] = [
+    &[(t::call_rung_low, 1), (t::call_rung_medium, 3), (t::call_rung_high, 5), (t::call_rung_best, 6)],
+    &[(t::call_rung_low, 1), (t::call_rung_medium, 3), (t::call_rung_high, 5), (t::call_rung_best, 7), (t::call_rung_ultra, 8)],
 ];
 const FPS: [&[u32]; 2] = [&[15, 30], &[5, 10, 15, 30, 60]];
-const BLOCK_TITLE: [&str; 2] = ["Camera quality", "Screenshare quality"];
-const KIND: [&str; 2] = ["camera", "screen"];
+const BLOCK_TITLE: [Label; 2] = [t::call_camera_quality, t::call_screen_quality];
+const WAITING: [Label; 2] = [t::call_waiting_camera, t::call_waiting_screen];
 
 pub fn showing(call: &Call) -> bool {
     call.live() && call.video_mine.iter().chain(call.video_peer.iter()).any(|&b| b)
@@ -47,10 +50,10 @@ fn video_btn(id: &'static str, k: usize, call: &Call, enabled: bool, on: &OnAct)
     let o = on.clone();
     call_btn(id, state)
         .tip(match (k, state) {
-            (0, true) => "Turn the camera off",
-            (0, false) => "Turn the camera on",
-            (_, true) => "Stop sharing the screen",
-            (_, false) => "Share the screen",
+            (0, true) => t::call_camera_off(),
+            (0, false) => t::call_camera_on(),
+            (_, true) => t::call_screen_stop(),
+            (_, false) => t::call_screen_share(),
         })
         .when(!enabled, |d| d.opacity(0.35).cursor_default())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -151,8 +154,8 @@ pub fn pictures(call: &Call, store: &Store, seen: &Seen, w: f32, max_h: f32, on:
             Some(k) => {
                 let o = on.clone();
                 d.children(picture(seen, k, ObjectFit::Contain))
-                    .when(seen.peer[k].is_none(), |d| d.child(idle(div()).child(format!("Waiting for their {}…", KIND[k]))))
-                    .child(small_btn("call-picture-max", "ui/call-max.svg").tip("Fill the window").top(px(8.)).right(px(8.)).on_click(move |_, w, cx| o(Act::Maximize(Some(k)), w, cx)))
+                    .when(seen.peer[k].is_none(), |d| d.child(idle(div()).child(WAITING[k]())))
+                    .child(small_btn("call-picture-max", "ui/call-max.svg").tip(t::call_fill_window()).top(px(8.)).right(px(8.)).on_click(move |_, w, cx| o(Act::Maximize(Some(k)), w, cx)))
                     .when(k == 1, |d| {
                         d.child(
                             div()
@@ -166,18 +169,18 @@ pub fn pictures(call: &Call, store: &Store, seen: &Seen, w: f32, max_h: f32, on:
                                 .text_size(px(11.))
                                 .line_height(px(24.))
                                 .text_color(c(0xdddddd))
-                                .child(format!("{name} is sharing a screen")),
+                                .child(t::call_sharing_screen(&name)),
                         )
                     })
             }
-            None => d.child(idle(div()).child(crate::ui::avatar(store, &call.peer, 64.)).child("Their camera is off")),
+            None => d.child(idle(div()).child(crate::ui::avatar(store, &call.peer, 64.)).child(t::call_their_camera_off())),
         })
         .children(inset.map(|k| {
             let iw = (w * 0.26).min(150.);
             let o = on.clone();
             div()
                 .id("call-picture-inset")
-                .tip("Fill the window with their camera")
+                .tip(t::call_fill_with_camera())
                 .absolute()
                 .bottom(px(8.))
                 .left(px(8.))
@@ -276,7 +279,7 @@ pub fn maximized(call: &Call, seen: &Seen, chrome: f32, mic: AnyElement, hangup:
             .child(
                 div()
                     .id("call-max-restore")
-                    .tip("Back to the call window (Esc)")
+                    .tip(t::call_restore())
                     .absolute()
                     .top(px(12.))
                     .right(px(12.))
@@ -293,7 +296,7 @@ pub fn maximized(call: &Call, seen: &Seen, chrome: f32, mic: AnyElement, hangup:
                 div().absolute().bottom(px(if controls { 72. } else { 16. })).left_0().right_0().flex().justify_center().child(
                     div()
                         .id("call-max-other")
-                        .tip("Swap")
+                        .tip(t::call_swap())
                         .w(px(320.))
                         .h(px(201.))
                         .rounded(px(10.))
@@ -380,16 +383,16 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
             let note = call
                 .video_stats(k)
                 .filter(|s| s.0 > 0)
-                .map(|(w, h, fps, kbps)| format!("{w}×{h} · {fps} fps · {kbps} kbit/s"))
+                .map(|(w, h, fps, kbps)| t::call_video_stats(fps, kbps, format!("{w}×{h}")))
                 .unwrap_or_default();
             let (rung, fps) = call.prefs[k];
-            let mut q: Vec<(String, Option<u32>)> = vec![("Adaptive".into(), None)];
-            q.extend(QUALITY[k].iter().map(|(l, r)| (l.to_string(), Some(*r))));
-            let q_label = q.iter().find(|(_, v)| *v == rung).map(|(l, _)| l.clone()).unwrap_or_else(|| "Adaptive".into());
-            let mut f: Vec<(String, Option<u32>)> = vec![("Adaptive".into(), None)];
-            f.extend(FPS[k].iter().map(|r| (format!("{r} fps"), Some(*r))));
-            let f_label = f.iter().find(|(_, v)| *v == fps).map(|(l, _)| l.clone()).unwrap_or_else(|| "Adaptive".into());
-            let row = |l: &'static str, v: AnyElement| div().flex().items_center().child(label(l)).child(v);
+            let mut q: Vec<(String, Option<u32>)> = vec![(t::call_adaptive().into(), None)];
+            q.extend(QUALITY[k].iter().map(|(l, r)| (l().into(), Some(*r))));
+            let q_label = q.iter().find(|(_, v)| *v == rung).map(|(l, _)| l.clone()).unwrap_or_else(|| t::call_adaptive().into());
+            let mut f: Vec<(String, Option<u32>)> = vec![(t::call_adaptive().into(), None)];
+            f.extend(FPS[k].iter().map(|r| (t::call_fps(*r).into(), Some(*r))));
+            let f_label = f.iter().find(|(_, v)| *v == fps).map(|(l, _)| l.clone()).unwrap_or_else(|| t::call_adaptive().into());
+            let row = |l: SharedString, v: AnyElement| div().flex().items_center().child(label(l)).child(v);
             div()
                 .flex()
                 .flex_col()
@@ -405,7 +408,7 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
                         .justify_between()
                         .gap(px(8.))
                         .text_size(px(11.))
-                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(ACCENT)).child(BLOCK_TITLE[k].to_uppercase()))
+                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(ACCENT)).child(BLOCK_TITLE[k]().to_uppercase()))
                         .child(div().truncate().text_color(c(0x8a8a8a)).child(note)),
                 )
                 .child(
@@ -413,12 +416,12 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
                         .flex()
                         .flex_col()
                         .gap(px(6.))
-                        .child(row("Quality", compact_select(("call-q", k), q_label, call.pref_open == Some((k, false)), q, (k, false), on)))
-                        .child(row("Frame rate", compact_select(("call-f", k), f_label, call.pref_open == Some((k, true)), f, (k, true), on)))
+                        .child(row(t::call_quality(), compact_select(("call-q", k), q_label, call.pref_open == Some((k, false)), q, (k, false), on)))
+                        .child(row(t::call_frame_rate(), compact_select(("call-f", k), f_label, call.pref_open == Some((k, true)), f, (k, true), on)))
                         .when(k == 1, |d| {
                             let change = on.clone();
                             d.child(row(
-                                "Window",
+                                t::call_window(),
                                 div()
                                     .id("call-change-screen")
                                     .px(px(10.))
@@ -432,11 +435,11 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
                                     .text_color(c(0xffffff))
                                     .cursor_pointer()
                                     .on_click(move |_, w, cx| change(Act::ChangeScreen, w, cx))
-                                    .child("Change…")
+                                    .child(t::call_window_change())
                                     .into_any_element(),
                             ))
                             .child(row(
-                                "Sound",
+                                t::call_sound(),
                                 if call.share_audio_native {
                                     div()
                                         .flex()
@@ -446,7 +449,7 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
                                         .gap(px(8.))
                                         .text_size(px(12.5))
                                         .text_color(c(0xf6f6f6))
-                                        .child(div().flex().items_center().gap(px(8.)).child(if call.share_audio_mine { "Sharing" } else { "Not shared" }).when(
+                                        .child(div().flex().items_center().gap(px(8.)).child(if call.share_audio_mine { t::call_sound_sharing() } else { t::call_sound_not_shared() }).when(
                                             call.share_audio_denied && !call.share_audio_mine,
                                             |d| {
                                                 d.child(
@@ -460,14 +463,14 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
                                                         .text_color(c(0xffc400))
                                                         .text_size(px(10.5))
                                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                        .child("System permission required"),
+                                                        .child(t::call_sound_permission()),
                                                 )
                                             },
                                         ))
                                         .child(toggle("call-share-audio", call.share_audio_mine, Act::ShareAudio(!call.share_audio_mine), on))
                                         .into_any_element()
                                 } else {
-                                    div().truncate().text_size(px(12.)).text_color(c(0xb2b2b2)).child("Not offered by this window").into_any_element()
+                                    div().truncate().text_size(px(12.)).text_color(c(0xb2b2b2)).child(t::call_sound_unavailable()).into_any_element()
                                 },
                             ))
                         }),
@@ -479,7 +482,7 @@ pub fn panel_blocks(call: &Call, on: &OnAct) -> Vec<AnyElement> {
 
 /// The Connection grid's lines for what they send.
 pub fn peer_lines(call: &Call, seen: &Seen) -> Vec<AnyElement> {
-    ["Their camera", "Their screen"]
+    [t::call_their_camera(), t::call_their_screen()]
         .into_iter()
         .enumerate()
         .filter_map(|(k, l)| {
@@ -489,7 +492,7 @@ pub fn peer_lines(call: &Call, seen: &Seen) -> Vec<AnyElement> {
                     .flex()
                     .items_center()
                     .child(label(l))
-                    .child(div().truncate().text_size(px(12.)).text_color(c(0xb2b2b2)).child(format!("{w}×{h} · {} fps", seen.dec_fps[k])))
+                    .child(div().truncate().text_size(px(12.)).text_color(c(0xb2b2b2)).child(t::call_video_size(seen.dec_fps[k], format!("{w}×{h}"))))
                     .into_any_element(),
             )
         })

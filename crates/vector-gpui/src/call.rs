@@ -17,6 +17,7 @@ use gpui::{
 use serde_json::Value;
 
 use crate::data::Store;
+use crate::t;
 use crate::theme::{ACCENT, c, ca, white_a};
 
 const HISTORY: usize = 60;
@@ -53,12 +54,12 @@ impl Quality {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> SharedString {
         match self {
-            Quality::Excellent => "Excellent",
-            Quality::Good => "Good",
-            Quality::Fair => "Fair",
-            Quality::Poor => "Poor",
+            Quality::Excellent => t::call_quality_excellent(),
+            Quality::Good => t::call_quality_good(),
+            Quality::Fair => t::call_quality_fair(),
+            Quality::Poor => t::call_quality_poor(),
         }
     }
 }
@@ -369,15 +370,10 @@ impl Call {
 
     fn status(&self) -> String {
         match self.phase {
-            Some(Phase::Ringing) => if self.outgoing {
-                "Calling…"
-            } else {
-                "Incoming call"
-            }
-            .into(),
-            Some(Phase::Connecting) => "Connecting…".into(),
-            Some(Phase::Active) if self.peer_away => "Waiting for them to come back…".into(),
-            Some(Phase::Active) if self.stalled => "Reconnecting…".into(),
+            Some(Phase::Ringing) => if self.outgoing { t::call_calling() } else { t::call_incoming() }.into(),
+            Some(Phase::Connecting) => t::call_connecting().into(),
+            Some(Phase::Active) if self.peer_away => t::call_peer_away().into(),
+            Some(Phase::Active) if self.stalled => t::call_reconnecting().into(),
             Some(Phase::Active) => {
                 clock(self.active_ms + self.received_at.elapsed().as_millis() as u64)
             }
@@ -395,18 +391,18 @@ impl Call {
     }
 }
 
-fn reason_text(reason: Option<&str>) -> &'static str {
+fn reason_text(reason: Option<&str>) -> SharedString {
     match reason {
-        Some("rejected") => "Declined",
-        Some("busy") => "Busy",
-        Some("no_answer") => "No answer",
-        Some("missed") => "Missed call",
-        Some("connect_failed") => "Could not connect",
-        Some("disconnected") => "Connection lost",
-        Some("audio_failed") => "Microphone unavailable",
-        Some("send_failed") => "Could not reach the relays",
-        Some("answered_elsewhere") => "Answered on another device",
-        _ => "Call ended",
+        Some("rejected") => t::call_ended_declined(),
+        Some("busy") => t::call_ended_busy(),
+        Some("no_answer") => t::call_ended_no_answer(),
+        Some("missed") => t::call_ended_missed(),
+        Some("connect_failed") => t::call_ended_connect_failed(),
+        Some("disconnected") => t::call_ended_disconnected(),
+        Some("audio_failed") => t::call_ended_audio_failed(),
+        Some("send_failed") => t::call_ended_send_failed(),
+        Some("answered_elsewhere") => t::call_ended_elsewhere(),
+        _ => t::call_ended(),
     }
 }
 
@@ -421,14 +417,20 @@ pub fn clock(ms: u64) -> String {
     }
 }
 
-fn lost_word(v: f32) -> String {
+fn lost_word(v: f32) -> SharedString {
     if v < 0.05 {
-        "nothing lost".into()
+        t::call_graph_lost_none()
     } else if v < 1. {
-        "under 1% lost".into()
+        t::call_graph_lost_under_one()
     } else {
-        format!("{v:.prec$}% lost", prec = if v < 10. { 1 } else { 0 })
+        t::call_graph_lost_percent(shown_pct(v))
     }
+}
+
+/// One decimal under 10, whole above.
+fn shown_pct(v: f32) -> f64 {
+    let v = f64::from(v);
+    if v < 10. { (v * 10.).round() / 10. } else { v.round() }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -534,11 +536,11 @@ fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
     let o = on.clone();
     call_btn("call-mic", off)
         .tip(if call.mic_off {
-            "Microphone access is off"
+            t::call_mic_off()
         } else if call.muted {
-            "Unmute microphone"
+            t::call_unmute()
         } else {
-            "Mute microphone"
+            t::call_mute()
         })
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, w, cx| o(Act::Mic, w, cx))
@@ -557,7 +559,7 @@ fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
 fn hangup_btn(on: &OnAct) -> impl IntoElement {
     let o = on.clone();
     round_btn("call-hangup", 34.)
-        .tip("Hang up")
+        .tip(t::call_hang_up())
         .bg(c(DANGER))
         .hover(|d| d.bg(c(0xff4db6)))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -569,7 +571,7 @@ fn hangup_btn(on: &OnAct) -> impl IntoElement {
 fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
     let (decline, accept) = (on.clone(), on.clone());
     let pulse = round_btn("call-accept", 60.)
-        .tip("Accept")
+        .tip(t::call_accept())
         .bg(c(ACCENT))
         .on_click(move |_, w, cx| accept(Act::Accept, w, cx))
         .child(phone(28., c(0x111111), false))
@@ -628,11 +630,7 @@ fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
                         .child(store.name(&call.peer)),
                 )
                 .child(div().text_size(px(13.)).text_color(c(0xb2b2b2)).child(
-                    if call.video_offered {
-                        "Incoming video call"
-                    } else {
-                        "Incoming call"
-                    },
+                    if call.video_offered { t::call_incoming_video() } else { t::call_incoming() },
                 ))
                 .child(
                     div()
@@ -641,7 +639,7 @@ fn ring(call: &Call, store: &Store, on: &OnAct) -> AnyElement {
                         .mt(px(18.))
                         .child(
                             round_btn("call-decline", 60.)
-                                .tip("Decline")
+                                .tip(t::call_decline())
                                 .bg(c(DANGER))
                                 .on_click(move |_, w, cx| decline(Act::Reject, w, cx))
                                 .child(phone(28., c(0xffffff), true)),
@@ -657,7 +655,7 @@ fn ease_in_out(t: f32) -> f32 {
     t * t * (3. - 2. * t)
 }
 
-fn section(title: &'static str) -> impl IntoElement {
+fn section(title: SharedString) -> impl IntoElement {
     div()
         .mt(px(6.))
         .pt(px(10.))
@@ -669,13 +667,13 @@ fn section(title: &'static str) -> impl IntoElement {
         .child(title.to_uppercase())
 }
 
-pub(crate) fn label(text: &'static str) -> impl IntoElement {
+pub(crate) fn label(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .w(px(84.))
         .flex_shrink_0()
         .text_size(px(12.5))
         .text_color(white_a(0.8))
-        .child(text)
+        .child(text.into())
 }
 
 fn value(text: impl Into<SharedString>) -> gpui::Div {
@@ -709,7 +707,7 @@ pub(crate) fn dot(q: Quality) -> impl IntoElement {
 /// The neon toggle at the panel's 0.8 scale.
 fn switch(
     id: &'static str,
-    label_text: &'static str,
+    label_text: SharedString,
     on_state: bool,
     which: Switch,
     on: &OnAct,
@@ -849,11 +847,11 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
         .items_center()
         .gap(px(10.))
         .pt(px(8.))
-        .child(label("Their volume"))
+        .child(label(t::call_their_volume()))
         .child(
             div()
                 .id("call-volume")
-                .as_slider("Their volume", format!("{}%", (call.volume * 100.).round()), pct)
+                .as_slider(t::call_their_volume(), t::percent((call.volume * 100.).round()), pct)
                 .slider_keys(pct, 0.025, {
                     let on = on.clone();
                     move |f, w, cx| on(Act::Volume((f * 40.).round() / 20.), w, cx)
@@ -927,7 +925,7 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
             .justify_center()
             .text_size(px(11.5))
             .text_color(c(0x8a8a8a))
-            .child("Measuring the connection…")
+            .child(t::call_graph_measuring())
             .into_any_element();
     }
     let max_rtt = hist.iter().map(|r| r.rtt).fold(200f32, f32::max);
@@ -1023,16 +1021,12 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(c(ACCENT))
-                    .child(format!("{} ms", r.rtt as u32)),
+                    .child(t::call_delay_ms(r.rtt as u32)),
             )
             .child(format!(
                 "· {} · {}",
                 lost_word(r.lost),
-                if ago == 0 {
-                    "now".to_string()
-                } else {
-                    format!("{ago}s ago")
-                }
+                if ago == 0 { t::call_graph_now() } else { t::call_graph_ago(ago) }
             ))
     };
     let legend = match hover {
@@ -1051,7 +1045,7 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
                     .items_center()
                     .gap(px(5.))
                     .child(div().w(px(10.)).h(px(3.)).rounded(px(2.)).bg(c(ACCENT)))
-                    .child(format!("delay, up to {} ms", max_rtt as u32)),
+                    .child(t::call_graph_delay(max_rtt as u32)),
             )
             .child(
                 div()
@@ -1059,7 +1053,7 @@ fn graph(call: &Call, on: &OnAct) -> AnyElement {
                     .items_center()
                     .gap(px(5.))
                     .child(div().w(px(10.)).h(px(7.)).rounded(px(2.)).bg(c(0xfca559)))
-                    .child("lost audio"),
+                    .child(t::call_graph_lost()),
             )
             .into_any_element(),
     };
@@ -1094,38 +1088,28 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
     let stats = call.stats.as_ref();
     let lost = call.lost_pct();
     let lost_text = if lost < 0.05 {
-        "none".to_string()
+        t::call_lost_none()
     } else if lost < 1. {
-        "under 1%".into()
+        t::call_lost_under_one()
     } else {
-        format!("{lost:.prec$}%", prec = if lost < 10. { 1 } else { 0 })
+        t::percent(shown_pct(lost))
     };
     let path = match stats.map(|s| s.path.as_str()) {
-        Some("relay") => "via relay",
-        Some("direct") => "direct",
-        _ => "",
+        Some("relay") => t::call_via_relay(),
+        Some("direct") => t::call_direct(),
+        _ => SharedString::default(),
     };
     let bitrate = stats.map(|s| s.bitrate_kbps).filter(|b| *b > 0);
     let bitrate_hint = match (stats.map(|s| s.net_loss).unwrap_or(0.), bitrate) {
-        (l, _) if l >= 4. => "lowered, the network is dropping packets",
-        (_, Some(b)) if b >= 64 => "full quality",
-        _ => "",
+        (l, _) if l >= 4. => t::call_bitrate_lowered(),
+        (_, Some(b)) if b >= 64 => t::call_bitrate_full(),
+        _ => SharedString::default(),
     };
-    let row = |l: &'static str, v: AnyElement| {
-        let tip = match l {
-            "Lost audio" => Some("Moments the speaker had to fill in because the audio was late or missing"),
-            "Bitrate" => Some("How much data your voice uses. It rises on a clean connection and drops when packets are being lost"),
-            _ => None,
-        };
+    let row = |id: &'static str, l: SharedString, tip: Option<SharedString>, v: AnyElement| {
         div()
             .flex()
             .items_center()
-            .child(
-                div()
-                    .id(l)
-                    .when_some(tip, |d, t| d.tip(t))
-                    .child(label(l)),
-            )
+            .child(div().id(id).when_some(tip, |d, t| d.tip(t)).child(label(l)))
             .child(v)
     };
     div()
@@ -1144,12 +1128,12 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
                 div()
                     .flex()
                     .items_center()
-                    .child(label("Your voice"))
+                    .child(label(t::call_your_voice()))
                     .child(meter(call.levels.0, live)),
             )
         })
         .children(crate::callpics::panel_blocks(call, on))
-        .child(section("Voice processing"))
+        .child(section(t::call_processing()))
         .child(
             div()
                 .flex()
@@ -1157,57 +1141,55 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
                 .gap(px(6.))
                 .child(switch(
                     "call-agc",
-                    "Automatic gain",
+                    t::call_auto_gain(),
                     proc_.auto_gain,
                     Switch::AutoGain,
                     on,
                 ))
                 .child(switch(
                     "call-aec",
-                    "Echo cancellation",
+                    t::call_echo_cancel(),
                     proc_.echo_cancel,
                     Switch::EchoCancel,
                     on,
                 ))
                 .child(switch(
                     "call-ns",
-                    "Noise suppression",
+                    t::call_noise_suppress(),
                     proc_.noise_suppress,
                     Switch::NoiseSuppress,
                     on,
                 )),
         )
-        .child(section("Connection"))
+        .child(section(t::call_connection()))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.))
                 .child(row(
-                    "Quality",
+                    "call-row-quality",
+                    t::call_quality(),
+                    None,
                     match call.quality {
                         Some(q) => value("").child(dot(q)).child(q.label()).into_any_element(),
-                        None => value("Measuring…").into_any_element(),
+                        None => value(t::call_measuring()).into_any_element(),
                     },
                 ))
                 .child(row(
-                    "Delay",
-                    value(
-                        stats
-                            .map(|s| format!("{} ms", s.rtt_ms))
-                            .unwrap_or_else(|| "…".into()),
-                    )
-                    .when(!path.is_empty(), |d| d.child(hint(path)))
-                    .into_any_element(),
+                    "call-row-delay",
+                    t::call_delay(),
+                    None,
+                    value(stats.map(|s| t::call_delay_ms(s.rtt_ms)).unwrap_or_else(|| "…".into()))
+                        .when(!path.is_empty(), |d| d.child(hint(path)))
+                        .into_any_element(),
                 ))
-                .child(row("Lost audio", value(lost_text).into_any_element()))
+                .child(row("call-row-lost", t::call_lost(), Some(t::call_lost_tip()), value(lost_text).into_any_element()))
                 .child(row(
-                    "Bitrate",
-                    value(
-                        bitrate
-                            .map(|b| format!("{b} kbit/s"))
-                            .unwrap_or_else(|| "…".into()),
-                    )
+                    "call-row-bitrate",
+                    t::call_bitrate(),
+                    Some(t::call_bitrate_tip()),
+                    value(bitrate.map(|b| t::call_bitrate_kbps(b)).unwrap_or_else(|| "…".into()))
                     .when(!bitrate_hint.is_empty(), |d| d.child(hint(bitrate_hint)))
                     .into_any_element(),
                 ))
@@ -1250,15 +1232,11 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
         .line_height(px(13.2))
         .text_color(c(0xb2b2b2))
         .when_some(call.quality.filter(|_| live), |d, q| d.child(div().id("call-pill-quality").tip(q.label()).child(dot(q))))
-        .child(div().truncate().child(format!(
-            "{}{}",
-            call.status(),
-            if live && call.peer_muted {
-                " · muted"
-            } else {
-                ""
-            }
-        )));
+        .child(div().truncate().child(if live && call.peer_muted {
+            t::call_status_muted(call.status())
+        } else {
+            call.status().into()
+        }));
     let drag = call.drag.clone();
     let bounds = call.pill.clone();
     let down = move |e: &gpui::MouseDownEvent, _: &mut Window, _: &mut App| {
@@ -1308,7 +1286,7 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
     };
     let row = div()
         .id("call-pill-row")
-        .tip("Open the channel")
+        .tip(t::call_open_channel())
         .relative()
         .flex()
         .items_center()
