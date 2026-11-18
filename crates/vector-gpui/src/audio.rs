@@ -711,15 +711,19 @@ impl Audio {
         moving
     }
 
-    pub fn dispose_all(&mut self) {
+}
+
+/// An account swap replaces the app's media: what it was playing stops with it.
+impl Drop for Audio {
+    fn drop(&mut self) {
+        if self.sources.is_empty() {
+            return;
+        }
         if let Ok(e) = engine() {
             for id in self.sources.keys() {
                 let _ = e.stop(*id);
             }
         }
-        self.sources.clear();
-        self.players.clear();
-        self.active = None;
     }
 }
 
