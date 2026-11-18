@@ -180,15 +180,17 @@ thread_local! {
     static CURRENT: RefCell<Option<(u64, Arc<Active>)>> = const { RefCell::new(None) };
 }
 
+/// `f` runs outside the thread's cache borrow, so a lookup inside it can't panic.
 fn with_active<R>(f: impl FnOnce(&Active) -> R) -> R {
     let generation = GENERATION.load(Ordering::Acquire);
-    CURRENT.with(|c| {
+    let active = CURRENT.with(|c| {
         let mut c = c.borrow_mut();
         if c.as_ref().is_none_or(|(g, _)| *g != generation) {
             *c = Some((generation, ACTIVE.read().unwrap().clone()));
         }
-        f(&c.as_ref().unwrap().1)
-    })
+        c.as_ref().unwrap().1.clone()
+    });
+    f(&active)
 }
 
 /// Adds or replaces a pack. Takes effect on the next [`set_language`] for its tag.
