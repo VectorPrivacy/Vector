@@ -234,9 +234,10 @@ impl VectorApp {
                 if ix == 0 {
                     m.scroll.set_offset(gpui::point(px(0.), px(0.)));
                 } else {
-                    m.scroll.scroll_to_item(ix);
+                    m.scroll.scroll_to_top_of_item(ix);
                 }
             }
+            Act::Scrolled => m.anchor = None,
             Act::ClearSearch => m.search.update(cx, |t, cx| t.set_text("", cx)),
             Act::View(v) => m.view = v.into(),
             Act::Private(want) => {
@@ -378,9 +379,10 @@ impl VectorApp {
                     if overwrite.is_some()
                         && let Some(p) = m.perms.as_mut()
                     {
+                        let support = p.support(&target);
                         p.overwrites.retain(|o| o.key != target);
                         if draft != (0, 0) {
-                            p.overwrites.push(crate::chaneditor::Overwrite { key: target, npub: None, allow: draft.0, deny: draft.1 });
+                            p.overwrites.push(crate::chaneditor::Overwrite { key: target, npub: None, allow: draft.0, deny: draft.1, support });
                         }
                     }
                     let (name, topic) = (m.name.read(cx).text().trim().to_string(), m.topic.read(cx).text().trim().to_string());

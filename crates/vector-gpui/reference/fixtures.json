@@ -3347,25 +3347,30 @@
   "category": "e70d362ac4e73ce2887e5395680c76b7b3c93e43b69587845448f3b9d03ff48c",
   "synced": null,
   "can_manage": true,
-  "grantable": "18446744073709551615",
+  "can_sync": true,
+  "me": "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+  "everyone_support": "18446744073709551615",
   "roles": [
    {
     "role_id": "1111111111111111111111111111111111111111111111111111111111111111",
     "name": "Mods",
     "color": 5897395,
-    "position": 1
+    "position": 1,
+    "support": null
    },
    {
     "role_id": "2222222222222222222222222222222222222222222222222222222222222222",
     "name": "Helpers",
     "color": 3718648,
-    "position": 2
+    "position": 2,
+    "support": "18446744073709551615"
    },
    {
     "role_id": "3333333333333333333333333333333333333333333333333333333333333333",
     "name": "Designers",
     "color": 0,
-    "position": 3
+    "position": 3,
+    "support": "18446744073709551615"
    }
   ],
   "overwrites": [
@@ -3374,35 +3379,41 @@
     "id": null,
     "npub": null,
     "allow": "0",
-    "deny": "16384"
+    "deny": "16384",
+    "support": "18446744073709551615"
    },
    {
     "kind": "role",
     "id": "1111111111111111111111111111111111111111111111111111111111111111",
     "npub": null,
     "allow": "16416",
-    "deny": "0"
+    "deny": "0",
+    "support": null
    },
    {
     "kind": "member",
     "id": "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90",
     "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
     "allow": "65536",
-    "deny": "131072"
+    "deny": "131072",
+    "support": "18446744073709551615"
    }
   ],
   "members": [
    {
     "id": "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90",
-    "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a"
+    "npub": "npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a",
+    "support": "18446744073709551615"
    },
    {
     "id": "81b637d8fcd2c6da6359e6963113a1170de795e4b725b84d1e0b4cfd9ec58ce9",
-    "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn"
+    "npub": "npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn",
+    "support": "18446744073709551615"
    },
    {
     "id": "4c26d9074c27d89ede59270c0ac14b71e071b15239519f75474b2f3ba63481f5",
-    "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf"
+    "npub": "npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf",
+    "support": "18446744073709551615"
    }
   ]
  },

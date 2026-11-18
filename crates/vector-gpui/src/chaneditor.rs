@@ -9,6 +9,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px, svg};
 use serde_json::Value;
 
+use crate::kit::Tipped as _;
 use crate::commsettings::{block, field_head, heading, hint, input_box, lede, save_btn, short_npub, tab_strip, text_btn};
 use crate::composer::TextInput;
 use crate::data::Store;
@@ -61,6 +62,9 @@ const VIEWS: [(&str, &str, &str); 2] = [
     ("voice", "Voice", "Opens its call, with the chat beside it."),
 ];
 
+const SYNCED: &str = "This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own.";
+const OWN: &str = "This channel sets its own permissions.";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tri {
     Deny,
@@ -73,6 +77,8 @@ pub struct Role {
     pub name: String,
     pub color: u32,
     pub position: i64,
+    /// The bits this account may set on it; `None` where it may set none.
+    pub support: Option<u64>,
 }
 
 pub struct Overwrite {
@@ -81,6 +87,7 @@ pub struct Overwrite {
     pub npub: Option<String>,
     pub allow: u64,
     pub deny: u64,
+    pub support: Option<u64>,
 }
 
 /// `get_channel_permissions`, parsed.
@@ -90,18 +97,26 @@ pub struct Perms {
     pub can_manage: bool,
     pub synced: bool,
     pub category: Option<String>,
-    pub grantable: u64,
+    /// Whether syncing with the category, or stopping, swaps only rules this account may set.
+    pub can_sync: bool,
+    /// This account's key, as hex.
+    pub me: String,
+    pub everyone_support: Option<u64>,
     pub roles: Vec<Role>,
     pub overwrites: Vec<Overwrite>,
     /// (hex, npub) of everyone a member overwrite can name.
     pub members: Vec<(String, String)>,
+    /// What this account may set on each of `members`, by hex; absent where it may set none.
+    pub member_support: std::collections::HashMap<String, u64>,
 }
 
 fn bits(v: &Value) -> u64 {
-    v.as_str()
-        .and_then(|s| s.parse().ok())
-        .or_else(|| v.as_u64())
-        .unwrap_or(0)
+    held(v).unwrap_or(0)
+}
+
+/// A bit set that may be null.
+fn held(v: &Value) -> Option<u64> {
+    v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64())
 }
 
 impl Perms {
@@ -112,7 +127,9 @@ impl Perms {
             can_manage: v["can_manage"].as_bool().unwrap_or(false),
             synced: !v["synced"].is_null() && v["synced"] != Value::Bool(false),
             category: str_of(&v["category"]),
-            grantable: bits(&v["grantable"]),
+            can_sync: v["can_sync"].as_bool().unwrap_or(false),
+            me: str_of(&v["me"]).unwrap_or_default(),
+            everyone_support: held(&v["everyone_support"]),
             roles: v["roles"]
                 .as_array()
                 .into_iter()
@@ -122,6 +139,7 @@ impl Perms {
                     name: str_of(&r["name"]).unwrap_or_default(),
                     color: r["color"].as_u64().unwrap_or(0) as u32,
                     position: r["position"].as_i64().unwrap_or(0),
+                    support: held(&r["support"]),
                 })
                 .collect(),
             overwrites: v["overwrites"]
@@ -138,6 +156,7 @@ impl Perms {
                         npub: str_of(&o["npub"]),
                         allow: bits(&o["allow"]),
                         deny: bits(&o["deny"]),
+                        support: held(&o["support"]),
                     }
                 })
                 .collect(),
@@ -147,7 +166,36 @@ impl Perms {
                 .flatten()
                 .filter_map(|m| Some((str_of(&m["id"])?, str_of(&m["npub"])?)))
                 .collect(),
+            member_support: v["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| Some((str_of(&m["id"])?, held(&m["support"])?)))
+                .collect(),
         }
+    }
+
+    /// What this account may set for `key`: the bits from its roles strictly above it, while
+    /// Manage Roles is among them. The backend judges a save by the same rule.
+    pub fn support(&self, key: &str) -> Option<u64> {
+        if key == "everyone" {
+            return self.everyone_support;
+        }
+        match key.split_once(':') {
+            Some(("role", id)) => self.roles.iter().find(|r| r.id == id)?.support,
+            Some((_, id)) => match self.overwrites.iter().find(|o| o.key == key) {
+                Some(o) => o.support,
+                None => self.member_support.get(id).copied(),
+            },
+            None => None,
+        }
+    }
+
+    /// A save restates the whole rule, so one bit this account can't vouch for leaves it as is.
+    pub fn editable(&self, key: &str) -> bool {
+        let Some(held) = self.support(key) else { return false };
+        let (allow, deny) = self.stored(key);
+        (allow | deny) & !held == 0
     }
 
     pub fn stored(&self, key: &str) -> (u64, u64) {
@@ -201,6 +249,8 @@ pub enum Act {
     Close,
     Section(&'static str),
     Anchor(&'static str, &'static str),
+    /// The wheel moved on from an anchor jumped to.
+    Scrolled,
     ClearSearch,
     View(&'static str),
     Private(bool),
@@ -216,6 +266,11 @@ pub enum Act {
     Delete,
 }
 
+fn click_wheel(on: &OnAct) -> impl Fn(&gpui::ScrollEvent, &mut Window, &mut App) + 'static {
+    let on = on.clone();
+    move |_, w, cx| on(Act::Scrolled, w, cx)
+}
+
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 
 fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
@@ -227,7 +282,8 @@ pub struct Target {
     pub key: String,
     pub label: String,
     pub color: Option<u32>,
-    pub member: bool,
+    /// A member's npub, empty where it isn't known.
+    pub member: Option<String>,
     pub set: bool,
 }
 
@@ -315,16 +371,33 @@ impl ChannelEditor {
 
     pub fn can_lock(&self) -> bool {
         let Some(p) = self.perms.as_ref() else { return false };
-        let (allow, deny) = p.stored("everyone");
-        LOCK_BITS.iter().all(|b| p.grantable & (1 << b) != 0 || (allow | deny) & (1 << b) != 0)
+        let held = p.support("everyone").unwrap_or(0);
+        p.editable("everyone") && LOCK_BITS.iter().all(|b| held & (1 << b) != 0)
     }
 
-    /// A bit you lack can't be set, but one already set may be cleared.
     pub fn can_touch(&self, bit: u32) -> bool {
         let Some(p) = self.perms.as_ref() else { return false };
         let b = 1u64 << bit;
-        let (allow, deny) = p.stored(&self.target);
-        p.grantable & b == b || (allow | deny) & b == b
+        p.editable(&self.target) && p.support(&self.target).is_some_and(|held| held & b == b)
+    }
+
+    /// Why the open target can't be changed, when it can't.
+    pub fn read_only_why(&self) -> Option<&'static str> {
+        let p = self.perms.as_ref()?;
+        if self.target.is_empty() || p.editable(&self.target) {
+            return None;
+        }
+        Some(if p.support(&self.target).is_some() {
+            "Its rules here include permissions your roles don't give you, so only someone above you can change them."
+        } else if self.target == "everyone" {
+            "Changing @everyone here needs Manage Roles from one of your roles."
+        } else if self.target.strip_prefix("member:") == Some(p.me.as_str()) {
+            "These are your own rules here, so only someone above you can change them."
+        } else if self.target.starts_with("member:") {
+            "This member holds a role at or above yours, so you can see their rules here but not change them."
+        } else {
+            "This role sits at or above your own, so you can see its rules here but not change them."
+        })
     }
 
     /// A private channel opens only to a role's or a member's allow, whatever @everyone says.
@@ -347,7 +420,7 @@ impl ChannelEditor {
                 let (allow, deny) = p.stored(key);
                 let set = allow != 0 || deny != 0;
                 if key == "everyone" {
-                    return (f64::INFINITY, Target { key: key.into(), label: "@everyone".into(), color: None, member: false, set: true });
+                    return (f64::INFINITY, Target { key: key.into(), label: "@everyone".into(), color: None, member: None, set: true });
                 }
                 let (kind, id) = key.split_once(':').unwrap_or((key, ""));
                 if kind == "role" {
@@ -358,7 +431,7 @@ impl ChannelEditor {
                             key: key.into(),
                             label: role.map_or("Deleted role".into(), |r| r.name.clone()),
                             color: Some(role.map_or(0, |r| r.color)),
-                            member: false,
+                            member: None,
                             set,
                         },
                     );
@@ -369,7 +442,7 @@ impl ChannelEditor {
                     .find(|o| o.key == key)
                     .and_then(|o| o.npub.clone())
                     .or_else(|| p.members.iter().find(|m| m.0 == id).map(|m| m.1.clone()));
-                (2e9, Target { key: key.into(), label: member_label(store, npub.as_deref(), id), color: None, member: true, set })
+                (2e9, Target { key: key.into(), label: member_label(store, npub.as_deref(), id), color: None, member: Some(npub.unwrap_or_default()), set })
             })
             .collect();
         out.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -412,13 +485,13 @@ impl ChannelEditor {
         let roles = p
             .roles
             .iter()
-            .filter(|r| !taken(format!("role:{}", r.id)))
+            .filter(|r| r.support.is_some() && !taken(format!("role:{}", r.id)))
             .filter(|r| q.is_empty() || r.name.to_lowercase().contains(&q))
             .collect();
         let mut members: Vec<(String, String, String)> = p
             .members
             .iter()
-            .filter(|(id, _)| !taken(format!("member:{id}")))
+            .filter(|(id, _)| p.member_support.contains_key(id) && !taken(format!("member:{id}")))
             .filter_map(|(id, npub)| {
                 let named = store.profiles.get(npub.as_str()).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty());
                 let name = if named { store.name(npub) } else { String::new() };
@@ -751,10 +824,11 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                         .justify_between()
                         .gap(px(12.))
                         .child(
-                            div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(if synced {
-                                "This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own."
-                            } else {
-                                "This channel sets its own permissions."
+                            div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(match (synced, p.can_sync) {
+                                (true, true) => SYNCED.to_string(),
+                                (true, false) => format!("{SYNCED} Stopping would change rules set above your roles, so only someone above you can."),
+                                (false, true) => OWN.to_string(),
+                                (false, false) => format!("{OWN} Syncing would replace rules set above your roles, so only someone above you can."),
                             }),
                         )
                         .child(
@@ -769,8 +843,8 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_size(px(14.))
                                 .text_color(c(PRIMARY))
-                                .when(m.busy, |d| d.opacity(0.45))
-                                .when(!m.busy, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Sync(!synced))))
+                                .when(m.busy || !p.can_sync, |d| d.opacity(0.45))
+                                .when(!m.busy && p.can_sync, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Sync(!synced))))
                                 .child(if synced { "Stop syncing" } else { "Sync with its category" }),
                         ),
                 ),
@@ -871,17 +945,20 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                 .when(i > 0, |d| d.border_t_1().border_color(c(0x1e1e1e)))
                 .when(!on_, |d| d.hover(|d| d.bg(c(0x131313))))
                 .when(!m.busy, |d| d.cursor_pointer().on_click(click(on, move || Act::Target(key.clone()))))
-                .child(if t.member {
-                    div()
+                .child(match t.member.as_deref() {
+                    Some(npub) => div()
                         .size(px(18.))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(svg().path("icons/user-circle.svg").size(px(16.)).text_color(c(0x6f6f6f)))
-                        .into_any_element()
-                } else {
-                    dot(t.color.unwrap_or(DEFAULT_TINT)).into_any_element()
+                        .child(if npub.is_empty() {
+                            svg().path("icons/user-circle.svg").size(px(16.)).text_color(c(0x6f6f6f)).into_any_element()
+                        } else {
+                            crate::ui::avatar(store, npub, 18.).into_any_element()
+                        })
+                        .into_any_element(),
+                    None => dot(t.color.unwrap_or(DEFAULT_TINT)).into_any_element(),
                 })
                 .child(
                     div()
@@ -895,6 +972,16 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                 )
                 .child(div().ml_auto().flex().items_center().gap(px(12.)).when(!t.set, |d| {
                     d.child(div().flex_shrink_0().text_size(px(12.5)).line_height(px(24.)).text_color(c(0x6f6f6f)).child("no rules yet"))
+                }).when(!p.editable(&t.key), |d| {
+                    // A target whose rules come from above you: shown, never editable.
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("ce-lock-{}", t.key)))
+                            .tip("You can't change these rules")
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            .child(svg().path("icons/locked.svg").size(px(14.)).text_color(c(0x6f6f6f))),
+                    )
                 }).child(div().size(px(16.)).flex_shrink_0().flex().items_center().justify_center().when(on_, |d| {
                     d.child(svg().path("icons/check.svg").size(px(16.)).text_color(c(PRIMARY)))
                 }))),
@@ -914,7 +1001,8 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
         )
         .into_any_element(),
     );
-    for (_, title, _, perms) in GROUPS {
+    let why = m.read_only_why();
+    for (gi, (_, title, _, perms)) in GROUPS.into_iter().enumerate() {
         let mut list = div().flex().flex_col();
         for (i, perm) in perms.iter().enumerate() {
             let closed = m.closed_to_everyone(perm.bit);
@@ -951,6 +1039,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                                 div().ml(px(7.)).font_weight(FontWeight::NORMAL).text_color(c(0x8a8a8a)).child(format!("for {l}"))
                             })),
                     )
+                    .children(why.filter(|_| gi == 0).map(lede))
                     .child(list),
             )
             .into_any_element(),
@@ -1054,10 +1143,20 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
     let compact = vw <= 760.;
     let sections = m.sections();
     let section = sections.iter().find(|s| s.id == m.section).unwrap_or(&sections[0]);
-    let active = m
-        .anchor
-        .filter(|a| section.anchors.iter().any(|x| x.id == *a))
-        .unwrap_or(section.anchors[0].id);
+    // The anchor jumped to, until a wheel moves on; else the block crossing the middle, or
+    // the last once the bottom is reached.
+    let active = m.anchor.filter(|a| section.anchors.iter().any(|x| x.id == *a)).unwrap_or_else(|| {
+        let last = section.anchors.len().saturating_sub(1);
+        let h = &m.scroll;
+        let (view, y) = (h.bounds(), -h.offset().y);
+        let mid = view.top() + y + view.size.height / 2.;
+        let mut at = (0..=last).take_while(|&i| h.bounds_for_item(i).is_some_and(|b| b.top() <= mid)).last().unwrap_or(0);
+        let max = h.max_offset().y;
+        if max > px(0.) && y >= max - px(2.) {
+            at = last;
+        }
+        section.anchors[at].id
+    });
     let glyph = if m.is_category {
         "icons/folder.svg"
     } else if m.saved.view == "voice" {
@@ -1199,6 +1298,7 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
                 .min_h_0()
                 .overflow_y_scroll()
                 .track_scroll(&m.scroll)
+                .when(m.anchor.is_some(), |d| d.on_scroll(click_wheel(on)))
                 .pt(px(12.))
                 .pb(px(140.))
                 .when(m.busy, |d| d.opacity(0.6))
@@ -1249,7 +1349,7 @@ mod tests {
     fn perms_parse_and_targets_sort() {
         let v = serde_json::json!({
             "activated": true, "can_manage": true, "synced": null, "category": "ab",
-            "grantable": "18446744073709551615",
+            "everyone_support": "18446744073709551615",
             "roles": [{"role_id": "r2", "name": "Low", "color": 0, "position": 2}, {"role_id": "r1", "name": "High", "color": 5, "position": 1}],
             "overwrites": [
                 {"kind": "everyone", "id": null, "allow": "0", "deny": "16384"},
@@ -1260,7 +1360,8 @@ mod tests {
         });
         let p = Perms::parse(&v);
         assert!(p.open() && !p.synced);
-        assert_eq!(p.grantable, u64::MAX);
+        assert_eq!(p.support("everyone"), Some(u64::MAX));
+        assert!(p.editable("everyone") && p.support("role:r1").is_none() && !p.editable("role:r1"));
         assert_eq!(p.stored("everyone"), (0, 1 << 14));
         assert_eq!(p.stored("role:r2"), (1 << 14, 0));
     }
