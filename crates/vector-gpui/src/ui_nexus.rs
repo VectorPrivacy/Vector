@@ -7,6 +7,7 @@ use serde_json::Value;
 use super::{VectorApp, backend};
 use crate::composer::{InputChanged, TextInput};
 use crate::nexus::{Act, Action, Kind, Nexus, View};
+use crate::t;
 use crate::theme::*;
 
 impl VectorApp {
@@ -14,7 +15,7 @@ impl VectorApp {
     pub(super) fn show_nexus(&mut self, view: Option<View>, window: &mut Window, cx: &mut Context<Self>) {
         if self.nexus.is_none() {
             let search = cx.new(|cx| {
-                TextInput::new("Search the App Store", cx).with_look(nexus_search_look(false))
+                TextInput::new(t::store_search_placeholder(), cx).with_look(nexus_search_look(false))
             });
             cx.subscribe_in(&search, window, |app, _, _: &InputChanged, _, cx| {
                 if let Some(n) = app.nexus.as_mut() {
@@ -108,7 +109,7 @@ impl VectorApp {
                     Ok(Err(e)) => {
                         n.error = e;
                         if !n.apps.is_empty() {
-                            this.show_toast("Couldn't refresh the App Store", cx);
+                            this.show_toast(&t::store_refresh_failed(), cx);
                         }
                     }
                     Err(_) => {}
@@ -374,7 +375,7 @@ impl VectorApp {
             Act::OpenUrl(url) => self.open_web(&url, cx),
             Act::CopyLink(id) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!("https://vectorapp.io/go#nexus/{id}")));
-                self.show_toast("Copied App Link", cx);
+                self.show_toast(&t::store_link_copied(), cx);
             }
             Act::ClearSearch => {
                 n.search.update(cx, |s, cx| s.set_text("", cx));
@@ -399,11 +400,11 @@ impl VectorApp {
                 self.menu = Some((
                     at,
                     vec![
-                        crate::kit::MenuItem::new("Copy Link", "share"),
+                        crate::kit::MenuItem::new(t::store_copy_link(), "share"),
                         if pinned {
-                            crate::kit::MenuItem::new("Unpin", "pin").danger()
+                            crate::kit::MenuItem::new(t::main_menu_unpin(), "pin").danger()
                         } else {
-                            crate::kit::MenuItem::new("Pin to Main Menu", "pin")
+                            crate::kit::MenuItem::new(t::main_menu_pin(), "pin")
                         },
                     ],
                     vec![super::MenuAct::NexusLink(id), super::MenuAct::StartTogglePin(key)],
@@ -420,7 +421,7 @@ impl VectorApp {
         id: String,
         kind: Kind,
         label: &str,
-        failed: &'static str,
+        failed: SharedString,
         fut: impl std::future::Future<Output = Result<Option<String>, String>> + Send + 'static,
         done: impl FnOnce(&mut VectorApp, Option<String>, &mut Context<VectorApp>) + 'static,
         cx: &mut Context<Self>,
@@ -476,7 +477,7 @@ impl VectorApp {
         self.nexus_run(
             app.id.clone(),
             Kind::Launching,
-            crate::nexus::launching_text(&app),
+            &crate::nexus::launching_text(&app),
             crate::nexus::action_text(&app),
             async move { backend::market::open(open_id).await.map(|_| None) },
             |this, _, _| {
@@ -502,8 +503,8 @@ impl VectorApp {
             self.nexus_run(
                 id,
                 Kind::Installing,
-                "Installing",
-                "Failed",
+                &t::store_installing(),
+                t::store_failed_action(),
                 async move { backend::market::install(install_id).await.map(Some) },
                 move |this, path, _| {
                     if let Some(n) = this.nexus.as_mut() {
@@ -527,8 +528,8 @@ impl VectorApp {
         self.nexus_run(
             id,
             Kind::Updating,
-            "Updating",
-            "Failed",
+            &t::store_updating(),
+            t::store_failed_action(),
             async move { backend::market::update(run_id).await.map(Some) },
             move |this, path, _| {
                 if let Some(n) = this.nexus.as_mut() {
@@ -569,10 +570,10 @@ impl VectorApp {
 
     fn nexus_uninstall(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(app) = self.nexus.as_ref().and_then(|n| n.app(&id)).cloned() else { return };
-        let mut p = crate::kit::Popup::notice(format!("Uninstall {}?", app.name));
-        p.text = Some("This will remove the app from your device. You can reinstall it anytime.".into());
-        p.confirm = "Uninstall".into();
-        p.cancel = Some("Cancel".into());
+        let mut p = crate::kit::Popup::notice(t::store_uninstall_title(app.name.as_str()));
+        p.text = Some(t::store_uninstall_text());
+        p.confirm = t::store_uninstall_confirm();
+        p.cancel = Some(t::dialog_cancel());
         self.popup = Some((p, super::PopupAct::NexusUninstall(id)));
         cx.notify();
     }
@@ -583,8 +584,8 @@ impl VectorApp {
         self.nexus_run(
             id,
             Kind::Uninstalling,
-            "Uninstalling...",
-            "Failed",
+            &t::store_uninstalling(),
+            t::store_failed_action(),
             async move { backend::market::uninstall(run_id, name).await.map(|_| None) },
             move |this, _, cx| {
                 if let Some(n) = this.nexus.as_mut() {
@@ -596,7 +597,7 @@ impl VectorApp {
                     });
                     n.played = backend::market::plays();
                 }
-                this.show_toast("App uninstalled", cx);
+                this.show_toast(&t::store_uninstalled(), cx);
             },
             cx,
         );
@@ -676,7 +677,7 @@ impl VectorApp {
 
     fn open_picker(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let search = cx.new(|cx| {
-            TextInput::new("Search chats", cx).with_look(crate::composer::Look {
+            TextInput::new(t::store_friends_search(), cx).with_look(crate::composer::Look {
                 family: RUBIK,
                 size: px(15.),
                 line_height: px(18.),
@@ -714,7 +715,7 @@ impl VectorApp {
                 if channel.is_voice() || store.send_lock(&ch.id).is_some() {
                     continue;
                 }
-                let name = if com.name.is_empty() { "Community".to_string() } else { com.name.clone() };
+                let name = if com.name.is_empty() { t::store_friends_community().to_string() } else { com.name.clone() };
                 let room = if channel.name.is_empty() { "general" } else { channel.name.as_str() };
                 out.push((
                     crate::data::last_activity(ch),
@@ -727,7 +728,7 @@ impl VectorApp {
             {
                 out.push((
                     crate::data::last_activity(ch),
-                    (ch.id.clone(), store.name(&ch.id), "Direct message".into(), store.avatar_path(&ch.id), false),
+                    (ch.id.clone(), store.name(&ch.id), t::store_friends_dm().into(), store.avatar_path(&ch.id), false),
                 ));
             }
         }
@@ -742,7 +743,7 @@ impl VectorApp {
         let Some(app) = n.app(&id).cloned() else { return };
         let icon = n.icon_path(&app);
         let Some(path) = app.local_path.clone() else {
-            return self.show_toast("Install it first", cx);
+            return self.show_toast(&t::store_install_first(), cx);
         };
         self.close_nexus(cx);
         self.open_chat(chat.clone().into(), window, cx);
@@ -796,7 +797,7 @@ impl VectorApp {
                             .text_size(px(18.))
                             .line_height(px(22.))
                             .font_weight(FontWeight::BOLD)
-                            .child("Play with Friends"),
+                            .child(t::store_play_with_friends()),
                     )
                     .child(
                         div()
@@ -804,7 +805,7 @@ impl VectorApp {
                             .text_size(px(13.))
                             .line_height(px(19.5))
                             .text_color(white_a(0.55))
-                            .child(format!("Send {} to a chat, and it opens for you", app.name)),
+                            .child(t::store_friends_hint(app.name.as_str())),
                     ),
             )
             .child(
@@ -847,7 +848,7 @@ impl VectorApp {
                     .text_center()
                     .text_size(px(14.))
                     .text_color(c(0x6f6f6f))
-                    .child(if q.is_empty() { "No chats yet: start one to play together" } else { "No chats match" }),
+                    .child(if q.is_empty() { t::store_friends_no_chats() } else { t::store_friends_no_match() }),
             );
         }
         for (chat, name, sub, avatar, is_group) in chats {
@@ -908,7 +909,7 @@ impl VectorApp {
                             .text_color(c(PRIMARY))
                             .opacity(0.)
                             .group_hover(group, |s| s.opacity(1.))
-                            .child("Send"),
+                            .child(t::store_friends_send()),
                     ),
             );
         }
@@ -1046,11 +1047,11 @@ impl VectorApp {
             return;
         }
         let rows = if app.blossom_hash.is_empty() {
-            Err("No permissions available".to_string())
+            Err(t::store_permissions_none().to_string())
         } else if live {
             backend::market::granted(&app.blossom_hash)
                 .map(|g| backend::market::permission_rows(&app.requested_permissions, &g))
-                .map_err(|_| "Failed to load permissions".to_string())
+                .map_err(|_| t::store_permissions_failed().to_string())
         } else {
             let g = FIXTURE_GRANTS.with(|g| g.borrow().get(&app.blossom_hash).cloned().unwrap_or_default());
             Ok(backend::market::permission_rows(&app.requested_permissions, &g))
@@ -1146,16 +1147,13 @@ impl VectorApp {
         }
         let card = crate::security::card("ma-perm")
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(crate::security::head("icons/shield-filled.svg", format!("{} asks for access", p.prompt.name).into(), None))
-            .child(crate::security::lead(
-                "Turn on what you're happy to share. It may work with less, and you can change these later on its App Store page.",
-                false,
-            ))
+            .child(crate::security::head("icons/shield-filled.svg", t::store_permissions_ask(p.prompt.name.as_str()), None))
+            .child(crate::security::lead(t::store_permissions_ask_text(), false))
             .child(list)
             .child(
                 crate::security::actions()
-                    .child(crate::security::button("ma-perm-go", "Continue", false, true, answer(true)))
-                    .child(crate::security::button("ma-perm-cancel", "Cancel", true, true, answer(false))),
+                    .child(crate::security::button("ma-perm-go", t::store_permissions_continue(), false, true, answer(true)))
+                    .child(crate::security::button("ma-perm-cancel", t::dialog_cancel(), true, true, answer(false))),
             );
         let backdrop = cx.listener(|a, _: &gpui::MouseDownEvent, _, cx| a.perm_answer(false, cx));
         Some(

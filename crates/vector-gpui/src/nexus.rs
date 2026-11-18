@@ -13,6 +13,7 @@ use crate::pic::img;
 
 use crate::backend::market::MarketplaceApp;
 use crate::composer::TextInput;
+use crate::t;
 use crate::theme::*;
 
 const BG: u32 = 0x030303;
@@ -180,13 +181,18 @@ pub fn fits(app: &MarketplaceApp, d: Device) -> bool {
     (d.keys && !c.only) || (d.touch && c.touch) || (d.pad && c.pad)
 }
 
-pub fn needs_label(app: &MarketplaceApp) -> String {
+pub fn needs_label(app: &MarketplaceApp) -> SharedString {
     let c = controls_of(app);
-    let parts: Vec<&str> = [(c.keys, "a keyboard"), (c.pad, "a controller"), (c.touch, "a touchscreen")]
-        .into_iter()
-        .filter_map(|(on, s)| on.then_some(s))
-        .collect();
-    if parts.is_empty() { "a keyboard and mouse".into() } else { parts.join(" or ") }
+    match (c.keys, c.pad, c.touch) {
+        (true, false, false) => t::store_needs_keys(),
+        (false, true, false) => t::store_needs_pad(),
+        (false, false, true) => t::store_needs_touch(),
+        (true, true, false) => t::store_needs_keys_pad(),
+        (true, false, true) => t::store_needs_keys_touch(),
+        (false, true, true) => t::store_needs_pad_touch(),
+        (true, true, true) => t::store_needs_all(),
+        (false, false, false) => t::store_needs_none(),
+    }
 }
 
 pub fn is_game(app: &MarketplaceApp) -> bool {
@@ -226,7 +232,7 @@ pub fn tag_label(tag: &str) -> String {
         "dnd" => "D&D",
         "asmr" => "ASMR",
         "io" => "IO",
-        "kbm" => "Keyboard & Mouse",
+        "kbm" => return t::store_control_keys().into(),
         _ => "",
     };
     if !said.is_empty() {
@@ -303,22 +309,22 @@ fn search_rank(app: &MarketplaceApp, q: &str) -> u8 {
     }
 }
 
-pub fn action_text(app: &MarketplaceApp) -> &'static str {
-    if is_game(app) { "Play" } else { "Open" }
+pub fn action_text(app: &MarketplaceApp) -> SharedString {
+    if is_game(app) { t::store_play() } else { t::store_open() }
 }
 
-pub fn launching_text(app: &MarketplaceApp) -> &'static str {
-    if is_game(app) { "Launching..." } else { "Opening..." }
+pub fn launching_text(app: &MarketplaceApp) -> SharedString {
+    if is_game(app) { t::store_launching() } else { t::store_opening() }
 }
 
 /// "just now", "5m ago", "2d ago", "3 Oct".
 pub fn played_ago(ms: i64, now: i64) -> String {
     let s = ((now - ms).max(0) / 1000) as i64;
     match s {
-        0..60 => "just now".into(),
-        60..3600 => format!("{}m ago", s / 60),
-        3600..86400 => format!("{}h ago", s / 3600),
-        86400..604800 => format!("{}d ago", s / 86400),
+        0..60 => t::store_played_now().into(),
+        60..3600 => t::store_played_minutes(s / 60).into(),
+        3600..86400 => t::store_played_hours(s / 3600).into(),
+        86400..604800 => t::store_played_days(s / 86400).into(),
         _ => chrono::DateTime::from_timestamp_millis(ms)
             .map(|d| d.with_timezone(&chrono::Local).format("%-d %b").to_string())
             .unwrap_or_default(),
@@ -595,9 +601,9 @@ fn action_button(n: &Nexus, app: &MarketplaceApp, lg: bool, on: &OnAct, key: &st
     };
     let label: SharedString = match action {
         Some(a) if !downloading => a.label.clone(),
-        _ if app.update_available => "Update".into(),
-        _ if is_installed(app) => action_text(app).into(),
-        _ => "Install".into(),
+        _ if app.update_available => t::store_update(),
+        _ if is_installed(app) => action_text(app),
+        _ => t::store_install(),
     };
     let id = app.id.clone();
     let play = !busy && !failed && is_installed(app) && !app.update_available;
@@ -669,7 +675,7 @@ fn btn(id: impl Into<SharedString>, label: impl Into<SharedString>, accent: bool
         .child(label.into())
 }
 
-fn soft(id: impl Into<SharedString>, glyph_name: Option<&str>, label: &'static str, disabled: bool) -> gpui::Stateful<gpui::Div> {
+fn soft(id: impl Into<SharedString>, glyph_name: Option<&str>, label: SharedString, disabled: bool) -> gpui::Stateful<gpui::Div> {
     let mut b = div()
         .id(id.into())
         .flex()
@@ -696,7 +702,7 @@ fn soft(id: impl Into<SharedString>, glyph_name: Option<&str>, label: &'static s
     b.child(label)
 }
 
-fn link(id: impl Into<SharedString>, label: &'static str) -> gpui::Stateful<gpui::Div> {
+fn link(id: impl Into<SharedString>, label: SharedString) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id.into())
         .flex_shrink_0()
@@ -805,7 +811,7 @@ fn nav_row(
     row.into_any_element()
 }
 
-fn group_label(text: &'static str) -> gpui::Div {
+fn group_label(text: SharedString) -> gpui::Div {
     div()
         .mt(px(22.))
         .mx(px(8.))
@@ -828,17 +834,17 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
     let tools = fit.iter().filter(|a| !is_game(a)).count();
     let cats = tag_counts(fit.iter().copied());
     let mut list = div().flex().flex_col();
-    list = list.child(nav_row("discover".into(), Some("globe"), "Discover".into(), 0, false, here(&View::Discover), || Act::Show(View::Discover), on));
-    list = list.child(nav_row("library".into(), Some("grid"), "Library".into(), installed, false, here(&View::Library), || Act::Show(View::Library), on));
+    list = list.child(nav_row("discover".into(), Some("globe"), t::store_discover().into(), 0, false, here(&View::Discover), || Act::Show(View::Discover), on));
+    list = list.child(nav_row("library".into(), Some("grid"), t::store_library().into(), installed, false, here(&View::Library), || Act::Show(View::Library), on));
     if updates > 0 {
-        list = list.child(nav_row("updates".into(), Some("arrow-up"), "Updates".into(), updates, true, here(&View::Updates), || Act::Show(View::Updates), on));
+        list = list.child(nav_row("updates".into(), Some("arrow-up"), t::store_updates().into(), updates, true, here(&View::Updates), || Act::Show(View::Updates), on));
     }
-    list = list.child(nav_row("all".into(), Some("align-left"), "All Apps".into(), fit.len(), false, here(&View::All), || Act::Show(View::All), on));
+    list = list.child(nav_row("all".into(), Some("align-left"), t::store_all_apps().into(), fit.len(), false, here(&View::All), || Act::Show(View::All), on));
     if !cats.is_empty() {
-        list = list.child(group_label("Categories"));
+        list = list.child(group_label(t::store_categories()));
         if tools > 0 {
             let v = View::Category("app".into());
-            list = list.child(nav_row("cat-app".into(), None, "Apps & Tools".into(), tools, false, here(&v), move || Act::Show(v.clone()), on));
+            list = list.child(nav_row("cat-app".into(), None, t::store_apps_tools().into(), tools, false, here(&v), move || Act::Show(v.clone()), on));
         }
         let shown = if n.more { cats.len() } else { cats.len().min(FEW) };
         for (tag, count) in &cats[..shown] {
@@ -862,7 +868,7 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
                     .hover(|s| s.text_color(c(0xffffff)))
                     .cursor_pointer()
                     .on_click(click(on, || Act::More))
-                    .child(if n.more { "Fewer".to_string() } else { format!("{} More", cats.len() - FEW) })
+                    .child(if n.more { t::store_fewer() } else { t::store_more(cats.len() - FEW) })
                     .child(
                         glyph(if n.more { "chevron-up" } else { "chevron-down" }, 12., c(0x6f6f6f))
                             .group_hover("nx-nav-more", |s| s.text_color(c(0xffffff))),
@@ -871,12 +877,12 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
         }
     }
     let d = n.device;
-    let controls: Vec<&str> = [(d.touch, "Touch"), (d.keys, "Keyboard & Mouse"), (d.pad, "Controller")]
+    let controls: Vec<SharedString> = [(d.touch, t::store_control_touch as fn() -> SharedString), (d.keys, t::store_control_keys), (d.pad, t::store_control_pad)]
         .into_iter()
-        .filter_map(|(on, s)| on.then_some(s))
+        .filter_map(|(on, s)| on.then(s))
         .collect();
     let fit_only = n.fit_only;
-    list = list.child(group_label("This Device")).child(
+    list = list.child(group_label(t::store_this_device())).child(
         div()
             .flex()
             .flex_col()
@@ -895,7 +901,7 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
                     .text_size(px(13.))
                     .line_height(px(24.))
                     .text_color(c(0xb2b2b2))
-                    .child(if controls.is_empty() { "No controls found".to_string() } else { controls.join(" · ") }),
+                    .child(if controls.is_empty() { t::store_no_controls() } else { controls.join(" · ").into() }),
             )
             .when(!d.pad, |e| {
                 e.child(
@@ -903,7 +909,7 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
                         .text_size(px(12.))
                         .line_height(px(16.8))
                         .text_color(c(0x5b6060))
-                        .child("Press a button on a controller to add it"),
+                        .child(t::store_add_controller()),
                 )
             })
             .child(
@@ -915,7 +921,7 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
                     .text_size(px(14.))
                     .line_height(px(24.))
                     .text_color(c(0xb2b2b2))
-                    .child("Only What Fits")
+                    .child(t::store_fit_only())
                     .child(crate::settings::toggle("nx-fit", fit_only, true, click(on, move || Act::FitOnly(!fit_only)))),
             ),
     );
@@ -999,7 +1005,7 @@ fn nav(n: &Nexus, on: &OnAct, cx: &App) -> AnyElement {
                                 .line_height(px(17.))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(c(0xffffff))
-                                .child("App Store"),
+                                .child(t::store_title()),
                         ),
                 )
                 .child(list),
@@ -1027,9 +1033,9 @@ fn row(n: &Nexus, app: &MarketplaceApp, i: usize, note: Option<String>, on: &OnA
     sub = sub.child(tag_label(&lead_tag(app)));
     let dot = || div().size(px(3.)).rounded_full().bg(c(MUTE)).opacity(0.6);
     if app.update_available {
-        sub = sub.child(dot()).child(div().text_color(c(PRIMARY)).child("Update ready"));
+        sub = sub.child(dot()).child(div().text_color(c(PRIMARY)).child(t::store_update_ready()));
     } else if !fits(app, n.device) {
-        sub = sub.child(dot()).child(div().text_color(c(FAIR)).child(format!("For {}", needs_label(app))));
+        sub = sub.child(dot()).child(div().text_color(c(FAIR)).child(t::store_for(&needs_label(app))));
     }
     let on2 = on.clone();
     let el = div()
@@ -1179,7 +1185,7 @@ fn shelf(
     if let Some(more) = more {
         let more = Rc::new(std::cell::RefCell::new(Some(more)));
         let on = on.clone();
-        head = head.child(link(SharedString::from(format!("nx-more-{key}")), "See All").on_click(move |_, w, cx| {
+        head = head.child(link(SharedString::from(format!("nx-more-{key}")), t::store_see_all()).on_click(move |_, w, cx| {
             if let Some(a) = more.borrow().as_ref().map(clone_act) {
                 on(a, w, cx);
             }
@@ -1257,11 +1263,11 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
     let id = shown.id.clone();
     let second = if is_multiplayer(shown) && is_installed(shown) {
         let id = id.clone();
-        soft("nx-spot-friends", Some("users-multi"), "Play with Friends", false)
+        soft("nx-spot-friends", Some("users-multi"), t::store_play_with_friends(), false)
             .on_click(click(on, move || Act::PlayWith(id.clone())))
     } else {
         let id = id.clone();
-        soft("nx-spot-details", None, "Details", false).on_click(click(on, move || Act::Details(id.clone())))
+        soft("nx-spot-details", None, t::store_details(), false).on_click(click(on, move || Act::Details(id.clone())))
     };
     let narrow = n.narrow;
     let art_size = if narrow { 76. } else { 132. };
@@ -1296,7 +1302,7 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(PRIMARY))
                         .child(crate::kit::spaced(
-                            if is_multiplayer(shown) { "PLAY TOGETHER" } else { "NEW IN THE APP STORE" },
+                            if is_multiplayer(shown) { t::store_spotlight_together() } else { t::store_spotlight_new() }.to_uppercase(),
                             11. * 0.14,
                         )),
                 )
@@ -1418,19 +1424,19 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
     let d = n.device;
     let mut out = Vec::new();
     out.extend(spotlight(n, &n.spotlight(), on));
-    let mut picks: Vec<(&'static str, &str, &str, &str, Vec<&MarketplaceApp>)> = Vec::new();
+    let mut picks: Vec<(&'static str, SharedString, &str, &str, Vec<&MarketplaceApp>)> = Vec::new();
     if d.pad {
-        picks.push(("pad", "Grab Your Controller", "gamepad", "controller", games.iter().copied().filter(|a| controls_of(a).pad).collect()));
+        picks.push(("pad", t::store_shelf_controller(), "gamepad", "controller", games.iter().copied().filter(|a| controls_of(a).pad).collect()));
     }
     if d.touch && !d.keys {
-        picks.push(("touch", "Play on the Go", "touch", "mobile", newest.iter().copied().filter(|a| controls_of(a).touch).collect()));
+        picks.push(("touch", t::store_shelf_touch(), "touch", "mobile", newest.iter().copied().filter(|a| controls_of(a).touch).collect()));
     } else if d.keys {
-        picks.push(("keys", "Made for Keyboard & Mouse", "keyboard", "keyboard", newest.iter().copied().filter(|a| controls_of(a).keys).collect()));
+        picks.push(("keys", t::store_shelf_keys(), "keyboard", "keyboard", newest.iter().copied().filter(|a| controls_of(a).keys).collect()));
     }
     for (key, title, g, tag, apps) in picks.into_iter().filter(|p| !p.4.is_empty()) {
         let tiles = apps.iter().map(|a| tile(n, a, None, on, key)).collect();
         let h = n.shelves.get(key).cloned().unwrap_or_default();
-        out.push(shelf(n.narrow, key, title, Some(g), Some(Act::Show(View::Category(tag.into()))), tiles, &h, on));
+        out.push(shelf(n.narrow, key, &title, Some(g), Some(Act::Show(View::Category(tag.into()))), tiles, &h, on));
     }
     let recent: Vec<(&MarketplaceApp, i64)> = n
         .played
@@ -1441,12 +1447,12 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
     if !recent.is_empty() {
         let tiles = recent.iter().map(|(a, at)| tile(n, a, Some(played_ago(*at, n.now_ms)), on, "recent")).collect();
         let h = n.shelves.get("recent").cloned().unwrap_or_default();
-        out.push(shelf(n.narrow, "recent", "Jump Back In", None, Some(Act::Show(View::Library)), tiles, &h, on));
+        out.push(shelf(n.narrow, "recent", &t::store_shelf_recent(), None, Some(Act::Show(View::Library)), tiles, &h, on));
     }
     if !together.is_empty() {
         let tiles = together.iter().map(|a| tile(n, a, None, on, "together")).collect();
         let h = n.shelves.get("together").cloned().unwrap_or_default();
-        out.push(shelf(n.narrow, "together", "Play Together", None, Some(Act::Show(View::Category("multiplayer".into()))), tiles, &h, on));
+        out.push(shelf(n.narrow, "together", &t::store_shelf_together(), None, Some(Act::Show(View::Category("multiplayer".into()))), tiles, &h, on));
     }
     let arrivals: Vec<AnyElement> = newest.iter().take(6).enumerate().map(|(i, a)| row(n, a, i, None, on, "new")).collect();
     let gap = if n.narrow { 30. } else { 36. };
@@ -1459,9 +1465,9 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
                     .items_center()
                     .gap(px(14.))
                     .mb(px(12.))
-                    .child(h3("New Arrivals"))
+                    .child(h3(t::store_new_arrivals()))
                     .child(div().flex_1())
-                    .child(link("nx-new-all", "See All").on_click(click(on, || Act::Show(View::All)))),
+                    .child(link("nx-new-all", t::store_see_all()).on_click(click(on, || Act::Show(View::All)))),
             )
             .child(rows(arrivals, width))
             .into_any_element(),
@@ -1470,7 +1476,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
         let tiles = tools.iter().map(|a| tile(n, a, None, on, "tools")).collect();
         let h = n.shelves.get("tools").cloned().unwrap_or_default();
         let more = (tools.len() > 6).then(|| Act::Show(View::Category("app".into())));
-        out.push(shelf(n.narrow, "tools", "Apps & Tools", None, more, tiles, &h, on));
+        out.push(shelf(n.narrow, "tools", &t::store_apps_tools(), None, more, tiles, &h, on));
     }
     let cats: Vec<(String, usize)> = tag_counts(fit.iter().copied())
         .into_iter()
@@ -1538,7 +1544,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
                                         .text_size(px(12.))
                                         .line_height(px(16.))
                                         .text_color(c(MUTE))
-                                        .child(format!("{count} {}", if *count == 1 { "app" } else { "apps" })),
+                                        .child(t::store_app_count(*count)),
                                 ),
                         )
                         .child(faces)
@@ -1550,7 +1556,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
         out.push(
             div()
                 .mt(px(gap))
-                .child(div().flex().items_center().mb(px(12.)).child(h3("Browse by Category")))
+                .child(div().flex().items_center().mb(px(12.)).child(h3(t::store_browse())))
                 .child(grid)
                 .into_any_element(),
         );
@@ -1558,7 +1564,7 @@ fn discover(n: &Nexus, width: f32, on: &OnAct) -> Vec<AnyElement> {
     out
 }
 
-fn empty(g: &str, title: String, hint: &str, button: Option<(&'static str, Act)>, on: &OnAct, pulse: bool) -> AnyElement {
+fn empty(g: &str, title: SharedString, hint: SharedString, button: Option<(SharedString, Act)>, on: &OnAct, pulse: bool) -> AnyElement {
     let mut col = div()
         .flex()
         .flex_col()
@@ -1594,7 +1600,7 @@ fn empty(g: &str, title: String, hint: &str, button: Option<(&'static str, Act)>
                 .text_center()
                 .text_size(px(14.))
                 .text_color(c(MUTE))
-                .child(hint.to_string()),
+                .child(hint),
         );
     }
     if let Some((label, act)) = button {
@@ -1659,10 +1665,10 @@ fn browse(n: &Nexus, q: &str, width: f32, on: &OnAct) -> Vec<AnyElement> {
                         .text_size(px(14.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(c(0xffffff))
-                        .child(if updates.len() == 1 { "1 update ready".to_string() } else { format!("{} updates ready", updates.len()) }),
+                        .child(t::store_updates_ready(updates.len())),
                 )
                 .child(
-                    btn("nx-update-all", if updating { "Updating" } else { "Update All" }, true)
+                    btn("nx-update-all", if updating { t::store_updating() } else { t::store_update_all() }, true)
                         .h(px(30.))
                         .px(px(14.))
                         .text_size(px(13.))
@@ -1679,21 +1685,21 @@ fn browse(n: &Nexus, q: &str, width: f32, on: &OnAct) -> Vec<AnyElement> {
             .enumerate()
             .map(|(i, a)| {
                 let note = (matches!(n.view, View::Library) && q.is_empty()).then(|| match played.get(a.id.as_str()) {
-                    Some(at) => format!("Played {}", played_ago(*at, n.now_ms)),
-                    None => "Not played yet".into(),
+                    Some(at) => t::store_played(played_ago(*at, n.now_ms)).into(),
+                    None => t::store_not_played().into(),
                 });
                 row(n, a, i, note, on, "list")
             })
             .collect();
         out.push(rows(items, width));
     } else if !q.is_empty() && unfit == 0 {
-        out.push(empty("search", format!("No results for \u{201c}{q}\u{201d}"), "Try a name, a maker, or a kind of game", None, on, false));
+        out.push(empty("search", t::store_no_results(q), t::store_no_results_hint(), None, on, false));
     } else if matches!(n.view, View::Library) && q.is_empty() {
-        out.push(empty("grid", "Nothing installed yet".into(), "Apps you install from the App Store live here", Some(("Discover Apps", Act::Show(View::Discover))), on, false));
+        out.push(empty("grid", t::store_library_empty(), t::store_library_empty_hint(), Some((t::store_discover_apps(), Act::Show(View::Discover))), on, false));
     } else if matches!(n.view, View::Updates) && q.is_empty() {
-        out.push(empty("check-circle", "You're up to date".into(), "Every app you have is on its newest version", None, on, false));
+        out.push(empty("check-circle", t::store_up_to_date(), t::store_up_to_date_hint(), None, on, false));
     } else {
-        out.push(empty(g, "Nothing here fits this device".into(), "These are made for other controls", None, on, false));
+        out.push(empty(g, t::store_nothing_fits(), t::store_nothing_fits_hint(), None, on, false));
     }
     if unfit > 0 {
         let fit_only = n.fit_only;
@@ -1707,13 +1713,9 @@ fn browse(n: &Nexus, q: &str, width: f32, on: &OnAct) -> Vec<AnyElement> {
                 .text_size(px(13.))
                 .text_color(c(MUTE))
                 .child(glyph(g, 15., c(MUTE)))
-                .child(if fit_only {
-                    if unfit == 1 { "1 more is made for other controls".to_string() } else { format!("{unfit} more are made for other controls") }
-                } else {
-                    "Showing what may not fit this device".to_string()
-                })
+                .child(if fit_only { t::store_unfit(unfit) } else { t::store_showing_unfit() })
                 .child(
-                    link("nx-fit-link", if fit_only { "Show" } else { "Hide" })
+                    link("nx-fit-link", if fit_only { t::store_show() } else { t::store_hide() })
                         .text_size(px(13.))
                         .on_click(click(on, move || Act::FitOnly(!fit_only))),
                 )
@@ -1736,7 +1738,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         .developer
         .clone()
         .or_else(|| publisher.map(|p| p.0.to_string()))
-        .unwrap_or_else(|| "Unknown maker".into());
+        .unwrap_or_else(|| t::store_unknown_maker().into());
     let narrow = n.narrow;
     let fill = |d: gpui::Stateful<gpui::Div>| d.when(narrow, |d| d.flex_1().min_w_0());
     let mut actions = div()
@@ -1747,13 +1749,13 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         .child(fill(action_button(n, app, true, on, "detail")));
     if is_multiplayer(app) {
         let id = app.id.clone();
-        let b = fill(soft("nx-d-friends", Some("users-multi"), "Play with Friends", busy));
+        let b = fill(soft("nx-d-friends", Some("users-multi"), t::store_play_with_friends(), busy));
         actions = actions.child(if busy { b } else { b.on_click(click(on, move || Act::PlayWith(id.clone()))) });
     }
     if !n.me.is_empty() && app.publisher == n.me {
         let id = app.id.clone();
         actions = actions.child(
-            fill(soft("nx-d-edit", Some("edit"), "Edit Listing", false))
+            fill(soft("nx-d-edit", Some("edit"), t::store_edit_listing(), false))
                 .when(narrow, |d| d.flex_basis(gpui::relative(1.)))
                 .on_click(click(on, move || Act::EditListing(id.clone()))),
         );
@@ -1777,7 +1779,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                         .child(
                             div()
                                 .id("nx-copy-link")
-                                .tip("Copy Link")
+                                .tip(t::store_copy_link())
                                 .cursor_pointer()
                                 .opacity(0.)
                                 .hover(|s| s.opacity(1.))
@@ -1802,7 +1804,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
             .child(icon(n, app, 112.))
             .child(id_block.child(actions))
     };
-    let fact = |k: &str, v: String, s: Option<String>, first: bool| {
+    let fact = |k: SharedString, v: String, s: Option<String>, first: bool| {
         div()
             .when(narrow, |d| d.w_1_2())
             .when(!narrow, |d| d.flex_1())
@@ -1845,16 +1847,16 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         .border_b_1()
         .border_color(c(LINE_2))
         .child(fact(
-            "Version",
+            t::store_version(),
             app.version.clone(),
-            app.update_available.then(|| app.installed_version.clone()).flatten().map(|v| format!("You have {v}")),
+            app.update_available.then(|| app.installed_version.clone()).flatten().map(|v| t::store_you_have(v).into()),
             true,
         ))
-        .child(fact("Size", crate::media::format_bytes_with(app.size as f64, 1, false), None, false))
-        .child(fact("Released", publish_date(app.published_at), None, narrow))
+        .child(fact(t::store_size(), crate::media::format_bytes_with(app.size as f64, 1, false), None, false))
+        .child(fact(t::store_released(), publish_date(app.published_at), None, narrow))
         .child(fact(
-            if game { "Players" } else { "Kind" },
-            if game { if is_multiplayer(app) { "Multiplayer" } else { "Solo" } } else { "App" }.into(),
+            if game { t::store_players() } else { t::store_kind() },
+            if game { if is_multiplayer(app) { t::store_multiplayer() } else { t::store_solo() } } else { t::store_app() }.into(),
             None,
             false,
         ));
@@ -1862,7 +1864,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
     let d = n.device;
     let mut page = div().max_w(px(760.)).w_full().mx_auto().child(head).child(facts);
     if ctl.touch || ctl.pad || ctl.keys {
-        let play = |g: &str, label: &'static str, have: bool| {
+        let play = |g: &str, label: SharedString, have: bool| {
             div()
                 .flex()
                 .items_center()
@@ -1891,16 +1893,16 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                     .text_size(px(11.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c(MUTE))
-                    .child(crate::kit::spaced("PLAYS WITH", 11. * 0.12)),
+                    .child(crate::kit::spaced(t::store_plays_with().to_uppercase(), 11. * 0.12)),
             );
         if ctl.touch {
-            plays = plays.child(play("touch", "Touch", d.touch));
+            plays = plays.child(play("touch", t::store_control_touch(), d.touch));
         }
         if ctl.pad {
-            plays = plays.child(play("gamepad", "Controller", d.pad));
+            plays = plays.child(play("gamepad", t::store_control_pad(), d.pad));
         }
         if ctl.keys {
-            plays = plays.child(play("keyboard", "Keyboard & Mouse", d.keys));
+            plays = plays.child(play("keyboard", t::store_control_keys(), d.keys));
         }
         page = page.child(plays);
     }
@@ -1919,7 +1921,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                 .text_size(px(13.))
                 .line_height(px(18.2))
                 .child(glyph("info", 16., c(FAIR)))
-                .child(format!("Made for {}, which this device doesn't seem to have", needs_label(app))),
+                .child(t::store_made_for(&needs_label(app))),
         );
     }
     let tags: Vec<&String> = tags_of(app).collect();
@@ -1940,7 +1942,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
             .child(text)
     };
     if !app.description.is_empty() {
-        page = page.child(div().mt(px(32.)).child(h3("About").mb(px(10.))).child(prose(app.description.clone())));
+        page = page.child(div().mt(px(32.)).child(h3(t::store_about()).mb(px(10.))).child(prose(app.description.clone())));
     }
     if let Some(log) = app.changelog.as_ref().filter(|l| !l.is_empty()) {
         page = page.child(
@@ -1953,8 +1955,8 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                         .justify_between()
                         .gap(px(12.))
                         .mb(px(10.))
-                        .child(h3("What's New"))
-                        .child(div().text_size(px(13.)).text_color(c(MUTE)).child(format!("Version {}", app.version))),
+                        .child(h3(t::store_whats_new()))
+                        .child(div().text_size(px(13.)).text_color(c(MUTE)).child(t::store_version_number(app.version.as_str()))),
                 )
                 .child(prose(log.clone())),
         );
@@ -1970,7 +1972,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
     page = page.child(
         div()
             .mt(px(32.))
-            .child(h3("Publisher").mb(px(10.)))
+            .child(h3(t::store_publisher()).mb(px(10.)))
             .child(
                 div()
                     .id("nx-pub")
@@ -2020,7 +2022,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                     .child(glyph("chevron-right", 16., c(MUTE))),
             ),
     );
-    let info_row = |k: &'static str, v: AnyElement, first: bool| {
+    let info_row = |k: SharedString, v: AnyElement, first: bool| {
         div()
             .flex()
             .items_center()
@@ -2051,17 +2053,17 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         .border_color(c(LINE));
     let mut first = true;
     if let Some(dev) = &app.developer {
-        info = info.child(info_row("Developer", value(dev.clone()), true));
+        info = info.child(info_row(t::store_developer(), value(dev.clone()), true));
         first = false;
     }
-    info = info.child(info_row("Category", value(if game { "Game" } else { "App" }.into()), first));
+    info = info.child(info_row(t::store_category(), value(if game { t::store_game() } else { t::store_app() }.into()), first));
     if installed && let Some(v) = &app.installed_version {
-        info = info.child(info_row("Installed", value(format!("Version {v}")), false));
+        info = info.child(info_row(t::store_installed(), value(t::store_version_number(v.as_str()).into()), false));
     }
     if let Some(url) = &app.source_url {
         let u = url.clone();
         info = info.child(info_row(
-            "Source",
+            t::store_source(),
             div()
                 .flex_1()
                 .min_w_0()
@@ -2086,7 +2088,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
         ));
     }
     info = info.child(info_row(
-        "App ID",
+        t::store_app_id(),
         div()
             .flex_1()
             .min_w_0()
@@ -2096,13 +2098,13 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
             .into_any_element(),
         false,
     ));
-    let mut sec = div().mt(px(32.)).child(h3("Information").mb(px(10.))).child(info);
+    let mut sec = div().mt(px(32.)).child(h3(t::store_information()).mb(px(10.))).child(info);
     if installed {
         let (id, label) = (
             app.id.clone(),
             match action {
                 Some(a) if a.kind == Kind::Uninstalling => a.label.to_string(),
-                _ => format!("Uninstall {}", app.name),
+                _ => t::store_uninstall(app.name.as_str()).into(),
             },
         );
         sec = sec.child(
@@ -2143,23 +2145,23 @@ pub fn view(
     let app = n.details.as_deref().and_then(|id| n.app(id));
     let title: String = match (app, searching, &n.view) {
         (Some(a), _, _) => a.name.clone(),
-        (_, true, _) => "Search".into(),
-        (_, _, View::Library) => "Library".into(),
-        (_, _, View::Updates) => "Updates".into(),
-        (_, _, View::All) => "All Apps".into(),
-        (_, _, View::Category(c)) if c == "app" => "Apps & Tools".into(),
+        (_, true, _) => t::store_search().into(),
+        (_, _, View::Library) => t::store_library().into(),
+        (_, _, View::Updates) => t::store_updates().into(),
+        (_, _, View::All) => t::store_all_apps().into(),
+        (_, _, View::Category(c)) if c == "app" => t::store_apps_tools().into(),
         (_, _, View::Category(c)) => tag_label(c),
-        _ => "Discover".into(),
+        _ => t::store_discover().into(),
     };
-    let count = |n: usize| format!("{n} {}", if n == 1 { "app" } else { "apps" });
+    let count = |n: usize| String::from(t::store_app_count(n));
     let fit: Vec<&MarketplaceApp> = n.apps.iter().filter(|a| n.shows(a)).collect();
     let heading: Option<(String, String)> = if searching {
-        Some(("Results".into(), count(fit.iter().filter(|a| matches(a, &q)).count())))
+        Some((t::store_results().into(), count(fit.iter().filter(|a| matches(a, &q)).count())))
     } else {
         match &n.view {
-            View::Library => Some(("Library".into(), count(n.apps.iter().filter(|a| is_installed(a)).count()))),
-            View::Updates => Some(("Updates".into(), String::new())),
-            View::All => Some(("All Apps".into(), count(fit.len()))),
+            View::Library => Some((t::store_library().into(), count(n.apps.iter().filter(|a| is_installed(a)).count()))),
+            View::Updates => Some((t::store_updates().into(), String::new())),
+            View::All => Some((t::store_all_apps().into(), count(fit.len()))),
             View::Category(c) => Some((title.clone(), count(fit.iter().filter(|a| in_category(a, c)).count()))),
             View::Discover => None,
         }
@@ -2175,9 +2177,9 @@ pub fn view(
         .px(px(pad))
         .pb(px(if n.narrow { 56. } else { 72. }));
     if n.loading && n.apps.is_empty() {
-        page = page.child(empty("nexus", "Opening the App Store".into(), "", None, on, true));
+        page = page.child(empty("nexus", t::store_loading(), SharedString::default(), None, on, true));
     } else if !n.error.is_empty() && n.apps.is_empty() {
-        page = page.child(empty("info", "The App Store didn't load".into(), &n.error, Some(("Try Again", Act::Retry)), on, false));
+        page = page.child(empty("info", t::store_failed(), n.error.clone().into(), Some((t::store_try_again(), Act::Retry)), on, false));
     } else if let Some(app) = app {
         page = page.child(details(n, app, publisher, on));
     } else {
@@ -2225,7 +2227,7 @@ pub fn view(
         },
     );
     let back = app.is_some() || n.slim;
-    let title = if n.slim { app.map(|a| a.name.clone()).unwrap_or_else(|| "App Store".into()) } else { title };
+    let title = if n.slim { app.map(|a| a.name.clone()).unwrap_or_else(|| t::store_title().into()) } else { title };
     let closes = app.is_none();
     let top = div()
         .h(px(if n.slim { 56. } else { 50. }))
@@ -2267,7 +2269,7 @@ pub fn view(
         .child(
             div()
                 .id("nx-refresh")
-                .aria_label("Refresh")
+                .aria_label(t::store_refresh())
                 .group("nx-refresh")
                 .flex()
                 .items_center()
@@ -2325,13 +2327,13 @@ fn slim_head(n: &Nexus, q: &str, on: &OnAct) -> AnyElement {
     let searching = !q.is_empty();
     let fit: Vec<&MarketplaceApp> = n.apps.iter().filter(|a| n.shows(a)).collect();
     let updates = n.apps.iter().filter(|a| a.update_available).count();
-    let mut chips: Vec<(View, String, usize)> = vec![(View::Discover, "Discover".into(), 0), (View::Library, "Library".into(), 0)];
+    let mut chips: Vec<(View, String, usize)> = vec![(View::Discover, t::store_discover().into(), 0), (View::Library, t::store_library().into(), 0)];
     if updates > 0 {
-        chips.push((View::Updates, "Updates".into(), updates));
+        chips.push((View::Updates, t::store_updates().into(), updates));
     }
-    chips.push((View::All, "All".into(), 0));
+    chips.push((View::All, t::store_all().into(), 0));
     if n.apps.iter().any(|a| !is_game(a)) {
-        chips.push((View::Category("app".into()), "Apps & Tools".into(), 0));
+        chips.push((View::Category("app".into()), t::store_apps_tools().into(), 0));
     }
     for (tag, _) in tag_counts(fit.iter().copied()).into_iter().filter(|(_, c)| *c > 1).take(10) {
         let label = tag_label(&tag);
@@ -2353,7 +2355,7 @@ fn slim_head(n: &Nexus, q: &str, on: &OnAct) -> AnyElement {
         .border_b_1()
         .border_color(c(0x191919))
         .child(
-            lit(chip("nx-chip-fit", "Fits This Device".into()), fit_only)
+            lit(chip("nx-chip-fit", t::store_fits().into()), fit_only)
                 .gap(px(6.))
                 .child(glyph(fit_glyph, 15., if fit_only { c(PRIMARY) } else { c(DIM) }))
                 .on_click(click(on, move || Act::FitOnly(!fit_only))),
@@ -2427,7 +2429,7 @@ fn permissions(n: &Nexus, app: &MarketplaceApp, on: &OnAct) -> gpui::Div {
         .border_color(c(LINE));
     let mut any = false;
     match n.perms.as_ref().filter(|p| p.0 == app.id).map(|p| &p.1) {
-        None => list = list.child(row().child(hint("Loading permissions…".into()))),
+        None => list = list.child(row().child(hint(t::store_permissions_loading().into()))),
         Some(Err(e)) => list = list.child(row().child(hint(e.clone()))),
         Some(Ok(items)) => {
             any = !items.is_empty();
@@ -2460,8 +2462,8 @@ fn permissions(n: &Nexus, app: &MarketplaceApp, on: &OnAct) -> gpui::Div {
         .mt(px(32.))
         .flex()
         .flex_col()
-        .child(h3("Permissions").mb(px(10.)))
-        .child(hint(format!("What {} may use. Turn any off at any time.", app.name)).mt(px(-4.)).mb(px(12.)))
+        .child(h3(t::store_permissions()).mb(px(10.)))
+        .child(hint(t::store_permissions_hint(app.name.as_str()).into()).mt(px(-4.)).mb(px(12.)))
         .child(list)
         .when(any, |d| {
             d.child(
@@ -2475,7 +2477,7 @@ fn permissions(n: &Nexus, app: &MarketplaceApp, on: &OnAct) -> gpui::Div {
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.75))
                     .on_click(click(on, || Act::ResetPerms))
-                    .child("Reset Permissions"),
+                    .child(t::store_permissions_reset()),
             )
         })
 }
