@@ -1,0 +1,7 @@
+First preview of 0.5.2.
+- Locked Channels, where only those who can post reach the readers
+- A role opens its channels in about a second, and nothing said meanwhile is lost
+- Choose where join and leave messages go, and where new members land
+- Duplicate Channel, a guided Create Community, and joins that open in under a second
+- Edit history as a timeline, formatting shortcuts and rich paste
+- Fixes: live messages after a reconnect, failed sends keep their files, blocked messages hide again
