@@ -1371,6 +1371,19 @@ pub fn rich_with(html: &str, strong: gpui::HighlightStyle) -> gpui::StyledText {
     gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
 }
 
+/// `before <tag>inside</tag> after` in its three parts, for a sentence with one live span.
+/// Spaces at the joins become no-break spaces, which line layout can't trim.
+pub fn around(text: &str, tag: &str) -> (String, String, String) {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    let Some((before, rest)) = text.split_once(&open) else { return (text.to_string(), String::new(), String::new()) };
+    let (inside, after) = rest.split_once(&close).unwrap_or((rest, ""));
+    let nb = |s: &str| s.replace(' ', "\u{a0}");
+    let (b, a) = (before.trim_end_matches(' '), after.trim_start_matches(' '));
+    let before = if b.len() < before.len() { format!("{b}{}", nb(&before[b.len()..])) } else { before.to_string() };
+    let after = if a.len() < after.len() { format!("{}{a}", nb(&after[..after.len() - a.len()])) } else { after.to_string() };
+    (before, inside.to_string(), after)
+}
+
 /// The text of [`rich`] markup, and the ranges its `<b>` covers.
 pub fn untag(html: &str) -> (String, Vec<std::ops::Range<usize>>) {
     let mut text = String::with_capacity(html.len());
@@ -1853,4 +1866,18 @@ pub fn context_menu(
     )
     .with_priority(20)
     .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn around_splits_one_span_and_keeps_its_join_spaces() {
+        let nb = '\u{a0}';
+        assert_eq!(
+            super::around("<hub>Explore</hub> to discover", "hub"),
+            (String::new(), "Explore".to_string(), format!("{nb}to discover"))
+        );
+        assert_eq!(super::around("Open the <hub>Hub</hub>", "hub"), (format!("Open the{nb}"), "Hub".to_string(), String::new()));
+        assert_eq!(super::around("no span", "hub"), ("no span".to_string(), String::new(), String::new()));
+    }
 }

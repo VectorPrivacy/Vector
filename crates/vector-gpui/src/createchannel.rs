@@ -7,6 +7,7 @@ use gpui::prelude::*;
 use gpui::{App, Entity, FontWeight, SharedString, Window, div, px, svg};
 
 use crate::composer::TextInput;
+use crate::t;
 use crate::theme::*;
 
 pub struct CreateChannel {
@@ -59,14 +60,14 @@ fn kind_row(m: &CreateChannel, voice: bool, on: &OnAct) -> impl IntoElement {
     let (icon, name, desc) = if voice {
         (
             "icons/volume-max.svg",
-            "Voice",
-            "Hang out over voice and video",
+            t::channel_type_voice(),
+            t::channel_type_voice_desc(),
         )
     } else {
         (
             "icons/channel-hash.svg",
-            "Text",
-            "Messages, images and files",
+            t::channel_type_text(),
+            t::channel_type_text_desc(),
         )
     };
     let on = on.clone();
@@ -145,8 +146,12 @@ fn kind_row(m: &CreateChannel, voice: bool, on: &OnAct) -> impl IntoElement {
 }
 
 pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl IntoElement + use<> {
-    let noun = if m.is_category { "Category" } else { "Channel" };
-    let verb = if m.source.is_some() { "Duplicate" } else { "Create" };
+    let title = match (m.source.is_some(), m.is_category) {
+        (false, false) => t::channel_create(),
+        (false, true) => t::channel_create_category(),
+        (true, false) => t::channel_duplicate(),
+        (true, true) => t::channel_duplicate_category(),
+    };
     let picks = !m.is_category && m.source.is_none();
     let valid = m.valid(cx) && !m.busy;
     let bytes = m.name.read(cx).text().len();
@@ -194,13 +199,13 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                                 .text_size(px(19.))
                                 .line_height(px(24.))
                                 .text_color(c(0xffffff))
-                                .child(format!("{verb} {noun}")),
+                                .child(title.clone()),
                         )
                         .children(
                             m.source
                                 .as_ref()
-                                .map(|(_, n)| format!("of {n}"))
-                                .or_else(|| m.category_name.as_ref().map(|n| format!("in {n}")))
+                                .map(|(_, n)| t::channel_duplicate_of(n))
+                                .or_else(|| m.category_name.as_ref().map(|n| t::channel_create_in(n)))
                                 .map(|sub| div().truncate().text_size(px(12.5)).text_color(c(0x8a8a8a)).child(sub)),
                         ),
                 )
@@ -220,7 +225,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                 ),
         )
         .when(picks, |d| {
-            d.child(label("Channel Type")).child(
+            d.child(label(&t::channel_type())).child(
                 div()
                     .flex()
                     .flex_col()
@@ -230,7 +235,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                     .child(kind_row(m, true, on)),
             )
         })
-        .child(label(&format!("{noun} Name")))
+        .child(label(&if m.is_category { t::channel_category_name() } else { t::channel_name() }))
         .child(
             div()
                 .relative()
@@ -282,7 +287,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                     .text_size(px(12.5))
                     .line_height(px(17.5))
                     .text_color(c(0x8a8a8a))
-                    .child("Same settings and permissions, a fresh history."),
+                    .child(t::channel_duplicate_note()),
             )
         })
         .when(picks, |d| {
@@ -313,18 +318,14 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                                             .mr(px(6.))
                                             .text_color(c(0xcfcfcf)),
                                     )
-                                    .child("Private Channel"),
+                                    .child(t::channel_private()),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.5))
                                     .line_height(px(17.5))
                                     .text_color(c(0x7a7a7a))
-                                    .child(if m.voice {
-                                        "Only members and roles you let in can join it."
-                                    } else {
-                                        "Only members and roles you let in can see it."
-                                    }),
+                                    .child(if m.voice { t::channel_private_voice() } else { t::channel_private_text() }),
                             ),
                     )
                     .child(crate::settings::toggle(
@@ -366,7 +367,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                             let on = on.clone();
                             move |_, w, cx| on(Act::Close, w, cx)
                         })
-                        .child("Cancel"),
+                        .child(t::dialog_cancel()),
                 )
                 .child(
                     div()
@@ -386,9 +387,9 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                                 .on_click(move |_, w, cx| submit(Act::Submit, w, cx))
                         })
                         .child(match (m.busy, m.source.is_some()) {
-                            (true, true) => "Duplicating…".to_string(),
-                            (true, false) => "Creating…".to_string(),
-                            (false, _) => format!("{verb} {noun}"),
+                            (true, true) => t::channel_duplicating(),
+                            (true, false) => t::channel_creating(),
+                            (false, _) => title,
                         }),
                 ),
         );
@@ -413,10 +414,10 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
 
 pub fn placeholder(is_category: bool, voice: bool) -> SharedString {
     if is_category {
-        "New Category".into()
+        t::channel_placeholder_category()
     } else if voice {
-        "Lounge".into()
+        t::channel_placeholder_voice()
     } else {
-        "new-channel".into()
+        t::channel_placeholder_text()
     }
 }

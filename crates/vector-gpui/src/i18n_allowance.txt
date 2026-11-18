@@ -1,4 +1,4 @@
-# Hard-coded English left per file (4216 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (4170 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -51,7 +51,6 @@ commands.rs 36
 commsettings.rs 116
 community.rs 29
 composer.rs 10
-createchannel.rs 23
 createcommunity.rs 33
 crop.rs 24
 cropper.rs 2
@@ -80,7 +79,6 @@ miniprofile.rs 7
 moderation.rs 32
 netdialog.rs 30
 netinfo.rs 30
-newchat.rs 23
 nexus.rs 126
 packcreator.rs 90
 packdetails.rs 9

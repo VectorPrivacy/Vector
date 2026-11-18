@@ -10,6 +10,7 @@ use gpui::{AnyElement, App, Entity, FontWeight, SharedString, Window, div, px, s
 
 use crate::composer::TextInput;
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 pub struct NewChat {
@@ -334,24 +335,22 @@ pub fn view(
             .items_center()
             .text_size(px(14.))
             .text_color(white_a(0.5))
-            .child(if filter_text.trim().is_empty() {
-                "No contacts yet. Paste an npub to invite someone."
-            } else {
-                "No matches."
-            });
+            .child(if filter_text.trim().is_empty() { t::newchat_empty() } else { t::newchat_no_matches() });
         if filter_text.trim().is_empty() {
+            let (before, hub, after) = crate::kit::around(&t::newchat_hub(), "hub");
             empty = empty.child(
                 div()
                     .flex()
+                    .when(!before.is_empty(), |d| d.child(before))
                     .child(
                         div()
                             .id("cp-hub")
                             .cursor_pointer()
                             .text_color(c(ACCENT))
                             .on_click(click(|| Act::Hub))
-                            .child("Explore the Vector Hub"),
+                            .child(hub),
                     )
-                    .child("\u{a0}to discover communities to join and meet new people."),
+                    .when(!after.is_empty(), |d| d.child(after)),
             );
         }
         empty.into_any_element()
@@ -391,7 +390,7 @@ pub fn view(
             .into_any_element()
     };
     let ready = n.picked.is_some();
-    let button = |id: &'static str, label: &'static str| {
+    let button = |id: &'static str, label: SharedString| {
         div()
             .id(id)
             .flex_1()
@@ -444,7 +443,7 @@ pub fn view(
                                         .text_color(c(0xffffff)),
                                 ),
                         )
-                        .child(crate::kit::spaced("New Message", 1.)),
+                        .child(crate::kit::spaced(t::newchat_title(), 1.)),
                 )
                 .child(
                     div()
@@ -494,12 +493,10 @@ pub fn view(
                             .child({
                                 let ready = matches!(p, Preview::Ready(_) | Preview::Go(_)) && !n.joining;
                                 let label = match p {
-                                    Preview::Go(_) => "Open Link",
-                                    _ if n.joining => "Joining…",
-                                    Preview::Ready(i) if member(&i.community_id) => {
-                                        "Open Community"
-                                    }
-                                    _ => "Join Community",
+                                    Preview::Go(_) => t::newchat_open_link(),
+                                    _ if n.joining => t::newchat_joining(),
+                                    Preview::Ready(i) if member(&i.community_id) => t::newchat_open_community(),
+                                    _ => t::newchat_join_community(),
                                 };
                                 button("create-group-create-btn", label)
                                     .bg(c(0x58fcb3))
@@ -513,7 +510,7 @@ pub fn view(
                                     })
                             })
                             .child(
-                                button("create-group-cancel", "Cancel")
+                                button("create-group-cancel", t::dialog_cancel())
                                     .border_color(white_a(0.2))
                                     .text_color(c(0xffffff))
                                     .cursor_pointer()
@@ -545,7 +542,7 @@ pub fn view(
                     .justify_center()
                     .gap(px(10.))
                     .child(
-                        button("create-group-create-btn", "Start Chat")
+                        button("create-group-create-btn", t::newchat_start())
                             .bg(c(0x58fcb3))
                             .border_color(ca(90, 252, 180, 0.65))
                             .text_color(c(0x000000))
@@ -557,7 +554,7 @@ pub fn view(
                             }),
                     )
                     .child(
-                        button("create-group-cancel", "Cancel")
+                        button("create-group-cancel", t::dialog_cancel())
                             .border_color(white_a(0.2))
                             .text_color(c(0xffffff))
                             .cursor_pointer()
@@ -604,8 +601,8 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
                     .object_fit(if pad > 0. { gpui::ObjectFit::Contain } else { gpui::ObjectFit::Cover }),
             )
     };
-    let eyebrow = |t: &'static str| {
-        crate::kit::spaced(t.to_uppercase(), 1.1)
+    let eyebrow = |s: SharedString| {
+        crate::kit::spaced(s.to_uppercase(), 1.1)
             .mb(px(18.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_size(px(11.))
@@ -661,25 +658,25 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
         }]);
     match p {
         Preview::Loading => card
-            .child(eyebrow("Community Invite"))
+            .child(eyebrow(t::newchat_invite()))
             .child(div().size(px(88.)).rounded(px(22.)).bg(white_a(0.06)))
             .child(div().mt(px(18.)).w(gpui::relative(0.58)).h(px(20.)).rounded(px(6.)).bg(white_a(0.06)))
             .child(div().mt(px(12.)).w(gpui::relative(0.82)).h(px(12.)).rounded(px(6.)).bg(white_a(0.06)))
             .child(div().mt(px(8.)).w(gpui::relative(0.5)).h(px(12.)).rounded(px(6.)).bg(white_a(0.06)))
-            .child(div().id("cg-link-wait").status().mt(px(18.)).text_size(px(13.)).text_color(white_a(0.55)).child("Loading invite...")),
+            .child(div().id("cg-link-wait").status().mt(px(18.)).text_size(px(13.)).text_color(white_a(0.55)).child(t::newchat_invite_loading())),
         Preview::Go(_) => card
-            .child(eyebrow("Vector Link"))
+            .child(eyebrow(t::newchat_link()))
             .child(icon("icons/vector-mark.svg".into(), 18.))
-            .child(name("Open in Vector".into()))
-            .child(desc("This link opens a place inside Vector.".into())),
+            .child(name(t::newchat_link_open().into()))
+            .child(desc(t::newchat_link_open_desc().into())),
         Preview::Failed => card
-            .child(eyebrow("Community Invite"))
+            .child(eyebrow(t::newchat_invite()))
             .child(icon("icons/vector_warning.svg".into(), 18.))
-            .child(name("Invite Unavailable".into()))
-            .child(desc("This invite couldn't be loaded. It may have been revoked or expired, or its relays are unreachable.".into())),
+            .child(name(t::newchat_invite_failed().into()))
+            .child(desc(t::newchat_invite_failed_desc().into())),
         Preview::Ready(info) => {
             let joined = member(&info.community_id);
-            card.child(eyebrow(if joined { "Your Community" } else { "You've been invited to join" }))
+            card.child(eyebrow(if joined { t::newchat_your_community() } else { t::newchat_invited() }))
                 .child(icon(info.icon.clone().map(|p| std::path::PathBuf::from(p).into()).unwrap_or_else(|| "icons/group-placeholder.svg".into()), 0.))
                 .child(name(info.name.clone()))
                 .when(!info.description.is_empty(), |d| d.child(desc(info.description.clone())))
@@ -699,7 +696,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
                             .text_size(px(12.))
                             .text_color(c(ACCENT))
                             .child(svg().path("icons/check.svg").size(px(14.)).text_color(c(ACCENT)))
-                            .child("You're already a member"),
+                            .child(t::newchat_member()),
                     )
                 })
         }
