@@ -517,6 +517,19 @@ async fn reregister(community_id: &str) {
     super::emit("communities_changed", ());
 }
 
+/// A new channel with another's settings and permission rules, under its own name.
+pub async fn duplicate_channel(community_id: String, channel_id: String, name: String) -> Result<String, String> {
+    db::scoped_result(async move {
+        let id = VectorCore
+            .duplicate_channel(&community_id, &channel_id, name.trim())
+            .await
+            .map_err(|e| e.to_string());
+        super::emit("communities_changed", ());
+        id
+    })
+    .await
+}
+
 /// The new channel's id.
 pub async fn create_channel(
     community_id: String,

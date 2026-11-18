@@ -458,6 +458,10 @@ enum MenuAct {
         community: String,
         category: Option<String>,
     },
+    DuplicateChannel {
+        community: String,
+        channel: String,
+    },
     CreateCategory(String),
     InvitePeople(String),
     CommunitySettings(String),
@@ -2088,6 +2092,9 @@ impl VectorApp {
                 community,
                 category,
             } => self.open_create_channel(community, category, false, window, cx),
+            MenuAct::DuplicateChannel { community, channel } => {
+                self.open_duplicate_channel(community, channel, window, cx)
+            }
             MenuAct::CreateCategory(community) => {
                 self.open_create_channel(community, None, true, window, cx)
             }
@@ -11810,6 +11817,13 @@ impl VectorApp {
                     category: false,
                 },
             ));
+            rows.push((
+                kit::MenuItem::new("Duplicate Channel", "copy"),
+                MenuAct::DuplicateChannel {
+                    community: community.clone(),
+                    channel: channel.clone(),
+                },
+            ));
         }
         rows.extend(self.start_pin_row(format!("c/{community}/{channel}")));
         rows.push((
@@ -11959,8 +11973,31 @@ impl VectorApp {
             name,
             busy: false,
             error: None,
+            source: None,
         });
         cx.notify();
+    }
+
+    /// The same modal, asking only for the copy's name.
+    fn open_duplicate_channel(&mut self, community: String, channel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, voice)) = self
+            .store
+            .borrow()
+            .community(&community)
+            .and_then(|c| c.channel(&channel))
+            .map(|ch| (ch.name.clone(), ch.is_voice()))
+        else {
+            return;
+        };
+        self.open_create_channel(community, None, false, window, cx);
+        let Some(m) = self.create_channel.as_mut() else { return };
+        m.voice = voice;
+        m.name.update(cx, |i, cx| {
+            i.set_placeholder(crate::createchannel::placeholder(false, voice), cx);
+            i.set_text(&name, cx);
+            i.select_everything(cx);
+        });
+        m.source = Some((channel, name));
     }
 
     fn on_create_channel(
@@ -12000,8 +12037,14 @@ impl VectorApp {
                     m.voice,
                     m.private,
                 );
+                let source = m.source.as_ref().map(|(id, _)| id.clone());
+                let duplicate = source.is_some();
                 let rx = backend::run(async move {
-                    if is_category {
+                    if let Some(source) = source {
+                        backend::community::duplicate_channel(community, source, name)
+                            .await
+                            .map(Some)
+                    } else if is_category {
                         backend::community::create_category(community, name)
                             .await
                             .map(|_| None)
@@ -12028,6 +12071,10 @@ impl VectorApp {
                                 if let Some(m) = this.create_channel.as_mut() {
                                     m.busy = false;
                                     m.error = Some(e);
+                                }
+                                // A duplicate can stand with part of its rules missing.
+                                if duplicate {
+                                    this.reload_communities(cx);
                                 }
                             }
                         }

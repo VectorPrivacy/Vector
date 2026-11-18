@@ -1,5 +1,5 @@
 //! `CreateChannelModal.svelte`: a Channel's kind, name and privacy, or a Category's name,
-//! in one card.
+//! in one card. Duplicating a Channel asks only for the name.
 
 use std::rc::Rc;
 
@@ -20,6 +20,8 @@ pub struct CreateChannel {
     pub name: Entity<TextInput>,
     pub busy: bool,
     pub error: Option<String>,
+    /// The channel being duplicated (id, name), which fixes the type and privacy.
+    pub source: Option<(String, String)>,
 }
 
 pub enum Act {
@@ -144,6 +146,8 @@ fn kind_row(m: &CreateChannel, voice: bool, on: &OnAct) -> impl IntoElement {
 
 pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl IntoElement + use<> {
     let noun = if m.is_category { "Category" } else { "Channel" };
+    let verb = if m.source.is_some() { "Duplicate" } else { "Create" };
+    let picks = !m.is_category && m.source.is_none();
     let valid = m.valid(cx) && !m.busy;
     let bytes = m.name.read(cx).text().len();
     let close = on.clone();
@@ -190,15 +194,15 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                                 .text_size(px(19.))
                                 .line_height(px(24.))
                                 .text_color(c(0xffffff))
-                                .child(format!("Create {noun}")),
+                                .child(format!("{verb} {noun}")),
                         )
-                        .children(m.category_name.clone().map(|n| {
-                            div()
-                                .truncate()
-                                .text_size(px(12.5))
-                                .text_color(c(0x8a8a8a))
-                                .child(format!("in {n}"))
-                        })),
+                        .children(
+                            m.source
+                                .as_ref()
+                                .map(|(_, n)| format!("of {n}"))
+                                .or_else(|| m.category_name.as_ref().map(|n| format!("in {n}")))
+                                .map(|sub| div().truncate().text_size(px(12.5)).text_color(c(0x8a8a8a)).child(sub)),
+                        ),
                 )
                 .child(
                     div()
@@ -215,7 +219,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                         .child("✕"),
                 ),
         )
-        .when(!m.is_category, |d| {
+        .when(picks, |d| {
             d.child(label("Channel Type")).child(
                 div()
                     .flex()
@@ -271,7 +275,17 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                     )
                 }),
         )
-        .when(!m.is_category, |d| {
+        .when(m.source.is_some(), |d| {
+            d.child(
+                div()
+                    .mt(px(12.))
+                    .text_size(px(12.5))
+                    .line_height(px(17.5))
+                    .text_color(c(0x8a8a8a))
+                    .child("Same settings and permissions, a fresh history."),
+            )
+        })
+        .when(picks, |d| {
             d.child(
                 div()
                     .mt(px(10.))
@@ -371,10 +385,10 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                             d.cursor_pointer()
                                 .on_click(move |_, w, cx| submit(Act::Submit, w, cx))
                         })
-                        .child(if m.busy {
-                            "Creating…".to_string()
-                        } else {
-                            format!("Create {noun}")
+                        .child(match (m.busy, m.source.is_some()) {
+                            (true, true) => "Duplicating…".to_string(),
+                            (true, false) => "Creating…".to_string(),
+                            (false, _) => format!("{verb} {noun}"),
                         }),
                 ),
         );
