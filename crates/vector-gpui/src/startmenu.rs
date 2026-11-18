@@ -116,6 +116,15 @@ impl Render for Ghost {
     }
 }
 
+thread_local! {
+    /// The zone a pin drag is over, by tile and side, while the drag lasts.
+    static DROP_AT: std::cell::RefCell<Option<(SharedString, &'static str)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn drop_at(tile: &str) -> Option<&'static str> {
+    DROP_AT.with_borrow(|d| d.as_ref().filter(|(t, _)| t == tile).map(|(_, z)| *z))
+}
+
 /// Where a tile takes a drop: its middle files into it, either side places beside it.
 struct Zones {
     before: RailDrop,
@@ -170,16 +179,37 @@ fn arrangeable(
                 .top(gpui::relative(0.3))
                 .bottom(gpui::relative(0.3)),
         };
-        let z = z
-            .drag_over::<PinDrag>(move |d, _, _, _| {
+        let z = if list {
+            z.drag_over::<PinDrag>(move |d, _, _, _| {
                 if into {
                     d.rounded(px(12.)).border_2().border_color(c(PRIMARY))
-                } else if list {
-                    d.border_color(c(PRIMARY)).border_t_2()
                 } else {
-                    d.border_color(c(PRIMARY)).border_l_2()
+                    d.border_color(c(PRIMARY)).border_t_2()
                 }
             })
+        } else {
+            let (tile, src) = (id.clone(), source.clone());
+            z.on_drag_move::<PinDrag>(move |e, w, cx| {
+                let d = e.drag(cx);
+                let takes = d.source != src && !(into && matches!(d.source, RailDrag::Folder { .. }));
+                let inside = takes && e.bounds.contains(&e.event.position);
+                let changed = DROP_AT.with_borrow_mut(|at| {
+                    let here = at.as_ref().is_some_and(|(t, z)| *t == tile && *z == name);
+                    if inside && !here {
+                        *at = Some((tile.clone(), name));
+                    } else if !inside && here {
+                        *at = None;
+                    } else {
+                        return false;
+                    }
+                    true
+                });
+                if changed {
+                    w.refresh();
+                }
+            })
+        };
+        let z = z
             .on_drop(move |d: &PinDrag, w, cx| {
                 // A tile dropped on itself stays put, and a folder never files into another.
                 if d.source != src && !(into && matches!(d.source, RailDrag::Folder { .. })) {
@@ -187,6 +217,32 @@ fn arrangeable(
                 }
             });
         wrap = wrap.child(z);
+    }
+    // `stm-mark-in`: the drop line beside the tile grows in from 40% of its height.
+    if let Some(side @ ("before" | "after")) = drop_at(&id).filter(|_| !list) {
+        let mark = div()
+            .absolute()
+            .when(side == "before", |d| d.left(px(-9.)))
+            .when(side == "after", |d| d.right(px(-9.)))
+            .w(px(3.))
+            .rounded(px(2.))
+            .bg(c(PRIMARY))
+            .shadow(vec![gpui::BoxShadow {
+                color: c(PRIMARY),
+                offset: gpui::point(px(0.), px(0.)),
+                blur_radius: px(8.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+            .with_animation(
+                SharedString::from(format!("{id}-mark-{side}")),
+                gpui::Animation::new(std::time::Duration::from_millis(140)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+                |d, t| {
+                    let inset = 40. * 0.6 * (1. - t);
+                    d.top(px(6. + inset)).bottom(px(26. + inset)).opacity(t)
+                },
+            );
+        wrap = wrap.child(mark);
     }
     wrap.into_any_element()
 }
@@ -695,6 +751,7 @@ fn tile(
     plate: bool,
     missing: bool,
     list: bool,
+    drop: Option<&'static str>,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let tip = titled.then(|| label.clone());
@@ -744,6 +801,33 @@ fn tile(
             .into_any_element();
     }
     let group = SharedString::from(format!("{id}-g"));
+    // The box beside a drop line leans away from it; the one a drop files into lifts.
+    let lean = crate::kit::ease(
+        format!("{id}-lean").into(),
+        match drop {
+            Some("before") => 6.,
+            Some("after") => -6.,
+            _ => 0.,
+        },
+        0.16,
+        crate::kit::css_ease(),
+    );
+    let into = crate::kit::ease(format!("{id}-into").into(), (drop == Some("into")) as u8 as f32, 0.16, crate::kit::css_ease());
+    let boxed = div()
+        .size(px(80.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(12.))
+        .when(plate, |d| {
+            d.border(px(1.5))
+                .border_color(crate::kit::mix(c(0x3a3a3a), c(PRIMARY), into))
+                .bg(crate::kit::mix(c(0x222222), c(0x226633), into))
+                .group_hover(group.clone(), |d| d.border_color(c(PRIMARY)))
+        })
+        .when(!plate, |d| d.p(px(7.5)).when(into > 0., |d| d.bg(c(0x226633).opacity(into))))
+        .when(missing, |d| d.opacity(0.5))
+        .child(g);
     div()
         .id(id)
         .when_some(tip, |d, t| d.tip(t))
@@ -755,23 +839,7 @@ fn tile(
         .gap(px(8.))
         .cursor_pointer()
         .on_click(on_click)
-        .child(
-            div()
-                .size(px(80.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(12.))
-                .when(plate, |d| {
-                    d.border(px(1.5))
-                        .border_color(c(0x3a3a3a))
-                        .bg(c(0x222222))
-                        .group_hover(group.clone(), |d| d.border_color(c(PRIMARY)))
-                })
-                .when(!plate, |d| d.p(px(7.5)))
-                .when(missing, |d| d.opacity(0.5))
-                .child(g),
-        )
+        .child(div().relative().left(px(lean)).child(gpui::zoom(boxed).scale(1. + 0.08 * into)))
         .child(
             div()
                 .max_w_full()
@@ -951,6 +1019,9 @@ fn arrange(tiles: Vec<AnyElement>, list: bool) -> AnyElement {
 
 /// The menu's bottom-left corner is the rail row's, so its footer stands where the row stood.
 pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &App) -> AnyElement {
+    if !cx.has_active_drag() {
+        DROP_AT.with_borrow_mut(|d| *d = None);
+    }
     let viewport = window.viewport_size();
     let height = (viewport.height - px(20.)).min(px(562.));
     let list = sm.list;
@@ -1142,6 +1213,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     plate,
                     r.missing,
                     list,
+                    drop_at(&format!("stm-a-{ix}")),
                     click(on, move || Act::Open(k.clone())),
                 );
                 let into = if folder_id.is_none() {
@@ -1193,6 +1265,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     true,
                     false,
                     list,
+                    drop_at(&format!("stm-a-{ix}")),
                     click(on, move || Act::Folder(Some(fid.clone()))),
                 );
                 let zones = zones_for(
@@ -1231,6 +1304,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             true,
             false,
             list,
+            None,
             click(on, || Act::AddPin),
         ));
     }
@@ -1279,6 +1353,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     false,
                     false,
                     list,
+                    None,
                     click(on, move || {
                         if current {
                             Act::Back
@@ -1304,6 +1379,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 true,
                 false,
                 list,
+                None,
                 click(on, || Act::AddAccount),
             ));
         }

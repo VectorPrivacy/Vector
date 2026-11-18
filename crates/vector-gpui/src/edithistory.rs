@@ -5,6 +5,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use gpui::AnimationExt as _;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Bounds, Pixels, SharedString, Size, Window, div, point, px};
 
@@ -365,10 +366,37 @@ pub fn render(
                 .children(revisions),
         );
     let _ = &h.size;
+    // `ehSheetIn` rises a sheet from the bottom; `popupFadeIn` fades the popup and the scrim.
+    let key = |what: &str| SharedString::from(format!("eh-{what}-{}", h.msg));
+    let panel = if sheet {
+        gpui::zoom(panel)
+            .with_animation(
+                key("sheet"),
+                gpui::Animation::new(std::time::Duration::from_millis(220)).with_easing(crate::kit::bezier(0.2, 0.8, 0.2, 1.)),
+                |z, t| z.shift_rel(0., 1. - t),
+            )
+            .into_any_element()
+    } else {
+        gpui::zoom(panel)
+            .with_animation(
+                key("in"),
+                gpui::Animation::new(std::time::Duration::from_millis(160)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+                |z, t| z.opacity(t),
+            )
+            .into_any_element()
+    };
     gpui::deferred(
         div()
             .when(sheet, |d| {
-                d.child(gpui::anchored().position(point(px(0.), px(0.))).child(div().w(px(vw)).h(px(vh)).bg(ca(0, 0, 0, 0.45))))
+                d.child(
+                    gpui::anchored().position(point(px(0.), px(0.))).child(
+                        div().w(px(vw)).h(px(vh)).bg(ca(0, 0, 0, 0.45)).with_animation(
+                            key("scrim"),
+                            gpui::Animation::new(std::time::Duration::from_millis(200)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+                            |d, t| d.opacity(t),
+                        ),
+                    ),
+                )
             })
             .child(gpui::anchored().anchor(corner).position(pos).child(panel)),
     )

@@ -21,7 +21,7 @@ pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
     row
 }
 
-fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
     gpui::Rgba {
         r: a.r + (b.r - a.r) * t,
@@ -326,7 +326,10 @@ pub fn select_look(
         .map(|d| if width.is_finite() { d.w(px(width)) } else { d.w_full() })
         .flex_shrink_0()
         .child(button);
-    if open {
+    // `.vselect-list`: opacity 0.14s ease and a 4px rise on 0.18s, both ways.
+    let shown = ease(format!("vselect-fade-{id:?}").into(), open as u8 as f32, 0.14, css_ease());
+    let slide = ease(format!("vselect-slide-{id:?}").into(), open as u8 as f32, 0.18, bezier(0.22, 1., 0.36, 1.));
+    if shown > 0. {
         let mut list = div()
             .absolute()
             .top(px(42.))
@@ -344,7 +347,7 @@ pub fn select_look(
                 spread_radius: px(0.),
                 inset: false,
             }])
-            .occlude();
+            .when(open, |d| d.occlude());
         let hi = keys.as_ref().map(|(_, hi)| hi.get()).unwrap_or(usize::MAX);
         if let Some((Some(focus), hi)) = keys {
             let (pick, toggle, live) = (on_pick.clone(), on_toggle.clone(), live.clone());
@@ -396,7 +399,7 @@ pub fn select_look(
                     .text_color(c(if selected { 0xffffff } else { 0xcfcfcf }))
                     .when(selected || ix == hi, |s| s.bg(c(0x1f1f1f)))
                     .when(off, |s| s.opacity(0.4))
-                    .when(!off, |s| {
+                    .when(!off && open, |s| {
                         s.hover(|s| s.bg(c(0x1f1f1f)).text_color(c(0xffffff)))
                             .cursor_pointer()
                             .on_click(move |_, w, cx| pick(v, w, cx))
@@ -413,7 +416,7 @@ pub fn select_look(
                     }),
             );
         }
-        let list = rise(format!("vselect-in-{id:?}"), list, 180, (0., -4., 1.), bezier(0.22, 1., 0.36, 1.));
+        let list = gpui::zoom(list).shift(0., -4. * (1. - slide)).opacity(shown);
         root = root.child(gpui::deferred(list).with_priority(look.priority));
     }
     root.into_any_element()

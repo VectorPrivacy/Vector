@@ -919,7 +919,18 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
                 .hover(|d| d.bg(ca(149, 48, 244, 0.24)).border_color(ca(178, 102, 255, 0.65)).text_color(c(0xf1e1ff)))
                 .on_click(act(on, || NetAct::NewCircuit))
         })
-        .child(svg().path("ui/circuit-new.svg").size(px(10.)).text_color(c(0xc9a4ff)))
+        .child(if loading {
+            svg()
+                .path("ui/circuit-new.svg")
+                .size(px(10.))
+                .text_color(c(0xc9a4ff))
+                .with_animation("tor-refresh-spin", gpui::Animation::new(std::time::Duration::from_millis(850)).repeat(), |s, t| {
+                    s.with_transformation(gpui::Transformation::rotate(gpui::radians(t * std::f32::consts::TAU)))
+                })
+                .into_any_element()
+        } else {
+            svg().path("ui/circuit-new.svg").size(px(10.)).text_color(c(0xc9a4ff)).into_any_element()
+        })
         .child(crate::kit::spaced("NEW".to_string(), 1.2));
     let head = div()
         .h(px(28.))
@@ -989,6 +1000,33 @@ pub fn hops(hops: &[Value]) -> AnyElement {
                 .bottom(px(15.))
                 .w(px(1.))
                 .bg(gpui::linear_gradient(180., gpui::linear_color_stop(ca(178, 102, 255, 0.55), 0.), gpui::linear_color_stop(ca(178, 102, 255, 0.92), 1.))),
+        );
+        // `torDataFlow`: a pulse fades in at the guard, rides the rail, and fades out at the exit.
+        let (y0, y1) = (15., 26. * n as f32 + 4. - 15.);
+        list = list.child(
+            div()
+                .absolute()
+                .left(px(7.))
+                .top(px(y0 - 2.))
+                .size(px(4.))
+                .rounded_full()
+                .bg(c(0xf6e6ff))
+                .opacity(0.)
+                .with_animation(
+                    "tor-data-flow",
+                    gpui::Animation::new(std::time::Duration::from_millis(4200)).repeat(),
+                    move |d, t| {
+                        let ease = crate::kit::bezier(0.65, 0.05, 0.35, 0.95);
+                        let (y, o) = if t < 0.08 {
+                            (y0, 0.95 * ease(t / 0.08))
+                        } else if t < 0.92 {
+                            (y0 + (y1 - y0) * ease((t - 0.08) / 0.84), 0.95)
+                        } else {
+                            (y1, 0.95 * (1. - ease((t - 0.92) / 0.08)))
+                        };
+                        d.top(px(y - 2.)).opacity(o)
+                    },
+                ),
         );
     }
     for h in hops {

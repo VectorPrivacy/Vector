@@ -944,16 +944,22 @@ impl Settings {
             .collect()
     }
 
-    /// The block being read: the last whose top has passed the pane's top.
+    /// The block being read: the last whose top has passed the pane's midline, or the last of
+    /// all once the scroll bottoms out, however short its block.
     pub fn active_anchor(&self, cat: &Category) -> &'static str {
         if let Some(j) = self.jumped {
             return j;
         }
         let last = cat.anchors.len().saturating_sub(1);
-        cat.anchors
-            .get(self.scroll.top_item().min(last))
-            .map(|a| a.id)
-            .unwrap_or("")
+        let h = &self.scroll;
+        let (view, y) = (h.bounds(), -h.offset().y);
+        let mid = view.top() + y + view.size.height / 2.;
+        let mut at = (0..=last).take_while(|&i| h.bounds_for_item(i).is_some_and(|b| b.top() <= mid)).last().unwrap_or(0);
+        let max = h.max_offset().y;
+        if max > px(0.) && y >= max - px(2.) {
+            at = last;
+        }
+        cat.anchors.get(at).map(|a| a.id).unwrap_or("")
     }
 }
 
