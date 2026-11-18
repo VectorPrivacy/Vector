@@ -678,13 +678,7 @@ impl VectorApp {
                 if !realtime {
                     return then(this, cx);
                 }
-                let label = backend::calls::off_clearnet_label().unwrap_or_else(|| "the network in use".into());
-                let mut p = crate::kit::Popup::notice(format!("Connect outside {label}?"));
-                p.icon = None;
-                p.text = Some("Calls and multiplayer Mini Apps connect directly.<br>The people you connect with and the iroh relay can see your IP address.<br>Allowed until you close Vector, switch accounts or change networks.".into());
-                p.confirm = "Connect".into();
-                p.cancel = Some("Cancel".into());
-                this.popup = Some((p, super::PopupAct::RealtimeThen(Box::new(then))));
+                this.popup = Some((super::realtime_popup(), super::PopupAct::RealtimeThen(Box::new(then))));
                 cx.notify();
             })
             .ok();

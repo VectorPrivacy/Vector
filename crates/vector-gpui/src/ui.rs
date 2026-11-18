@@ -14680,14 +14680,16 @@ impl VectorApp {
             Some((i, _)) => format!("{}…", &masked[..i]),
             None => masked,
         };
-        let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-        let mut popup = kit::Popup::notice("Open in your browser?");
-        popup.text = Some(format!("It loads outside {}.<br><br>{}", esc(&label), esc(&shown)).into());
-        popup.confirm = "Open".into();
-        popup.cancel = Some("Cancel".into());
+        let mut popup = kit::Popup::notice(t::outside_browser_title());
+        popup.text = Some(match label {
+            Some(network) => t::outside_browser_text(&kit::escape(&network), &kit::escape(&shown)),
+            None => t::outside_browser_text_unknown(&kit::escape(&shown)),
+        });
+        popup.confirm = t::outside_browser_open();
+        popup.cancel = Some(t::dialog_cancel());
         let full = url.to_string();
         popup.link = Some((
-            "Copy Link".into(),
+            t::outside_browser_copy(),
             std::rc::Rc::new(move |_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(full.clone()))),
         ));
         self.popup = Some((popup, PopupAct::OpenWeb(url.to_string())));
@@ -17167,14 +17169,7 @@ impl VectorApp {
             && vector_core::transport::realtime::check()
                 .is_err_and(|e| e == vector_core::transport::realtime::CONSENT_REQUIRED)
         {
-            let label =
-                backend::calls::off_clearnet_label().unwrap_or_else(|| "the network in use".into());
-            let mut p = kit::Popup::notice(format!("Connect outside {label}?"));
-            p.icon = None;
-            p.text = Some("Calls and multiplayer Mini Apps connect directly.<br>The people you connect with and the iroh relay can see your IP address.<br>Allowed until you close Vector, switch accounts or change networks.".into());
-            p.confirm = "Connect".into();
-            p.cancel = Some("Cancel".into());
-            self.popup = Some((p, PopupAct::Realtime(then)));
+            self.popup = Some((realtime_popup(), PopupAct::Realtime(then)));
             cx.notify();
             return;
         }
@@ -20662,4 +20657,17 @@ impl VectorApp {
             view.update(cx, |v, cx| v.dev_pin(&digits, window, cx));
         }
     }
+}
+
+/// Asked before calls, voice and multiplayer Mini Apps connect directly, off Clearnet.
+pub(crate) fn realtime_popup() -> kit::Popup {
+    let mut p = kit::Popup::notice(match backend::calls::off_clearnet_label().flatten() {
+        Some(network) => t::outside_connect_title(&network),
+        None => t::outside_connect_title_unknown(),
+    });
+    p.icon = None;
+    p.text = Some(t::outside_connect_text());
+    p.confirm = t::outside_connect();
+    p.cancel = Some(t::dialog_cancel());
+    p
 }

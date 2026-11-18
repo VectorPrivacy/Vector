@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::{CHROME_H, MenuAct, PopupAct, VectorApp};
 use crate::voice::{Act, Member, Session};
-use crate::{backend, kit};
+use crate::{backend, kit, t};
 
 impl VectorApp {
     /// What a session holds now: ours, live; fixtures under VECTOR_VOICE.
@@ -208,14 +208,8 @@ impl VectorApp {
         if vector_core::transport::realtime::check()
             .is_err_and(|e| e == vector_core::transport::realtime::CONSENT_REQUIRED)
         {
-            let label = backend::calls::off_clearnet_label().unwrap_or_else(|| "the network in use".into());
-            let mut p = kit::Popup::notice(format!("Connect outside {label}?"));
-            p.icon = None;
-            p.text = Some("Calls and multiplayer Mini Apps connect directly.<br>The people you connect with and the iroh relay can see your IP address.<br>Allowed until you close Vector, switch accounts or change networks.".into());
-            p.confirm = "Connect".into();
-            p.cancel = Some("Cancel".into());
             self.popup = Some((
-                p,
+                super::realtime_popup(),
                 PopupAct::RealtimeThen(Box::new(move |app, cx| app.voice_join(community, channel, cx))),
             ));
             cx.notify();
@@ -257,12 +251,12 @@ impl VectorApp {
         let (mute, deafen, move_) = if self.live { backend::voice::powers(&community, &npub) } else { (true, true, true) };
         let mut rows: Vec<(kit::MenuItem, MenuAct)> = vec![
             if volume == 0. {
-                (kit::MenuItem::new("Unmute for Me", "volume-max"), MenuAct::VoiceVolume(npub.clone(), 1.))
+                (kit::MenuItem::new(t::voice_unmute_for_me(), "volume-max"), MenuAct::VoiceVolume(npub.clone(), 1.))
             } else {
-                (kit::MenuItem::new("Mute for Me", "volume-mute"), MenuAct::VoiceVolume(npub.clone(), 0.))
+                (kit::MenuItem::new(t::voice_mute_for_me(), "volume-mute"), MenuAct::VoiceVolume(npub.clone(), 0.))
             },
             (
-                kit::MenuItem::slider("Volume", volume / 2., format!("{}%", (volume * 100.).round())),
+                kit::MenuItem::slider(t::voice_volume(), volume / 2., t::percent((volume * 100.).round()).to_string()),
                 MenuAct::VoiceSlide(npub.clone()),
             ),
         ];
@@ -277,16 +271,16 @@ impl VectorApp {
         if let Some(them) = &them {
             if mute {
                 mods.push(if them.server_muted {
-                    (kit::MenuItem::new("Server Unmute", "mic-on"), act("unmute", None))
+                    (kit::MenuItem::new(t::voice_server_unmute(), "mic-on"), act("unmute", None))
                 } else {
-                    (kit::MenuItem::new("Server Mute", "mic-off"), act("mute", None))
+                    (kit::MenuItem::new(t::voice_server_mute(), "mic-off"), act("mute", None))
                 });
             }
             if deafen {
                 mods.push(if them.server_deafened {
-                    (kit::MenuItem::new("Server Undeafen", "volume-max"), act("undeafen", None))
+                    (kit::MenuItem::new(t::voice_server_undeafen(), "volume-max"), act("undeafen", None))
                 } else {
-                    (kit::MenuItem::new("Server Deafen", "volume-mute"), act("deafen", None))
+                    (kit::MenuItem::new(t::voice_server_deafen(), "volume-mute"), act("deafen", None))
                 });
             }
             if move_ {
@@ -303,9 +297,9 @@ impl VectorApp {
                     })
                     .unwrap_or_default();
                 for (id, name) in others {
-                    mods.push((kit::MenuItem::new(format!("Move to {name}"), "volume-max"), act("move", Some(id))));
+                    mods.push((kit::MenuItem::new(t::voice_move_to(&name), "volume-max"), act("move", Some(id))));
                 }
-                mods.push((kit::MenuItem::new("Disconnect", "x").danger(), act("disconnect", None)));
+                mods.push((kit::MenuItem::new(t::voice_disconnect(), "x").danger(), act("disconnect", None)));
             }
         }
         if !mods.is_empty() {
@@ -313,7 +307,7 @@ impl VectorApp {
             rows.extend(mods);
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
-        rows.push((kit::MenuItem::new("View Profile", "user-circle"), MenuAct::ViewProfile(npub)));
+        rows.push((kit::MenuItem::new(t::member_view_profile(), "user-circle"), MenuAct::ViewProfile(npub)));
         self.show_menu(at, rows, cx);
     }
 

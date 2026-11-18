@@ -36,13 +36,14 @@ pub fn status() -> Option<serde_json::Value> {
     session::snapshot().and_then(|s| serde_json::to_value(s).ok())
 }
 
-/// Off Clearnet, calls connect only once the account agrees; the label names the network.
-pub fn off_clearnet_label() -> Option<String> {
+/// Off Clearnet, calls connect only once the account agrees: the network's name, or `Some(None)`
+/// while the choice hasn't loaded.
+pub fn off_clearnet_label() -> Option<Option<String>> {
     use vector_core::transport::Kind;
     match vector_core::transport::preference() {
         Some(Kind::Clearnet) => None,
-        Some(k) => Some(k.label().to_string()),
-        None => Some("the network in use".into()),
+        Some(k) => Some(Some(k.label().to_string())),
+        None => Some(None),
     }
 }
 
