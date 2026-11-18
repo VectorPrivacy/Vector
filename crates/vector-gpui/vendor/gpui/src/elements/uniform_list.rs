@@ -508,7 +508,11 @@ impl Element for UniformList {
                                 AvailableSpace::Definite(available_width),
                                 AvailableSpace::Definite(item_height),
                             );
-                            item.layout_as_root(available_space, window, cx);
+                            let size = item.layout_as_root(available_space, window, cx);
+                            let item_origin = match window.mirrored() {
+                                true => point(bounds.right() - padding.left + scroll_offset.x - size.width, item_origin.y),
+                                false => item_origin,
+                            };
                             item.prepaint_at(item_origin, window, cx);
                             frame_state.items.push(item);
                         }

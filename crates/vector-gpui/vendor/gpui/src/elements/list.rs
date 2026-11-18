@@ -1321,10 +1321,16 @@ impl StateInner {
             if bounds.size.height > padding.top + padding.bottom {
                 let mut item_origin = bounds.origin + Point::new(padding.left, padding.top);
                 item_origin.y -= layout_response.scroll_top.offset_in_item + layout_response.lead;
+                let mirrored = window.mirrored();
                 for item in &mut layout_response.item_layouts {
+                    // Mirrored, each item sits as far from the right edge as it would from the left.
+                    let at = match mirrored {
+                        true => point(bounds.right() - padding.left - item.size.width, item_origin.y),
+                        false => item_origin,
+                    };
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         window.scroll_parents.push(crate::window::ScrollParent::List);
-                        item.element.prepaint_at(item_origin, window, cx);
+                        item.element.prepaint_at(at, window, cx);
                         window.scroll_parents.pop();
                     });
 
