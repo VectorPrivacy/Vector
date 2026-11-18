@@ -510,22 +510,26 @@ impl Render for CommandForm {
 
 /// `#chat-command-bar`: "Using /cmd with Bot", the focused argument's description, Cancel.
 pub fn strip(form: &CommandForm, bot: (SharedString, Option<std::path::PathBuf>), on_cancel: impl Fn(&mut Window, &mut App) + 'static) -> AnyElement {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(
+    let html = crate::t::command_using(crate::kit::escape(&bot.0), crate::kit::escape(&format!("/{}", form.cmd.name)));
+    let (before, name, after) = crate::kit::around(&html, "bot");
+    let accent = gpui::HighlightStyle { color: Some(c(PRIMARY)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+    let words = |text: &str| {
+        let text = text.trim_matches(['\u{a0}', ' ']);
+        (!text.is_empty()).then(|| {
             div()
                 .flex_shrink_0()
                 .whitespace_nowrap()
                 .text_size(px(13.5))
                 .text_color(white_a(0.85))
-                .flex()
-                .child("Using\u{a0}")
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(PRIMARY)).child(format!("/{}", form.cmd.name)))
-                .child("\u{a0}with"),
-        )
+                .child(crate::kit::run_text(text, accent))
+        })
+    };
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .children(words(&before))
         .child(
             div()
                 .flex()
@@ -539,8 +543,9 @@ pub fn strip(form: &CommandForm, bot: (SharedString, Option<std::path::PathBuf>)
                     Some(p) => crate::pic::img_face(p, 16.).object_fit(gpui::ObjectFit::Cover).size(px(16.)).rounded_full().flex_shrink_0().into_any_element(),
                     None => img("icons/user-placeholder.svg").size(px(16.)).rounded_full().flex_shrink_0().into_any_element(),
                 })
-                .child(div().min_w_0().truncate().child(bot.0)),
+                .child(div().min_w_0().truncate().child(crate::kit::untag(&name).0)),
         )
+        .children(words(&after))
         .child(
             div()
                 .flex_1()

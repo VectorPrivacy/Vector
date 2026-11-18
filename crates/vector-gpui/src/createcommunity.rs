@@ -97,11 +97,11 @@ fn steps(step: u8) -> impl IntoElement {
             } else if current {
                 dot.border_color(c(PRIMARY))
                     .text_color(c(PRIMARY))
-                    .child(n.to_string())
+                    .child(crate::lang::num(n))
             } else {
                 dot.border_color(white_a(0.2))
                     .text_color(white_a(0.4))
-                    .child(n.to_string())
+                    .child(crate::lang::num(n))
             };
             div()
                 .flex()

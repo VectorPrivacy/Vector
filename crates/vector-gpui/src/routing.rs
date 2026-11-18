@@ -952,7 +952,7 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(div().min_w(px(38.1)).text_size(px(28.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xc9a4ff)).child(n.to_string()))
+            .child(div().min_w(px(38.1)).text_size(px(28.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xc9a4ff)).child(crate::lang::num(n)))
             .child(
                 div()
                     .flex()

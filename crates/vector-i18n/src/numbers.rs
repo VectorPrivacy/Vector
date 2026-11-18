@@ -26,6 +26,8 @@ pub struct LocaleData {
     pub list_last: Cow<'static, str>,
     pub list_pair: Cow<'static, str>,
     pub dates: crate::dates::Dates,
+    /// Zero to nine as the language writes them: `0123456789`, `٠١٢٣٤٥٦٧٨٩`, `۰۱۲۳۴۵۶۷۸۹`.
+    pub digits: Cow<'static, str>,
 }
 
 impl Default for LocaleData {
@@ -39,11 +41,38 @@ impl Default for LocaleData {
             list_last: " and ".into(),
             list_pair: " and ".into(),
             dates: Default::default(),
+            digits: LATIN_DIGITS.into(),
         }
     }
 }
 
+const LATIN_DIGITS: &str = "0123456789";
+
 impl LocaleData {
+    /// `s` with its digits in the language's own.
+    pub fn native(&self, s: String) -> String {
+        if self.digits == LATIN_DIGITS || !s.bytes().any(|b| b.is_ascii_digit()) {
+            return s;
+        }
+        let own: Vec<char> = self.digits.chars().collect();
+        if own.len() != 10 {
+            return s;
+        }
+        s.chars().map(|c| c.to_digit(10).filter(|_| c.is_ascii_digit()).map_or(c, |d| own[d as usize])).collect()
+    }
+
+    pub fn date(&self, c: &crate::dates::Civil, style: crate::dates::DateStyle) -> String {
+        self.native(self.dates.date(c, style))
+    }
+
+    pub fn time(&self, c: &crate::dates::Civil, clock: crate::dates::Clock) -> String {
+        self.native(self.dates.time(c, clock))
+    }
+
+    pub fn date_time(&self, c: &crate::dates::Civil, style: crate::dates::DateStyle, clock: crate::dates::Clock) -> String {
+        self.native(self.dates.date_time(c, style, clock))
+    }
+
     /// `n` with `decimals` places (trailing zeros kept only if `pad`) and grouped thousands.
     pub fn number(&self, n: f64, decimals: usize, pad: bool, grouping: bool) -> String {
         let s = format!("{:.decimals$}", n.abs());
@@ -64,13 +93,13 @@ impl LocaleData {
             out.push_str(&self.decimal);
             out.push_str(frac);
         }
-        out
+        self.native(out)
     }
 
     /// A size in the 1024 steps the app uses everywhere: `0 Bytes`, `1.5 KB`, `12.25 MB`.
     pub fn bytes(&self, n: f64, decimals: usize, pad: bool) -> String {
         if n == 0. {
-            return format!("0 {}", self.units[0]);
+            return format!("{} {}", self.native("0".into()), self.units[0]);
         }
         let (mut v, mut i) = (n, 0);
         while v >= 1024. && i < self.units.len() - 1 {
@@ -83,7 +112,7 @@ impl LocaleData {
     /// A running clock: `04:05`, or `1:02:03` past the hour.
     pub fn duration(&self, secs: u64) -> String {
         let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-        if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+        self.native(if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") })
     }
 
     /// `A`, `A and B`, `A, B and C`.
@@ -214,6 +243,18 @@ mod tests {
         assert_eq!(d.list(&["Alice"]), "Alice");
         assert_eq!(d.list(&["Alice", "Bob"]), "Alice and Bob");
         assert_eq!(d.list(&["Alice", "Bob", "Carol"]), "Alice, Bob and Carol");
+    }
+
+    #[test]
+    fn a_language_writes_its_own_digits() {
+        let d = LocaleData { digits: "٠١٢٣٤٥٦٧٨٩".into(), decimal: "٫".into(), group: "٬".into(), ..Default::default() };
+        assert_eq!(d.number(1234.5, 2, false, true), "١٬٢٣٤٫٥");
+        assert_eq!(d.duration(65), "٠١:٠٥");
+        assert_eq!(d.bytes(0., 2, false), "٠ Bytes");
+        let c = crate::dates::Civil { year: 2026, month: 11, day: 18, weekday: 3, hour: 9, minute: 5, second: 0 };
+        assert_eq!(d.time(&c, crate::dates::Clock::SHORT), d.native(d.dates.time(&c, crate::dates::Clock::SHORT)));
+        assert!(d.date(&c, crate::dates::DateStyle::Numeric).chars().all(|ch| !ch.is_ascii_digit()));
+        assert_eq!(LocaleData::default().native("12".into()), "12");
     }
 
     #[test]

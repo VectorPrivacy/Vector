@@ -94,6 +94,8 @@ pub fn literals(src: &str) -> Vec<(usize, String)> {
 
 /// Whether a literal reads as text a person sees, rather than a key, path or format.
 pub fn is_prose(s: &str) -> bool {
+    let unescaped = unescape(s);
+    let s = unescaped.as_str();
     let words = s.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| w.len() >= 2).count();
     if words == 0 {
         return false;
@@ -117,6 +119,33 @@ pub fn is_prose(s: &str) -> bool {
         return false;
     }
     true
+}
+
+/// The literal as a reader meets it: space escapes as spaces, format placeholders and other
+/// escapes as a mark that is not a word, so `"\u{a0}Emoji"` is prose and `"{url}\n{}"` is not.
+fn unescape(s: &str) -> String {
+    const SPACES: [&str; 6] = ["a0", "2007", "2009", "200a", "202f", "3000"];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find(['\\', '{']) {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some((hex, r)) = rest.strip_prefix("\\u{").and_then(|r| r.split_once('}')) {
+            out.push(if SPACES.contains(&hex) { ' ' } else { '_' });
+            rest = r;
+        } else if let Some((_, r)) = rest.strip_prefix('{').and_then(|r| r.split_once('}')).filter(|(p, _)| !p.contains([' ', '{'])) {
+            out.push('_');
+            rest = r;
+        } else if rest.starts_with('\\') && rest.len() > 1 {
+            out.push('_');
+            rest = &rest[2..];
+        } else {
+            out.push_str(&rest[..1]);
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Lines where a literal is for developers, not people: logs, panics and attributes.
@@ -271,5 +300,7 @@ mod tests {
         assert!(is_prose("Save") && is_prose("Hello there") && is_prose("{} is typing..."));
         assert!(!is_prose("typing-strip") && !is_prose("icons/x.svg") && !is_prose("ws_list_width") && !is_prose("VECTOR_LANG") && !is_prose("{}"));
         assert!(!is_prose("ranSiteID") && is_prose("Save Changes"));
+        assert!(is_prose(r"\u{a0}Emoji{}") && is_prose(r"Using\u{a0}") && is_prose(r"\u{a0}with"));
+        assert!(!is_prose(r"{url}\n{}") && !is_prose(r"\u{0}small") && !is_prose(r"vector-gpui\n"));
     }
 }

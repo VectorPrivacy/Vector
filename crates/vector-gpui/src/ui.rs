@@ -7644,7 +7644,7 @@ fn nav_tabs(nav: &Navbar, slim: bool) -> impl IntoElement {
                     .font_weight(FontWeight::BOLD)
                     .line_height(px(19.))
                     .text_center()
-                    .child(if n > 99 { "99+".to_string() } else { n.to_string() })
+                    .child(crate::pings::text(n))
             }))
             .when(dot || (slim && badge.is_some()), |d| {
                 d.child(div().absolute().top(px(16.)).right(px(10.)).size(px(8.)).rounded_full().bg(c(PRIMARY)))

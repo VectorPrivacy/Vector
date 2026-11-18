@@ -62,3 +62,6 @@ command-loading-bots = { $count ->
 command-finding-bots = Looking for bots…
 command-recent = Recently Used
 command-checking-updates = Checking for Updates
+# The strip above the composer while a command's form is open. $command is the command with
+# its slash ("/roll"), drawn in the accent colour; <bot> marks the bot, drawn with its picture.
+command-using = Using <b>{ $command }</b> with <bot>{ $bot }</bot>

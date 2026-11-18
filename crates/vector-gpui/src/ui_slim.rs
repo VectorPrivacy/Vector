@@ -1250,7 +1250,7 @@ impl VectorApp {
                                                     .line_height(px(11.))
                                                     .font_weight(FontWeight::BOLD)
                                                     .text_color(if unread { c(0x000000).into() } else { white_a(0.8) })
-                                                    .child(archived.len().to_string()),
+                                                    .child(crate::lang::num(archived.len())),
                                             ),
                                     )
                                     .child(

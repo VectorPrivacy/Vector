@@ -229,15 +229,9 @@ pub fn view(
                                         .text_size(px(12.))
                                         .line_height(px(24.))
                                         .text_color(white_a(0.5))
-                                        .child(
-                                            div()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(c(PRIMARY))
-                                                .child(n.to_string()),
-                                        )
-                                        .child(format!(
-                                            "\u{a0}Emoji{}",
-                                            if n == 1 { "" } else { "s" }
+                                        .child(crate::kit::run_text(
+                                            &crate::t::packs_details_count(n),
+                                            gpui::HighlightStyle { color: Some(c(PRIMARY)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() },
                                         )),
                                 ),
                         ),

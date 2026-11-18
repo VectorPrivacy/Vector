@@ -52,6 +52,33 @@ unread-jump = { $count ->
   English has, around whichever words fit your sentence.
 - **Names stay as they are**: Vector, Nostr, npub, nsec, PIVX, Tor, I2P, Blossom.
 
+## Numbers and dates
+
+Numbers, sizes, lists and dates follow your language through an optional `locale.json` in its
+folder. Leave out any field English already gets right. Take the values from
+[CLDR](https://cldr.unicode.org/) for your language:
+
+```json
+{
+  "decimal": ",",
+  "group": ".",
+  "list_sep": ", ",
+  "list_last": " y ",
+  "list_pair": " y ",
+  "dates": {
+    "months": ["enero", "febrero", "…"],
+    "patterns": ["d/M/y", "dd/MM/y", "d MMM y", "d 'de' MMMM 'de' y", "…"],
+    "hour12": false,
+    "week_start": 1
+  }
+}
+```
+
+`digits` is zero to nine as your language writes them, such as `"٠١٢٣٤٥٦٧٨٩"` for Arabic; leave
+it out to keep `0123456789`.
+`dates.patterns` holds one CLDR pattern for each of the app's nine date styles, in the order
+`crates/vector-i18n/src/dates.rs` lists them.
+
 ## Check your work
 
 ```bash

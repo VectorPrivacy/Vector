@@ -112,7 +112,7 @@ pub fn community(store: &Store, community_id: &str) -> usize {
 
 /// `countText`: past 99 the pill stops counting.
 pub fn text(n: usize) -> String {
-    if n > 99 { "99+".into() } else { n.to_string() }
+    if n > 99 { format!("{}+", crate::lang::num(99)) } else { crate::lang::num(n).to_string() }
 }
 
 /// `.chatlist-contact-count`: a row's badge.

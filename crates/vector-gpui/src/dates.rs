@@ -25,13 +25,13 @@ pub fn at_secs(secs: i64) -> Option<DateTime<Local>> {
 }
 
 pub fn date(t: &DateTime<Local>, style: DateStyle) -> String {
-    vector_i18n::locale().dates.date(&civil(t), style)
+    vector_i18n::locale().date(&civil(t), style)
 }
 
 pub fn time(t: &DateTime<Local>, clock: Clock) -> String {
-    vector_i18n::locale().dates.time(&civil(t), clock)
+    vector_i18n::locale().time(&civil(t), clock)
 }
 
 pub fn date_time(t: &DateTime<Local>, style: DateStyle, clock: Clock) -> String {
-    vector_i18n::locale().dates.date_time(&civil(t), style, clock)
+    vector_i18n::locale().date_time(&civil(t), style, clock)
 }

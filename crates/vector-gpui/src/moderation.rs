@@ -403,7 +403,7 @@ fn stats(m: &Moderation) -> impl IntoElement {
                         .text_size(px(21.))
                         .line_height(px(22.))
                         .text_color(tone)
-                        .child(n.to_string()),
+                        .child(crate::lang::num(n)),
                 )
                 .child(
                     crate::kit::spaced(label.to_uppercase(), 0.95)
@@ -454,7 +454,7 @@ fn chips(m: &Moderation, on: &OnAct) -> impl IntoElement {
                     div()
                         .text_size(px(11.))
                         .text_color(if active { white_a(0.75) } else { white_a(0.4) })
-                        .child(n.to_string()),
+                        .child(crate::lang::num(n)),
                 )
         }))
 }

@@ -128,6 +128,11 @@ packs-adding = Adding…
 packs-card-remove = Remove
 packs-add-pack = Add Pack
 packs-copy-share-link = Copy share link
+# Under a pack's name in its details. <b> marks the number, drawn in the accent colour.
+packs-details-count = { $count ->
+    [one] <b>{ $count }</b> Emoji
+   *[other] <b>{ $count }</b> Emojis
+}
 # $count is how many emoji the pack holds.
 packs-emoji-count = { $count ->
     [one] { $count } emoji

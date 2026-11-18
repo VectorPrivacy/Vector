@@ -19,6 +19,11 @@ const MIRRORED_ICONS: &[&str] = &[
 ];
 const PACK_EXT: &str = "vpack";
 
+/// A count shown on its own (a badge, a tally) in the language's digits.
+pub fn num(n: impl std::fmt::Display) -> gpui::SharedString {
+    vector_i18n::locale().native(n.to_string()).into()
+}
+
 /// Where downloaded packs live, beside the device settings.
 pub fn packs_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("languages")

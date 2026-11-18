@@ -793,7 +793,7 @@ fn nav_row(
                 .text_color(c(0x000000))
                 .text_size(px(11.))
                 .font_weight(FontWeight::BOLD)
-                .child(n.to_string()),
+                .child(crate::lang::num(n)),
         );
     } else if n > 0 {
         row = row.child(
@@ -801,7 +801,7 @@ fn nav_row(
                 .text_size(px(12.))
                 .text_color(if active { c(0x9a9a9a) } else { c(0x5b6060) })
                 .group_hover(group, |s| s.text_color(c(0x9a9a9a)))
-                .child(n.to_string()),
+                .child(crate::lang::num(n)),
         );
     }
     row.into_any_element()
@@ -2374,7 +2374,7 @@ fn slim_head(n: &Nexus, q: &str, on: &OnAct) -> AnyElement {
                     .text_size(px(11.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c(0x000000))
-                    .child(count.to_string()),
+                    .child(crate::lang::num(count)),
             );
         }
         strip = strip.child(el.on_click(click(on, move || Act::Show(v.clone()))));
