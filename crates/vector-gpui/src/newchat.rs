@@ -338,20 +338,15 @@ pub fn view(
             .child(if filter_text.trim().is_empty() { t::newchat_empty() } else { t::newchat_no_matches() });
         if filter_text.trim().is_empty() {
             let (before, hub, after) = crate::kit::around(&t::newchat_hub(), "hub");
-            empty = empty.child(
-                div()
-                    .flex()
-                    .when(!before.is_empty(), |d| d.child(before))
-                    .child(
-                        div()
-                            .id("cp-hub")
-                            .cursor_pointer()
-                            .text_color(c(ACCENT))
-                            .on_click(click(|| Act::Hub))
-                            .child(hub),
-                    )
-                    .when(!after.is_empty(), |d| d.child(after)),
-            );
+            let pieces = crate::kit::visual(vec![(before, false), (hub, true), (after, false)]);
+            empty = empty.child(div().flex().keep_ltr().children(pieces.into_iter().filter(|p| !p.0.is_empty()).enumerate().map(|(i, (text, link))| {
+                let text = text.replace(' ', "\u{a0}");
+                if link {
+                    div().id(("cp-hub", i)).cursor_pointer().text_color(c(ACCENT)).on_click(click(|| Act::Hub)).child(text).into_any_element()
+                } else {
+                    div().child(text).into_any_element()
+                }
+            })));
         }
         empty.into_any_element()
     } else {

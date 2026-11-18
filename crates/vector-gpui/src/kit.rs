@@ -42,15 +42,13 @@ pub fn gapped(text: &str, gap: f32) -> gpui::Div {
         .children(text.graphemes(true).map(|g| div().child(SharedString::from(g.to_string()))))
 }
 
-/// A row of letters laid one by one: reversed under a mirrored layout, so they still read left
-/// to right.
+/// A row of letters laid one by one, left to right even under a mirrored layout.
 fn letters(row: gpui::Div) -> gpui::Div {
-    if gpui::layout_rtl() { row.flex_row_reverse() } else { row.flex_row() }
+    row.flex_row().keep_ltr()
 }
 
-/// The space CSS adds after a letter, on its right whichever way the row runs.
 fn trailing(letter: gpui::Div, spacing: f32) -> gpui::Div {
-    if gpui::layout_rtl() { letter.ml(px(spacing)) } else { letter.mr(px(spacing)) }
+    letter.mr(px(spacing))
 }
 
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
@@ -1503,6 +1501,89 @@ pub fn runs(html: &str) -> Vec<(String, bool)> {
     out
 }
 
+/// A sentence's pieces in the order they show, for a `keep_ltr` row of one element each: cut
+/// where the direction changes and reordered as one paragraph (UAX #9; the UI's direction,
+/// or the first letter's in a right-to-left UI, as labels take). A piece with nothing to cut,
+/// such as a pill, passes `\u{FFFC}` and stays whole. Direction marks are dropped once read.
+pub fn visual<T: Clone>(pieces: Vec<(String, T)>) -> Vec<(String, T)> {
+    visual_in(pieces, gpui::layout_rtl())
+}
+
+fn visual_in<T: Clone>(pieces: Vec<(String, T)>, rtl_ui: bool) -> Vec<(String, T)> {
+    let text: String = pieces.iter().map(|p| p.0.as_str()).collect();
+    if !crate::inline::has_rtl(&text) {
+        return pieces;
+    }
+    let base = (!rtl_ui).then(unicode_bidi::Level::ltr);
+    let info = unicode_bidi::BidiInfo::new(&text, base);
+    let para = info.paragraphs.first().map_or(0, |p| p.level.number());
+    let mut levels: Vec<u8> = info.levels.iter().map(|l| l.number()).collect();
+    // L1: trailing spaces take the paragraph's level.
+    for (at, ch) in text.char_indices().rev() {
+        if !ch.is_whitespace() {
+            break;
+        }
+        levels[at..at + ch.len_utf8()].fill(para);
+    }
+    let mark = |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    let mut cut: Vec<(String, T, u8)> = Vec::with_capacity(pieces.len() + 2);
+    let mut at = 0;
+    for (s, tag) in pieces {
+        let mut open = false;
+        for (k, ch) in s.char_indices() {
+            if mark(ch) {
+                continue;
+            }
+            let level = levels[at + k];
+            match cut.last_mut() {
+                Some((t, _, l)) if open && *l == level => t.push(ch),
+                _ => cut.push((ch.to_string(), tag.clone(), level)),
+            }
+            open = true;
+        }
+        at += s.len();
+    }
+    let order = crate::inline::visual_order(&cut.iter().map(|c| c.2).collect::<Vec<_>>());
+    let mut slots: Vec<Option<(String, T, u8)>> = cut.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .filter_map(|k| slots[k].take())
+        .map(|(s, tag, level)| {
+            // Shaped alone, punctuation has no direction: a right-to-left run's turns here.
+            if level % 2 == 1 && !crate::inline::has_rtl(&s) {
+                (s.chars().rev().map(|c| unicode_bidi_mirroring::get_mirrored(c).unwrap_or(c)).collect(), tag)
+            } else {
+                (s, tag)
+            }
+        })
+        .collect()
+}
+
+/// Whether a sentence reads left to right in a right-to-left UI (a line not yet translated,
+/// say): a row of its pieces then keeps them in reading order with `keep_ltr`. Markup and
+/// isolated values don't count (UAX #9 P2).
+pub fn reads_ltr(html: &str) -> bool {
+    use unicode_bidi::BidiClass::*;
+    if !gpui::layout_rtl() {
+        return false;
+    }
+    let (mut tag, mut isolated) = (false, 0u32);
+    for ch in html.chars() {
+        match (ch, unicode_bidi::bidi_class(ch)) {
+            ('<', _) => tag = true,
+            ('>', _) => tag = false,
+            _ if tag => {}
+            (_, LRI | RLI | FSI) => isolated += 1,
+            (_, PDI) => isolated = isolated.saturating_sub(1),
+            _ if isolated > 0 => {}
+            (_, L) => return true,
+            (_, R | AL) => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// [`rich`] markup as one line, `<b>` runs styled by `strong`: shaped whole, so a right-to-left
 /// language orders its runs and punctuation as one sentence.
 pub fn run_text(html: &str, strong: gpui::HighlightStyle) -> gpui::StyledText {
@@ -1957,6 +2038,34 @@ pub fn context_menu(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_sentence_of_pieces_shows_in_reading_order() {
+        let v = |p: &[(&str, u8)], rtl| {
+            super::visual_in(p.iter().map(|(t, k)| (t.to_string(), *k)).collect(), rtl)
+                .into_iter()
+                .map(|(t, k)| format!("{t}|{k}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(v(&[("Alice", 1), (" joined.", 0)], true), ["Alice|1", " joined.|0"], "English in a right-to-left UI");
+        assert_eq!(v(&[("\u{5d0}", 1), (" joined", 0)], false), ["\u{5d0}|1", " joined|0"]);
+        assert_eq!(
+            v(&[("\u{2068}Ann\u{2069}", 1), (" \u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e4}\u{5d4}.", 0)], true),
+            [" \u{5d4}\u{5e6}\u{5d8}\u{5e8}\u{5e4}\u{5d4}.|0", "Ann|1"],
+            "an isolated name, marks dropped"
+        );
+        assert_eq!(
+            v(&[("\u{200f}", 0), ("12", 1), (" PIV \u{5d6}\u{5de}\u{5d9}\u{5df}", 0)], true),
+            [" \u{5d6}\u{5de}\u{5d9}\u{5df}|0", "PIV|0", " |0", "12|1"],
+            "a Latin word and a number inside a right-to-left sentence"
+        );
+        assert_eq!(
+            v(&[("\u{5d0}", 0), (" (", 1), ("\u{5d1}", 2), (")", 3)], true),
+            ["(|3", "\u{5d1}|2", ") |1", "\u{5d0}|0"],
+            "right-to-left brackets turn"
+        );
+        assert_eq!(v(&[("\u{5d0}", 0), (": ", 1), ("\u{5d1}", 2)], false), ["\u{5d1}|2", " :|1", "\u{5d0}|0"]);
+    }
+
     #[test]
     fn around_splits_one_span_and_keeps_its_join_spaces() {
         let nb = '\u{a0}';

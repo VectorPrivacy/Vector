@@ -1545,11 +1545,15 @@ unsafe fn slice_from_nullable<'a, T>(
     }
 }
 
-/// Whether the first letter with a direction reads right to left (UAX #9 P2), so a line takes
-/// the paragraph direction the other platforms' shapers give it.
+/// Whether the first letter with a direction, outside any isolate, reads right to left
+/// (UAX #9 P2), so a line takes the paragraph direction the other platforms' shapers give it.
 fn starts_right_to_left(text: &str) -> bool {
+    let mut isolated = 0u32;
     for c in text.chars() {
         match c as u32 {
+            0x2066..=0x2068 => isolated += 1,
+            0x2069 => isolated = isolated.saturating_sub(1),
+            _ if isolated > 0 => {}
             0x200F => return true,
             0x200E => return false,
             0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF if c.is_alphabetic() => {

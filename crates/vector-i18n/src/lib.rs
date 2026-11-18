@@ -186,14 +186,48 @@ impl Active {
         if self.pseudo == Pseudo::Ids {
             return id.to_string();
         }
-        let s = self.chain.iter().find_map(|l| l.format(id, args)).unwrap_or_else(|| {
+        let mut translated = false;
+        let last = self.chain.len() - 1;
+        let s = self.chain.iter().enumerate().find_map(|(i, l)| {
+            let s = l.format(id, args)?;
+            translated = i < last;
+            Some(s)
+        });
+        let s = s.unwrap_or_else(|| {
             // Even English failed (a value the code didn't pass): show what it could.
             let mut errors = vec![];
             let l = self.chain.last().unwrap();
             l.pattern(id).map(|p| clean(l.bundle.format_pattern(p, args, &mut errors))).unwrap_or_else(|| id.to_string())
         });
-        if self.pseudo == Pseudo::Accented { pseudo::stretch(&s) } else { s }
+        if self.pseudo == Pseudo::Accented {
+            return pseudo::stretch(&s);
+        }
+        // A translation opening with a Latin word or a value still reads right to left, as
+        // a paragraph takes its first letter's direction.
+        if translated && self.rtl && has_rtl(&s) && first_strong_rtl(&s) != Some(true) {
+            return format!("\u{200F}{s}");
+        }
+        s
     }
+}
+
+/// UAX #9 P2: the first strong letter's direction, skipping isolated values and markup.
+fn first_strong_rtl(s: &str) -> Option<bool> {
+    let (mut isolated, mut tag) = (0u32, false);
+    for c in s.chars() {
+        match c {
+            '<' => tag = true,
+            '>' => tag = false,
+            '\u{2066}'..='\u{2068}' => isolated += 1,
+            '\u{2069}' => isolated = isolated.saturating_sub(1),
+            _ if tag || isolated > 0 => {}
+            '\u{200F}' => return Some(true),
+            '\u{200E}' => return Some(false),
+            _ if c.is_alphabetic() => return Some(has_rtl(c.encode_utf8(&mut [0; 4]))),
+            _ => {}
+        }
+    }
+    None
 }
 
 struct Registry {

@@ -1655,7 +1655,7 @@ fn bidi_cuts(line: &[Placed], atoms: &[Atom], b: &Bidi) -> Option<Vec<(usize, Ra
 
 /// L2: from the highest level down to the lowest odd one, each run at that level or above
 /// reverses.
-fn visual_order(levels: &[u8]) -> Vec<usize> {
+pub(crate) fn visual_order(levels: &[u8]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..levels.len()).collect();
     let (Some(&max), Some(&min)) = (levels.iter().max(), levels.iter().min()) else {
         return order;

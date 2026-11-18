@@ -101,9 +101,10 @@ fn fiat_text(value: f64, currency: &str) -> String {
     }
 }
 
-/// A sentence as flex items with gaps between: its `<b>` runs styled by `strong`.
+/// A sentence as flex items with gaps between, in a `keep_ltr` row: its `<b>` runs styled by
+/// `strong`.
 fn runs(html: SharedString, strong: impl Fn(gpui::Div) -> gpui::Div) -> Vec<gpui::Div> {
-    crate::kit::runs(&html)
+    crate::kit::visual(crate::kit::runs(&html))
         .into_iter()
         .filter(|(t, _)| !t.trim().is_empty())
         .map(|(t, b)| {
@@ -1165,6 +1166,7 @@ impl VectorApp {
                                         div()
                                             .flex()
                                             .gap(px(4.))
+                                            .keep_ltr()
                                             .children(runs(t::pivx_available(*available), |d| d.font_weight(FontWeight::SEMIBOLD))),
                                     )
                                     .child(max_btn("pivx-send-max-btn")),
@@ -1201,6 +1203,7 @@ impl VectorApp {
                             .text_size(px(12.))
                             .line_height(px(24.))
                             .text_color(white_a(0.6))
+                            .keep_ltr()
                             .children(runs(t::pivx_sending_to(crate::kit::escape(recipient)), |d| d.font_weight(FontWeight::MEDIUM).text_color(c(VIOLET)))),
                     )
                     .child({
@@ -1233,6 +1236,7 @@ impl VectorApp {
                                         div()
                                             .flex()
                                             .gap(px(4.))
+                                            .keep_ltr()
                                             .children(runs(t::pivx_available(*available), |d| d.font_weight(FontWeight::SEMIBOLD))),
                                     )
                                     .child(max_btn("pivx-withdraw-max").on_click(cx.listener(|app, _, _, cx| {

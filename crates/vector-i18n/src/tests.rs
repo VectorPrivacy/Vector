@@ -195,3 +195,28 @@ fn the_built_in_english_names_itself() {
     let langs = languages();
     assert_eq!(langs[0], Language { tag: BUILT_IN.into(), name: "English (UK)".into(), coverage: 100 });
 }
+
+#[test]
+fn a_right_to_left_sentence_opening_in_latin_still_reads_right_to_left() {
+    let _g = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    let mut p = pack(
+        "he",
+        "day-today = Vector \u{5d4}\u{5d9}\u{5d5}\u{5dd}\n\
+         day-yesterday = \u{5d0}\u{5ea}\u{5de}\u{5d5}\u{5dc}\n\
+         typing-strip = <b>{ $first }</b> \u{5de}\u{5e7}\u{5dc}\u{5d9}\u{5d3}\n\
+         typing-dm = Vector\n",
+    );
+    p.rtl = true;
+    install(p);
+    set_language("he");
+    assert_eq!(&*t::day_today(), "\u{200F}Vector \u{5d4}\u{5d9}\u{5d5}\u{5dd}");
+    assert_eq!(&*t::day_yesterday(), "\u{5d0}\u{5ea}\u{5de}\u{5d5}\u{5dc}", "already right to left");
+    assert_eq!(
+        &*t::typing_strip(1, "Ann", "", ""),
+        "<b>\u{2068}Ann\u{2069}</b> \u{5de}\u{5e7}\u{5dc}\u{5d9}\u{5d3}",
+        "an isolated value doesn't decide the direction"
+    );
+    assert_eq!(&*t::typing_dm(), "Vector", "no right-to-left letters: left as written");
+    assert_eq!(&*t::hidden_blocked(), "Blocked message", "English keeps its own direction");
+    set_language(BUILT_IN);
+}

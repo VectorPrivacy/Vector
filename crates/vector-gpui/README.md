@@ -54,6 +54,9 @@ screens need nothing. The exceptions:
   `kit::scroll_from_start`.
 - An icon that points along the reading direction goes in `lang::MIRRORED_ICONS`.
 - Counts and clocks built in code go through `lang::num` and `lang::digits`.
+- A sentence styled in one piece is `kit::run_text`. One built from several elements (a link, a
+  hover name) puts its pieces through `kit::visual` in a `keep_ltr` row; where a piece is a
+  widget, the row takes `keep_ltr` only when `kit::reads_ltr`.
 
 `VECTOR_LANG=ar-XB` shows English mirrored, for checking a screen.
 

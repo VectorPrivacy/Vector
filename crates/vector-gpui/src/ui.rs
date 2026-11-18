@@ -10334,7 +10334,7 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
         .cursor_pointer()
         .on_click(open)
         .child(div().mr(px(5.)).child(crate::ui::avatar(ctx.store, &line.npub, 16.)))
-        .children(crate::kit::runs(&text).into_iter().enumerate().map(|(i, (run, strong))| {
+        .child(div().flex().items_center().keep_ltr().children(crate::kit::visual(crate::kit::runs(&text)).into_iter().enumerate().map(|(i, (run, strong))| {
             let run = run.replace(' ', "\u{a0}");
             if strong {
                 div().font_weight(FontWeight::SEMIBOLD).group_hover(group.clone(), |d| d.underline()).child(run).into_any_element()
@@ -10343,7 +10343,7 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
             } else {
                 div().child(run).into_any_element()
             }
-        }));
+        })));
     divider(label, white_a(0.1), 0.7)
 }
 

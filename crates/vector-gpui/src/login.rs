@@ -914,23 +914,30 @@ fn lg_title(text: SharedString, lock: bool, color: u32) -> gpui::Div {
 /// A prompt with its `<back>` link.
 fn lg_back(text: SharedString, on: impl Fn(&mut Window, &mut App) + 'static) -> gpui::Div {
     let (prompt, label, after) = kit::around(&text, "back");
+    let on = std::rc::Rc::new(on);
+    let pieces = kit::visual(vec![(prompt, false), (label, true), (after, false)]);
     div()
         .mt(px(25.))
         .flex()
         .items_baseline()
+        .keep_ltr()
         .text_size(px(11.))
         .line_height(px(24.))
         .text_color(c(ICON_MUTED))
-        .child(kit::spaced(prompt, 1.1))
-        .child(
-            div()
-                .id("lg-back")
-                .cursor_pointer()
-                .text_color(c(PRIMARY))
-                .on_click(move |_, w, cx| on(w, cx))
-                .child(kit::spaced(label, 1.1)),
-        )
-        .when(!after.is_empty(), |d| d.child(kit::spaced(after, 1.1)))
+        .children(pieces.into_iter().filter(|p| !p.0.is_empty()).enumerate().map(|(i, (text, link))| {
+            if link {
+                let on = on.clone();
+                div()
+                    .id(("lg-back", i))
+                    .cursor_pointer()
+                    .text_color(c(PRIMARY))
+                    .on_click(move |_, w, cx| on(w, cx))
+                    .child(kit::spaced(text, 1.1))
+                    .into_any_element()
+            } else {
+                kit::spaced(text, 1.1).into_any_element()
+            }
+        }))
 }
 
 impl LoginView {

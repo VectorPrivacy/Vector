@@ -801,8 +801,8 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
     let over = cut > max.saturating_sub(count);
     let idle = m.busy.is_none() && m.intel.is_some();
     let n = |html: SharedString, tone: gpui::Hsla| {
-        div().flex().items_baseline().gap(px(4.)).children(
-            crate::kit::runs(&html).into_iter().filter(|(t, _)| !t.trim().is_empty()).map(move |(t, b)| {
+        div().flex().items_baseline().gap(px(4.)).keep_ltr().children(
+            crate::kit::visual(crate::kit::runs(&html)).into_iter().filter(|(t, _)| !t.trim().is_empty()).map(move |(t, b)| {
                 let d = div().child(t.trim().to_string());
                 if b { d.font_weight(FontWeight::SEMIBOLD).text_size(px(13.5)).text_color(tone) } else { d }
             }),

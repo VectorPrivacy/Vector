@@ -51,6 +51,9 @@ unread-jump = { $count ->
   and a named tag such as `<back>…</back>` is a link the app makes clickable. Keep the same tags
   English has, around whichever words fit your sentence.
 - **Names stay as they are**: Vector, Nostr, npub, nsec, PIVX, Tor, I2P, Blossom.
+- **Right-to-left languages** (Arabic, Hebrew, Persian, Urdu…) need no direction marks. A
+  translated sentence reads right to left even when it opens with a Latin name or a value, and
+  the app mirrors its layout to match.
 
 ## Numbers and dates
 
