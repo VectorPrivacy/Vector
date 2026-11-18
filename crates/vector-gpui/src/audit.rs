@@ -446,6 +446,14 @@ mod tests {
             details(&e, &member),
             vec!["Permissions: Kick Members, Ban Members"]
         );
+        let e = json!({"actor": "alice", "action": "voice_mute", "target": {"kind": "member", "npub": "bobby"}, "changes": [{"field": "channel", "new": {"kind": "channel", "name": "Lounge", "view": "voice"}}]});
+        assert_eq!(plain_text(&e, &member), "alice muted bobby in Lounge");
+        let e = json!({"actor": "alice", "action": "overwrite_update", "target": {"for": {"kind": "role", "name": "Mods"}, "in": {"kind": "channel", "name": "dev"}}});
+        assert_eq!(plain_text(&e, &member), "alice changed permissions for @Mods in #dev");
+        let e = json!({"actor": "alice", "action": "channel_sync", "target": {"kind": "channel", "name": "dev"}, "changes": [{"field": "category", "new": {"kind": "category", "name": "Work"}}]});
+        assert_eq!(plain_text(&e, &member), "alice synced #dev to Work");
+        let e = json!({"actor": "alice", "action": "channel_update", "target": {"kind": "channel", "name": "devs"}, "changes": [{"field": "name", "old": "dev", "new": "devs"}]});
+        assert_eq!(details(&e, &member), vec!["Name: dev → devs"]);
         assert_eq!(tone_of("member_ban"), Tone::Remove);
         assert_eq!(family_of("overwrite_update"), "channels");
         assert_eq!(when(1_000_000, 1_000_000 + 120_000), "2 minutes ago");
