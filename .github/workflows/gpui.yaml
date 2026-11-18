@@ -7,6 +7,7 @@ on:
     branches: [gpui]
     paths:
       - 'crates/vector-gpui/**'
+      - 'crates/vector-i18n/**'
       - 'crates/vector-core/**'
       - 'crates/vector-calls/**'
       - 'src-tauri/src/**'
@@ -14,6 +15,7 @@ on:
   pull_request:
     paths:
       - 'crates/vector-gpui/**'
+      - 'crates/vector-i18n/**'
       - '.github/workflows/gpui.yaml'
   workflow_dispatch:
   # A release (publish.yaml) builds the updater bundles here, then signs and uploads them itself.
@@ -114,7 +116,9 @@ jobs:
 
       - name: Tests
         shell: bash
-        run: cargo test --locked ${{ matrix.features }} --bin vector-gpui
+        run: |
+          cargo test --locked ${{ matrix.features }} --bin vector-gpui
+          cargo test --locked --manifest-path ../vector-i18n/Cargo.toml
 
   # Release builds to try the port on a Mac or a PC: a push whose message carries [package].
   # Thin LTO keeps a cold build near an hour; unsigned, so first launch needs the OS's override.

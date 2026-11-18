@@ -30,6 +30,7 @@ dhat = { version = "0.3", optional = true }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false, features = ["x11", "wayland", "font-kit"] }
 vector-core = { path = "../vector-core", features = ["calls", "xdc"] }
+vector-i18n = { path = "../vector-i18n" }
 anyhow = "1"
 unicode-segmentation = "1"
 unicode-bidi = "0.3"

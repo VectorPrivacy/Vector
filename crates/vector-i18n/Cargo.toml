@@ -1,0 +1,19 @@
+[package]
+name = "vector-i18n"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Vector's app text: the built-in en-GB catalogue, language packs, and typed lookups"
+build = "build.rs"
+
+# Its own root until it joins the crates workspace with the GPUI client.
+[workspace]
+
+[dependencies]
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
+intl-memoizer = "0.5"
+
+[build-dependencies]
+fluent-syntax = "0.12"

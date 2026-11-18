@@ -10,6 +10,8 @@ use serde::Deserialize;
 use vector_core::chat::SerializableChat;
 use vector_core::profile::SlimProfile;
 
+use crate::t;
+
 #[derive(Deserialize, Default)]
 struct ChatlistDemo {
     pinned: Vec<String>,
@@ -1080,11 +1082,11 @@ pub const TYPING_TTL_MS: u64 = 30_000;
 pub fn typing_text(typers: &[String], group: bool, name: impl Fn(&str) -> String) -> Option<String> {
     Some(match typers {
         [] => return None,
-        _ if !group => "Typing...".into(),
-        [a] => format!("{} is typing...", name(a)),
-        [a, b] => format!("{} and {} are typing...", name(a), name(b)),
-        [a, b, c] => format!("{}, {}, and {} are typing...", name(a), name(b), name(c)),
-        _ => "Several people are typing...".into(),
+        _ if !group => t::typing_dm().into(),
+        [a] => t::typing_group(1, &name(a), "", "").into(),
+        [a, b] => t::typing_group(2, &name(a), &name(b), "").into(),
+        [a, b, c] => t::typing_group(3, &name(a), &name(b), &name(c)).into(),
+        _ => t::typing_group(typers.len(), "", "", "").into(),
     })
 }
 
@@ -1135,8 +1137,8 @@ pub fn clock(ms: u64) -> String {
 pub fn day_label(now_ms: u64, ms: u64) -> String {
     let (now, then) = (local(now_ms).date_naive(), local(ms).date_naive());
     match (now - then).num_days() {
-        0 => "Today".into(),
-        1 => "Yesterday".into(),
+        0 => t::day_today().into(),
+        1 => t::day_yesterday().into(),
         _ => then.format("%-m/%-d/%Y").to_string(),
     }
 }

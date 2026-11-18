@@ -1362,6 +1362,17 @@ pub fn bezier(x1: f32, y1: f32, x2: f32, y2: f32) -> impl Fn(f32) -> f32 {
 
 /// The HTML subset explainers are written in: `<b>`, `<br>` and a few entities.
 pub fn rich(html: &str) -> gpui::StyledText {
+    rich_with(html, gpui::HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() })
+}
+
+/// [`rich`] with its own look for `<b>`.
+pub fn rich_with(html: &str, strong: gpui::HighlightStyle) -> gpui::StyledText {
+    let (text, bold) = untag(html);
+    gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
+}
+
+/// The text of [`rich`] markup, and the ranges its `<b>` covers.
+pub fn untag(html: &str) -> (String, Vec<std::ops::Range<usize>>) {
     let mut text = String::with_capacity(html.len());
     let mut bold = Vec::new();
     let mut open: Option<usize> = None;
@@ -1396,11 +1407,7 @@ pub fn rich(html: &str) -> gpui::StyledText {
             rest = &rest[ch.len_utf8()..];
         }
     }
-    let strong = gpui::HighlightStyle {
-        font_weight: Some(FontWeight::BOLD),
-        ..Default::default()
-    };
-    gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
+    (text, bold)
 }
 
 /// Text safe inside a popup's `<b>`/`<br>` markup.

@@ -52,6 +52,8 @@ mod emoji;
 mod fileclip;
 mod filepreview;
 mod highlight;
+#[cfg(test)]
+mod i18n_audit;
 mod inline;
 mod invite;
 mod kit;
@@ -59,6 +61,7 @@ mod linkcard;
 mod login;
 mod markdown;
 mod marks;
+mod lang;
 mod langnames;
 mod lyrics;
 mod media;
@@ -108,6 +111,7 @@ mod simd;
 mod startmenu;
 mod switcher;
 mod textcolor;
+mod t;
 mod texttime;
 mod theme;
 mod timeline;
@@ -226,6 +230,7 @@ fn main() {
         fileclip::purge();
     }
     let events = fixtures.is_none().then(|| backend::start(data_dir));
+    lang::init();
 
     let os_links = links_tx.clone();
     let app = gpui_platform::application().with_assets(assets::Assets);

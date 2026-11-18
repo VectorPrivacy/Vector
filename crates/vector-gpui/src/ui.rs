@@ -8524,25 +8524,12 @@ fn typing_strip(store: &Store, chat: &str, fade: f32, window: &Window) -> Option
     if typers.is_empty() {
         return None;
     }
-    let names: Vec<String> = if typers.len() > 3 { Vec::new() } else { typers.iter().map(|n| store.name(n)).collect() };
-    let mut text = div().min_w_0().flex().overflow_hidden().whitespace_nowrap();
-    if names.is_empty() {
-        text = text.child("Several people are typing");
-    } else {
-        for (i, name) in names.iter().enumerate() {
-            if i > 0 {
-                text = text.child(if i == names.len() - 1 { "\u{a0}and\u{a0}" } else { ",\u{a0}" });
-            }
-            text = text.child(div().font_weight(FontWeight::SEMIBOLD).text_color(c(0xffffff)).child(name.clone()));
-        }
-        text = text.child(if names.len() == 1 { "\u{a0}is typing" } else { "\u{a0}are typing" });
-    }
-    let said = match names.as_slice() {
-        [] => "Several people are typing".to_string(),
-        [one] => format!("{one} is typing"),
-        [rest @ .., last] => format!("{} and {last} are typing", rest.join(", ")),
-    };
-    let text = text.spoken(said);
+    let names: Vec<String> = if typers.len() > 3 { Vec::new() } else { typers.iter().map(|n| crate::kit::escape(&store.name(n))).collect() };
+    let name = |i: usize| names.get(i).map_or("", String::as_str);
+    let line = crate::t::typing_strip(typers.len(), name(0), name(1), name(2));
+    let strong = gpui::HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), color: Some(c(0xffffff).into()), ..Default::default() };
+    let (said, _) = crate::kit::untag(&line);
+    let text = div().min_w_0().overflow_hidden().whitespace_nowrap().child(crate::kit::rich_with(&line, strong)).spoken(said);
     Some(
         div()
             .id("typing-strip")
