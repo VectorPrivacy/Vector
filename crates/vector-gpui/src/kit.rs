@@ -14,12 +14,12 @@ pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
     if crate::inline::has_rtl(text) {
         return div().flex().flex_shrink_0().child(SharedString::from(text.to_string()));
     }
-    let mut row = letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())));
+    let mut row = div();
     for g in text.graphemes(true) {
         let g = if g == " " { "\u{00a0}" } else { g };
-        row = row.child(trailing(div(), spacing).child(SharedString::from(g.to_string())));
+        row = row.child(div().mr(px(spacing)).child(SharedString::from(g.to_string())));
     }
-    row
+    letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())), row)
 }
 
 /// How far a sideways scroller has moved from its start, whichever way the layout runs.
@@ -38,17 +38,15 @@ pub fn gapped(text: &str, gap: f32) -> gpui::Div {
     if crate::inline::has_rtl(text) {
         return div().flex().child(SharedString::from(text.to_string()));
     }
-    letters(div().flex().gap(px(gap)).spoken(SharedString::from(text.to_string())))
-        .children(text.graphemes(true).map(|g| div().child(SharedString::from(g.to_string()))))
+    letters(
+        div().flex().spoken(SharedString::from(text.to_string())),
+        div().gap(px(gap)).children(text.graphemes(true).map(|g| div().child(SharedString::from(g.to_string())))),
+    )
 }
 
-/// A row of letters laid one by one, left to right even under a mirrored layout.
-fn letters(row: gpui::Div) -> gpui::Div {
-    row.flex_row().keep_ltr()
-}
-
-fn trailing(letter: gpui::Div, spacing: f32) -> gpui::Div {
-    letter.mr(px(spacing))
+/// Letters laid one by one: left to right under a mirrored layout too, from `outer`'s start.
+fn letters(outer: gpui::Div, row: gpui::Div) -> gpui::Div {
+    outer.child(row.flex().flex_row().keep_ltr())
 }
 
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
@@ -73,16 +71,16 @@ pub fn gradient_text_in(text: &str, spacing: f32, phase: f32, from: gpui::Hsla, 
     let count = text.graphemes(true).count().max(1) as f32;
     // background-position swings 0% → 100% → 0%: the visible half of the 200% strip slides.
     let swing = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
-    let mut row = letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())));
+    let mut row = div();
     for (i, g) in text.graphemes(true).enumerate() {
         let x = (i as f32 + 0.5) / count;
         // Position on the 200%-wide strip: the element shows [swing*0.5, swing*0.5 + 0.5].
         let p = swing * 0.5 + x * 0.5;
         let t = ((p - 0.1387) / (0.60 - 0.1387)).clamp(0., 1.);
         let g = if g == " " { "\u{00a0}" } else { g };
-        row = row.child(trailing(div(), spacing).text_color(mix(from, to, t)).child(SharedString::from(g.to_string())));
+        row = row.child(div().mr(px(spacing)).text_color(mix(from, to, t)).child(SharedString::from(g.to_string())));
     }
-    row
+    letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())), row)
 }
 
 /// How far along a slider's track `x` sits, 0 to 1, with `inset` held back at each end for the
