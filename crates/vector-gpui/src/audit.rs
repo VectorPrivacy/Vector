@@ -131,24 +131,6 @@ fn target_name(t: Option<&Value>, member: &dyn Fn(Option<&str>) -> String) -> St
     }
 }
 
-/// Message markup as `(text, bold)` runs.
-fn runs(html: &str) -> Vec<(String, bool)> {
-    let (text, bold) = kit::untag(html);
-    let mut out = Vec::with_capacity(bold.len() * 2 + 1);
-    let mut at = 0;
-    for r in bold {
-        if r.start > at {
-            out.push((text[at..r.start].to_string(), false));
-        }
-        out.push((text[r.clone()].to_string(), true));
-        at = r.end;
-    }
-    if at < text.len() {
-        out.push((text[at..].to_string(), false));
-    }
-    out
-}
-
 /// `entry` as `(text, bold)` parts; `member` names an npub (or none) as the log shows them.
 pub fn sentence(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<(String, bool)> {
     let bold = |text: String| format!("<b>{}</b>", kit::escape(&text));
@@ -179,7 +161,7 @@ pub fn sentence(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<(
             if added.len() == 1 && removed.is_empty() {
                 t::audit_member_role_give(actor, target(), name(added.first()))
             } else if removed.len() == 1 && added.is_empty() {
-                t::audit_member_role_take(actor, name(removed.first()), target())
+                t::audit_member_role_take(actor, target(), name(removed.first()))
             } else {
                 t::audit_member_roles_update(actor, target())
             }
@@ -218,10 +200,10 @@ pub fn sentence(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<(
         "category_create" => t::audit_category_create(actor, target()),
         "category_update" => t::audit_category_update(actor, target()),
         "category_delete" => t::audit_category_delete(actor, target()),
-        "overwrite_create" => t::audit_overwrite_create(actor, name(sub("for")), name(sub("in"))),
-        "overwrite_update" => t::audit_overwrite_update(actor, name(sub("for")), name(sub("in"))),
-        "overwrite_delete" => t::audit_overwrite_delete(actor, name(sub("for")), name(sub("in"))),
-        "channel_sync" => t::audit_channel_sync(actor, target(), name(new_of("category"))),
+        "overwrite_create" => t::audit_overwrite_create(actor, name(sub("in")), name(sub("for"))),
+        "overwrite_update" => t::audit_overwrite_update(actor, name(sub("in")), name(sub("for"))),
+        "overwrite_delete" => t::audit_overwrite_delete(actor, name(sub("in")), name(sub("for"))),
+        "channel_sync" => t::audit_channel_sync(actor, name(new_of("category")), target()),
         "channel_unsync" => t::audit_channel_unsync(actor, target()),
         "message_pin" => t::audit_message_pin(actor, author(), name(sub("channel"))),
         "message_unpin" => t::audit_message_unpin(actor, author(), name(sub("channel"))),
@@ -231,15 +213,15 @@ pub fn sentence(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<(
         "invite_delete" => t::audit_invite_delete(actor, count()),
         "keys_rotate" if field(entry, "severed").is_some() => t::audit_keys_lockdown(actor),
         "keys_rotate" => t::audit_keys_rotate(actor),
-        "voice_mute" => t::audit_voice_mute(actor, target(), name(new_of("channel"))),
-        "voice_unmute" => t::audit_voice_unmute(actor, target(), name(new_of("channel"))),
-        "voice_deafen" => t::audit_voice_deafen(actor, target(), name(new_of("channel"))),
-        "voice_undeafen" => t::audit_voice_undeafen(actor, target(), name(new_of("channel"))),
-        "voice_move" => t::audit_voice_move(actor, target(), name(new_of("to"))),
-        "voice_disconnect" => t::audit_voice_disconnect(actor, target(), name(new_of("channel"))),
+        "voice_mute" => t::audit_voice_mute(actor, name(new_of("channel")), target()),
+        "voice_unmute" => t::audit_voice_unmute(actor, name(new_of("channel")), target()),
+        "voice_deafen" => t::audit_voice_deafen(actor, name(new_of("channel")), target()),
+        "voice_undeafen" => t::audit_voice_undeafen(actor, name(new_of("channel")), target()),
+        "voice_move" => t::audit_voice_move(actor, name(new_of("to")), target()),
+        "voice_disconnect" => t::audit_voice_disconnect(actor, name(new_of("channel")), target()),
         _ => t::audit_unknown(actor),
     };
-    runs(&html)
+    kit::runs(&html)
 }
 
 fn view_name(v: &Value) -> String {
@@ -289,7 +271,7 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
                 if !creating || action == "community_create" {
                     let new = new.map(shown).unwrap_or_default();
                     out.push(match old {
-                        Some(o) => t::audit_detail_rename(shown(o), new),
+                        Some(o) => t::audit_detail_rename(new, shown(o)),
                         None => t::audit_detail_name(new),
                     });
                 }
@@ -330,7 +312,7 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
             "color" => {
                 let now = hex_color(new.unwrap_or(&Value::Null));
                 out.push(match old {
-                    Some(o) => t::audit_detail_recolour(hex_color(o), now),
+                    Some(o) => t::audit_detail_recolour(now, hex_color(o)),
                     None => t::audit_detail_colour(now),
                 })
             }
@@ -363,8 +345,8 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
             "display" => out.push(if truthy(new) { t::audit_detail_display() } else { t::audit_detail_display_off() }),
             "mentionable" => out.push(if truthy(new) { t::audit_detail_mentionable() } else { t::audit_detail_mentionable_off() }),
             "view" if !creating => out.push(t::audit_detail_view(
-                old.map(view_name).unwrap_or_default(),
                 new.map(view_name).unwrap_or_default(),
+                old.map(view_name).unwrap_or_default(),
             )),
             "private" if !creating => out.push(t::audit_detail_private()),
             "category" if action == "channel_update" => out.push(if truthy(new) {
@@ -387,7 +369,7 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
                 old.and_then(Value::as_str).filter(|s| !s.is_empty()),
                 new.and_then(Value::as_str).filter(|s| !s.is_empty()),
             ) {
-                (Some(o), Some(n)) => out.push(t::audit_detail_renick(o, n)),
+                (Some(o), Some(n)) => out.push(t::audit_detail_renick(n, o)),
                 (Some(o), None) => out.push(t::audit_detail_nick_removed(o)),
                 _ => {}
             },

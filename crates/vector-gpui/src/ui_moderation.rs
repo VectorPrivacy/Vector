@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use futures::StreamExt;
 use gpui::prelude::*;
-use gpui::{Context, FontWeight, Window, px};
+use gpui::{Context, FontWeight, SharedString, Window, px};
 use serde_json::{Value, json};
 
 use super::{PopupAct, VectorApp};
@@ -13,11 +13,8 @@ use crate::composer::{CancelInput, InputChanged, TextInput};
 use crate::kit;
 use crate::moderation::{Act, Moderation, Tab};
 use crate::policies::{self, Act as PAct, Draft, Rule};
+use crate::t;
 use crate::theme::*;
-
-fn plural(n: usize, word: &str) -> String {
-    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
-}
 
 impl VectorApp {
     pub(super) fn open_moderation(
@@ -27,7 +24,7 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) {
         let query = cx.new(|cx| {
-            TextInput::new("Search members...", cx).with_look(crate::composer::Look {
+            TextInput::new(t::moderation_search(), cx).with_look(crate::composer::Look {
                 size: px(13.),
                 line_height: px(16.),
                 weight: FontWeight::NORMAL,
@@ -69,7 +66,7 @@ impl VectorApp {
                 .borrow()
                 .fixture_moderation
                 .clone()
-                .ok_or_else(|| "No moderation data.".to_string())
+                .ok_or_else(|| t::moderation_no_data().to_string())
         };
         match intel {
             Ok(intel) => m.set_intel(intel, refresh),
@@ -134,43 +131,27 @@ impl VectorApp {
             }
             Act::Revoke => {
                 let n = m.invites();
-                let mut popup = kit::Popup::notice("Revoke every invite link");
-                popup.text = Some(format!("Retire all {}? Anyone holding one can no longer join. Existing members are unaffected.", plural(n, "public invite link")).into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::moderation_revoke_title());
+                popup.text = Some(t::moderation_revoke_text(n));
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::ModRevoke));
             }
             Act::Rotate => {
                 let cut = m.cut().len();
                 let live = m.invites();
-                let link = if live > 0 {
-                    format!(
-                        "\n\n{} still live. Anyone holding one can rejoin straight after this. Revoke them first.",
-                        if live == 1 {
-                            "1 invite link is".to_string()
-                        } else {
-                            format!("{live} invite links are")
-                        }
-                    )
+                let mut paras = if cut > 0 {
+                    vec![t::moderation_remove_text(cut, m.keep.len()), t::moderation_remove_slow(cut)]
                 } else {
-                    String::new()
+                    vec![t::moderation_rotate_text()]
                 };
-                let (title, text) = if cut > 0 {
-                    (
-                        "Remove members and rotate",
-                        format!(
-                            "Remove {} from the community, then mint a new epoch only the {} remaining can follow. They are dropped from everyone's member list and lose access, without being banned.\n\nThis publishes one removal per member, so {cut} will take a while.",
-                            plural(cut, "member"),
-                            m.keep.len()
-                        ),
-                    )
-                } else {
-                    ("Rotate keys", "Mint a new epoch for everyone currently in the community. Use this when an invite link leaked but the members are all real.".to_string())
-                };
-                let mut popup = kit::Popup::notice(title);
-                popup.text = Some(format!("{text}{link}").into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                if live > 0 {
+                    paras.push(t::moderation_links_live(live));
+                }
+                let mut popup = kit::Popup::notice(if cut > 0 { t::moderation_remove_title() } else { t::moderation_rotate_title() });
+                popup.text = Some(paras.join("\n\n").into());
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::ModRotate));
             }
             Act::BanRotate => {
@@ -178,10 +159,10 @@ impl VectorApp {
                 if cut == 0 {
                     return;
                 }
-                let mut popup = kit::Popup::notice("Ban and rotate");
-                popup.text = Some(format!("Ban {} and rotate the keys around them. They're added to the banlist, stripped of any role, and cannot rejoin until unbanned.", plural(cut, "member")).into());
-                popup.confirm = "Confirm".into();
-                popup.cancel = Some("Cancel".into());
+                let mut popup = kit::Popup::notice(t::moderation_ban_title());
+                popup.text = Some(t::moderation_ban_text(cut));
+                popup.confirm = t::dialog_confirm();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::ModBanRotate));
             }
             Act::Policy(act) => self.on_policy(act, window, cx),
@@ -197,12 +178,7 @@ impl VectorApp {
 
     fn mod_busy(&mut self, label: Option<String>, cx: &mut Context<Self>) {
         if let Some(m) = self.moderation.as_mut() {
-            m.busy = label.map(|l| {
-                (
-                    l,
-                    " Publishing. Leave this open until it finishes.".to_string(),
-                )
-            });
+            m.busy = label.map(|l| (l, t::moderation_publishing().into()));
         }
         cx.notify();
     }
@@ -219,19 +195,15 @@ impl VectorApp {
         if !self.live {
             return;
         }
-        self.mod_busy(Some("Revoking invite links…".into()), cx);
+        self.mod_busy(Some(t::moderation_revoking().into()), cx);
         let rx = backend::run(backend::community::revoke_all_invites(id));
         cx.spawn(async move |this, cx| {
             let res = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
             this.update(cx, |app, cx| {
                 match res {
-                    Ok((revoked, 0)) => {
-                        app.show_toast(&format!("Revoked {}", plural(revoked, "invite link")), cx)
-                    }
-                    Ok((revoked, failed)) => {
-                        app.show_toast(&format!("Revoked {revoked}, {failed} failed"), cx)
-                    }
-                    Err(e) => app.mod_fail("Couldn't revoke", e),
+                    Ok((revoked, 0)) => app.show_toast(&t::moderation_revoked(revoked), cx),
+                    Ok((revoked, failed)) => app.show_toast(&t::moderation_revoked_some(revoked, failed), cx),
+                    Err(e) => app.mod_fail(&t::moderation_revoke_failed(), e),
                 }
                 app.mod_done(cx);
             })
@@ -256,13 +228,16 @@ impl VectorApp {
         }
         let n = cut.len();
         self.mod_busy(
-            Some(if ban {
-                format!("Banning {n}…")
-            } else if n > 0 {
-                format!("Removing 0/{n}")
-            } else {
-                "Rotating keys…".into()
-            }),
+            Some(
+                if ban {
+                    t::moderation_banning(n)
+                } else if n > 0 {
+                    t::moderation_removing_progress(0, n)
+                } else {
+                    t::moderation_rotating()
+                }
+                .into(),
+            ),
             cx,
         );
         let (tx, mut progress) = futures::channel::mpsc::unbounded::<(usize, usize)>();
@@ -284,7 +259,7 @@ impl VectorApp {
                 let ok = this
                     .update(cx, |app, cx| {
                         if let Some(m) = app.moderation.as_mut() {
-                            m.busy = Some((format!("Removing {done}/{total}"), format!(" {pct}% — leave this open until it finishes.")));
+                            m.busy = Some((t::moderation_removing_progress(done, total).into(), t::moderation_removing_percent(pct).into()));
                         }
                         cx.notify();
                     })
@@ -298,22 +273,23 @@ impl VectorApp {
                 match res {
                     Ok(summary) if ban => {
                         let _ = summary;
-                        app.show_toast(&format!("Banned {n} and rotated."), cx);
+                        app.show_toast(&t::moderation_banned(n), cx);
                     }
                     Ok(summary) => {
-                        let refused = summary["refused"].as_u64().filter(|r| *r > 0).map(|r| format!(" {r} refused.")).unwrap_or_default();
+                        let refused = summary["refused"].as_u64().filter(|r| *r > 0);
                         let kicked = summary["kicked"].as_u64().map(|k| k as usize).unwrap_or(n);
-                        app.show_toast(&if n > 0 { format!("Removed {kicked} and rotated.{refused}") } else { "Keys rotated.".into() }, cx);
+                        let text = match (n > 0, refused) {
+                            (false, _) => t::moderation_rotated(),
+                            (true, None) => t::moderation_removed(kicked),
+                            (true, Some(r)) => t::moderation_removed_refused(kicked, r),
+                        };
+                        app.show_toast(&text, cx);
                     }
-                    Err((true, e)) => app.mod_fail("Couldn't ban", e),
+                    Err((true, e)) => app.mod_fail(&t::moderation_ban_failed(), e),
                     Err((false, e)) if ban => {
-                        let held = if n == 1 { "account is" } else { "accounts are" };
-                        app.mod_fail(
-                            "Banned, but the keys did NOT rotate",
-                            format!("The {n} {held} banned and cannot post. They still hold the current key and can READ until a rotation lands. Use Rotate keys to finish.\n\n{e}"),
-                        );
+                        app.mod_fail(&t::moderation_ban_unrotated(), format!("{}\n\n{e}", t::moderation_ban_unrotated_text(n)));
                     }
-                    Err((false, e)) => app.mod_fail("Couldn't complete the removal", e),
+                    Err((false, e)) => app.mod_fail(&t::moderation_remove_failed(), e),
                 }
                 app.mod_done(cx);
             })
@@ -426,15 +402,15 @@ impl VectorApp {
                 _ => continue,
             };
             let placeholder = match kind {
-                "wordlist" => "one word per line",
-                "domainlist" => "example.com",
-                "text" => "Spoiler filter",
-                _ => "",
+                "wordlist" => t::policies_words_placeholder(),
+                "domainlist" => "example.com".into(),
+                "text" => t::policies_spoiler_placeholder(),
+                _ => SharedString::default(),
             };
             inputs.insert(
                 key.to_string(),
                 self.policy_input(
-                    placeholder,
+                    &placeholder,
                     &text,
                     kind != "text" && kind != "seconds",
                     window,
@@ -557,8 +533,7 @@ impl VectorApp {
                         p.preview_error = Some(
                             r["error"]
                                 .as_str()
-                                .unwrap_or("This policy is not valid.")
-                                .to_string(),
+                                .map_or_else(|| t::policies_invalid().into(), str::to_string),
                         );
                         p.previewed = false;
                     }
@@ -591,7 +566,7 @@ impl VectorApp {
                     if let Err(e) =
                         backend::community::set_policy(&community, &id, &doc.to_string(), true)
                     {
-                        self.mod_fail("Couldn't save the policy", e);
+                        self.mod_fail(&t::policies_save_failed(), e);
                         return;
                     }
                 }
@@ -625,9 +600,9 @@ impl VectorApp {
                 self.load_policies(false, cx);
             }
             PAct::Explain => {
-                let mut popup = kit::Popup::notice("Sensitivity");
+                let mut popup = kit::Popup::notice(t::policies_sensitivity());
                 popup.icon = None;
-                popup.text = Some(policies::STRICTNESS_EXPLAINER.into());
+                popup.text = Some(policies::strictness_explainer().into());
                 self.popup = Some((popup, PopupAct::Notice));
             }
         }

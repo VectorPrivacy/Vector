@@ -1435,6 +1435,24 @@ pub fn untag(html: &str) -> (String, Vec<std::ops::Range<usize>>) {
     (text, bold)
 }
 
+/// [`rich`] markup as `(text, bold)` runs.
+pub fn runs(html: &str) -> Vec<(String, bool)> {
+    let (text, bold) = untag(html);
+    let mut out = Vec::with_capacity(bold.len() * 2 + 1);
+    let mut at = 0;
+    for r in bold {
+        if r.start > at {
+            out.push((text[at..r.start].to_string(), false));
+        }
+        out.push((text[r.clone()].to_string(), true));
+        at = r.end;
+    }
+    if at < text.len() {
+        out.push((text[at..].to_string(), false));
+    }
+    out
+}
+
 /// Text safe inside a popup's `<b>`/`<br>` markup.
 pub fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")

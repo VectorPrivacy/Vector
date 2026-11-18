@@ -11,41 +11,51 @@ use serde_json::{Value, json};
 
 use crate::composer::TextInput;
 use crate::moderation::{Act as ModAct, Moderation, OnAct};
+use crate::settings::Label;
+use crate::t;
 use crate::theme::*;
 
 pub struct Strictness {
     pub id: &'static str,
-    pub label: &'static str,
+    pub label: Label,
     mult: f64,
     first: u64,
-    pub says: &'static str,
+    pub says: Label,
 }
 
 pub const STRICTNESS: [Strictness; 3] = [
     Strictness {
         id: "relaxed",
-        label: "Relaxed",
+        label: t::policies_relaxed,
         mult: 0.8,
         first: 2,
-        says: "Two hits in one message before it says anything, with lower confidence.",
+        says: t::policies_relaxed_desc,
     },
     Strictness {
         id: "balanced",
-        label: "Balanced",
+        label: t::policies_balanced,
         mult: 1.0,
         first: 1,
-        says: "One hit is enough, at this template's own confidence.",
+        says: t::policies_balanced_desc,
     },
     Strictness {
         id: "strict",
-        label: "Strict",
+        label: t::policies_strict,
         mult: 1.1,
         first: 1,
-        says: "One hit is enough, with higher confidence.",
+        says: t::policies_strict_desc,
     },
 ];
 
-pub const STRICTNESS_EXPLAINER: &str = "Sensitivity sets how much it takes to trip a rule, and how confident the result is.\n\nRelaxed: two hits in one message, with lower confidence.\n\nBalanced: one hit, at the template's own confidence.\n\nStrict: one hit, with higher confidence.";
+pub fn strictness_explainer() -> String {
+    [
+        t::policies_sensitivity_intro(),
+        t::policies_sensitivity_relaxed(),
+        t::policies_sensitivity_balanced(),
+        t::policies_sensitivity_strict(),
+    ]
+    .join("\n\n")
+}
 
 pub struct Rule {
     pub kind: String,
@@ -252,22 +262,17 @@ pub fn compose(p: &Policies, cx: &App) -> Option<Value> {
 
 /// `polReadiness`: whether the draft is worth running, and why not if it isn't.
 pub fn readiness(p: &Policies, cx: &App) -> Result<Value, String> {
-    let doc = compose(p, cx).ok_or("This policy is not ready yet.")?;
+    let doc = compose(p, cx).ok_or_else(|| t::policies_not_ready().to_string())?;
     let rules = doc["rules"].as_array().cloned().unwrap_or_default();
     if rules.is_empty() {
-        return Err("Add at least one rule before previewing.".into());
+        return Err(t::policies_no_rules().into());
     }
     let bare = rules.iter().find(|r| {
         matches!(r["match"]["type"].as_str(), Some("keyword" | "link"))
             && r["match"]["patterns"].as_array().is_none_or(Vec::is_empty)
     });
     if let Some(r) = bare {
-        return Err(if r["match"]["type"] == "link" {
-            "One of your rules has no domains in it."
-        } else {
-            "One of your rules has no words in it."
-        }
-        .into());
+        return Err(if r["match"]["type"] == "link" { t::policies_no_domains() } else { t::policies_no_words() }.into());
     }
     Ok(doc)
 }
@@ -352,8 +357,8 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(name("Vector's defaults".into()))
-                    .child(sub("Watching for raid waves · running".into(), muted())),
+                    .child(name(t::policies_builtin().into()))
+                    .child(sub(t::policies_builtin_running().into(), muted())),
             )
             .child(
                 div()
@@ -373,18 +378,15 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
                             .border_color(ca(89, 252, 179, 0.5))
                     })
                     .on_click(click(on, || Act::Inspect))
-                    .child("See the rules"),
+                    .child(t::policies_inspect()),
             )
     } else {
         row(false).bg(white_a(0.03)).child(
             div()
                 .flex_1()
                 .min_w_0()
-                .child(name("Vector's defaults".into()))
-                .child(sub(
-                    "Replaced by your own version below.".into(),
-                    white_a(0.4),
-                )),
+                .child(name(t::policies_builtin().into()))
+                .child(sub(t::policies_builtin_replaced().into(), white_a(0.4))),
         )
     };
     div()
@@ -410,15 +412,12 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
                 .unwrap_or(0);
             let enabled = s["enabled"].as_bool().unwrap_or(false);
             let valid = s["valid"].as_bool().unwrap_or(true);
-            let line = if valid {
-                format!(
-                    "{rules} rule{} · {}",
-                    if rules == 1 { "" } else { "s" },
-                    if enabled { "active" } else { "paused" }
-                )
+            let line: String = if valid {
+                if enabled { t::policies_active(rules) } else { t::policies_paused(rules) }
             } else {
-                format!("Not running: {}", s["error"].as_str().unwrap_or("invalid"))
-            };
+                s["error"].as_str().map_or_else(t::policies_not_running_invalid, t::policies_not_running)
+            }
+            .into();
             let (t, r) = (id.clone(), id.clone());
             row(false)
                 .child(div().flex_1().min_w_0().child(name(title)).child(sub(
@@ -515,7 +514,7 @@ fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
                     .line_height(px(13.2))
                     .italic()
                     .text_color(muted().opacity(0.85))
-                    .child(format!("Catches: {}", x["example"].as_str().unwrap_or(""))),
+                    .child(t::policies_catches(x["example"].as_str().unwrap_or(""))),
             )
     };
     let blank = p.presets.iter().find(|x| x["id"] == "blank");
@@ -523,7 +522,7 @@ fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
         .flex()
         .flex_col()
         .child(
-            crate::kit::spaced("START FROM A TEMPLATE", 0.95)
+            crate::kit::spaced(t::policies_templates().to_uppercase(), 0.95)
                 .mb(px(8.))
                 .text_size(px(10.5))
                 .line_height(px(24.))
@@ -679,7 +678,7 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_size(px(10.5))
                                             .text_color(white_a(0.34))
-                                            .child("only after another rule fires"),
+                                            .child(t::policies_after_another()),
                                     )
                                 }),
                         )
@@ -699,6 +698,7 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                 .find(|s| s.id == draft.strictness)
                 .unwrap_or(&STRICTNESS[1])
                 .says;
+            let says = says();
             div()
                 .child(
                     div()
@@ -728,7 +728,7 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                                 .text_color(if active { c(ACCENT) } else { muted() })
                                 .cursor_pointer()
                                 .on_click(click(on, move || Act::Strictness(id)))
-                                .child(s.label)
+                                .child((s.label)())
                         })),
                 )
                 .child(
@@ -780,11 +780,7 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                 div()
                     .text_size(px(11.5))
                     .text_color(muted())
-                    .child(if mo.intel.is_some() {
-                        "This community has no channels."
-                    } else {
-                        "Loading channels…"
-                    })
+                    .child(if mo.intel.is_some() { t::policies_no_channels() } else { t::policies_loading_channels() })
                     .into_any_element()
             } else {
                 div()
@@ -965,7 +961,7 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
     };
     if let Some(e) = &p.preview_error {
         return frame()
-            .child(warn().mt_0().child(format!("Not ready: {e}")))
+            .child(warn().mt_0().child(t::policies_preview_failed(e.as_str())))
             .into_any_element();
     }
     let Some(res) = &p.preview else {
@@ -982,42 +978,25 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
         }
     };
     let _ = mo;
-    let plural = |n: u64, w: &str| format!("{w}{}", if n == 1 { "" } else { "s" });
     let flagged = res["flagged"].as_array().cloned().unwrap_or_default();
     let n = flagged.len() as u64;
     let cited = res["messages_cited"].as_u64().unwrap_or(0);
-    let head = format!(
-        "Over the last 7 days this would have flagged {n} {} and cited {cited} {}.",
-        plural(n, "member"),
-        plural(cited, "message")
-    );
-    let n_text = n.to_string();
-    let c_text = cited.to_string();
-    let a = head
-        .find(&format!(" {n_text} "))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let b = head
-        .rfind(&format!(" {c_text} "))
-        .map(|i| i + 1)
-        .unwrap_or(0);
     let accent = gpui::HighlightStyle {
         color: Some(c(ACCENT)),
         font_weight: Some(FontWeight::BOLD),
         ..Default::default()
     };
     let mut out = frame().child(
-        div().mb(px(8.)).font_weight(FontWeight::SEMIBOLD).child(
-            gpui::StyledText::new(head.clone())
-                .with_highlights([(a..a + n_text.len(), accent), (b..b + c_text.len(), accent)]),
-        ),
+        div()
+            .mb(px(8.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(crate::kit::rich_with(&t::policies_preview_head(cited, n), accent)),
     );
     if n == 0 {
         let corpus = res["corpus"].as_u64().unwrap_or(0);
-        out = out.child(div().text_size(px(11.5)).line_height(px(17.)).text_color(muted()).child(format!(
-            "Checked against {corpus} {}, and nothing tripped this rule. Usually good news, though it also means the preview cannot tell you whether the rule works. Try a word you know someone has used.",
-            plural(corpus, "message")
-        )));
+        out = out.child(
+            div().text_size(px(11.5)).line_height(px(17.)).text_color(muted()).child(t::policies_preview_nothing(corpus)),
+        );
     }
     let shielded = res["shielded_matches"]
         .as_array()
@@ -1028,21 +1007,10 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
         let names: Vec<String> = shielded
             .iter()
             .take(4)
-            .map(|r| {
-                format!(
-                    "{} ({} msgs)",
-                    name(r["npub"].as_str().unwrap_or("")),
-                    r["messages"].as_u64().unwrap_or(0)
-                )
-            })
+            .map(|r| t::policies_shielded_name(r["messages"].as_u64().unwrap_or(0), name(r["npub"].as_str().unwrap_or(""))).to_string())
+            .chain((k > 4).then(|| "…".to_string()))
             .collect();
-        out = out.child(warn().child(format!(
-            "{k} trusted {} also matched this rule and {} spared only by their standing: {}{}. If this rule is meant for raiders, it is catching ordinary conversation.",
-            plural(k, "member"),
-            if k == 1 { "was" } else { "were" },
-            names.join(", "),
-            if k > 4 { ", …" } else { "" }
-        )));
+        out = out.child(warn().child(t::policies_shielded(k, names.join(", "))));
     }
     let unevaluated: Vec<&str> = res["unevaluated"]
         .as_array()
@@ -1056,7 +1024,7 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
                 .mt(px(8.))
                 .text_size(px(11.5))
                 .text_color(muted())
-                .child(format!("Not checked here: {}", unevaluated.join(", "))),
+                .child(t::policies_unchecked(unevaluated.join(", "))),
         );
     }
     if n > 0 {
@@ -1086,15 +1054,10 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
                             .text_color(muted())
                             .child(r["reasons"][0].as_str().unwrap_or("").to_string()),
                     )
-                    .child(div().text_size(px(11.)).text_color(muted()).child(format!(
-                        "{}{}",
-                        r["score"].as_u64().unwrap_or(0),
-                        if proven == 0 {
-                            " · suspected"
-                        } else {
-                            " · provable"
-                        }
-                    )))
+                    .child(div().text_size(px(11.)).text_color(muted()).child({
+                        let score = r["score"].as_u64().unwrap_or(0);
+                        if proven == 0 { t::policies_suspected(score) } else { t::policies_provable(score) }
+                    }))
             }),
         ));
     }
@@ -1137,11 +1100,7 @@ fn editor(
                 .hover(|d| d.bg(white_a(0.1)))
                 .on_click(click(on, || Act::Preview))
         })
-        .child(if p.busy {
-            "Checking real history…"
-        } else {
-            "Preview on real history"
-        });
+        .child(if p.busy { t::policies_checking() } else { t::policies_preview() });
     let enable = div()
         .id("pol-enable")
         .min_w(px(196.))
@@ -1164,11 +1123,7 @@ fn editor(
         .when(!p.previewed, |d| {
             d.border_color(white_a(0.12)).text_color(white_a(0.32))
         })
-        .child(if p.previewed {
-            "Enable this policy"
-        } else {
-            "Preview before Enabling"
-        });
+        .child(if p.previewed { t::policies_enable() } else { t::policies_preview_first() });
     div()
         .flex()
         .flex_col()

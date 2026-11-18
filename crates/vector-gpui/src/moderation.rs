@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::composer::TextInput;
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 const RED: u32 = 0xfc595c;
@@ -120,13 +121,14 @@ impl Moderation {
 /// `modAgo`: relative time that stays readable at raid speed.
 pub fn ago(secs: u64) -> String {
     match secs {
-        0 => "unknown".into(),
-        s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m", s / 60),
-        s if s < 86400 => format!("{}h", s / 3600),
-        s if s < 86400 * 365 => format!("{}d", s / 86400),
-        s => format!("{:.1}y", s as f64 / (86400. * 365.)),
+        0 => t::moderation_ago_unknown(),
+        s if s < 60 => t::moderation_ago_seconds(s),
+        s if s < 3600 => t::moderation_ago_minutes(s / 60),
+        s if s < 86400 => t::moderation_ago_hours(s / 3600),
+        s if s < 86400 * 365 => t::moderation_ago_days(s / 86400),
+        s => t::moderation_ago_years(s as f64 / (86400. * 365.)),
     }
+    .into()
 }
 
 /// `modDisplayName`: your nickname for them, theirs here, their name, or a short key.
@@ -155,14 +157,13 @@ fn head(m: &Moderation, on: &OnAct) -> impl IntoElement {
             i["name"]
                 .as_str()
                 .filter(|n| !n.is_empty())
-                .unwrap_or("Community")
-                .to_string()
+                .map_or_else(|| t::moderation_unnamed().into(), str::to_string)
         })
         .unwrap_or_default();
     let epoch = m
         .intel
         .as_ref()
-        .map(|i| format!("Epoch {}", i["epoch"].as_u64().unwrap_or(0)));
+        .map(|i| t::moderation_epoch(i["epoch"].as_u64().unwrap_or(0)));
     div()
         .flex_shrink_0()
         .flex()
@@ -180,7 +181,7 @@ fn head(m: &Moderation, on: &OnAct) -> impl IntoElement {
                 .flex_col()
                 .gap(px(2.))
                 .child(
-                    crate::kit::spaced("MODERATION", 1.6)
+                    crate::kit::spaced(t::moderation_title().to_uppercase(), 1.6)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(10.))
                         .line_height(px(24.))
@@ -211,7 +212,7 @@ fn head(m: &Moderation, on: &OnAct) -> impl IntoElement {
         .child(
             div()
                 .id("mod-x")
-                .aria_label("Close")
+                .aria_label(t::moderation_close())
                 .px(px(6.))
                 .py(px(4.))
                 .text_size(px(15.))
@@ -240,33 +241,14 @@ fn alert(m: &Moderation) -> Option<impl IntoElement> {
             r["burst_from_ms"].as_u64().unwrap_or(0),
             r["burst_to_ms"].as_u64().unwrap_or(0),
         );
-        let burst = if size >= 2 && to > from {
-            format!(
-                " {size} joined within {} of each other.",
-                ago(((to - from) as f64 / 1000.).round() as u64)
-            )
-        } else {
-            String::new()
-        };
-        let cohort = biggest
-            .map(|b| {
-                let sample: String = b["sample"]
-                    .as_str()
-                    .unwrap_or("")
-                    .chars()
-                    .take(40)
-                    .collect();
-                format!(" {} posted “{sample}”.", b["size"].as_u64().unwrap_or(0))
-            })
-            .unwrap_or_default();
-        (
-            format!(
-                "Raid: {} accounts flagged.",
-                r["suspects"].as_u64().unwrap_or(0)
-            ),
-            format!("{cohort}{burst} They start unticked, so they are the ones being removed."),
-            false,
-        )
+        let burst = (size >= 2 && to > from)
+            .then(|| t::moderation_raid_burst(size, ago(((to - from) as f64 / 1000.).round() as u64)));
+        let cohort = biggest.map(|b| {
+            let sample: String = b["sample"].as_str().unwrap_or("").chars().take(40).collect();
+            t::moderation_raid_cohort(b["size"].as_u64().unwrap_or(0), sample)
+        });
+        let body: Vec<SharedString> = cohort.into_iter().chain(burst).chain([t::moderation_raid_unticked()]).collect();
+        (t::moderation_raid(r["suspects"].as_u64().unwrap_or(0)).to_string(), body.join(" "), false)
     };
     let tone = c(crate::timeline::DANGER);
     let mut text = title.clone();
@@ -316,7 +298,7 @@ fn alert(m: &Moderation) -> Option<impl IntoElement> {
 }
 
 fn tabs(m: &Moderation, on: &OnAct) -> impl IntoElement {
-    let tab = |id: &'static str, label: &'static str, which: Tab| {
+    let tab = |id: &'static str, label: SharedString, which: Tab| {
         let active = m.tab == which;
         div()
             .id(id)
@@ -345,12 +327,12 @@ fn tabs(m: &Moderation, on: &OnAct) -> impl IntoElement {
         .gap(px(22.))
         .border_b_1()
         .border_color(white_a(0.08))
-        .child(tab("mod-tab-members", "Members", Tab::Members))
-        .child(tab("mod-tab-policies", "Policies", Tab::Policies))
+        .child(tab("mod-tab-members", t::moderation_tab_members(), Tab::Members))
+        .child(tab("mod-tab-policies", t::moderation_tab_policies(), Tab::Policies))
 }
 
 fn stats(m: &Moderation) -> impl IntoElement {
-    let cells: Vec<(u64, &str, gpui::Hsla)> = match &m.intel {
+    let cells: Vec<(u64, SharedString, gpui::Hsla)> = match &m.intel {
         None => Vec::new(),
         Some(i) => {
             let r = &i["report"];
@@ -371,14 +353,14 @@ fn stats(m: &Moderation) -> impl IntoElement {
                         .iter()
                         .filter(|x| !unlisted.contains(x["npub"].as_str().unwrap_or("")))
                         .count() as u64,
-                    "MEMBERS",
+                    t::moderation_stat_members(),
                     white_a(0.92),
                 ),
-                (r["trusted"].as_u64().unwrap_or(0), "TRUSTED", c(ACCENT)),
-                (r["protected"].as_u64().unwrap_or(0), "STAFF", c(GOLD)),
+                (r["trusted"].as_u64().unwrap_or(0), t::moderation_stat_trusted(), c(ACCENT)),
+                (r["protected"].as_u64().unwrap_or(0), t::moderation_stat_staff(), c(GOLD)),
                 (
                     flagged,
-                    "FLAGGED",
+                    t::moderation_stat_flagged(),
                     if flagged > 0 { c(RED) } else { white_a(0.92) },
                 ),
             ]
@@ -424,7 +406,7 @@ fn stats(m: &Moderation) -> impl IntoElement {
                         .child(n.to_string()),
                 )
                 .child(
-                    crate::kit::spaced(label, 0.95)
+                    crate::kit::spaced(label.to_uppercase(), 0.95)
                         .text_size(px(10.5))
                         .line_height(px(11.5))
                         .text_color(white_a(0.4)),
@@ -436,9 +418,9 @@ fn chips(m: &Moderation, on: &OnAct) -> impl IntoElement {
     let all = m.members().len();
     let cut = m.cut().len();
     let counts = [
-        ("all", "Everyone", all),
-        ("cut", "Removing", cut),
-        ("keep", "Staying", all - cut),
+        ("all", t::moderation_filter_all(), all),
+        ("cut", t::moderation_filter_removing(), cut),
+        ("keep", t::moderation_filter_staying(), all - cut),
     ];
     div()
         .flex()
@@ -492,26 +474,25 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
         .iter()
         .copied()
         .filter(|r| {
-            !matches!(
-                *r,
-                "Long-standing member" | "Holds a role" | "Community owner"
-            )
+            // i18n-exempt: needles in core's English reasons
+            !matches!(*r, "Long-standing member" | "Holds a role" | "Community owner")
         })
         .collect();
     let flag = |k: &str| x[k].as_bool().unwrap_or(false);
     let badge = if flag("is_owner") {
-        Some("OWNER")
+        Some(t::moderation_badge_owner())
     } else if flag("is_me") {
-        Some("YOU")
+        Some(t::moderation_badge_you())
     } else if flag("is_admin") {
-        Some("STAFF")
+        Some(t::moderation_badge_staff())
     } else if verdict == "trusted" {
-        Some("REGULAR")
+        Some(t::moderation_badge_regular())
     } else if verdict == "neutral" && !reasons.is_empty() {
-        Some("CHECK")
+        Some(t::moderation_badge_check())
     } else {
         None
-    };
+    }
+    .map(|b| b.to_uppercase());
     let badge_tone = match verdict {
         "trusted" => Some(c(ACCENT)),
         "protected" => Some(c(GOLD)),
@@ -528,65 +509,59 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
             _ => None,
         }
     };
-    let num = |n: String| (n, true);
-    let mut meta: Vec<(String, bool)> = Vec::new();
-    let tenure = x["tenure_secs"].as_u64().unwrap_or(0);
-    if tenure > 0 {
-        meta.push(("here ".into(), false));
-        meta.push(num(ago(tenure)));
-    } else {
-        meta.push(("age unknown".into(), false));
+    #[derive(Clone, Copy)]
+    enum Look {
+        Plain,
+        Strong,
+        Dot,
+        Unknown,
     }
-    let dot = || (" · ".to_string(), false);
-    let msgs = x["messages"].as_u64().unwrap_or(0);
+    let mut meta: Vec<(String, Look)> = Vec::new();
+    let add = |meta: &mut Vec<(String, Look)>, html: SharedString| {
+        meta.extend(crate::kit::runs(&html).into_iter().map(|(t, b)| (t, if b { Look::Strong } else { Look::Plain })))
+    };
+    let tenure = x["tenure_secs"].as_u64().unwrap_or(0);
+    let dot = || ("  ·  ".to_string(), Look::Dot);
+    if tenure > 0 {
+        add(&mut meta, t::moderation_meta_here(ago(tenure)));
+    } else {
+        meta.push((t::moderation_meta_age_unknown().into(), Look::Unknown));
+    }
     meta.push(dot());
-    meta.push(num(msgs.to_string()));
-    meta.push((format!(" msg{}", if msgs == 1 { "" } else { "s" }), false));
+    add(&mut meta, t::moderation_meta_messages(x["messages"].as_u64().unwrap_or(0)));
     let distinct = x["distinct"].as_u64().unwrap_or(0);
     if distinct > 0 {
         meta.push(dot());
-        meta.push(num(distinct.to_string()));
-        meta.push((" distinct".into(), false));
+        add(&mut meta, t::moderation_meta_distinct(distinct));
     }
     if let Some(label) = x["invite_label"].as_str() {
         meta.push(dot());
-        meta.push((format!("via {label}"), false));
+        add(&mut meta, t::moderation_meta_via(crate::kit::escape(label)));
     }
     let mut text = String::new();
     let mut highlights = Vec::new();
-    for (t, strong) in meta {
-        let style = if strong {
-            Some(gpui::HighlightStyle {
-                color: Some(white_a(0.62)),
-                ..Default::default()
-            })
-        } else if t == " · " {
-            Some(gpui::HighlightStyle {
-                color: Some(white_a(0.22)),
-                ..Default::default()
-            })
-        } else if t == "age unknown" {
-            Some(gpui::HighlightStyle {
+    for (t, look) in meta {
+        let style = match look {
+            Look::Strong => Some(gpui::HighlightStyle { color: Some(white_a(0.62)), ..Default::default() }),
+            Look::Dot => Some(gpui::HighlightStyle { color: Some(white_a(0.22)), ..Default::default() }),
+            Look::Unknown => Some(gpui::HighlightStyle {
                 color: Some(white_a(0.34)),
                 font_style: Some(gpui::FontStyle::Italic),
                 ..Default::default()
-            })
-        } else {
-            None
+            }),
+            Look::Plain => None,
         };
         if let Some(st) = style {
             highlights.push((text.len()..text.len() + t.len(), st));
         }
         text.push_str(&t);
     }
-    let text = text.replace(" · ", "  ·  ");
-    let highlights = remap(&highlights);
     let busy = m.busy.is_some();
     let key = npub.clone();
     let group = SharedString::from(format!("mod-row-{npub}"));
     div()
         .id(group.clone())
-        .when(locked, |d| d.tip(reasons.first().copied().unwrap_or("Protected").to_string()))
+        .when(locked, |d| d.tip(reasons.first().map_or_else(t::moderation_protected, |r| SharedString::from(r.to_string()))))
         .group(group.clone())
         .relative()
         .flex()
@@ -700,23 +675,6 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
         )
 }
 
-/// Shifts highlight ranges for the widened " · " separators.
-fn remap(
-    h: &[(std::ops::Range<usize>, gpui::HighlightStyle)],
-) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
-    let mut shift = 0;
-    h.iter()
-        .map(|(r, st)| {
-            let dot = r.len() == " · ".len() && st.color == Some(white_a(0.22));
-            let start = r.start + shift;
-            if dot {
-                shift += 2;
-            }
-            (start..r.end + shift, *st)
-        })
-        .collect()
-}
-
 fn list(m: &Moderation, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     let empty = |text: String| {
         div()
@@ -768,7 +726,7 @@ fn list(m: &Moderation, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
         })
         .collect();
     if rows.is_empty() {
-        return empty("No members match.".into());
+        return empty(t::moderation_no_match().into());
     }
     div()
         .flex()
@@ -780,7 +738,7 @@ fn list(m: &Moderation, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
 fn mod_btn(
     id: &'static str,
     icon: &'static str,
-    label: String,
+    label: SharedString,
     danger: bool,
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -842,19 +800,13 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
         .unwrap_or((0, 500));
     let over = cut > max.saturating_sub(count);
     let idle = m.busy.is_none() && m.intel.is_some();
-    let n = |b: usize, tone: gpui::Hsla, rest: &'static str| {
-        div()
-            .flex()
-            .items_baseline()
-            .gap(px(4.))
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(13.5))
-                    .text_color(tone)
-                    .child(b.to_string()),
-            )
-            .child(rest)
+    let n = |html: SharedString, tone: gpui::Hsla| {
+        div().flex().items_baseline().gap(px(4.)).children(
+            crate::kit::runs(&html).into_iter().filter(|(t, _)| !t.trim().is_empty()).map(move |(t, b)| {
+                let d = div().child(t.trim().to_string());
+                if b { d.font_weight(FontWeight::SEMIBOLD).text_size(px(13.5)).text_color(tone) } else { d }
+            }),
+        )
     };
     div()
         .flex_shrink_0()
@@ -879,16 +831,14 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .gap(px(14.))
                 .text_size(px(12.))
                 .text_color(white_a(0.42))
-                .child(n(total - cut, c(ACCENT), "staying"))
-                .when(cut > 0, |d| {
-                    d.child(n(cut, c(crate::timeline::DANGER), "removing"))
-                })
+                .child(n(t::moderation_staying(total - cut), c(ACCENT)))
+                .when(cut > 0, |d| d.child(n(t::moderation_removing(cut), c(crate::timeline::DANGER))))
                 .child(
                     div()
                         .ml_auto()
                         .pr(px(6.))
                         .text_color(white_a(0.3))
-                        .children(m.intel.as_ref().map(|_| format!("banlist {count}/{max}"))),
+                        .children(m.intel.as_ref().map(|_| t::moderation_banlist(count, max))),
                 ),
         )
         .child(
@@ -899,14 +849,7 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .child(mod_btn(
                     "mod-revoke",
                     "icons/locked.svg",
-                    if invites > 0 {
-                        format!(
-                            "Revoke {invites} invite{}",
-                            if invites == 1 { "" } else { "s" }
-                        )
-                    } else {
-                        "No invite links".into()
-                    },
+                    if invites > 0 { t::moderation_revoke(invites) } else { t::moderation_no_invites() },
                     false,
                     idle && invites > 0,
                     click(on, || Act::Revoke),
@@ -915,11 +858,7 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .child(mod_btn(
                     "mod-rotate",
                     "icons/refresh.svg",
-                    if cut > 0 {
-                        format!("Remove {cut} & rotate")
-                    } else {
-                        "Rotate keys".into()
-                    },
+                    if cut > 0 { t::moderation_remove_rotate(cut) } else { t::moderation_rotate() },
                     false,
                     idle,
                     click(on, || Act::Rotate),
@@ -928,11 +867,7 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .child(mod_btn(
                     "mod-ban",
                     "icons/x-user.svg",
-                    if cut > 0 {
-                        format!("Ban {cut} & rotate")
-                    } else {
-                        "Ban & rotate".into()
-                    },
+                    if cut > 0 { t::moderation_ban_rotate_count(cut) } else { t::moderation_ban_rotate() },
                     true,
                     idle && cut > 0 && !over,
                     click(on, || Act::BanRotate),
@@ -940,7 +875,7 @@ fn foot(m: &Moderation, narrow: bool, on: &OnAct) -> impl IntoElement {
                 )
                 .when(over && m.intel.is_some(), |d| {
                     let room = max.saturating_sub(count);
-                    d.tip(format!("The banlist holds {max}; only {room} slots are free. Rotate instead: it has no ceiling."))
+                    d.tip(t::moderation_banlist_full(max, room))
                 })),
         )
 }
@@ -961,7 +896,7 @@ pub fn view(
             .flex()
             .flex_col()
             .child(stats(m))
-            .child(div().flex_shrink_0().mx(px(18.)).mt(px(12.)).text_size(px(12.)).line_height(px(18.)).text_color(white_a(0.44)).child("Everyone is kept by default. Untick someone to cut them off at the next rotation."))
+            .child(div().flex_shrink_0().mx(px(18.)).mt(px(12.)).text_size(px(12.)).line_height(px(18.)).text_color(white_a(0.44)).child(t::moderation_kept_note()))
             .child(
                 div()
                     .flex_shrink_0()
