@@ -470,7 +470,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // the running loops be.
     let monitor_rx = client.monitor().map(|m| m.subscribe());
     let mut dm_notifications = client.notifications();
-    let mut tap = client.notifications();
     let mut notifications = client.notifications();
     let run = NotifsRun::claim();
 
@@ -537,34 +536,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
         });
     }
 
-    // Lag probe: a second broadcast receiver stamps FRESH community events the
-    // moment the pool surfaces them, so the main loop's dequeue lag below is
-    // directly measurable (broadcast receivers have independent queues; this one
-    // never awaits handlers). Old fetched history stays silent via the age gate.
-    {
-        let run = run.clone();
-        vector_core::db::spawn_bound(async move {
-            while let Some(n) = tap.next().await {
-                if run.superseded() {
-                    break;
-                }
-                if let ClientNotification::Event { event, subscription_id, .. } = n {
-                    let k = event.kind.as_u16();
-                    if k == 1059 || k == 21059 {
-                        let age = vector_core::clock::timestamp()
-                            .as_secs()
-                            .saturating_sub(event.created_at.as_secs());
-                        if age <= 120 {
-                            println!(
-                                "[lag-probe] pool surfaced kind={k} id={} sub={subscription_id} age={age}s",
-                                &event.id.to_hex()[..8]
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
     // Community events get their own worker, off the main loop — the same lesson
     // the DM lane above carries. At boot the sweep's fetches surface thousands of
     // community events through this broadcast, each ~100-300ms to fold (decrypt +
@@ -577,33 +548,14 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     let (fresh_tx, mut fresh_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     let (bulk_tx, mut bulk_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     vector_core::db::spawn_bound(async move {
-        let mut flood_count: u64 = 0;
-        let mut flood_micros: u64 = 0;
         loop {
-            let (event, fresh) = tokio::select! {
+            let event = tokio::select! {
                 biased;
-                Some(e) = fresh_rx.recv() => (e, true),
-                Some(e) = bulk_rx.recv() => (e, false),
+                Some(e) = fresh_rx.recv() => e,
+                Some(e) = bulk_rx.recv() => e,
                 else => break,
             };
-            let k = event.kind.as_u16();
-            let id8 = if fresh { event.id.to_hex()[..8].to_string() } else { String::new() };
-            let t = std::time::Instant::now();
             handle_community_event(event).await;
-            flood_count += 1;
-            flood_micros += t.elapsed().as_micros() as u64;
-            if fresh {
-                println!(
-                    "[lag-probe] community lane handled kind={k} id={id8} in {:?} ({flood_count} events, {}ms folded so far)",
-                    t.elapsed(),
-                    flood_micros / 1000
-                );
-            } else if flood_count.is_multiple_of(500) {
-                println!(
-                    "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative",
-                    flood_micros / 1000
-                );
-            }
         }
     });
 
@@ -611,7 +563,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
         {
             match notification {
                 ClientNotification::Event { event, subscription_id, .. } => {
-                    let _ = &subscription_id;
                     let k = event.kind.as_u16();
                     // DM gift wraps route by KIND + the p-tag addressing us — the
                     // same lesson the community branch below already carries.
