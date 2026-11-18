@@ -7892,6 +7892,7 @@ fn rail(
                 .gap(px(10.))
                 .child(
                     div()
+                        .flex_none()
                         .size(px(26.))
                         .rounded(px(4.9))
                         .border_1()
@@ -7909,6 +7910,9 @@ fn rail(
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
                         .font_family(RUBIK)
                         .text_size(px(14.))
                         .text_color(white_a(0.55))
