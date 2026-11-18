@@ -272,11 +272,7 @@ pub fn select_look(
             .path("ui/caret-down.svg")
             .size_full()
             .text_color(c(0x888888))
-            .when(open, |s| {
-                s.with_transformation(gpui::Transformation::rotate(gpui::radians(
-                    std::f32::consts::PI,
-                )))
-            }),
+            .with_transformation(turn(format!("vselect-caret-{id:?}"), open, std::f32::consts::PI, 0.2, css_ease())),
     );
     let toggle = on_toggle.clone();
     let opening = !open;
@@ -417,6 +413,7 @@ pub fn select_look(
                     }),
             );
         }
+        let list = rise(format!("vselect-in-{id:?}"), list, 180, (0., -4., 1.), bezier(0.22, 1., 0.36, 1.));
         root = root.child(gpui::deferred(list).with_priority(look.priority));
     }
     root.into_any_element()

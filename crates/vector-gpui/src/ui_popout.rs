@@ -136,7 +136,7 @@ impl VectorApp {
                 // Whatever is drawn in the chat's place gives way to it.
                 self.settings = None;
                 self.profile = None;
-                self.nexus = None;
+                self.close_nexus(cx);
                 self.new_chat = None;
                 self.create_community = None;
                 self.open_chat(SharedString::from(item.chat.clone()), window, cx);

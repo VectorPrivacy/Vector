@@ -39,6 +39,7 @@ impl VectorApp {
                 n.now_ms = ms as i64;
             }
             self.nexus = Some(n);
+            self.nexus_leaving = None;
             self.settings = None;
             self.attach = None;
             self.mini = None;
@@ -270,8 +271,42 @@ impl VectorApp {
     }
 
     pub(super) fn close_nexus(&mut self, cx: &mut Context<Self>) {
-        self.nexus = None;
+        if let Some(n) = self.nexus.take() {
+            let at = std::time::Instant::now();
+            self.nexus_leaving = Some((Box::new(n), at));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(170)).await;
+                this.update(cx, |app, cx| {
+                    if app.nexus_leaving.as_ref().is_some_and(|(_, t)| *t == at) {
+                        app.nexus_leaving = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         cx.notify();
+    }
+
+    /// `.nx.closing`: the closed Nexus over what it reveals, fading out and settling 6px.
+    pub(super) fn nexus_ghost(&self, width: f32, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (n, at) = self.nexus_leaving.as_ref()?;
+        let t = at.elapsed().as_secs_f32() / 0.16;
+        if t >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        let e = crate::kit::bezier(0., 0., 0.58, 1.)(t);
+        let publisher = n.details.as_deref().and_then(|id| n.app(id)).and_then(|a| {
+            let store = self.store.borrow();
+            store.profiles.contains_key(&a.publisher).then(|| {
+                (SharedString::from(store.name(&a.publisher)), store.avatar_path(&a.publisher))
+            })
+        });
+        let on: crate::nexus::OnAct = std::rc::Rc::new(|_, _, _| {});
+        let view = crate::nexus::view(n, publisher.as_ref(), width, &on, cx);
+        Some(gpui::zoom(view).shift(0., 6. * e).opacity(1. - e).into_any_element())
     }
 
     pub(super) fn on_nexus(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
@@ -333,7 +368,7 @@ impl VectorApp {
             }
             Act::PlayWith(id) => self.play_with(id, window, cx),
             Act::Publisher(npub) => {
-                self.nexus = None;
+                self.close_nexus(cx);
                 self.open_profile(npub, cx);
             }
             Act::OpenUrl(url) => self.open_web(&url, cx),
@@ -709,7 +744,7 @@ impl VectorApp {
         let Some(path) = app.local_path.clone() else {
             return self.show_toast("Install it first", cx);
         };
-        self.nexus = None;
+        self.close_nexus(cx);
         self.open_chat(chat.clone().into(), window, cx);
         let grid = super::miniapps_ops::GridApp {
             name: app.name.clone(),

@@ -2308,22 +2308,16 @@ pub fn view(
                 .track_scroll(&n.scroll)
                 .child(page),
         );
-    div()
+    let root = div()
         .size_full()
         .flex()
         .bg(c(BG))
         .font_family(RUBIK)
         .when(!n.slim, |d| d.child(nav(n, on, cx)))
-        .child(main)
-        .with_animation(
-            SharedString::from(format!("nx-open-{:?}", n.opened)),
-            gpui::Animation::new(std::time::Duration::from_millis(240)),
-            |d, t| {
-                let e = crate::kit::bezier(0.22, 1., 0.36, 1.)(t);
-                d.opacity(e)
-            },
-        )
-        .into_any_element()
+        .child(main);
+    // `nx-open`, from the clock so the closing copy never replays it.
+    let e = crate::kit::bezier(0.22, 1., 0.36, 1.)((n.opened.elapsed().as_secs_f32() / 0.24).min(1.));
+    gpui::zoom(root).shift(0., 10. * (1. - e)).opacity(e).into_any_element()
 }
 
 /// `.nx-mhead`: on a phone, the search, then the pages and busiest categories as one strip.

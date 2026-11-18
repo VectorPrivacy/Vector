@@ -4076,7 +4076,10 @@ pub fn section_nav(
                 .child(div().min_w_0().truncate().child(cat.label))
                 .when(flag, |d| d.child(badge_new())),
         );
-        if open {
+        // `.cs-anchors-wrap`: the row grows while its anchors fade and settle into place.
+        let size = crate::kit::ease(format!("cs-fold-{id}").into(), open as u8 as f32, 0.28, crate::kit::bezier(0.22, 1., 0.36, 1.));
+        let fade = crate::kit::ease(format!("cs-fade-{id}").into(), open as u8 as f32, 0.2, crate::kit::css_ease());
+        if size > 0. {
             let shown: Vec<&Anchor> = cat
                 .anchors
                 .iter()
@@ -4084,6 +4087,7 @@ pub fn section_nav(
                 .filter(|(_, h)| **h)
                 .map(|(a, _)| a)
                 .collect();
+            let shown_n = shown.len();
             let marker = selected
                 .then(|| shown.iter().position(|a| a.id == active))
                 .flatten();
@@ -4097,11 +4101,12 @@ pub fn section_nav(
                     .bg(c(0x333333)),
             );
             if let Some(i) = marker {
+                let y = crate::kit::ease(format!("cs-marker-{id}").into(), 34. * i as f32 + 17., 0.5, crate::kit::bezier(0.25, 0.8, 0.3, 1.));
                 anchors = anchors.child(
                     div()
                         .absolute()
                         .left(px(18.5))
-                        .top(px(34. * i as f32 + 17. - 10.))
+                        .top(px(y - 10.))
                         .w(px(2.))
                         .h(px(20.))
                         .rounded(px(1.))
@@ -4136,7 +4141,13 @@ pub fn section_nav(
                         .when(fresh.contains(&a.id), |d| d.child(badge_new())),
                 );
             }
-            list = list.child(anchors);
+            let full = 34. * shown_n as f32 + 6.;
+            list = list.child(
+                div()
+                    .h(px(full * size))
+                    .overflow_hidden()
+                    .child(anchors.top(px(-4. * (1. - size))).opacity(fade)),
+            );
         }
     }
     if !any {

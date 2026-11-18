@@ -172,6 +172,8 @@ pub struct VectorApp {
     /// The attachment panel's Mini Apps view, while it shows.
     mini: Option<miniapps_ops::MiniPanel>,
     nexus: Option<crate::nexus::Nexus>,
+    /// The Nexus as it fades out after closing (`.nx.closing`).
+    nexus_leaving: Option<(Box<crate::nexus::Nexus>, std::time::Instant)>,
     launch: Option<miniapps_ops::Launch>,
     perm_prompt: Option<nexus_ops::PermPrompt>,
     publish: Option<publish_ops::PublishForm>,
@@ -1059,6 +1061,7 @@ impl VectorApp {
             attach_turn: Default::default(),
             mini: None,
             nexus: None,
+            nexus_leaving: None,
             launch: None,
             perm_prompt: None,
             pivx_wallet: None,
@@ -2349,7 +2352,7 @@ impl VectorApp {
             "chat" => {
                 self.settings = None;
                 self.profile = None;
-                self.nexus = None;
+                self.close_nexus(cx);
             }
             "bookmarks" => {
                 self.settings = None;
@@ -6759,7 +6762,19 @@ impl VectorApp {
             .child(self.security.clone())
             .child(chrome(window, false, rail_mode.collapsed && !slim).children(self.update_banner(cx)))
             .child(if slim {
-                self.slim_main(&store, &on_community, window, cx)
+                let main = self.slim_main(&store, &on_community, window, cx);
+                match self.nexus_ghost(f32::from(window.viewport_size().width), window, cx) {
+                    Some(g) => div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .relative()
+                        .child(main)
+                        .child(div().absolute().top_0().bottom_0().left_0().right_0().child(g))
+                        .into_any_element(),
+                    None => main,
+                }
             } else {
                 div()
                     .flex()
@@ -6915,6 +6930,11 @@ impl VectorApp {
                             }
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })
+                    })
+                    .children({
+                        let rail = rail_mode.width();
+                        self.nexus_ghost(f32::from(window.viewport_size().width) - rail, window, cx)
+                            .map(|g| div().absolute().top_0().bottom_0().left(px(rail)).right_0().child(g))
                     })
                 .into_any_element()
             })
@@ -10350,6 +10370,22 @@ fn composer(
     };
     let replying = matches!(mode, Mode::Reply { .. });
     let editing = matches!(mode, Mode::Edit { .. });
+    let opened = crate::kit::ease("reply-bar".into(), if replying { 1. } else { 0. }, 0.22, crate::kit::bezier(0.33, 1., 0.68, 1.));
+    let shown = crate::kit::ease("reply-bar-fade".into(), if replying { 1. } else { 0. }, 0.18, crate::kit::css_ease());
+    thread_local! {
+        // The bar keeps its last reply while it folds away.
+        static LAST_REPLY: std::cell::RefCell<Option<Mode>> = const { std::cell::RefCell::new(None) };
+    }
+    let held = if replying {
+        LAST_REPLY.with_borrow_mut(|l| if l.as_ref() != Some(mode) { *l = Some(mode.clone()) });
+        None
+    } else if opened > 0. {
+        LAST_REPLY.with_borrow(Clone::clone)
+    } else {
+        LAST_REPLY.take();
+        None
+    };
+    let bar = if replying { Some(mode) } else { held.as_ref() };
     let mut boxed = div()
         .child(
             gpui::canvas(move |b, _, _| measure.set(Some(b)), |_, _, _, _| {})
@@ -10361,14 +10397,14 @@ fn composer(
         .relative()
         .flex_shrink_0()
         .px(px(8.))
-        .pt(px(5. + if replying { 34. } else { 0. } + if commanding { 34. } else { 0. }))
+        .pt(px(5. + 34. * opened + if commanding { 34. } else { 0. }))
         .pb(px(5.))
         .bg(linear_gradient(
             90.,
             linear_color_stop(c(ACCENT), 0.),
             linear_color_stop(c(ACCENT_DEEP), 1.),
         ));
-    if let Mode::Reply { id, name, snippet, tags } = mode {
+    if let Some(Mode::Reply { id, name, snippet, tags }) = bar {
         let look = crate::inline::Look::new(INTER, 13., 18., white_a(0.45));
         let mut atoms = crate::preview::reply_atoms(snippet, &look);
         if !tags.is_empty() {
@@ -10385,7 +10421,8 @@ fn composer(
                 .top(px(5.))
                 .left(px(8.))
                 .right(px(8.))
-                .h(px(46.))
+                .h(px(12. + 34. * opened))
+                .overflow_hidden()
                 .pl(px(12.))
                 .pr(px(44.))
                 .pb(px(12.))
@@ -10406,10 +10443,12 @@ fn composer(
                         .h(px(16.))
                         .rounded(px(2.))
                         .bg(c(ACCENT))
-                        .flex_shrink_0(),
+                        .flex_shrink_0()
+                        .opacity(shown),
                 )
                 .child(
                     div()
+                        .opacity(shown)
                         .flex()
                         .flex_shrink_0()
                         .max_w(gpui::relative(0.5))
@@ -10427,6 +10466,7 @@ fn composer(
                 )
                 .child(
                     div()
+                        .opacity(shown)
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
@@ -10439,6 +10479,7 @@ fn composer(
                         .top(px(5.))
                         .size(px(24.))
                         .p(px(3.))
+                        .opacity(shown)
                         .child(cancel("reply-cancel", 18., cx)),
                 ),
         );
@@ -10447,7 +10488,7 @@ fn composer(
         boxed = boxed.child(
             div()
                 .absolute()
-                .top(px(if replying { 39. } else { 5. }))
+                .top(px(5. + 34. * opened))
                 .left(px(8.))
                 .right(px(8.))
                 .h(px(46.))
@@ -11296,13 +11337,13 @@ impl VectorApp {
         match act {
             Act::Open(id) => {
                 self.settings = None;
-                self.nexus = None;
+                self.close_nexus(cx);
                 self.open_community(id, window, cx)
             }
             Act::Home => {
                 self.leave_community();
                 self.settings = None;
-                self.nexus = None;
+                self.close_nexus(cx);
                 if !self.is_slim {
                     self.open_dm_home(window, cx);
                 }
@@ -11310,7 +11351,7 @@ impl VectorApp {
             Act::Dm(id) => {
                 self.leave_community();
                 self.settings = None;
-                self.nexus = None;
+                self.close_nexus(cx);
                 self.open_chat(id.into(), window, cx);
             }
             Act::Channel(id) => {
