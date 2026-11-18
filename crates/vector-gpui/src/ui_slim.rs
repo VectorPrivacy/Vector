@@ -544,13 +544,16 @@ impl VectorApp {
                 .into_any_element(),
             None => self.slim_pane(store, &query, window, cx),
         };
-        div()
+        let el = div()
             .flex_1()
             .min_h_0()
             .flex()
             .when(rail, |d| d.child(self.slim_rail(store, on_community, cx)))
-            .child(pane)
-            .into_any_element()
+            .child(pane);
+        if crate::kit::easing() {
+            window.request_animation_frame();
+        }
+        el.into_any_element()
     }
 
     /// `.cc-rail`: the Messages door, the communities, a tile to make one and the fold.

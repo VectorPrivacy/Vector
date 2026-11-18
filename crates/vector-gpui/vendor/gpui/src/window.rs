@@ -4990,6 +4990,27 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
+        self.paint_outset_shadows(bounds, corner_radii, shadows, 0);
+    }
+
+    /// Paints `shadows` as an element's `box-shadow`: like [`Self::paint_drop_shadows`], but
+    /// nothing lands under the element itself, so a see-through box shows no shadow inside.
+    pub fn paint_box_shadows(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
+        self.paint_outset_shadows(bounds, corner_radii, shadows, 2);
+    }
+
+    fn paint_outset_shadows(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+        mode: u32,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -5007,11 +5028,23 @@ impl Window {
                 blur_radius: shadow.blur_radius.scale(scale_factor),
                 bounds: self.cover_bounds(shadow_bounds),
                 content_mask,
-                corner_radii: corner_radii.scale(scale_factor),
+                corner_radii: if mode == 2 {
+                    // CSS grows a spread shadow's corners with it, so a ring keeps its width.
+                    let grow = |r: Pixels| if r > Pixels::ZERO { (r + shadow.spread_radius).max(Pixels::ZERO) } else { r };
+                    Corners {
+                        top_left: grow(corner_radii.top_left),
+                        top_right: grow(corner_radii.top_right),
+                        bottom_right: grow(corner_radii.bottom_right),
+                        bottom_left: grow(corner_radii.bottom_left),
+                    }
+                    .scale(scale_factor)
+                } else {
+                    corner_radii.scale(scale_factor)
+                },
                 color: shadow.color.opacity(opacity),
                 element_bounds,
                 element_corner_radii,
-                inset: 0,
+                inset: mode,
                 pad: 0,
             });
         }

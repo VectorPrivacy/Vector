@@ -978,7 +978,7 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
     var shadow = load_shadow(instance_id);
 
     var geometry: Bounds;
-    if (shadow.inset != 0u) {
+    if (shadow.inset == 1u) {
         geometry = shadow.element_bounds;
     } else {
         // Leave room for the gaussian tail outside the shadow rect.
@@ -1033,13 +1033,18 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         }
     }
 
-    if (shadow.inset != 0u) {
+    if (shadow.inset == 1u) {
         // The inset shadow is the complement of the (blurred) hole rect, clipped to the element.
         // `saturate(0.5 - d)` gives a 1-pixel antialiased edge: d <= -0.5 -> 1, d >= 0.5 -> 0.
         alpha = 1.0 - alpha;
         let element_distance = quad_sdf(input.position.xy, shadow.element_bounds,
                                         shadow.element_corner_radii);
         alpha *= saturate(0.5 - element_distance);
+    } else if (shadow.inset == 2u) {
+        // A box's own shadow, as CSS draws it: outside its border box only.
+        let element_distance = quad_sdf(input.position.xy, shadow.element_bounds,
+                                        shadow.element_corner_radii);
+        alpha *= saturate(0.5 + element_distance);
     }
 
     return blend_color(input.color, alpha);

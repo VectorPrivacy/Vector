@@ -671,7 +671,8 @@ pub struct Shadow {
     pub color: Hsla,
     pub element_bounds: Bounds<ScaledPixels>,
     pub element_corner_radii: Corners<ScaledPixels>,
-    /// 0 = drop shadow (rendered outside the element), 1 = inset shadow (rendered inside).
+    /// 0 = drop shadow, 1 = inset shadow (rendered inside the element), 2 = drop shadow
+    /// rendered outside the element only.
     pub inset: u32,
     pub pad: u32, // align to 8 bytes
 }

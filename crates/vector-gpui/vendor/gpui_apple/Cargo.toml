@@ -1,0 +1,75 @@
+[package]
+name = "gpui_apple"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_apple.rs"
+doctest = false
+
+[features]
+default = []
+bench-support = ["gpui/bench-support"]
+test-support = ["gpui/test-support"]
+runtime_shaders = []
+font-kit = ["dep:font-kit", "dep:core-text", "dep:objc2-core-text", "dep:pathfinder_geometry"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+anyhow = "1.0.86"
+async-task = "4.7"
+block2 = "0.6"
+collections = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+core-foundation = "0.10"
+core-foundation-sys = "0.8.6"
+core-graphics = "0.24"
+core-text = { version = "21", optional = true }
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2"] }
+etagere = "0.2"
+futures = "0.3.34"
+font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", default-features = false, optional = true, features = ["source"] }
+gpui_util = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+image = { version = "0.25.1", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
+libc = "0.2"
+log = { version = "0.4", default-features = false, features = ["std"] }
+mach2 = "0.6"
+objc2 = "0.6"
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFData", "CFDictionary", "CFString", "CFNumber", "CFBase", "CFCGTypes"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGDirectDisplay", "CGColorSpace"] }
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std", "CTFont", "CTFontDescriptor"], optional = true }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2", "objc2-metal"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLResource",
+    "MTLTexture",
+    "MTLTypes",
+] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSNull", "NSObjCRuntime", "NSObject", "NSProcessInfo", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSValue", "objc2-core-foundation", "std", "NSThread", "NSNotification", "NSOperation", "block2"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalDisplayLink", "CAMetalLayer", "objc2-metal", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecBase", "SecItem"] }
+parking_lot = "0.12.1"
+pathfinder_geometry = { version = "0.5", optional = true }
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+thiserror = "2.0.12"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.build-dependencies]
+cbindgen = { version = "0.28.0", default-features = false }

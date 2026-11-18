@@ -9315,7 +9315,7 @@ impl VectorApp {
         let store = store.borrow();
         let rail_mode = self.rail_mode(window);
         let on_community = self.on_community_act(cx);
-        rail(
+        let el = rail(
             &store,
             &self.rail_open,
             self.open.as_ref(),
@@ -9363,7 +9363,11 @@ impl VectorApp {
                     }),
                 }
             }),
-        ).into_any_element()
+        ).into_any_element();
+        if kit::easing() {
+            window.request_animation_frame();
+        }
+        el
     }
 
     fn on_community_act(&self, cx: &mut Context<Self>) -> crate::community::OnAct {

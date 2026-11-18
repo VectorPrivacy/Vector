@@ -2,7 +2,6 @@
 //! dropdown, the popup dialog and Vector's buttons.
 
 use gpui::{AnimationExt, AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
-use crate::pic::img;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::theme::*;
@@ -727,6 +726,35 @@ fn tween(key: &SharedString, to: [f32; 6], secs: f32) -> ([f32; 6], bool) {
         let moving = (now - t.since).as_secs_f32() < secs;
         (if moving { at(t) } else { to }, moving)
     })
+}
+
+thread_local! {
+    static EASES: std::cell::RefCell<std::collections::HashMap<SharedString, (f32, f32, std::time::Instant)>> = Default::default();
+    static EASING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A render-time transition: `key` eased toward `to` over `secs` along `curve`, from wherever it
+/// stood when `to` last changed, as CSS retargets one. The first sight takes `to` as is.
+pub fn ease(key: SharedString, to: f32, secs: f32, curve: impl Fn(f32) -> f32) -> f32 {
+    EASES.with_borrow_mut(|all| {
+        let now = std::time::Instant::now();
+        let at = |e: &(f32, f32, std::time::Instant)| e.0 + (e.1 - e.0) * curve(((now - e.2).as_secs_f32() / secs).min(1.));
+        let e = all.entry(key).or_insert((to, to, now));
+        if e.1 != to {
+            *e = (at(e), to, now);
+        }
+        if (now - e.2).as_secs_f32() < secs {
+            EASING.set(true);
+            at(e)
+        } else {
+            to
+        }
+    })
+}
+
+/// Whether an [`ease`] built since the last call is still moving: its view wants another frame.
+pub fn easing() -> bool {
+    EASING.replace(false)
 }
 
 thread_local!(static CLOSING: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) });

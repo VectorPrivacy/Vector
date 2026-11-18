@@ -258,6 +258,7 @@ pub fn render(
                     },
                     child: false,
                 };
+                let f = fold(id, is_open);
                 let head = folder_head(
                     store,
                     id,
@@ -265,6 +266,7 @@ pub fn render(
                     members,
                     tint,
                     is_open,
+                    &f,
                     !is_open && holds_active,
                     !is_open && any_unread,
                     head_zones,
@@ -273,9 +275,12 @@ pub fn render(
                 let mut band = div()
                     .mx(px(4.))
                     .rounded(px(12.))
-                    .when(is_open, |d| d.bg(tint.opacity(0.09)).my(px(4.)).pt(px(4.)).pb(px(4.)))
+                    .when(f.tint > 0., |d| d.bg(tint.opacity(0.09 * f.tint)))
+                    .my(px(4. * f.size))
+                    .pt(px(4. * f.size))
                     .child(head);
-                if is_open {
+                if f.size > 0. {
+                    let mut body = div().pb(px(4.));
                     for (i, com) in members.iter().enumerate() {
                         let zones = Zones {
                             before: RailDrop::IntoFolder {
@@ -294,8 +299,10 @@ pub fn render(
                             child: true,
                         };
                         let open_now = active == Some(com.community_id.as_str());
-                        band = band.child(item(store, com, open_now, !open_now && unread(com), 4., voice.get(&com.community_id).copied(), zones, on));
+                        let row = item(store, com, open_now, !open_now && unread(com), 4., voice.get(&com.community_id).copied(), zones, on);
+                        body = body.child(div().opacity(f.fade).child(row));
                     }
+                    band = band.child(fold_body(id, f.size, body));
                 }
                 list = list.child(band);
             }
@@ -438,35 +445,13 @@ fn folder_head(
     members: &[&Community],
     tint: Hsla,
     open: bool,
+    f: &Fold,
     active: bool,
     unread: bool,
     zones: Zones,
     on: &OnAct,
 ) -> AnyElement {
-    let tile = div()
-        .relative()
-        .size(px(26.))
-        .flex_shrink_0()
-        .rounded(px(4.9))
-        .when(!open, |d| {
-            d.bg(tint.opacity(0.26)).child(
-                div().absolute().inset(px(3.)).flex().flex_wrap().gap(px(2.)).children(
-                    members
-                        .iter()
-                        .take(4)
-                        .map(|c| logo(store, &c.community_id, 9., 2.7)),
-                ),
-            )
-        })
-        .when(open, |d| {
-            d.flex().items_center().justify_center().child(
-                svg()
-                    .path("icons/folder.svg")
-                    .size(px(15.6))
-                    .mt(px(-1.))
-                    .text_color(tint),
-            )
-        });
+    let tile = lid(f, tint, 26., 4.9, 3., 2., 15.6, -1., members.iter().take(4).map(|c| logo(store, &c.community_id, 9., 2.7)));
     let fid = id.to_string();
     let group = SharedString::from(format!("rail-f-{id}"));
     let any_unread = members.iter().any(|c| community_unread(store, c));
@@ -606,22 +591,8 @@ pub fn render_slim(
                     child: false,
                 };
                 let fid = id.clone();
-                let tile_el = div()
-                    .relative()
-                    .size(px(45.))
-                    .rounded(px(8.5))
-                    .when(!is_open, |d| {
-                        d.bg(tint.opacity(0.26)).child(
-                            div().absolute().inset(px(6.)).flex().flex_wrap().gap(px(3.)).children(
-                                members.iter().take(4).map(|c| logo(store, &c.community_id, 15., 4.5)),
-                            ),
-                        )
-                    })
-                    .when(is_open, |d| {
-                        d.flex().items_center().justify_center().child(
-                            svg().path("icons/folder.svg").size(px(27.)).mt(px(-1.6)).text_color(tint),
-                        )
-                    });
+                let f = fold(id, is_open);
+                let tile_el = lid(&f, tint, 45., 8.5, 6., 3., 27., -1.6, members.iter().take(4).map(|c| logo(store, &c.community_id, 15., 4.5)));
                 let head = bars(
                     ring(SharedString::from(format!("rail-f-{id}"))),
                     -edge - 3.,
@@ -653,10 +624,12 @@ pub fn render_slim(
                     .flex()
                     .flex_col()
                     .items_center()
-                    .when(is_open, |d| d.bg(tint.opacity(0.09)).mt(px(-4.)).pt(px(4.)).pb(px(4.)))
+                    .when(f.tint > 0., |d| d.bg(tint.opacity(0.09 * f.tint)))
+                    .mt(px(-4. * f.size))
+                    .pt(px(4. * f.size))
                     .child(head);
-                if is_open {
-                    let mut inner = div().pt(px(GAP)).flex().flex_col().gap(px(GAP));
+                if f.size > 0. {
+                    let mut inner = div().w_full().pt(px(GAP)).pb(px(4.)).flex().flex_col().items_center().gap(px(GAP));
                     for (i, com) in members.iter().enumerate() {
                         let zones = Zones {
                             before: RailDrop::IntoFolder {
@@ -674,15 +647,98 @@ pub fn render_slim(
                             child: true,
                         };
                         let open_now = active == Some(com.community_id.as_str());
-                        inner = inner.child(tile(store, com, open_now, !open_now && unread(com), edge, voice.get(&com.community_id).copied(), zones, on));
+                        let t = tile(store, com, open_now, !open_now && unread(com), edge, voice.get(&com.community_id).copied(), zones, on);
+                        inner = inner.child(div().opacity(f.fade).child(t));
                     }
-                    band = band.child(inner);
+                    band = band.child(fold_body(id, f.size, inner));
                 }
                 list = list.child(band);
             }
         }
     }
     list.into_any_element()
+}
+
+/// How far open a folder stands, per `.ws-rail-folder`'s transitions: the fold and the band's
+/// spacing, its communities' fade, and its tint.
+struct Fold {
+    size: f32,
+    fade: f32,
+    tint: f32,
+}
+
+fn fold(id: &str, open: bool) -> Fold {
+    use crate::kit::{bezier, ease};
+    let key = |part: &str| SharedString::from(format!("fold-{part}:{id}"));
+    let to = open as u8 as f32;
+    Fold {
+        size: ease(key("size"), to, 0.26, bezier(0.22, 1., 0.36, 1.)),
+        fade: ease(key("fade"), to, 0.2, bezier(0.25, 0.1, 0.25, 1.)),
+        tint: ease(key("tint"), to, 0.24, bezier(0.25, 0.1, 0.25, 1.)),
+    }
+}
+
+thread_local!(static FOLD_H: std::cell::RefCell<HashMap<String, f32>> = Default::default());
+
+/// `.ws-rail-folder-body`: the rows' own height, clipped to `size` of it while the fold runs.
+fn fold_body(id: &str, size: f32, body: gpui::Div) -> AnyElement {
+    let key = id.to_string();
+    let measure = gpui::canvas(
+        {
+            let key = key.clone();
+            move |b, _, _| FOLD_H.with_borrow_mut(|m| _ = m.insert(key, f32::from(b.size.height)))
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0();
+    let body = body.relative().child(measure);
+    if size >= 1. {
+        return body.into_any_element();
+    }
+    let h = FOLD_H.with_borrow(|m| m.get(&key).copied()).unwrap_or(0.);
+    // Clipped vertically only: an open community's bar reaches past the band to the rail's edge.
+    div()
+        .relative()
+        .w_full()
+        .h(px(h * size))
+        .overflow_y_hidden()
+        .child(body.absolute().top_0().left_0().w_full())
+        .into_any_element()
+}
+
+/// A folder's tile: up to four of its communities on its tint, crossfading into the folder
+/// glyph as it opens, so the head reads as a lid over what it holds.
+#[allow(clippy::too_many_arguments)]
+fn lid(f: &Fold, tint: Hsla, side: f32, radius: f32, inset: f32, gap: f32, glyph: f32, lift: f32, minis: impl Iterator<Item = impl IntoElement>) -> gpui::Div {
+    div()
+        .relative()
+        .size(px(side))
+        .flex_shrink_0()
+        .rounded(px(radius))
+        .when(f.tint < 1., |d| d.bg(tint.opacity(0.26 * (1. - f.tint))))
+        .when(f.size < 1., |d| {
+            d.child(
+                gpui::zoom(div().absolute().inset(px(inset)).flex().flex_wrap().gap(px(gap)).children(minis))
+                    .scale(1. - 0.3 * f.size)
+                    .opacity(1. - f.fade),
+            )
+        })
+        .when(f.size > 0., |d| {
+            d.child(
+                gpui::zoom(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(svg().path("icons/folder.svg").size(px(glyph)).mt(px(lift)).text_color(tint)),
+                )
+                .scale(0.7 + 0.3 * f.size)
+                .opacity(f.fade),
+            )
+        })
 }
 
 /// Rings stand 3px out from their tile, with 2px between neighbours.
