@@ -13,6 +13,7 @@ use vector_core::rail_layout::{RailAnchor, RailDrag, RailDrop, RailLayout, RailN
 
 use crate::composer::TextInput;
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 pub struct StartMenu {
@@ -294,7 +295,7 @@ fn resolve(key: &str, store: &Store) -> Resolved {
                 Some(p) => Glyph::Picture(p, true),
                 None => Glyph::Initial(initial(&label), true),
             };
-            r(label, "Direct Message", glyph, false)
+            r(label, &t::start_kind_dm(), glyph, false)
         }
         ["settings", rest @ ..] => {
             let cats = crate::settings::categories(&crate::settings::Offers {
@@ -306,7 +307,7 @@ fn resolve(key: &str, store: &Store) -> Resolved {
                 .first()
                 .and_then(|id| cats.iter().find(|c| c.id == *id))
             else {
-                return r("Settings".into(), "Settings", icon("settings"), false);
+                return r(t::start_settings().to_string(), &t::start_kind_settings(), icon("settings"), false);
             };
             match rest
                 .get(1)
@@ -314,15 +315,15 @@ fn resolve(key: &str, store: &Store) -> Resolved {
             {
                 Some(a) => r(
                     a.label.into(),
-                    &format!("Settings › {}", cat.label),
+                    &t::start_kind_settings_page(cat.label),
                     icon(cat.icon),
                     false,
                 ),
-                None => r(cat.label.into(), "Settings", icon(cat.icon), false),
+                None => r(cat.label.into(), &t::start_kind_settings(), icon(cat.icon), false),
             }
         }
-        ["requests"] => r("Requests".into(), "Messages", icon("mail"), false),
-        ["nexus"] => r("App Store".into(), "Mini Apps", icon("nexus"), false),
+        ["requests"] => r(t::start_requests().to_string(), &t::start_kind_messages(), icon("mail"), false),
+        ["nexus"] => r(t::start_app_store().to_string(), &t::start_kind_miniapps(), icon("nexus"), false),
         ["app", id] => {
             let app = match store.fixture_market.iter().find(|a| a.id == *id) {
                 Some(a) => Some(a.clone()),
@@ -335,16 +336,16 @@ fn resolve(key: &str, store: &Store) -> Resolved {
                         Some(p) => Glyph::Picture(p, false),
                         None => Glyph::Initial(initial(&a.name), false),
                     };
-                    r(a.name, "Mini App", glyph, false)
+                    r(a.name, &t::start_kind_miniapp(), glyph, false)
                 }
-                None => r(id.to_string(), "Mini App", icon("grid-fill"), true),
+                None => r(id.to_string(), &t::start_kind_miniapp(), icon("grid-fill"), true),
             }
         }
         ["c", id, rest @ ..] => {
             let Some(com) = store.community(id) else {
                 return r(
-                    "Community".into(),
-                    "A community you're not in",
+                    t::start_unknown_community().to_string(),
+                    &t::start_kind_not_member(),
                     icon("users-multi"),
                     true,
                 );
@@ -352,14 +353,14 @@ fn resolve(key: &str, store: &Store) -> Resolved {
             if let Some(ch) = rest.first() {
                 return match com.channel(ch) {
                     Some(c) => r(format!("#{}", c.name), &com.name, icon("channel-hash"), false),
-                    None => r("Channel".into(), &com.name, icon("channel-hash"), true),
+                    None => r(t::start_unknown_channel().to_string(), &com.name, icon("channel-hash"), true),
                 };
             }
             let glyph = match store.icon(id) {
                 Some(p) => Glyph::Picture(p, false),
                 None => Glyph::Initial(initial(&com.name), false),
             };
-            r(com.name.clone(), "Community", glyph, false)
+            r(com.name.clone(), &t::start_kind_community(), glyph, false)
         }
         _ => r(key.into(), "", icon("share"), true),
     }
@@ -373,12 +374,12 @@ pub struct Hit {
     glyph: Glyph,
 }
 
-const NAV: [(&str, &str, &str); 5] = [
-    ("profile", "Profile", "start-profile"),
-    ("chat", "Chat", "chats-fill"),
-    ("bookmarks", "Bookmarks", "bookmark-fill"),
-    ("miniapps", "Mini Apps", "grid-fill"),
-    ("settings", "Settings", "start-settings"),
+const NAV: [(&str, fn() -> SharedString, &str); 5] = [
+    ("profile", t::start_profile, "start-profile"),
+    ("chat", t::start_chat, "chats-fill"),
+    ("bookmarks", t::start_bookmarks, "bookmark-fill"),
+    ("miniapps", t::start_miniapps, "grid-fill"),
+    ("settings", t::start_settings, "start-settings"),
 ];
 
 fn is_npub(s: &str) -> bool {
@@ -402,11 +403,7 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
     };
     if is_npub(&q) {
         let mut h = hit(format!("dm/{q}"));
-        h.sub = if q == store.my_npub {
-            "You".into()
-        } else {
-            "Person".into()
-        };
+        h.sub = if q == store.my_npub { t::start_kind_you() } else { t::start_kind_person() }.to_string();
         return vec![h];
     }
     let mut dms: Vec<(u64, String)> = store
@@ -467,8 +464,8 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
             .map(|(id, label, icon)| Hit {
                 key: None,
                 nav: Some(id),
-                label: label.to_string(),
-                sub: "Vector".into(),
+                label: label().to_string(),
+                sub: t::start_kind_app().to_string(),
                 glyph: Glyph::Icon(SharedString::from(format!("icons/{icon}.svg"))),
             });
         let mut scored: Vec<(u8, Hit)> = nav
@@ -516,7 +513,7 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                 .text_color(c(0x8a8a8a))
                 .when(sm.adding, |d| d.child(back(on)))
                 .child(crate::kit::spaced(
-                    if sm.adding { "ADD PINS" } else { "RESULTS" },
+                    if sm.adding { t::start_add_pins() } else { t::start_results() }.to_uppercase(),
                     11. * 0.09,
                 )),
         );
@@ -554,24 +551,13 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                         div()
                             .text_size(px(15.))
                             .text_color(c(0xffffff))
-                            .child(format!(
-                                "{} “{q}”",
-                                if sm.adding {
-                                    "Nothing to pin called"
-                                } else {
-                                    "No results for"
-                                }
-                            )),
+                            .child(if sm.adding { t::start_nothing_to_pin(q) } else { t::start_no_results(q) }),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
                             .text_color(white_a(0.5))
-                            .child(if sm.adding {
-                                "Pin a Mini App, a chat, a community or a place in Settings."
-                            } else {
-                                "Try a name, a community, a Mini App or a setting."
-                            }),
+                            .child(if sm.adding { t::start_nothing_to_pin_hint() } else { t::start_no_results_hint() }),
                     ),
             )
             .into_any_element();
@@ -647,7 +633,7 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
             row = row.child(
                 div()
                     .id(SharedString::from(format!("stm-msg-{ix}")))
-                    .tip("Message")
+                    .tip(t::start_message())
                     .p(px(6.))
                     .rounded(px(8.))
                     .opacity(if selected { 1. } else { 0.35 })
@@ -696,7 +682,7 @@ fn back(on: &OnAct) -> impl IntoElement {
     div()
         .id("stm-back")
         .mr(px(6.))
-        .aria_label("Back")
+        .aria_label(t::start_back())
         .cursor_pointer()
         .on_click(click(on, || Act::Back))
         .child(
@@ -857,7 +843,7 @@ fn tile(
 
 fn nav_item(
     id: &'static str,
-    label: &'static str,
+    label: SharedString,
     icon: &'static str,
     dot: bool,
     on: &OnAct,
@@ -919,10 +905,10 @@ fn audio(
             div()
                 .id(id)
                 .tip(match (kind, off) {
-                    ("output", true) => "Undeafen",
-                    ("output", false) => "Deafen",
-                    (_, true) => "Unmute",
-                    (_, false) => "Mute",
+                    ("output", true) => t::start_undeafen(),
+                    ("output", false) => t::start_deafen(),
+                    (_, true) => t::start_unmute(),
+                    (_, false) => t::start_mute(),
                 })
                 .p(px(7.))
                 .rounded(px(10.))
@@ -942,7 +928,7 @@ fn audio(
         .child(
             div()
                 .id(SharedString::from(format!("{id}-more")))
-                .tip(if kind == "output" { "Output device" } else { "Input device" })
+                .tip(if kind == "output" { t::start_output_device() } else { t::start_input_device() })
                 .px(px(4.))
                 .py(px(7.))
                 .rounded(px(10.))
@@ -1071,7 +1057,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .gap(px(4.))
         .child(nav_item(
             "accounts",
-            "Accounts",
+            t::start_accounts(),
             if sm.accounts.len() > 1 {
                 "icons/users-multi-fill.svg"
             } else {
@@ -1082,29 +1068,29 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         ))
         .child(nav_item(
             "profile",
-            "Profile",
+            t::start_profile(),
             "icons/start-profile.svg",
             false,
             on,
         ))
-        .child(nav_item("chat", "Chat", "icons/chats-fill.svg", unread, on))
+        .child(nav_item("chat", t::start_chat(), "icons/chats-fill.svg", unread, on))
         .child(nav_item(
             "bookmarks",
-            "Bookmarks",
+            t::start_bookmarks(),
             "icons/bookmark-fill.svg",
             false,
             on,
         ))
         .child(nav_item(
             "miniapps",
-            "Mini Apps",
+            t::start_miniapps(),
             "icons/grid-fill.svg",
             false,
             on,
         ))
         .child(nav_item(
             "settings",
-            "Settings",
+            t::start_settings(),
             "icons/start-settings.svg",
             false,
             on,
@@ -1124,7 +1110,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
     let view_btn = |id: &'static str, icon: &'static str, on_: bool, want: bool| {
         div()
             .id(id)
-            .tip(if want { "List" } else { "Grid" })
+            .tip(if want { t::start_view_list() } else { t::start_view_grid() })
             .p(px(4.))
             .cursor_pointer()
             .on_click(click(on, move || Act::View(want)))
@@ -1137,12 +1123,12 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
     let title = match &folder {
         Some((name, _)) => {
             if name.is_empty() {
-                "Folder".to_string()
+                t::start_folder().to_string()
             } else {
                 name.clone()
             }
         }
-        None => "Pinned".into(),
+        None => t::start_pinned().to_string(),
     };
     let head = div()
         .h(px(32.))
@@ -1157,7 +1143,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             d.child(
                 div()
                     .id("stm-back")
-                    .aria_label("Back")
+                    .aria_label(t::start_back())
                     .mr(px(6.))
                     .cursor_pointer()
                     .on_click(click(on, || Act::Folder(None)))
@@ -1248,7 +1234,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     .children(mini);
                 let fid = id.clone();
                 let label = if name.is_empty() {
-                    "Folder".to_string()
+                    t::start_folder().to_string()
                 } else {
                     name.clone()
                 };
@@ -1260,7 +1246,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                     SharedString::from(format!("stm-folder-{ix}")),
                     label,
                     false,
-                    Some("Folder"),
+                    Some(&t::start_folder()),
                     grid.into_any_element(),
                     true,
                     false,
@@ -1297,7 +1283,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             .into_any_element();
         tiles.push(tile(
             "stm-add".into(),
-            "Add Pin".into(),
+            t::start_add_pin().to_string(),
             false,
             None,
             add,
@@ -1372,7 +1358,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
                 .into_any_element();
             tiles.push(tile(
                 "stm-add-acct".into(),
-                "Add Account".into(),
+                t::start_add_account().to_string(),
                 false,
                 None,
                 add,
@@ -1430,7 +1416,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
     let name = if store.me().is_some() {
         store.name(&me)
     } else {
-        "You".into()
+        t::start_you().to_string()
     };
     let short = if me.len() > 16 {
         format!("{}…", &me[..16])
@@ -1451,7 +1437,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .child(
             div()
                 .id("stm-me")
-                .tip("Close")
+                .tip(t::start_close())
                 .flex()
                 .items_center()
                 .gap(px(14.))
