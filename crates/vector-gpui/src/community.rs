@@ -48,6 +48,8 @@ pub enum Act {
     /// Invite People, for the open Community.
     Invite,
     CategoryMenu(String, gpui::Point<gpui::Pixels>),
+    /// The channel list's empty space.
+    ChannelsMenu(gpui::Point<gpui::Pixels>),
     /// The open channel's ⋯.
     ChatMenu,
     EditChannel(String),
@@ -369,7 +371,10 @@ fn channel_row(
         .on_click(click(on, move || Act::Channel(id.clone())))
         .on_mouse_down(gpui::MouseButton::Right, {
             let (on, id) = (on.clone(), ch.channel_id.clone());
-            move |e, w, cx| on(Act::ChannelMenu(id.clone(), e.position), w, cx)
+            move |e, w, cx| {
+                cx.stop_propagation();
+                on(Act::ChannelMenu(id.clone(), e.position), w, cx)
+            }
         })
         // A manager moves channels: dragged onto another's top or bottom half.
         .when(owner, |d| {
@@ -571,7 +576,10 @@ pub fn sidebar(
                     .on_click(click(on, move || Act::Fold(key.clone())))
                     .on_mouse_down(gpui::MouseButton::Right, {
                         let (on, id) = (on.clone(), cat.category_id.clone());
-                        move |e, w, cx| on(Act::CategoryMenu(id.clone(), e.position), w, cx)
+                        move |e, w, cx| {
+                            cx.stop_propagation();
+                            on(Act::CategoryMenu(id.clone(), e.position), w, cx)
+                        }
                     })
                     // A manager's heading is the Category's handle, and the top of it for a channel.
                     .when(owner, |d| {
@@ -652,6 +660,10 @@ pub fn sidebar(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
+                .on_mouse_down(gpui::MouseButton::Right, {
+                    let on = on.clone();
+                    move |e, w, cx| on(Act::ChannelsMenu(e.position), w, cx)
+                })
                 .children(sections),
         )
         .into_any_element()

@@ -254,8 +254,9 @@ pub struct VectorApp {
     send_shown: bool,
     /// When typing last flipped the two: the swap runs from this clock, not element state.
     send_flipped: Option<std::time::Instant>,
-    /// The message a jump landed on, flashing.
-    jumped: Option<(String, std::time::Instant)>,
+    /// The message a jump landed on, and when the flash was first painted: it runs from its
+    /// first frame, however late loading and layout make that.
+    jumped: Option<(String, std::time::Instant, Rc<std::cell::Cell<Option<std::time::Instant>>>)>,
     /// Someone else's message landing at the bottom of the open chat, sliding in (`.new-anim`).
     arrived: Option<(String, std::time::Instant)>,
     /// Older history is on its way.
@@ -4544,9 +4545,9 @@ impl VectorApp {
         if self
             .jumped
             .as_ref()
-            .is_none_or(|(j, at)| *j != id || at.elapsed().as_secs_f32() >= 1.5)
+            .is_none_or(|(j, _, shown)| *j != id || shown.get().is_some_and(|t| t.elapsed().as_secs_f32() >= 1.5))
         {
-            self.jumped = Some((id, std::time::Instant::now()));
+            self.jumped = Some((id, std::time::Instant::now(), Default::default()));
         }
         cx.notify();
     }
@@ -9490,10 +9491,14 @@ impl VectorApp {
                 // Fixtures answer as the mock does: anyone may ping everyone.
                 None => Rc::new(crate::mentions::Rules { anyone: !self.live, ..Default::default() }),
             });
+        // A row that is never painted gives up after 4 s.
         let jumped = self
             .jumped
             .clone()
-            .filter(|(_, t)| t.elapsed().as_secs_f32() < 1.5);
+            .filter(|(_, asked, shown)| match shown.get() {
+                Some(t) => t.elapsed().as_secs_f32() < 1.5,
+                None => asked.elapsed().as_secs_f32() < 4.,
+            });
         let arrived = self.arrived.clone().filter(|(_, t)| t.elapsed().as_secs_f32() < 0.75);
         let cmd_names = self.command_names();
         // `.history-edge.alone`: a chat with nothing yet has its beginning mid-view.
@@ -9538,7 +9543,7 @@ impl VectorApp {
                 invites: &invites,
                 jumped: jumped
                     .as_ref()
-                    .map(|(id, t)| (id.as_str(), t.elapsed().as_secs_f32())),
+                    .map(|(id, _, shown)| (id.as_str(), shown.get().map_or(0., |t| t.elapsed().as_secs_f32()))),
                 commands: cmd_names.as_deref(),
                 content_w,
                 vw,
@@ -9552,6 +9557,11 @@ impl VectorApp {
                     })
                     .is_some_and(|m| m.id == id)
             }) {
+                if let Some((_, _, shown)) = &jumped
+                    && shown.get().is_none()
+                {
+                    shown.set(Some(std::time::Instant::now()));
+                }
                 window.request_animation_frame();
             }
             // A divider's 10px margins stand in for the row's own above it.
@@ -11513,6 +11523,11 @@ impl VectorApp {
                     self.category_menu(id, category, at, cx);
                 }
             }
+            Act::ChannelsMenu(at) => {
+                if let Some(id) = self.community.as_ref().map(|v| v.id.clone()) {
+                    self.channels_menu(id, at, cx);
+                }
+            }
             Act::DropChannel(moved, at) => self.drop_channel(moved, at, cx),
             Act::DropCategory(moved, target, before) => self.drop_category(moved, target, before, cx),
             Act::ChatMenu => {
@@ -11941,6 +11956,21 @@ impl VectorApp {
                     category: true,
                 },
             ),
+        ];
+        self.show_menu(at, rows, cx);
+    }
+
+    /// `openChannelsMenu`: the channel list's empty space, for those who can add to it.
+    fn channels_menu(&mut self, community: String, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        if !self.community_caps(&community).contains("manage_channels") {
+            return;
+        }
+        let rows = vec![
+            (
+                kit::MenuItem::new(t::channel_create(), "channel-hash"),
+                MenuAct::CreateChannel { community: community.clone(), category: None },
+            ),
+            (kit::MenuItem::new(t::channel_create_category(), "plus"), MenuAct::CreateCategory(community)),
         ];
         self.show_menu(at, rows, cx);
     }
