@@ -8915,8 +8915,20 @@ impl VectorApp {
             return;
         }
         let want = self.wallpaper_key();
+        let waiting = want.is_some();
         if let Some(job) = self.wallpaper.want(want) {
             self.bake_wallpaper(job, cx);
+        } else if waiting && !self.wallpaper.waking && let Some(left) = self.wallpaper.settles_in() {
+            self.wallpaper.waking = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(left).await;
+                this.update(cx, |this, cx| {
+                    this.wallpaper.waking = false;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
     }
 
@@ -9766,8 +9778,11 @@ impl VectorApp {
                     .absolute()
                     .size_full(),
             )
+            // Cover, as baked: a bake for the old size holds its framing while the new one runs.
             .children(paper.clone().map(|image| {
-                crate::pic::img(gpui::ImageSource::Render(image)).absolute().top_0().left_0().size_full()
+                div().absolute().inset_0().overflow_hidden().child(
+                    crate::pic::img(gpui::ImageSource::Render(image)).size_full().object_fit(gpui::ObjectFit::Cover),
+                )
             }))
             .child(div().relative().flex_shrink_0().child(header).children(edit_bar))
             .children(stage)

@@ -57,7 +57,14 @@ pub struct Wallpaper {
     pub dragging: Rc<Cell<Option<bool>>>,
     /// A picture that would not decode, not retried every frame.
     failed: Option<Key>,
+    /// The pane size last asked for, and since when: a resize rebakes once it settles.
+    sized: Option<((u32, u32), Instant)>,
+    /// A wake is set for when the resize settles.
+    pub waking: bool,
 }
+
+/// How long the pane must hold a size before the picture is baked again for it.
+pub const SETTLE: Duration = Duration::from_millis(180);
 
 /// The work to start: bake `key` from its picture, decoded already or not.
 pub struct Job {
@@ -86,11 +93,32 @@ impl Wallpaper {
             self.queued = None;
             return None;
         }
+        let resized = self.shown.as_ref().is_some_and(|(k, _)| {
+            k.path == want.path && k.ts == want.ts && k.blur == want.blur && k.dim == want.dim
+        });
+        let now = Instant::now();
+        let since = match self.sized {
+            Some((size, at)) if size == want.size => at,
+            _ => {
+                self.sized = Some((want.size, now));
+                now
+            }
+        };
+        if resized && now - since < SETTLE {
+            return None;
+        }
         if self.running.is_some() {
             self.queued = Some(want);
             return None;
         }
         Some(self.start(want))
+    }
+
+    /// When a resize settles enough to rebake, if one is waiting.
+    pub fn settles_in(&self) -> Option<Duration> {
+        let (_, at) = self.sized?;
+        let left = SETTLE.checked_sub(at.elapsed())?;
+        (!left.is_zero()).then_some(left)
     }
 
     fn start(&mut self, key: Key) -> Job {
