@@ -7957,7 +7957,7 @@ fn rail(
                 .border_b_1()
                 .border_color(c(DIVIDER))
                 .child(div().flex_shrink_0().child(messages).children(dms).children(dms_slim))
-                .child(div().id("ws-rail-shortcuts").flex_1().min_h_0().overflow_y_scroll().child(spaces)),
+                .child(div().id("ws-rail-shortcuts").flex_1().min_h_0().overflow_y_scroll().edge_fade(px(24.)).child(spaces)),
         )
         .children(navbar.as_ref().map(|n| nav_tabs(n, slim)))
         .when(mode.locked, |d| d.child(div().mt(px(10.)).mb(px(2.))))
@@ -8436,7 +8436,8 @@ fn chat_list(
                             row.into_any_element()
                         }
                     })
-                    .size_full(),
+                    .size_full()
+                    .edge_fade(px(if app.is_slim { 0. } else { 24. })),
                 )
                 .child(kit::pump()),
         )

@@ -1108,13 +1108,20 @@ float quad_sdf_impl(float2 corner_center_to_point, float corner_radius) {
     }
 }
 
-// Coverage of a rounded content mask at `point`: 1 inside, 0 outside, antialiased at the curve.
+// Coverage of a content mask at `point`: its rounding, antialiased, times its edge fades.
 float mask_alpha(float2 point, ContentMask_ScaledPixels mask) {
+  float alpha = 1.;
+  if (mask.fade.top_len > 0.) {
+    alpha *= saturate((point.y - mask.fade.top) / mask.fade.top_len);
+  }
+  if (mask.fade.bottom_len > 0.) {
+    alpha *= saturate((mask.fade.bottom - point.y) / mask.fade.bottom_len);
+  }
   if (mask.corner_radii.top_left == 0. && mask.corner_radii.top_right == 0. &&
       mask.corner_radii.bottom_right == 0. && mask.corner_radii.bottom_left == 0.) {
-    return 1.;
+    return alpha;
   }
-  return saturate(0.5 - quad_sdf(point, mask.bounds, mask.corner_radii));
+  return alpha * saturate(0.5 - quad_sdf(point, mask.bounds, mask.corner_radii));
 }
 
 // A standard gaussian function, used for weighting samples

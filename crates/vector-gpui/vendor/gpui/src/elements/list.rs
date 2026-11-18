@@ -1670,7 +1670,18 @@ impl Element for List {
             }
         });
 
-        window.with_content_mask(Some(ContentMask::new(bounds)), |window| {
+        let mut mask = ContentMask::new(bounds);
+        if let Some(depth) = self.style.edge_fade {
+            let max = self.state.max_offset_for_scrollbar().y.max(Pixels::ZERO);
+            let above = (-self.state.scroll_px_offset_for_scrollbar().y).clamp(Pixels::ZERO, max);
+            mask.fade = crate::MaskFade {
+                top: bounds.top(),
+                top_len: above.min(depth),
+                bottom: bounds.bottom(),
+                bottom_len: (max - above).min(depth),
+            };
+        }
+        window.with_content_mask(Some(mask), |window| {
             for item in &mut prepaint.layout.item_layouts {
                 item.element.paint(window, cx);
             }

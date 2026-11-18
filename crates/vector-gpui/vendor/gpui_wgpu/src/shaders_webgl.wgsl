@@ -83,6 +83,15 @@ fn read_corners(cursor: ptr<function, InstanceCursor>) -> Corners {
     );
 }
 
+fn read_fade(cursor: ptr<function, InstanceCursor>) -> Fade {
+    return Fade(
+        read_f32(cursor),
+        read_f32(cursor),
+        read_f32(cursor),
+        read_f32(cursor),
+    );
+}
+
 fn read_edges(cursor: ptr<function, InstanceCursor>) -> Edges {
     return Edges(
         read_f32(cursor),
@@ -138,7 +147,7 @@ fn read_transformation(cursor: ptr<function, InstanceCursor>) -> TransformationM
 fn load_quad(instance_id: u32) -> Quad {
     // Keep this fixed-layout decoder explicit. Some WebGL shader compilers fail
     // to optimize the cursor's branches and dynamic vector indexing for quads.
-    let first_texel_index = instance_id * 11u;
+    let first_texel_index = instance_id * 12u;
     let width = textureDimensions(t_instances).x;
     let texel0 = fetch_instance_texel(first_texel_index, width);
     let texel1 = fetch_instance_texel(first_texel_index + 1u, width);
@@ -151,6 +160,7 @@ fn load_quad(instance_id: u32) -> Quad {
     let texel8 = fetch_instance_texel(first_texel_index + 8u, width);
     let texel9 = fetch_instance_texel(first_texel_index + 9u, width);
     let texel10 = fetch_instance_texel(first_texel_index + 10u, width);
+    let texel11 = fetch_instance_texel(first_texel_index + 11u, width);
 
     let values0 = bitcast<vec4<f32>>(texel0);
     let values1 = bitcast<vec4<f32>>(texel1);
@@ -163,6 +173,7 @@ fn load_quad(instance_id: u32) -> Quad {
     let values8 = bitcast<vec4<f32>>(texel8);
     let values9 = bitcast<vec4<f32>>(texel9);
     let values10 = bitcast<vec4<f32>>(texel10);
+    let values11 = bitcast<vec4<f32>>(texel11);
 
     return Quad(
         texel0.x,
@@ -170,31 +181,32 @@ fn load_quad(instance_id: u32) -> Quad {
         Bounds(values0.zw, values1.xy),
         Bounds(values1.zw, values2.xy),
         Corners(values2.z, values2.w, values3.x, values3.y),
+        Fade(values3.z, values3.w, values4.x, values4.y),
         Background(
-            texel3.z,
-            texel3.w,
-            Hsla(values4.x, values4.y, values4.z, values4.w),
-            values5.x,
+            texel4.z,
+            texel4.w,
+            Hsla(values5.x, values5.y, values5.z, values5.w),
+            values6.x,
             array<LinearColorStop, 2>(
                 LinearColorStop(
-                    Hsla(values5.y, values5.z, values5.w, values6.x),
-                    values6.y,
+                    Hsla(values6.y, values6.z, values6.w, values7.x),
+                    values7.y,
                 ),
                 LinearColorStop(
-                    Hsla(values6.z, values6.w, values7.x, values7.y),
-                    values7.z,
+                    Hsla(values7.z, values7.w, values8.x, values8.y),
+                    values8.z,
                 ),
             ),
-            texel7.w,
+            texel8.w,
         ),
-        Hsla(values8.x, values8.y, values8.z, values8.w),
-        Corners(values9.x, values9.y, values9.z, values9.w),
-        Edges(values10.x, values10.y, values10.z, values10.w),
+        Hsla(values9.x, values9.y, values9.z, values9.w),
+        Corners(values10.x, values10.y, values10.z, values10.w),
+        Edges(values11.x, values11.y, values11.z, values11.w),
     );
 }
 
 fn load_shadow(instance_id: u32) -> Shadow {
-    var cursor = instance_cursor(instance_id * 32u);
+    var cursor = instance_cursor(instance_id * 36u);
     return Shadow(
         read_word(&cursor),
         read_f32(&cursor),
@@ -202,6 +214,7 @@ fn load_shadow(instance_id: u32) -> Shadow {
         read_corners(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_fade(&cursor),
         read_hsla(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
@@ -226,13 +239,14 @@ fn load_path_sprite(instance_id: u32) -> PathSprite {
 }
 
 fn load_underline(instance_id: u32) -> Underline {
-    var cursor = instance_cursor(instance_id * 20u);
+    var cursor = instance_cursor(instance_id * 24u);
     return Underline(
         read_word(&cursor),
         read_word(&cursor),
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_fade(&cursor),
         read_hsla(&cursor),
         read_f32(&cursor),
         read_word(&cursor),
@@ -240,7 +254,7 @@ fn load_underline(instance_id: u32) -> Underline {
 }
 
 fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
-    var cursor = instance_cursor(instance_id * 32u);
+    var cursor = instance_cursor(instance_id * 36u);
     return MonochromeSprite(
         read_word(&cursor),
         read_word(&cursor),
@@ -248,13 +262,14 @@ fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_fade(&cursor),
         read_hsla(&cursor),
         read_transformation(&cursor),
     );
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
-    var cursor = instance_cursor(instance_id * 28u);
+    var cursor = instance_cursor(instance_id * 32u);
     return PolychromeSprite(
         read_word(&cursor),
         read_word(&cursor),
@@ -264,6 +279,7 @@ fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
         read_bounds(&cursor),
         read_bounds(&cursor),
         read_corners(&cursor),
+        read_fade(&cursor),
         read_corners(&cursor),
     );
 }

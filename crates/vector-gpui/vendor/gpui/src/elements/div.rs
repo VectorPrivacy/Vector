@@ -2629,6 +2629,20 @@ impl Interactivity {
             || window.is_inspector_picking(cx)
     }
 
+    /// How far this scroller has scrolled down, and how far it can still go.
+    fn scroll_room(&self, bounds: Bounds<Pixels>, style: &Style, window: &Window) -> (Pixels, Pixels) {
+        let Some(offset) = self.scroll_offset.as_ref() else {
+            return (Pixels::ZERO, Pixels::ZERO);
+        };
+        let padding = style
+            .padding
+            .to_pixels(bounds.size.into(), window.rem_size())
+            .map(|edge| window.pixel_snap(*edge));
+        let max = (self.content_size.height + padding.top + padding.bottom - bounds.size.height).max(Pixels::ZERO);
+        let above = (-offset.borrow().y).clamp(Pixels::ZERO, max);
+        (above, max - above)
+    }
+
     fn clamp_scroll_position(
         &self,
         bounds: Bounds<Pixels>,
@@ -2747,8 +2761,18 @@ impl Interactivity {
                 window.with_element_opacity(style.opacity, |window| {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
+                            let mut mask = style.overflow_mask_in(bounds, window);
+                                if let (Some(depth), Some(mask)) = (style.edge_fade, mask.as_mut()) {
+                                    let (above, below) = self.scroll_room(bounds, &style, window);
+                                    mask.fade = crate::MaskFade {
+                                        top: bounds.top(),
+                                        top_len: above.min(depth),
+                                        bottom: bounds.bottom(),
+                                        bottom_len: below.min(depth),
+                                    };
+                                }
                             window.with_content_mask(
-                                style.overflow_mask_in(bounds, window),
+                                mask,
                                 |window| {
                                     window.with_tab_group(tab_group, |window| {
                                         // Register the container's own focus handle *inside* its

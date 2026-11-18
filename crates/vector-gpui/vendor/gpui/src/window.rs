@@ -2522,6 +2522,34 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Each corner's rounding; zero clips square.
     pub corner_radii: Corners<P>,
+    /// Vertical alpha ramps, as CSS `mask-image` fades a scroller's ends.
+    pub fade: MaskFade<P>,
+}
+
+/// Content fading out toward a mask's top and bottom: transparent at `top`, opaque `top_len`
+/// below it, and likewise up from `bottom`. A zero length is no ramp.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct MaskFade<P: Clone + Debug + Default + PartialEq> {
+    /// Where the top ramp starts.
+    pub top: P,
+    /// How far the top ramp runs.
+    pub top_len: P,
+    /// Where the bottom ramp ends.
+    pub bottom: P,
+    /// How far the bottom ramp runs.
+    pub bottom_len: P,
+}
+
+impl MaskFade<Pixels> {
+    fn scale(&self, factor: f32) -> MaskFade<ScaledPixels> {
+        MaskFade {
+            top: self.top.scale(factor),
+            top_len: self.top_len.scale(factor),
+            bottom: self.bottom.scale(factor),
+            bottom_len: self.bottom_len.scale(factor),
+        }
+    }
 }
 
 impl<P: Clone + Copy + Debug + Default + PartialEq> ContentMask<P> {
@@ -2530,6 +2558,7 @@ impl<P: Clone + Copy + Debug + Default + PartialEq> ContentMask<P> {
         ContentMask {
             bounds,
             corner_radii: Corners::default(),
+            fade: MaskFade::default(),
         }
     }
 }
@@ -2540,11 +2569,13 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             corner_radii: self.corner_radii.scale(factor),
+            fade: self.fade.scale(factor),
         }
     }
 
     /// Intersect the content mask with the given content mask. A corner keeps the rounding of the
-    /// mask whose corner it is; one inside both masks' corners is square.
+    /// mask whose corner it is; one inside both masks' corners is square. An outer fade holds
+    /// over everything inside it.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
         let most = bounds.size.width.min(bounds.size.height) / 2.;
@@ -2555,6 +2586,10 @@ impl ContentMask<Pixels> {
             let theirs = if near(here, at(&other.bounds)) { radius(&other.corner_radii) } else { px(0.) };
             mine.max(theirs).min(most)
         };
+        let (outer, inner) = (&self.fade, &other.fade);
+        let (top, top_len) = if outer.top_len > px(0.) { (outer.top, outer.top_len) } else { (inner.top, inner.top_len) };
+        let (bottom, bottom_len) =
+            if outer.bottom_len > px(0.) { (outer.bottom, outer.bottom_len) } else { (inner.bottom, inner.bottom_len) };
         ContentMask {
             bounds,
             corner_radii: Corners {
@@ -2563,6 +2598,7 @@ impl ContentMask<Pixels> {
                 bottom_right: corner(|b| b.bottom_right(), |c| c.bottom_right),
                 bottom_left: corner(|b| b.bottom_left(), |c| c.bottom_left),
             },
+            fade: MaskFade { top, top_len, bottom, bottom_len },
         }
     }
 }
@@ -3671,6 +3707,7 @@ impl Window {
         ContentMask {
             bounds: self.cover_bounds(mask.bounds),
             corner_radii: mask.corner_radii.scale(self.scale_factor()),
+            fade: mask.fade.scale(self.scale_factor()),
         }
     }
 
@@ -5199,6 +5236,7 @@ impl Window {
         if !quad.background.is_transparent()
             || self.next_frame.scene.zoom.is_some()
             || quad.content_mask.corner_radii != Corners::default()
+            || quad.content_mask.fade != MaskFade::default()
         {
             self.next_frame.scene.insert_primitive(quad);
             return;
