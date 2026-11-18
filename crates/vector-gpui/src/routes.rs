@@ -11,8 +11,10 @@ use serde_json::Value;
 
 use crate::composer::{Look, TextInput};
 use crate::markdown::MONO;
+use crate::t;
 use crate::theme::*;
 
+// i18n-exempt: core's own refusal, matched to name it
 const I2P_ONLY_REFUSAL: &str = "I2P-Only is on, so this server is off.";
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -33,7 +35,7 @@ pub struct RouteBook {
 pub struct Tag {
     pub cls: &'static str,
     pub text: String,
-    pub short: Option<&'static str>,
+    pub short: Option<SharedString>,
     pub title: String,
 }
 
@@ -65,27 +67,27 @@ impl RouteBook {
         if class == "blocked" {
             // A network still starting holds traffic as a matter of course: not an error.
             return Some(if self.starting() {
-                Tag { cls: "connecting", text: "Connecting".into(), short: None, title }
+                Tag { cls: "connecting", text: t::route_connecting().into(), short: None, title }
             } else {
-                Tag { cls: "blocked", text: "Blocked".into(), short: None, title }
+                Tag { cls: "blocked", text: t::route_blocked().into(), short: None, title }
             });
         }
         if class != "refused" {
             return None;
         }
         if text == I2P_ONLY_REFUSAL {
-            return Some(Tag { cls: "refused", text: "Off in I2P-Only".into(), short: Some("I2P-Only"), title: text.into() });
+            return Some(Tag { cls: "refused", text: t::route_off_i2p_only().into(), short: Some(t::routing_i2p_only()), title: text.into() });
         }
         let host = s(r, "host").to_ascii_lowercase();
         // A build without Tor reaches no .onion, so only a refusal that names Tor promises it.
         let needs = if host.ends_with(".i2p") {
-            "I2P"
-        } else if host.ends_with(".onion") && text.ends_with("over Tor.") {
-            "Tor"
+            "I2P" // i18n-exempt: a name
+        } else if host.ends_with(".onion") && text.ends_with("over Tor.") { // i18n-exempt: core's words, matched
+            "Tor" // i18n-exempt: a name
         } else {
             ""
         };
-        let word = if needs.is_empty() { "Unreachable".to_string() } else { format!("Needs {needs}") };
+        let word = if needs.is_empty() { t::route_unreachable().to_string() } else { t::route_needs(needs).to_string() };
         Some(Tag { cls: "refused", text: word, short: None, title: text.into() })
     }
 
@@ -95,9 +97,9 @@ impl RouteBook {
         self.view.as_ref()?;
         let r = self.route_of(url)?;
         let kind = s(r, "kind");
-        let noun = if kind == "tor" { "Onion" } else { "I2P" };
         if s(r, "class") == "twin" {
-            return Some(Badge { failed: false, text: noun.into(), title: s(r, "text").into() });
+            let text = if kind == "tor" { t::route_badge_onion().to_string() } else { "I2P".into() }; // i18n-exempt: a name
+            return Some(Badge { failed: false, text, title: s(r, "text").into() });
         }
         if (kind != "i2p" && kind != "tor") || s(r, "class") != "exit" {
             return None;
@@ -107,7 +109,8 @@ impl RouteBook {
             return None;
         }
         let title = a["check"]["text"].as_str().unwrap_or(s(r, "text")).to_string();
-        Some(Badge { failed: true, text: format!("{noun} address failed"), title })
+        let text = if kind == "tor" { t::route_onion_failed() } else { t::route_i2p_failed() };
+        Some(Badge { failed: true, text: text.into(), title })
     }
 
     /// The network an address field is offered for: the one in use, when it has addresses.
@@ -139,8 +142,8 @@ pub fn tag_status(t: &Tag, short: bool) -> AnyElement {
         .text_color(color)
         .tip(t.title.clone())
         .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(color))
-        .child(match t.short.filter(|_| short) {
-            Some(s) => SharedString::from(s),
+        .child(match t.short.clone().filter(|_| short) {
+            Some(s) => s,
             None => SharedString::from(t.text.clone()),
         })
         .into_any_element()
@@ -193,7 +196,7 @@ fn section(title: impl IntoElement) -> gpui::Div {
     div().flex().flex_col().pt(px(12.)).border_t_1().border_color(c(0x262626)).child(title)
 }
 
-fn h4(text: &'static str) -> gpui::Div {
+fn h4(text: SharedString) -> gpui::Div {
     div().flex().items_center().text_size(px(13.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(white_a(0.7)).child(text)
 }
 
@@ -203,7 +206,7 @@ pub fn connection(book: &RouteBook, url: &str, circuit: Option<&[Value]>) -> Opt
     if route.is_none() && circuit.is_none() {
         return None;
     }
-    let mut col = section(h4("Connection"));
+    let mut col = section(h4(t::route_connection()));
     if let Some(r) = route {
         let class = s(r, "class");
         let held = class == "blocked" && book.starting();
@@ -223,7 +226,7 @@ pub fn connection(book: &RouteBook, url: &str, circuit: Option<&[Value]>) -> Opt
         };
         let text = if held {
             let label = book.view.as_ref().map(|v| s(v, "label")).unwrap_or("");
-            if label.is_empty() { "Waiting for the network to connect".to_string() } else { format!("Waiting for {label} to connect") }
+            if label.is_empty() { t::route_waiting().to_string() } else { t::route_waiting_for(label).to_string() }
         } else {
             s(r, "text").to_string()
         };
@@ -290,8 +293,9 @@ fn target(url: &str) -> Option<Target> {
 
 struct Net {
     label: &'static str,
-    title: &'static str,
-    noun: &'static str,
+    title: fn() -> SharedString,
+    /// Why a server off port 443 can't use this kind of address.
+    no_443: fn() -> SharedString,
     suffix: &'static str,
     placeholder: &'static str,
     help: &'static str,
@@ -300,9 +304,11 @@ struct Net {
 
 fn net(kind: &str) -> Net {
     if kind == "tor" {
-        Net { label: "Tor", title: "Onion Address", noun: "onion address", suffix: ".onion", placeholder: "xxxx.onion", help: "onionAlias", color: 0xd9b3ff }
+        // i18n-exempt: a name
+        Net { label: "Tor", title: t::route_alias_onion, no_443: t::route_no_443_onion, suffix: ".onion", placeholder: "xxxx.onion", help: "onionAlias", color: 0xd9b3ff }
     } else {
-        Net { label: "I2P", title: "I2P Address", noun: "I2P address", suffix: ".i2p", placeholder: "xxxx.b32.i2p", help: "i2pAlias", color: 0x7adef0 }
+        // i18n-exempt: a name
+        Net { label: "I2P", title: t::route_alias_i2p, no_443: t::route_no_443_i2p, suffix: ".i2p", placeholder: "xxxx.b32.i2p", help: "i2pAlias", color: 0x7adef0 }
     }
 }
 
@@ -362,23 +368,19 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
     let dirty = a.dirty(book, cx);
     let line: Option<(String, Tone)> = if t.port != 443 {
         Some((
-            if saved.is_empty() {
-                format!("This server doesn't use port 443, so it can't use an {}.", n.noun)
-            } else {
-                "This server doesn't use port 443, so this address isn't used.".into()
-            },
+            if saved.is_empty() { (n.no_443)().to_string() } else { t::route_no_443_saved().to_string() },
             Tone::Muted,
         ))
     } else if saved.is_empty() {
         None
     } else {
         let check = entry.map(|e| &e["check"]).cloned().unwrap_or(Value::Null);
-        let lead = if built_in { "Built into Vector. " } else { "" };
+        let lead = |text: String| if built_in { format!("{} {}", t::route_built_in(), text) } else { text };
         let text = check["text"].as_str();
         Some(match check["state"].as_str() {
-            Some("ok") => (format!("{lead}{}", text.map_or_else(|| format!("Checked. It serves {}.", t.host), str::to_string)), Tone::Ok),
-            Some("failed") => (text.map_or_else(|| format!("This address doesn't serve {}. Vector won't use it.", t.host), str::to_string), Tone::Error),
-            _ => (format!("{lead}{}", text.map_or_else(|| format!("Not checked yet. Vector checks it when {} connects.", n.label), str::to_string)), Tone::Muted),
+            Some("ok") => (lead(text.map_or_else(|| t::route_checked(&t.host).to_string(), str::to_string)), Tone::Ok),
+            Some("failed") => (text.map_or_else(|| t::route_check_failed(&t.host).to_string(), str::to_string), Tone::Error),
+            _ => (lead(text.map_or_else(|| t::route_unchecked(n.label).to_string(), str::to_string)), Tone::Muted),
         })
     };
     let say = |(text, tone): (String, Tone)| {
@@ -397,7 +399,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
         let on = on.clone();
         move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut App| on(a(), w, cx)
     };
-    let button = |id: &'static str, text: &'static str, primary: bool, enabled: bool| {
+    let button = |id: &'static str, text: SharedString, primary: bool, enabled: bool| {
         div()
             .id(id)
             .h(px(38.))
@@ -419,7 +421,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
         let key = n.help;
         crate::settings::info("alias-help", move |_, w, cx| on(AliasAct::Help(key), w, cx))
     };
-    let mut col = section(h4(n.title).child(div().ml(px(6.)).child(help)));
+    let mut col = section(h4((n.title)()).child(div().ml(px(6.)).child(help)));
     if usable {
         col = col.child(
             div()
@@ -442,7 +444,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
                         .overflow_hidden()
                         .child(a.input.clone()),
                 )
-                .child(button("alias-save", "Save", true, !a.busy && dirty).when(!a.busy && dirty, |d| d.on_click(act(|| AliasAct::Save)))),
+                .child(button("alias-save", t::route_save(), true, !a.busy && dirty).when(!a.busy && dirty, |d| d.on_click(act(|| AliasAct::Save)))),
         );
     } else if !saved.is_empty() {
         col = col.child(
@@ -451,7 +453,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
                 .flex()
                 .gap(px(8.))
                 .child(div().id("alias-saved").tip(saved.clone()).flex_1().min_w_0().truncate().font_family(MONO).text_size(px(12.)).line_height(px(38.)).text_color(white_a(0.45)).child(saved.clone()))
-                .child(button("alias-remove-row", "Remove", false, !a.busy).when(!a.busy, |d| d.on_click(act(|| AliasAct::Remove)))),
+                .child(button("alias-remove-row", t::route_remove(), false, !a.busy).when(!a.busy, |d| d.on_click(act(|| AliasAct::Remove)))),
         );
     }
     if let Some(n) = a.note.clone().filter(|(t, _)| !t.is_empty()) {
@@ -462,7 +464,7 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
     }
     let find = ready && can_find;
     if usable && (find || !saved.is_empty()) {
-        let link = |id: &'static str, text: &'static str, f: fn() -> AliasAct| {
+        let link = |id: &'static str, text: SharedString, f: fn() -> AliasAct| {
             div()
                 .id(id)
                 .text_size(px(13.))
@@ -478,9 +480,9 @@ pub fn alias_field(a: &Alias, book: &RouteBook, on: impl Fn(AliasAct, &mut Windo
                 .mt(px(8.))
                 .flex()
                 .gap(px(16.))
-                .when(find, |d| d.child(link("alias-find", "Find", || AliasAct::Find)))
-                .when(ready && !saved.is_empty(), |d| d.child(link("alias-check", "Check", || AliasAct::Check)))
-                .when(!saved.is_empty(), |d| d.child(link("alias-remove", "Remove", || AliasAct::Remove))),
+                .when(find, |d| d.child(link("alias-find", t::route_find(), || AliasAct::Find)))
+                .when(ready && !saved.is_empty(), |d| d.child(link("alias-check", t::route_check(), || AliasAct::Check)))
+                .when(!saved.is_empty(), |d| d.child(link("alias-remove", t::route_remove(), || AliasAct::Remove))),
         );
     }
     Some(col.into_any_element())

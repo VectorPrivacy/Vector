@@ -6,6 +6,10 @@ dialog-okay = Okay
 dialog-confirm = Confirm
 dialog-cancel = Cancel
 
+## Shown where an action's answer never came back, because the app's background half stopped
+
+backend-stopped = Backend stopped
+
 ## Copying an id, in Advanced mode: the menu row, and .done is the toast once it's copied
 
 copy-id-message = Copy Message ID

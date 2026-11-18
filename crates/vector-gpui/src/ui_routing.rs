@@ -10,6 +10,7 @@ use super::{PopupAct, Screen, VectorApp};
 use crate::backend::{self, transport as net};
 use crate::composer::{CancelInput, SendText, TextInput};
 use crate::kit;
+use crate::t;
 use crate::routing::{Load, NetAct, Routing};
 
 /// While a switch runs or a network starts, the view is re-read this often.
@@ -102,7 +103,7 @@ impl VectorApp {
             if in_use || at.elapsed() > Duration::from_secs(180) {
                 self.net_renewed = None;
                 if in_use {
-                    self.show_toast("New I2P address in use.", cx);
+                    self.show_toast(&t::routing_new_address_toast(), cx);
                 }
             }
         }
@@ -232,6 +233,7 @@ impl VectorApp {
         };
         let lines = bridges.get("lines").and_then(Value::as_str).unwrap_or("").to_string();
         let input = cx.new(|cx| {
+            // i18n-exempt: a bridge line's format
             let mut i = TextInput::new("obfs4 1.2.3.4:443 ABCD... cert=... iat-mode=0", cx).with_look(field_look(true, false)).multiline(gpui::px(160.));
             i.set_text(&lines, cx);
             i
@@ -240,7 +242,7 @@ impl VectorApp {
             let text = input.read(cx).text().to_string();
             if let Some(r) = app.routing() {
                 r.bridges_dirty = text != r.bridges.saved;
-                r.bridges.obfs4_missing = r.bridges.no_obfs4 && text.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("obfs4 "));
+                r.bridges.obfs4_missing = r.bridges.no_obfs4 && text.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("obfs4 ")); // i18n-exempt: a bridge line's format
                 r.bridges.status = None;
             }
             cx.notify();
@@ -260,7 +262,7 @@ impl VectorApp {
 
     fn load_tor_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.routing().is_some_and(|r| r.tor_port.is_none()) {
-            let input = cx.new(|cx| TextInput::new("Auto", cx).with_look(port_look()).centered().max_chars(5).keep_on_submit());
+            let input = cx.new(|cx| TextInput::new(t::routing_port_auto(), cx).with_look(port_look()).centered().max_chars(5).keep_on_submit());
             cx.subscribe_in(&input, window, |app, _, _: &SendText, window, cx| app.net_act(NetAct::SaveTorPort, window, cx)).detach();
             cx.observe(&input, |app, input, cx| {
                 let text = input.read(cx).text().to_string();
@@ -521,11 +523,11 @@ impl VectorApp {
                         if Self::relays_on_i2p(&rows) {
                             return app.set_i2p_only(true, cx);
                         }
-                        let mut popup = kit::Popup::notice("Turn on I2P-Only?");
+                        let mut popup = kit::Popup::notice(t::routing_i2p_only_ask());
                         popup.icon = None;
-                        popup.text = Some("None of your relays are on I2P. Turn on I2P-Only anyway?".into());
-                        popup.confirm = "Turn On".into();
-                        popup.cancel = Some("Cancel".into());
+                        popup.text = Some(kit::escape(&t::routing_i2p_only_ask_text()).into());
+                        popup.confirm = t::routing_i2p_only_ask_confirm();
+                        popup.cancel = Some(t::dialog_cancel());
                         app.popup = Some((popup, PopupAct::NetI2pOnly));
                         cx.notify();
                     })
@@ -552,11 +554,11 @@ impl VectorApp {
             }
             NetAct::OpRemove(i) => {
                 let Some(name) = self.outproxy_inputs().and_then(|l| l.get(i).map(|o| o.name.clone())) else { return };
-                let mut popup = kit::Popup::notice(format!("Remove {name}?"));
+                let mut popup = kit::Popup::notice(t::routing_outproxy_remove_ask(&name));
                 popup.icon = None;
-                popup.text = Some("Vector stops using this outproxy.".into());
-                popup.confirm = "Remove".into();
-                popup.cancel = Some("Cancel".into());
+                popup.text = Some(kit::escape(&t::routing_outproxy_remove_text()).into());
+                popup.confirm = t::routing_remove();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::NetOpRemove(i)));
             }
             NetAct::OpReset => {
@@ -566,11 +568,11 @@ impl VectorApp {
                     .and_then(|c| c.get("outproxies"))
                     .and_then(Value::as_array)
                     .is_some_and(|l| l.iter().any(|o| o.get("builtin").and_then(Value::as_bool) == Some(false)));
-                let mut popup = kit::Popup::notice("Use the built-in outproxies?");
+                let mut popup = kit::Popup::notice(t::routing_outproxies_reset_ask());
                 popup.icon = None;
-                popup.text = Some(if own { "Your own outproxies are removed." } else { "The built-in order comes back." }.into());
-                popup.confirm = "Reset".into();
-                popup.cancel = Some("Cancel".into());
+                popup.text = Some(kit::escape(&if own { t::routing_outproxies_reset_own() } else { t::routing_outproxies_reset_order() }).into());
+                popup.confirm = t::routing_reset();
+                popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::NetOpReset));
             }
             NetAct::OpAdd => {
@@ -606,7 +608,7 @@ impl VectorApp {
             }
             NetAct::CopyAddress(b32) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(b32));
-                self.show_toast("Address copied", cx);
+                self.show_toast(&t::routing_address_copied(), cx);
             }
             NetAct::OpenNetwork => self.settings_act(crate::settings::Act::Anchor("network", "relays"), window, cx),
         }
@@ -629,14 +631,14 @@ impl VectorApp {
                         Some(r) if r.ok => app.use_network(kind, keep_realtime, true, cx),
                         r => {
                             let why = match r.map(|r| r.text) {
-                                Some(t) if !t.is_empty() && !t.starts_with("No router answered") => t,
-                                _ => format!("No I2P router answered on port {port}."),
+                                Some(t) if !t.is_empty() && !t.starts_with("No router answered") => t, // i18n-exempt: core's words, matched
+                                _ => t::routing_no_router(port).to_string(),
                             };
-                            let mut popup = kit::Popup::notice("Switch to I2P?");
+                            let mut popup = kit::Popup::notice(t::routing_switch_i2p_ask());
                             popup.icon = None;
-                            popup.text = Some(format!("{} Switch anyway?", kit::escape(&why)).into());
-                            popup.confirm = "Switch".into();
-                            popup.cancel = Some("Cancel".into());
+                            popup.text = Some(kit::escape(&t::routing_switch_i2p_text(&why)).into());
+                            popup.confirm = t::routing_switch();
+                            popup.cancel = Some(t::dialog_cancel());
                             app.popup = Some((popup, PopupAct::NetUse(kind)));
                         }
                     }
@@ -648,12 +650,14 @@ impl VectorApp {
         }
         let realtime = self.net_view.as_ref().and_then(|v| v.get("realtime_active")).and_then(Value::as_bool) == Some(true);
         if realtime && kind != "clearnet" && keep_realtime.is_none() {
-            let label = crate::routing::label(&kind).to_string();
-            let mut popup = kit::Popup::notice("Keep your Mini App session?");
+            let label = crate::routing::label(&kind);
+            let mut popup = kit::Popup::notice(t::routing_keep_realtime_ask());
             popup.icon = None;
-            popup.text = Some(format!("It connects directly, outside {label}.<br>End it to keep everything on {label}.").into());
-            popup.confirm = "Keep".into();
-            popup.cancel = Some("End".into());
+            popup.text = Some(
+                format!("{}<br>{}", kit::escape(&t::routing_keep_realtime_text(&label)), kit::escape(&t::routing_keep_realtime_end(&label))).into(),
+            );
+            popup.confirm = t::routing_keep();
+            popup.cancel = Some(t::routing_end());
             self.popup = Some((popup, PopupAct::NetKeepRealtime(kind)));
             return;
         }
@@ -700,7 +704,7 @@ impl VectorApp {
         let enabled = toggled.unwrap_or(r.bridges.enabled);
         r.bridges.enabled = enabled;
         if toggled == Some(true) && lines.trim().is_empty() {
-            r.bridges.status = Some((if running { "Add bridge lines, then Apply." } else { "Add bridge lines, then Save." }.into(), false));
+            r.bridges.status = Some((if running { t::routing_bridges_add_apply() } else { t::routing_bridges_add_save() }.into(), false));
             return;
         }
         if !live {
@@ -709,13 +713,12 @@ impl VectorApp {
         r.bridges.busy = true;
         r.bridges.status = Some((
             match (toggled, running) {
-                (Some(true), true) => "Enabling bridges, reconnecting…",
-                (Some(false), true) => "Disabling bridges, reconnecting…",
-                (None, true) => "Applying & reconnecting…",
-                (None, false) => "Saving…",
-                _ => "",
-            }
-            .into(),
+                (Some(true), true) => t::routing_bridges_enabling().into(),
+                (Some(false), true) => t::routing_bridges_disabling().into(),
+                (None, true) => t::routing_bridges_applying().into(),
+                (None, false) => t::routing_bridges_saving().into(),
+                _ => String::new(),
+            },
             false,
         ));
         let saved = lines.clone();
@@ -727,13 +730,13 @@ impl VectorApp {
                     r.bridges.saved = saved;
                     r.bridges_dirty = false;
                     let text = match (toggled, running) {
-                        (Some(true), true) => "Bridges enabled. Tor reconnected.",
-                        (Some(false), true) => "Bridges disabled. Tor reconnected directly.",
-                        (Some(true), false) => "Bridges on. Tor will connect through them.",
-                        (Some(false), false) => "Bridges off. Tor will connect directly.",
-                        (None, false) => "Bridges saved. Tor will use them.",
-                        (None, true) if b.enabled => "Bridges applied. Tor reconnected.",
-                        (None, true) => "Bridges saved. Tor will use them.",
+                        (Some(true), true) => t::routing_bridges_enabled(),
+                        (Some(false), true) => t::routing_bridges_disabled(),
+                        (Some(true), false) => t::routing_bridges_on(),
+                        (Some(false), false) => t::routing_bridges_off(),
+                        (None, false) => t::routing_bridges_saved(),
+                        (None, true) if b.enabled => t::routing_bridges_applied(),
+                        (None, true) => t::routing_bridges_saved(),
                     };
                     r.bridges.status = Some((text.into(), false));
                     if running {
@@ -744,7 +747,7 @@ impl VectorApp {
                     if toggled.is_some() {
                         r.bridges.enabled = !enabled;
                     }
-                    r.bridges.status = Some((format!("Failed: {e}"), true));
+                    r.bridges.status = Some((t::routing_circuit_failed(&e).into(), true));
                 }
             }
         });
@@ -758,7 +761,7 @@ impl VectorApp {
     fn test_router(&mut self, cx: &mut Context<Self>) {
         let Some(port) = self.router_port(cx).filter(|p| (1..=65535).contains(p)) else {
             if let Some(r) = self.routing() {
-                r.note = Some(("Enter a port from 1 to 65535.".into(), false));
+                r.note = Some((t::routing_port_range().into(), false));
             }
             return;
         };
@@ -797,7 +800,7 @@ impl VectorApp {
         }
         if !(1..=65535).contains(&port) {
             if let Some(r) = self.routing() {
-                r.note = Some(("Enter a port from 1 to 65535.".into(), false));
+                r.note = Some((t::routing_port_range().into(), false));
             }
             return;
         }
@@ -1015,7 +1018,7 @@ impl VectorApp {
                 .map(|u| {
                     fx["routes"].as_array().and_then(|l| l.iter().find(|r| r["url"] == u.as_str())).cloned().unwrap_or_else(|| {
                         let host = url::Url::parse(u).ok().and_then(|p| p.host_str().map(str::to_string)).unwrap_or_default();
-                        serde_json::json!({ "url": u, "host": host, "kind": kind, "class": "direct", "text": "Direct" })
+                        serde_json::json!({ "url": u, "host": host, "kind": kind, "class": "direct", "text": "Direct" }) // i18n-exempt: fixture data
                     })
                 })
                 .collect()
@@ -1096,7 +1099,7 @@ impl VectorApp {
         };
         let _ = book;
         cx.spawn(async move |this, cx| {
-            let res = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update(cx, |app, cx| {
                 app.load_aliases(cx);
                 let Some(s) = app.settings.as_mut() else { return };
@@ -1119,12 +1122,12 @@ impl VectorApp {
                             a.input.update(cx, |i, cx| i.set_text(&found, cx));
                             let host = a.host().unwrap_or_default();
                             a.note = Some(match r["check"]["state"].as_str() {
-                                Some("ok") => ("Found and checked. Save to use it.".into(), Tone::Ok),
+                                Some("ok") => (t::route_found_checked().into(), Tone::Ok),
                                 Some("failed") => (
-                                    r["check"]["text"].as_str().map_or_else(|| format!("This address doesn't serve {host}. Vector won't use it."), str::to_string),
+                                    r["check"]["text"].as_str().map_or_else(|| t::route_check_failed(&host).into(), str::to_string),
                                     Tone::Error,
                                 ),
-                                _ => ("Found it. Save to use it.".into(), Tone::Muted),
+                                _ => (t::route_found().into(), Tone::Muted),
                             });
                         }
                     },

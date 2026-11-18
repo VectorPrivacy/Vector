@@ -1,4 +1,4 @@
-# Hard-coded English left per file (3419 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (3340 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -95,7 +95,6 @@ reactpop.rs 5
 recorder.rs 5
 rekey.rs 2
 roles.rs 109
-routes.rs 30
 screenpick.rs 7
 scrollbar.rs 4
 secretguard.rs 16
@@ -123,7 +122,6 @@ ui_popout.rs 16
 ui_publish.rs 47
 ui_qrscan.rs 6
 ui_rail.rs 11
-ui_routing.rs 49
 ui_secretguard.rs 2
 ui_slim.rs 30
 untrack.rs 1

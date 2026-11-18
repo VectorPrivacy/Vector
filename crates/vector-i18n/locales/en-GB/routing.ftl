@@ -148,3 +148,44 @@ routing-notice-not-starting = { $network } isn't starting.
 routing-notice-unnamed-not-starting = The network isn't starting.
 routing-notice-stranded = I2P-Only is on and none of your relays are on I2P.
 routing-notice-no-outproxy = No outproxy is reachable right now.
+
+## Routing's popups, toasts and notes
+
+routing-new-address-toast = New I2P address in use.
+routing-port-auto = Auto
+routing-i2p-only-ask = Turn on I2P-Only?
+routing-i2p-only-ask-text = None of your relays are on I2P. Turn on I2P-Only anyway?
+routing-i2p-only-ask-confirm = Turn On
+# $name is the outproxy's name.
+routing-outproxy-remove-ask = Remove { $name }?
+routing-outproxy-remove-text = Vector stops using this outproxy.
+routing-outproxies-reset-ask = Use the built-in outproxies?
+routing-outproxies-reset-own = Your own outproxies are removed.
+routing-outproxies-reset-order = The built-in order comes back.
+routing-address-copied = Address copied
+# $port is a port number.
+routing-no-router = No I2P router answered on port { $port }.
+routing-switch-i2p-ask = Switch to I2P?
+# $reason is why the router check failed, in one or more sentences.
+routing-switch-i2p-text = { $reason } Switch anyway?
+routing-switch = Switch
+routing-keep-realtime-ask = Keep your Mini App session?
+# $network is the network's name, like Tor or I2P.
+routing-keep-realtime-text = It connects directly, outside { $network }.
+# $network is the network's name, like Tor or I2P.
+routing-keep-realtime-end = End it to keep everything on { $network }.
+routing-keep = Keep
+routing-end = End
+routing-bridges-add-apply = Add bridge lines, then Apply.
+routing-bridges-add-save = Add bridge lines, then Save.
+routing-bridges-enabling = Enabling bridges, reconnecting…
+routing-bridges-disabling = Disabling bridges, reconnecting…
+routing-bridges-applying = Applying & reconnecting…
+routing-bridges-saving = Saving…
+routing-bridges-enabled = Bridges enabled. Tor reconnected.
+routing-bridges-disabled = Bridges disabled. Tor reconnected directly.
+routing-bridges-on = Bridges on. Tor will connect through them.
+routing-bridges-off = Bridges off. Tor will connect directly.
+routing-bridges-saved = Bridges saved. Tor will use them.
+routing-bridges-applied = Bridges applied. Tor reconnected.
+routing-port-range = Enter a port from 1 to 65535.
