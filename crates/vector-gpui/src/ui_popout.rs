@@ -34,9 +34,11 @@ impl VectorApp {
     /// Leaving `prev` for `next`: what plays floats (or stops, with the player off), and coming
     /// back to where the floating media came from takes it back into its row.
     fn leave_media(&mut self, prev: Option<&str>, next: &str, window: &Window) {
-        if self.popout.item.as_ref().is_some_and(|i| i.chat == next) {
-            self.popout.close();
-        }
+        // A video taken back into its row plays on there.
+        let back = match &self.popout.item {
+            Some(i) if i.chat == next => self.popout.close().filter(|i| i.kind == Kind::Video).map(|i| i.att),
+            _ => None,
+        };
         let Some(prev) = prev.map(String::from) else { return };
         let mut media = self.media.borrow_mut();
         let audio = media.audio.playing().map(String::from);
@@ -73,7 +75,7 @@ impl VectorApp {
         } else if let Some(a) = audio {
             media.audio.pause(&a);
         }
-        let keep = self.popout.item.as_ref().filter(|i| i.kind == Kind::Video).map(|i| i.att.clone());
+        let keep = self.popout.item.as_ref().filter(|i| i.kind == Kind::Video).map(|i| i.att.clone()).or(back);
         media.videos.stop_except(keep.as_deref());
     }
 
