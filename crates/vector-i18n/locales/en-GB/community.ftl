@@ -79,3 +79,44 @@ go-channel-unavailable = That channel isn't available to you
 go-message-deleted = That message was deleted
 go-message-not-yet = That message isn't on this device yet
 go-message-missing = That message isn't on this device
+
+## A channel row's buttons, and the header's
+
+community-channel-invite = Invite People
+community-channel-edit = Edit Channel
+community-channel-chat = Open Chat
+# $category is the category's name.
+community-add-channel-to = Add a channel to { $category }
+community-chat-options = Chat Options
+community-details-hide = Hide Details
+community-details-show = Show Details
+# $count is how many members the community has.
+community-member-count = { $count ->
+    [one] { $count } Member
+   *[other] { $count } Members
+}
+
+## The member list. Section headings are shown in capitals.
+
+community-section-admin = Admin
+community-section-members = Members
+community-owner = Owner
+community-bot = Bot
+community-departed = Posting after leaving
+community-unannounced = Never announced joining
+community-members-loading = Loading members…
+community-members-quiet = No one has spoken yet. Members appear here once they post.
+community-members-no-matches = No matches.
+
+## An invite to a community
+
+community-invite-card = Community invite
+community-invite-accept = Accept Invite
+community-invite-decline = Decline Invite
+community-invite-from = From
+community-invite-owner = Owner
+community-invite-sent = Sent
+community-invite-received = Received
+community-invite-expires = Expires
+community-invite-accept-short = Accept
+community-invite-decline-short = Decline

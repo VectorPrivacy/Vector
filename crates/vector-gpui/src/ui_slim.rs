@@ -16,6 +16,7 @@ use super::{MenuAct, VectorApp, avatar, preview_line_at, slim_badge};
 use crate::composer::TextInput;
 use crate::data::{self, Community, Store};
 use crate::kit;
+use crate::t;
 use crate::theme::*;
 
 /// `--cc-peek` (lib/drawer.js PEEK).
@@ -41,12 +42,21 @@ pub(super) enum Filter {
 }
 
 impl Filter {
-    fn label(self) -> &'static str {
+    fn id(self) -> &'static str {
         match self {
-            Filter::All => "All",
-            Filter::Messages => "Messages",
-            Filter::Communities => "Communities",
-            Filter::Requests => "Requests",
+            Filter::All => "all",
+            Filter::Messages => "messages",
+            Filter::Communities => "communities",
+            Filter::Requests => "requests",
+        }
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            Filter::All => t::slim_filter_all(),
+            Filter::Messages => t::chats_tab_messages(),
+            Filter::Communities => t::slim_filter_communities(),
+            Filter::Requests => t::chats_tab_requests(),
         }
     }
 }
@@ -187,11 +197,11 @@ impl VectorApp {
         self.show_menu(
             gpui::point(b.right() - px(180.), b.bottom() + px(6.)),
             vec![
-                (kit::MenuItem::new("New Message", "chat-circle").lead(), MenuAct::NewMessage),
-                (kit::MenuItem::new("New Community", "users-multi").lead(), MenuAct::NewCommunity),
-                (kit::MenuItem::new("Add Friend", "add-user").lead(), MenuAct::AddFriend),
-                (kit::MenuItem::new("Bookmark", "bookmark").lead(), MenuAct::Bookmark),
-                (kit::MenuItem::new("App Store", "nexus").lead(), MenuAct::AppStore),
+                (kit::MenuItem::new(t::chats_new_message(), "chat-circle").lead(), MenuAct::NewMessage),
+                (kit::MenuItem::new(t::chats_new_community(), "users-multi").lead(), MenuAct::NewCommunity),
+                (kit::MenuItem::new(t::slim_add_friend(), "add-user").lead(), MenuAct::AddFriend),
+                (kit::MenuItem::new(t::slim_bookmark(), "bookmark").lead(), MenuAct::Bookmark),
+                (kit::MenuItem::new(t::start_app_store(), "nexus").lead(), MenuAct::AppStore),
             ],
             cx,
         );
@@ -378,7 +388,7 @@ impl VectorApp {
             Some(s) => s.clone(),
             None => {
                 let s = cx.new(|cx| {
-                    TextInput::new("Search...", cx).with_look(crate::composer::Look {
+                    TextInput::new(t::slim_search(), cx).with_look(crate::composer::Look {
                         family: INTER,
                         weight: FontWeight::NORMAL,
                         size: px(15.),
@@ -616,7 +626,7 @@ impl VectorApp {
             .on_mouse_down(
                 gpui::MouseButton::Right,
                 cx.listener(|app, e: &gpui::MouseDownEvent, _, cx| {
-                    let rows = vec![(kit::MenuItem::new("Collapse", "chevron-double-left"), super::MenuAct::FoldRail)];
+                    let rows = vec![(kit::MenuItem::new(t::rail_collapse(), "chevron-double-left"), super::MenuAct::FoldRail)];
                     app.show_menu(e.position, rows, cx);
                 }),
             )
@@ -638,7 +648,7 @@ impl VectorApp {
             .child(
                 div()
                     .id("cc-rail-add")
-                    .tip("Create Community")
+                    .tip(t::rail_create_community())
                     .mt(px(5.))
                     .size(px(45.))
                     .flex_shrink_0()
@@ -657,7 +667,7 @@ impl VectorApp {
                 div()
                     .id("cc-rail-fold")
                     .group("cc-rail-fold")
-                    .tip("Hide communities")
+                    .tip(t::slim_hide_communities())
                     .mt(px(13.))
                     .w(px(45.))
                     .h(px(36.))
@@ -781,11 +791,11 @@ impl VectorApp {
         };
         let empty = items.is_empty().then(|| {
             if searching {
-                note(format!("No chats match \"{}\"", self.slim_raw_query(cx)))
+                note(t::slim_no_match(self.slim_raw_query(cx)).into())
             } else {
                 match filter {
-                    Filter::Requests => note("New people who message you show up here.".into()),
-                    Filter::Communities => note("Communities you join live here.".into()),
+                    Filter::Requests => note(t::chats_requests_empty().into()),
+                    Filter::Communities => note(t::slim_communities_empty().into()),
                     Filter::All | Filter::Messages => super::get_started(f32::from(window.viewport_size().width) - 14., cx).into_any_element(),
                 }
             }
@@ -896,7 +906,7 @@ impl VectorApp {
         let on: crate::community::OnAct = Rc::new(move |act, window, cx| {
             app.update(cx, |app, cx| app.on_community(act, window, cx)).ok();
         });
-        let button = |id: &'static str, icon: &'static str, ink: u32, edge: gpui::Hsla, label: &'static str| {
+        let button = |id: &'static str, icon: &'static str, ink: u32, edge: gpui::Hsla, label: SharedString| {
             div()
                 .id(id)
                 .h(px(41.2))
@@ -916,7 +926,7 @@ impl VectorApp {
         if caps.contains("create_invite") || !self.live {
             let id = cid.clone();
             actions = actions.child(
-                button("group-invite-member-btn", "icons/add-user.svg", ACCENT, ca(90, 252, 180, 0.65), "Invite")
+                button("group-invite-member-btn", "icons/add-user.svg", ACCENT, ca(90, 252, 180, 0.65), t::slim_invite())
                     .on_click(cx.listener(move |app, _, window, cx| app.open_invite(id.clone(), window, cx))),
             );
         }
@@ -924,14 +934,14 @@ impl VectorApp {
             let id = cid.clone();
             let suspects = self.raid.get(&cid).map_or(0, |r| r.1);
             actions = actions.child(
-                button("group-moderate-btn", "icons/vector_warning.svg", crate::timeline::DANGER, c(crate::timeline::DANGER), "Moderate")
-                    .tip(format!("{suspects} accounts flagged as a raid"))
+                button("group-moderate-btn", "icons/vector_warning.svg", crate::timeline::DANGER, c(crate::timeline::DANGER), t::slim_moderate())
+                    .tip(t::slim_raid_flagged(suspects))
                     .on_click(cx.listener(move |app, _, window, cx| app.open_moderation(id.clone(), window, cx))),
             );
         } else if caps.contains("manage_channels") {
             let (id, channel) = (cid.clone(), ch.channel_id.clone());
             actions = actions.child(
-                button("group-edit-channel-btn", "icons/edit.svg", ACCENT, ca(90, 252, 180, 0.65), "Edit Channel").on_click(
+                button("group-edit-channel-btn", "icons/edit.svg", ACCENT, ca(90, 252, 180, 0.65), t::community_channel_edit()).on_click(
                     cx.listener(move |app, _, window, cx| app.open_channel_editor(id.clone(), channel.clone(), false, window, cx)),
                 ),
             );
@@ -939,7 +949,7 @@ impl VectorApp {
         if !owner {
             let (id, name) = (cid.clone(), com.name.clone());
             actions = actions.child(
-                button("group-leave-btn", "icons/x-user.svg", crate::timeline::DANGER, white_a(0.1), "Leave")
+                button("group-leave-btn", "icons/x-user.svg", crate::timeline::DANGER, white_a(0.1), t::slim_leave())
                     .bg(white_a(0.06))
                     .on_click(cx.listener(move |app, _, window, cx| {
                         app.ask_leave_community(id.clone(), name.clone(), false, window, cx)
@@ -970,7 +980,7 @@ impl VectorApp {
                 }),
             )
             .child(svg().path(if muted { "icons/volume-mute.svg" } else { "icons/bell.svg" }).size(px(30.)).text_color(c(0xffffff)))
-            .child(div().mt(px(-4.)).text_size(px(10.)).line_height(px(16.)).text_color(c(0xb2b2b2)).child(if muted { "Muted" } else { "Notify" }));
+            .child(div().mt(px(-4.)).text_size(px(10.)).line_height(px(16.)).text_color(c(0xb2b2b2)).child(if muted { t::slim_muted() } else { t::slim_notify() }));
         let manage = caps.contains("manage_metadata");
         let settings_id = cid.clone();
         let uploading = self.overview_icon.as_ref().filter(|o| o.0 == cid).and_then(|o| o.1);
@@ -1076,7 +1086,7 @@ impl VectorApp {
                                 .line_height(px(24.))
                                 .text_color(c(TEXT))
                                 .opacity(0.8)
-                                .child(format!("{n} Member{}", if n == 1 { "" } else { "s" })),
+                                .child(t::community_member_count(n)),
                         )
                     }),
             )
@@ -1223,7 +1233,7 @@ impl VectorApp {
                                                     .text_size(px(16.))
                                                     .line_height(px(20.))
                                                     .text_color(c(0xb2b2b2))
-                                                    .child("Archived Chats"),
+                                                    .child(t::chats_archived()),
                                             )
                                             .child(
                                                 div()
@@ -1301,7 +1311,7 @@ impl VectorApp {
             let dot = dots.get(&f).copied().unwrap_or(false) && !on;
             let probe = probes.clone();
             let tab = div()
-                .id(SharedString::from(format!("cc-tab-{}", f.label())))
+                .id(SharedString::from(format!("cc-tab-{}", f.id())))
                 .relative()
                 .h_full()
                 .flex()
@@ -1342,7 +1352,7 @@ impl VectorApp {
                 match self.slim.bar_from.filter(|(to, _, _)| *to == active) {
                     Some((_, l0, w0)) => bar
                         .with_animation(
-                            SharedString::from(format!("cc-tab-bar-{}", active.label())),
+                            SharedString::from(format!("cc-tab-bar-{}", active.id())),
                             gpui::Animation::new(std::time::Duration::from_millis(240))
                                 .with_easing(kit::bezier(0.2, 0.8, 0.2, 1.)),
                             move |d, t| d.left(px(l0 + (left - l0) * t)).w(px(w0 + (w - w0) * t)),
@@ -1368,7 +1378,7 @@ impl VectorApp {
             .child(if folded {
                 div()
                     .id("cc-rail-pull")
-                    .tip("Show communities")
+                    .tip(t::slim_show_communities())
                     .group("cc-rail-pull")
                     .w(px(26.))
                     .h(px(44.))
@@ -1425,7 +1435,7 @@ impl VectorApp {
         let on_profile = self.profile.as_ref().is_some_and(|p| p.npub == me);
         let on_settings = self.settings.is_some();
         let on_chat = !on_profile && !on_settings;
-        let tab = |id: &'static str, icon: &'static str, label: &'static str, on: bool| {
+        let tab = |id: &'static str, icon: &'static str, label: SharedString, on: bool| {
             div()
                 .id(id)
                 .flex()
@@ -1444,17 +1454,17 @@ impl VectorApp {
             .flex()
             .items_center()
             .justify_evenly()
-            .child(tab("nav-profile", "icons/user-circle.svg", "Profile", on_profile).on_click(cx.listener(
+            .child(tab("nav-profile", "icons/user-circle.svg", t::start_profile(), on_profile).on_click(cx.listener(
                 move |app, _, _, cx| {
                     app.slim_home(cx);
                     let me = app.store.borrow().my_npub.clone();
                     app.open_profile(me, cx);
                 },
             )))
-            .child(tab("nav-chat", "icons/chats.svg", "Chat", on_chat).on_click(cx.listener(|app, _, _, cx| {
+            .child(tab("nav-chat", "icons/chats.svg", t::start_chat(), on_chat).on_click(cx.listener(|app, _, _, cx| {
                 app.slim_home(cx);
             })))
-            .child(tab("nav-settings", "icons/settings.svg", "Settings", on_settings).on_click(cx.listener(
+            .child(tab("nav-settings", "icons/settings.svg", t::start_settings(), on_settings).on_click(cx.listener(
                 |app, _, window, cx| {
                     app.slim_home(cx);
                     app.open_settings("appearance", window, cx);
@@ -1504,7 +1514,7 @@ fn community_row(store: &Store, com: &Community) -> gpui::Stateful<gpui::Div> {
                         .text_size(px(14.))
                         .line_height(px(19.))
                         .text_color(color)
-                        .child(format!("#{channel}: ")),
+                        .child(format!("#{channel}: ")), // i18n-exempt: a channel's tag
                 )
                 .child(div().min_w_0().overflow_hidden().child(preview_line_at(store, chat, color, 14., 19.)))
                 .into_any_element()

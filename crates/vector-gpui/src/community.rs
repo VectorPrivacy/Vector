@@ -11,6 +11,7 @@ use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::data::{Channel, Community, Store};
+use crate::t;
 use crate::theme::*;
 
 pub enum Act {
@@ -301,9 +302,9 @@ fn channel_row(
     };
     let action = |path: &'static str, act: Option<Rc<dyn Fn() -> Act>>| {
         let tip = match path {
-            "icons/add-user.svg" => Some("Invite People"),
-            "icons/settings.svg" => Some("Edit Channel"),
-            "icons/chat-bubble.svg" => Some("Open Chat"),
+            "icons/add-user.svg" => Some(t::community_channel_invite()),
+            "icons/settings.svg" => Some(t::community_channel_edit()),
+            "icons/chat-bubble.svg" => Some(t::community_channel_chat()),
             _ => None,
         };
         div()
@@ -484,9 +485,8 @@ pub fn sidebar(
                         .text_color(white_a(0.42))
                         .child(icon("icons/users-multi.svg", 13., white_a(0.42)))
                         .child(match view.members.len() {
-                            _ if view.loading => String::new(),
-                            1 => "1 Member".to_string(),
-                            n => format!("{n} Members"),
+                            _ if view.loading => SharedString::default(),
+                            n => t::community_member_count(n),
                         }),
                 ),
         )
@@ -613,7 +613,7 @@ pub fn sidebar(
                 d.child(
                     div()
                         .id(SharedString::from(format!("cat-add-{}", cat.category_id)))
-                        .tip(format!("Add a channel to {}", cat.name))
+                        .tip(t::community_add_channel_to(cat.name.as_str()))
                         .size(px(22.))
                         .rounded(px(6.))
                         .flex()
@@ -718,7 +718,7 @@ pub fn header(
         .child(
             div()
                 .id("chat-menu")
-                .tip("Chat Options")
+                .tip(t::community_chat_options())
                 .relative()
                 .size(px(40.))
                 .flex()
@@ -736,7 +736,7 @@ pub fn header(
         .child(
             div()
                 .id("details-toggle")
-                .tip(if panel { "Hide Details" } else { "Show Details" })
+                .tip(if panel { t::community_details_hide() } else { t::community_details_show() })
                 .aria_expanded(panel)
                 .ml(px(4.))
                 .size(px(32.))
@@ -921,7 +921,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                                     .id("rank")
                                     .ml(px(5.))
                                     .flex()
-                                    .tip("Owner")
+                                    .tip(t::community_owner())
                                     .child(icon("icons/crown.svg", 15., c(OWNER))),
                             )
                         })
@@ -930,13 +930,13 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                                 div()
                                     .id("bot")
                                     .flex()
-                                    .tip("Bot")
+                                    .tip(t::community_bot())
                                     .child(svg().path("icons/bot.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT))),
                             )
                         })
                         .children(crate::timeline::timeout_mark(store, Some(cid), npub))
                         .children(unlisted.map(|why| {
-                            let label = if why == "departed" { "Posting after leaving" } else { "Never announced joining" };
+                            let label = if why == "departed" { t::community_departed() } else { t::community_unannounced() };
                             let (tap, why) = (on.clone(), why.to_string());
                             div()
                                 .id("unlisted")
@@ -1025,9 +1025,9 @@ pub fn roster<E: ParentElement>(
         order.extend(heads.into_iter().map(|r| (format!("sec-role:{}", r.id), r.name.clone())));
     }
     if order.is_empty() && !graph.is_some_and(|g| g.activated) {
-        order.push(("sec-admin".into(), "Admin".into()));
+        order.push(("sec-admin".into(), t::community_section_admin().into()));
     }
-    order.push(("sec-members".into(), "Members".into()));
+    order.push(("sec-members".into(), t::community_section_members().into()));
     let mut buckets: Vec<Vec<&String>> = vec![Vec::new(); order.len()];
     for n in everyone {
         // A role the graph no longer defines must not drop its holder off the roster.
@@ -1132,9 +1132,9 @@ pub fn roster<E: ParentElement>(
         return d.children(sections);
     }
     let (text, italic) = match (view.loading, query.is_empty()) {
-        (true, true) => ("Loading members…", false),
-        (_, true) => ("No one has spoken yet. Members appear here once they post.", true),
-        _ => ("No matches.", true),
+        (true, true) => (t::community_members_loading(), false),
+        (_, true) => (t::community_members_quiet(), true),
+        _ => (t::community_members_no_matches(), true),
     };
     d.child(
         div()
@@ -1254,7 +1254,7 @@ pub fn invite_row(
     accept: Click,
     decline: Click,
 ) -> impl IntoElement {
-    let button = |id: String, icon_path: &'static str, tip: &'static str, ink: gpui::Hsla, on: Click| {
+    let button = |id: String, icon_path: &'static str, tip: SharedString, ink: gpui::Hsla, on: Click| {
         div()
             .id(SharedString::from(id))
             .tip(tip)
@@ -1333,7 +1333,7 @@ pub fn invite_row(
                         .text_size(px(13.))
                         .line_height(px(18.))
                         .text_color(white_a(0.85))
-                        .child("Community invite"),
+                        .child(t::community_invite_card()),
                 ),
         )
         .child(
@@ -1344,14 +1344,14 @@ pub fn invite_row(
                 .child(button(
                     format!("invite-accept-{}", inv.community_id),
                     "icons/check.svg",
-                    "Accept Invite",
+                    t::community_invite_accept(),
                     c(ACCENT),
                     accept,
                 ))
                 .child(button(
                     format!("invite-decline-{}", inv.community_id),
                     "icons/x.svg",
-                    "Decline Invite",
+                    t::community_invite_decline(),
                     c(crate::timeline::DANGER),
                     decline,
                 )),
@@ -1385,11 +1385,11 @@ pub fn invite_details(
         .and_then(|k| nostr_sdk::prelude::ToBech32::to_bech32(&k).ok())
         .filter(|o| *o != inv.inviter);
     let sent = if inv.sent_at > 0 {
-        ("Sent", inv.sent_at)
+        (t::community_invite_sent(), inv.sent_at)
     } else {
-        ("Received", inv.received_at)
+        (t::community_invite_received(), inv.received_at)
     };
-    let row = |first: bool, label: &'static str, value: AnyElement| {
+    let row = |first: bool, label: SharedString, value: AnyElement| {
         div()
             .h(px(42.))
             .px(px(14.))
@@ -1406,7 +1406,7 @@ pub fn invite_details(
             .child(div().flex_shrink_0().text_color(white_a(0.5)).child(label))
             .child(value)
     };
-    let button = |id: &'static str, label: &'static str, primary: bool, on: Click| {
+    let button = |id: &'static str, label: SharedString, primary: bool, on: Click| {
         div()
             .id(id)
             .flex_1()
@@ -1480,7 +1480,7 @@ pub fn invite_details(
                         .text_size(px(13.))
                         .line_height(px(24.))
                         .text_color(white_a(0.5))
-                        .child("Community invite"),
+                        .child(t::community_invite_card()),
                 ),
         )
         .child(
@@ -1491,8 +1491,8 @@ pub fn invite_details(
                 .border_color(c(0x262626))
                 .flex()
                 .flex_col()
-                .child(row(true, "From", person(&inv.inviter).into_any_element()))
-                .children(owner.map(|o| row(false, "Owner", person(&o).into_any_element())))
+                .child(row(true, t::community_invite_from(), person(&inv.inviter).into_any_element()))
+                .children(owner.map(|o| row(false, t::community_invite_owner(), person(&o).into_any_element())))
                 .child(row(
                     false,
                     sent.0,
@@ -1504,7 +1504,7 @@ pub fn invite_details(
                 ))
                 .child(row(
                     false,
-                    "Expires",
+                    t::community_invite_expires(),
                     div()
                         .id("invite-ends")
                         .tip(crate::texttime::full(inv.ends_at, false))
@@ -1517,8 +1517,8 @@ pub fn invite_details(
                 .mt(px(25.))
                 .flex()
                 .gap(px(10.))
-                .child(button("invite-decline", "Decline", false, decline))
-                .child(button("invite-accept", "Accept", true, accept)),
+                .child(button("invite-decline", t::community_invite_decline_short(), false, decline))
+                .child(button("invite-accept", t::community_invite_accept_short(), true, accept)),
         );
     gpui::deferred(
         div()
