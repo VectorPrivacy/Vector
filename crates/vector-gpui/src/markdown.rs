@@ -662,6 +662,7 @@ impl Builder<'_> {
 
     /// Text with its emoji swapped for twemoji images.
     fn twemoji_text(&mut self, t: &str, kind: Kind) {
+        let t = &*emoji::plain_text_symbols(t);
         let mut run_start = 0;
         for (i, g) in t.grapheme_indices(true) {
             if let Some(src) = emoji::twemoji(g) {

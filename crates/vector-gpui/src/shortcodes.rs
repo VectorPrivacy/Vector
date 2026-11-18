@@ -68,6 +68,18 @@ pub fn trigger(text: &str, caret: usize) -> Option<(usize, &str)> {
     None
 }
 
+/// A completed `:tm:`, `:copyright:` or `:registered:` just before the caret: its range and
+/// symbol. It belongs inside a word, so the autocomplete's after-a-space rule does not apply.
+pub fn text_symbol(text: &str, caret: usize) -> Option<(std::ops::Range<usize>, &'static str)> {
+    let before = text.get(..caret)?.strip_suffix(':')?;
+    let open = before.rfind(':')?;
+    let name = &before[open + 1..];
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase()) || before[..open].ends_with(':') {
+        return None;
+    }
+    Some((open..caret, crate::emoji::text_symbol_code(name)?))
+}
+
 /// What the draft's `:` suggests, or None for no panel.
 pub fn suggest(text: &str, caret: usize, picker: &EmojiPicker, emoticons: bool) -> Option<Popup> {
     let (start, query) = trigger(text, caret)?;
@@ -110,7 +122,7 @@ pub fn suggest(text: &str, caret: usize, picker: &EmojiPicker, emoticons: bool) 
 /// What a pick puts in place of `:query`.
 pub fn insert(cell: &Cell) -> String {
     match cell {
-        Cell::Stock(e) => format!("{} ", e.emoji),
+        Cell::Stock(e) => format!("{} ", crate::emoji::plain_text_symbols(e.emoji)),
         Cell::Custom(e) => format!(":{}: ", e.code),
     }
 }
@@ -135,7 +147,7 @@ pub fn view(
                             .text_size(px(22.))
                             .line_height(px(28.))
                             .text_center()
-                            .child(e.emoji)
+                            .child(crate::emoji::plain_text_symbols(e.emoji).into_owned())
                             .into_any_element(),
                     },
                     format!(":{}:", e.shortcode),
@@ -281,7 +293,7 @@ pub fn panel(
 
 #[cfg(test)]
 mod tests {
-    use super::trigger;
+    use super::{text_symbol, trigger};
 
     #[test]
     fn a_colon_opens_only_after_space_or_at_the_start() {
@@ -291,5 +303,16 @@ mod tests {
         assert_eq!(trigger("hi :sm x", 8), None);
         assert_eq!(trigger("a :)", 4), Some((2, ")")));
         assert_eq!(trigger("a :cat:", 7), None);
+    }
+
+    #[test]
+    fn a_completed_symbol_code_turns_into_its_symbol_mid_word() {
+        assert_eq!(text_symbol("Vector:tm:", 10), Some((6..10, "\u{2122}")));
+        assert_eq!(text_symbol(":copyright:", 11), Some((0..11, "\u{a9}")));
+        assert_eq!(text_symbol("x :registered: y", 14), Some((2..14, "\u{ae}")));
+        assert_eq!(text_symbol("Vector:tm", 9), None);
+        assert_eq!(text_symbol("a::tm:", 6), None);
+        assert_eq!(text_symbol("a:TM:", 5), None);
+        assert_eq!(text_symbol("a:smile:", 8), None);
     }
 }

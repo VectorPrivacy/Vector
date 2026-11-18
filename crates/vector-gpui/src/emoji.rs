@@ -27,6 +27,9 @@ fn code(g: &str) -> String {
 pub fn twemoji(g: &str) -> Option<SharedString> {
     let mut chars = g.chars();
     let first = chars.next()?;
+    if is_text_symbol(first) {
+        return None;
+    }
     // Text-default symbols (©, digits, #) are emoji only when asked to be.
     if (first as u32) < 0x2000 && !g.contains('\u{fe0f}') && !g.contains('\u{20e3}') {
         return None;
@@ -38,6 +41,38 @@ pub fn twemoji(g: &str) -> Option<SharedString> {
     // A sequence twemoji lacks still draws its base.
     let base = code(&first.to_string());
     (chars.next().is_some() && NAMES.contains(&base)).then(|| format!("twemoji/{base}.svg").into())
+}
+
+/// ©, ® and ™, drawn as plain symbols in the text's own font and colour: Twemoji draws them
+/// dark, which a dark theme loses.
+fn is_text_symbol(ch: char) -> bool {
+    matches!(ch, '\u{a9}' | '\u{ae}' | '\u{2122}')
+}
+
+/// `text` with ©, ® and ™ out of their emoji form (`plainTextSymbols`).
+pub fn plain_text_symbols(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{fe0f}') {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut after_symbol = false;
+    for ch in text.chars() {
+        if !(after_symbol && ch == '\u{fe0f}') {
+            out.push(ch);
+        }
+        after_symbol = is_text_symbol(ch);
+    }
+    if out.len() == text.len() { text.into() } else { out.into() }
+}
+
+/// The symbol a completed `:tm:`, `:copyright:` or `:registered:` turns into where it stands.
+pub fn text_symbol_code(name: &str) -> Option<&'static str> {
+    match name {
+        "tm" => Some("\u{2122}"),
+        "copyright" => Some("\u{a9}"),
+        "registered" => Some("\u{ae}"),
+        _ => None,
+    }
 }
 
 /// Emoji graphemes in `text`, with whitespace ignored; `None` once anything else appears.
@@ -276,6 +311,16 @@ pub fn search_kaomoji(query: &str) -> Vec<&'static Kaomoji> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_symbols_lose_their_emoji_form_and_their_art() {
+        assert_eq!(plain_text_symbols("Vector\u{2122}\u{fe0f} \u{a9}\u{fe0f}\u{ae}"), "Vector\u{2122} \u{a9}\u{ae}");
+        assert!(matches!(plain_text_symbols("\u{2764}\u{fe0f}"), std::borrow::Cow::Borrowed(_)));
+        for g in ["\u{2122}", "\u{2122}\u{fe0f}", "\u{a9}\u{fe0f}", "\u{ae}\u{fe0f}"] {
+            assert_eq!(twemoji(g), None);
+        }
+        assert!(twemoji("\u{2764}\u{fe0f}").is_some());
+    }
 
     #[test]
     fn scores_a_hair_apart_sort_without_a_panic() {

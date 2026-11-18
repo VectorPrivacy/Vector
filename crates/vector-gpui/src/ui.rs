@@ -741,9 +741,11 @@ impl VectorApp {
         .detach();
         cx.subscribe(&input, |app, _, _: &CancelInput, cx| app.cancel_mode(cx))
             .detach();
-        cx.subscribe(&input, |app, _, _: &crate::composer::InputChanged, cx| {
-            app.update_shortcode(cx);
-            app.typed(cx);
+        cx.subscribe_in(&input, window, |app, _, _: &crate::composer::InputChanged, window, cx| {
+            if !app.complete_text_symbol(window, cx) {
+                app.update_shortcode(cx);
+                app.typed(cx);
+            }
         })
         .detach();
         cx.subscribe_in(
@@ -5257,7 +5259,8 @@ impl VectorApp {
         }
         if self.picker_status {
             if let Some(field) = self.status.clone() {
-                field.update(cx, |input, cx| input.insert_spaced(&emoji, window, cx));
+                let plain = crate::emoji::plain_text_symbols(&emoji).into_owned();
+                field.update(cx, |input, cx| input.insert_spaced(&plain, window, cx));
             }
             if !shift {
                 self.close_picker(window, cx);
@@ -5276,9 +5279,9 @@ impl VectorApp {
                     self.on_act(id, timeline::Act::ReactWith(emoji), window, cx);
                 }
             }
-            None => self
-                .input
-                .update(cx, |input, cx| input.insert_spaced(&emoji, window, cx)),
+            None => self.input.update(cx, |input, cx| {
+                input.insert_spaced(&crate::emoji::plain_text_symbols(&emoji), window, cx)
+            }),
         }
         if !shift {
             self.close_picker(window, cx);
@@ -14230,6 +14233,29 @@ impl VectorApp {
             this.update(cx, |this, cx| this.load_equipped(false, cx)).ok();
         })
         .detach();
+    }
+
+    /// A completed `:tm:` becomes `™` where it stands; a custom emoji of that name keeps its code.
+    /// The edit it makes comes back as its own change.
+    fn complete_text_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let input = self.input.read(cx);
+        if input.has_selection() {
+            return false;
+        }
+        let Some((range, symbol)) = crate::shortcodes::text_symbol(input.text(), input.caret())
+        else {
+            return false;
+        };
+        let name = &input.text()[range.start + 1..range.end - 1];
+        if self.emoji_picker.read(cx).has_custom(name) {
+            return false;
+        }
+        self.shortcode = None;
+        self.input.update(cx, |i, cx| {
+            i.set_nav(false);
+            i.replace(range, symbol, window, cx);
+        });
+        true
     }
 
     /// The `:` before the caret, re-read on every edit.

@@ -258,12 +258,14 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
         } else {
             Kind::Plain
         };
+        let shown = emoji::plain_text_symbols(buf);
+        let shown = &*shown;
         let mut start = 0;
-        for (i, g) in buf.grapheme_indices(true) {
+        for (i, g) in shown.grapheme_indices(true) {
             if let Some(src) = emoji::twemoji(g) {
                 if i > start {
                     out.push(Atom::Text {
-                        text: buf[start..i].to_string().into(),
+                        text: shown[start..i].to_string().into(),
                         look: l.clone(),
                         kind: kind.clone(),
                     });
@@ -277,9 +279,9 @@ pub fn atoms(content: &str, max: usize, look: &Look) -> Vec<Atom> {
                 start = i + g.len();
             }
         }
-        if start < buf.len() {
+        if start < shown.len() {
             out.push(Atom::Text {
-                text: buf[start..].to_string().into(),
+                text: shown[start..].to_string().into(),
                 look: l,
                 kind,
             });

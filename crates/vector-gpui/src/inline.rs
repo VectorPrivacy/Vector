@@ -1363,6 +1363,7 @@ fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
 
 /// Plain text with its emoji drawn as twemoji at `emoji` px, on one line cut with `…`.
 pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
+    let text = &*crate::emoji::plain_text_symbols(text);
     let mut atoms = Vec::new();
     let mut run = String::new();
     for g in unicode_segmentation::UnicodeSegmentation::graphemes(text, true) {

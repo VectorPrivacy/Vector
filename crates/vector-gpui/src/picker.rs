@@ -1291,6 +1291,12 @@ impl EmojiPicker {
         emoji::by_char(ch)
     }
 
+    /// Whether a custom emoji goes by `name`, whatever its `~N`.
+    pub fn has_custom(&self, name: &str) -> bool {
+        self.live_customs()
+            .any(|e| e.code.split('~').next().is_some_and(|c| c.eq_ignore_ascii_case(name)))
+    }
+
     fn live_customs(&self) -> impl Iterator<Item = &Rc<PackEmoji>> {
         self.packs
             .iter()
@@ -1869,7 +1875,7 @@ impl EmojiPicker {
                     .size(px(30.))
                     .group_hover(group.clone(), |s| s.size(px(33.75)))
                     .into_any_element(),
-                None => div().text_size(px(24.)).child(e.emoji).into_any_element(),
+                None => div().text_size(px(24.)).child(emoji::plain_text_symbols(e.emoji).into_owned()).into_any_element(),
             };
             let picker = picker.clone();
             let emoji = e.emoji;
