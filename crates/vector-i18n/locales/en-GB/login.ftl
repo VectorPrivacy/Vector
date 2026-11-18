@@ -16,3 +16,87 @@ login-net-sam-only-if = Only if your router asks for one.
 login-net-sam-both = Enter both a username and a password.
 login-net-sam-chars = Use letters, numbers and symbols, without spaces or quotes.
 login-net-use = Use
+
+## Signing in
+
+login-method-qr = QR Code
+login-method-key = Private Key
+login-method-signer = Remote Signer
+login-sign-in-with = Sign in with
+login-sign-in-with-about = About these ways to sign in
+login-key-placeholder = Enter nsec or Seed Phrase...
+login-password-placeholder = Enter Password...
+login-bunker-placeholder = bunker:// from Amber, etc.
+login-select-profile = Select Profile
+login-create-account = Create Account
+login-login = Login
+login-enter-key = Enter Your Private Key
+login-with-qr = Login with QR Code
+login-another-device = Sign in with Another Device
+# The words inside <back> are the link that goes back.
+login-back-changed-mind = Changed your mind? <back>Go Back</back>
+# The words inside <back> are the link that goes back.
+login-back-change-accounts = Want to change accounts? <back>Back to Login</back>
+login-continue = Continue
+login-show-password = Show password
+login-hide-password = Hide password
+
+## Encrypting the keys on this device: a PIN or a password, or none
+
+login-skip-encryption = Skip Encryption
+login-create-password = Create Password
+login-create-pin = Create PIN
+login-recommended = *Recommended Option
+login-setting-up = Setting up your account...
+login-decrypting = Decrypting your keys...
+login-encrypting = Encrypting your keys...
+login-strengthening = Strengthening your encryption…
+# $percent is a whole number from 0 to 100.
+login-strengthening-at = Strengthening your encryption… { $percent }%
+login-enter-pin = Enter Your Decryption Pin
+login-create-your-pin = Create Your Pin
+login-reenter-pin = Re-enter Your Pin
+login-enter-password = Enter Your Password
+login-create-your-password = Create Your Password
+login-reenter-password = Re-enter Your Password
+login-password-short = Password must be at least 4 characters
+login-pin-mismatch = Pin doesn't match, re-try
+login-password-mismatch = Passwords don't match, re-try
+login-pin-incorrect = Incorrect pin, try again
+login-password-incorrect = Incorrect password, try again
+login-wrong-pin = Oops! You entered the wrong pin!
+login-wrong-password = Oops! You entered the wrong password!
+login-correct-pin = Enter the Correct Pin.
+login-correct-password = Enter the Correct Password.
+login-save-password-failed = Could not save your password
+login-save-pin-failed = Could not save your PIN
+
+## The welcome screen's footer
+
+login-link-website = Website
+login-link-docs = Documentation
+login-link-privacy = Privacy Policy
+login-link-donate = Donate
+login-show-background = Show Background
+login-hide-background = Hide Background
+
+## Signing in with a remote signer
+
+# $minutes and $seconds count down to when the link expires; $seconds always has two digits.
+login-signer-waiting-time = Waiting for signer… ({ $minutes }:{ $seconds })
+login-signer-waiting = Waiting for signer…
+login-signer-bunker = Must start with bunker://
+login-signer-connecting = Connecting to signer…
+login-signer-approve = Check your signer app to approve…
+login-signer-reconnected = Signer reconnected.
+login-signer-connected = Connected. Choosing security…
+login-signer-unreachable = Signer unreachable
+login-signer-unreachable-text = Your remote signer didn't respond. If you've reset or revoked Vector's permissions in your signer app, re-pair below without losing your account data.
+login-signer-reauthorize = Re-authorize Signer
+login-signer-qr-tip = Pair with a QR code
+login-signer-connect = Connect
+login-signer-title = Login with Remote Signer
+login-signer-reconnect-title = Reconnect Your Remote Signer
+login-signer-generating = Generating connection link…
+login-signer-copy-link = Copy Link
+login-signer-copied = Copied

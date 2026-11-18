@@ -12,6 +12,7 @@ use crate::pic::img;
 use super::LoginView;
 use crate::backend::{self, account, bunker};
 use crate::composer::TextInput;
+use crate::t;
 use crate::theme::*;
 
 const LINK_LIFE: Duration = Duration::from_secs(120);
@@ -47,7 +48,7 @@ impl Signer {
     fn line(&self) -> Option<(SharedString, Tone)> {
         if let Some(left) = self.deadline.and_then(|d| d.checked_duration_since(Instant::now())) {
             let secs = left.as_secs_f32().ceil() as u64;
-            return Some((format!("Waiting for signer… ({}:{:02})", secs / 60, secs % 60).into(), Tone::Connecting));
+            return Some((t::login_signer_waiting_time(secs / 60, format!("{:02}", secs % 60)), Tone::Connecting));
         }
         self.status.clone()
     }
@@ -69,12 +70,12 @@ impl LoginView {
             return;
         }
         if !url.to_ascii_lowercase().starts_with("bunker://") {
-            self.signer.status = Some(("Must start with bunker://".into(), Tone::Error));
+            self.signer.status = Some((t::login_signer_bunker(), Tone::Error));
             return cx.notify();
         }
         let Ok(add) = self.gate(cx) else { return };
         self.signer.busy = true;
-        self.signer.status = Some(("Connecting to signer…".into(), Tone::Connecting));
+        self.signer.status = Some((t::login_signer_connecting(), Tone::Connecting));
         cx.notify();
         let rx = backend::run(async move {
             if let Some((kind, opts)) = add {
@@ -87,7 +88,7 @@ impl LoginView {
             Ok::<_, String>(imported)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| {
                 this.signer.busy = false;
                 match result {
@@ -134,7 +135,7 @@ impl LoginView {
         self.signer.qr = None;
         self.signer.copied = false;
         self.signer.deadline = None;
-        self.signer.status = Some(("Waiting for signer…".into(), Tone::Connecting));
+        self.signer.status = Some((t::login_signer_waiting(), Tone::Connecting));
         cx.notify();
         let (tx, mut updates) = futures::channel::mpsc::unbounded();
         let rx = backend::run(async move {
@@ -144,7 +145,7 @@ impl LoginView {
             if reauth { bunker::reauthorize(tx).await } else { bunker::start_session(tx).await }
         });
         cx.spawn_in(window, async move |this, cx| {
-            let started = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let started = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             let ok = this
                 .update(cx, |this, cx| {
                     if this.signer.session != session {
@@ -180,7 +181,7 @@ impl LoginView {
                             bunker::Update::Awaiting => {
                                 // Waiting on a human in the signer: the link no longer expires here.
                                 this.signer.deadline = None;
-                                this.signer.status = Some(("Check your signer app to approve…".into(), Tone::Connecting));
+                                this.signer.status = Some((t::login_signer_approve(), Tone::Connecting));
                             }
                             bunker::Update::Done(Ok(imported)) => {
                                 this.signer.deadline = None;
@@ -188,11 +189,11 @@ impl LoginView {
                                 this.signer.qr = None;
                                 this.signer.qr_open = false;
                                 if let Some(at_unlock) = this.reauth {
-                                    this.signer.status = Some(("Signer reconnected.".into(), Tone::Online));
+                                    this.signer.status = Some((t::login_signer_reconnected(), Tone::Online));
                                     this.reauthorized(at_unlock, window, cx);
                                     return false;
                                 }
-                                this.signer.status = Some(("Connected. Choosing security…".into(), Tone::Online));
+                                this.signer.status = Some((t::login_signer_connected(), Tone::Online));
                                 if matches!(imported, account::Imported::Staged(_)) {
                                     let _ = backend::run(account::connect());
                                 }
@@ -280,7 +281,7 @@ impl LoginView {
                 self.signer.deadline = Some(Instant::now() + LINK_LIFE);
                 self.signer.qr_open = true;
             }
-            "-error" => self.signer.status = Some(("Must start with bunker://".into(), Tone::Error)),
+            "-error" => self.signer.status = Some((t::login_signer_bunker(), Tone::Error)),
             _ => window.focus(&self.signer.url.focus_handle(cx), cx),
         }
         cx.notify();
@@ -338,7 +339,7 @@ impl LoginView {
             Ok::<_, String>(npub)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, _, cx| {
                 this.signer.busy = false;
                 match result {
@@ -357,14 +358,15 @@ impl LoginView {
 
     /// An unlock the remote signer didn't answer: offer to re-pair it, keeping the account.
     pub fn offer_reauth(&mut self, error: &str, cx: &mut Context<Self>) -> bool {
+        // i18n-exempt: core's words, matched
         if !(error.contains("Remote signer unreachable") || error.to_lowercase().contains("bunker")) {
             return false;
         }
         let escaped = error.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-        let mut popup = crate::kit::Popup::notice("Signer unreachable");
-        popup.text = Some(format!("Your remote signer didn't respond. If you've reset or revoked Vector's permissions in your signer app, re-pair below without losing your account data.<br><br>{escaped}").into());
-        popup.confirm = "Re-authorize Signer".into();
-        popup.cancel = Some("Cancel".into());
+        let mut popup = crate::kit::Popup::notice(t::login_signer_unreachable());
+        popup.text = Some(format!("{}<br><br>{escaped}", crate::kit::escape(&t::login_signer_unreachable_text())).into());
+        popup.confirm = t::login_signer_reauthorize();
+        popup.cancel = Some(t::dialog_cancel());
         self.popup = Some(popup);
         self.popup_reauth = true;
         cx.notify();
@@ -378,11 +380,11 @@ impl LoginView {
             .flex_none()
             .rounded(px(7.))
             .cursor_pointer()
-            .tip("Pair with a QR code")
+            .tip(t::login_signer_qr_tip())
             .on_click(cx.listener(|this, _, w, cx| this.signer_open_qr(w, cx)))
             .child(img("icons/login/qr.svg").size(px(40.)));
         let row = self
-            .field(self.signer.url.clone(), false, "Connect", |this, w, cx| this.signer_connect(w, cx), cx)
+            .field(self.signer.url.clone(), false, t::login_signer_connect(), |this, w, cx| this.signer_connect(w, cx), cx)
             .when(self.signer.busy, |d| d.opacity(0.5))
             .child(qr_btn);
         div()
@@ -390,7 +392,7 @@ impl LoginView {
             .flex_col()
             .items_center()
             .child(super::lg_title(
-                if self.reauth.is_some() { "Reconnect Your Remote Signer" } else { "Login with Remote Signer" }.into(),
+                if self.reauth.is_some() { t::login_signer_reconnect_title() } else { t::login_signer_title() },
                 true,
                 0xffffff,
             ))
@@ -409,10 +411,10 @@ impl LoginView {
         let ready = self.signer.qr.is_some();
         let loading = match &line {
             Some((t, Tone::Error)) => t.clone(),
-            _ => "Generating connection link…".into(),
+            _ => t::login_signer_generating(),
         };
         let can_copy = self.signer.link.is_some() && !self.signer.busy;
-        let btn = |id: &'static str, label: &'static str| {
+        let btn = |id: &'static str, label: SharedString| {
             div()
                 .id(id)
                 .w(px(100.))
@@ -468,7 +470,7 @@ impl LoginView {
                     .flex()
                     .gap(px(10.))
                     .child(
-                        btn("lg-qr-copy", if self.signer.copied { "Copied" } else { "Copy Link" })
+                        btn("lg-qr-copy", if self.signer.copied { t::login_signer_copied() } else { t::login_signer_copy_link() })
                             .border_1()
                             .border_color(c(0x474747))
                             .text_color(c(0xffffff))
@@ -493,7 +495,7 @@ impl LoginView {
                             }),
                     )
                     .child(
-                        btn("lg-qr-close", "Close")
+                        btn("lg-qr-close", t::dialog_close())
                             .bg(c(0x59fcb3))
                             .text_color(c(0x000000))
                             .on_click(cx.listener(|this, _, _, cx| this.signer_close_qr(cx))),

@@ -17,6 +17,7 @@ mod signer;
 use crate::backend::{self, account};
 use crate::composer::{Look, SendText, TextInput};
 use crate::kit::{self, Choice, Popup};
+use crate::t;
 use crate::theme::*;
 
 /// The account is open: the app can boot.
@@ -85,20 +86,15 @@ enum Cred {
     Password,
 }
 
-const METHODS: &[Choice] = &[
-    Choice {
-        value: "qr",
-        label: "QR Code",
-    },
-    Choice {
-        value: "key",
-        label: "Private Key",
-    },
-    Choice {
-        value: "signer",
-        label: "Remote Signer",
-    },
-];
+fn methods() -> &'static [Choice] {
+    kit::choices("login-methods", || {
+        vec![
+            Choice { value: "qr", label: kit::interned(&t::login_method_qr()) },
+            Choice { value: "key", label: kit::interned(&t::login_method_key()) },
+            Choice { value: "signer", label: kit::interned(&t::login_method_signer()) },
+        ]
+    })
+}
 
 pub struct LoginView {
     step: Step,
@@ -116,6 +112,8 @@ pub struct LoginView {
     /// A step is running: the title breathes in the brand gradient.
     busy: bool,
     error: bool,
+    /// Setting up an account left unencrypted: no lock beside the title.
+    lockless: bool,
     /// The credential just refused: Aggroboi glares in the title's place.
     wrong: Option<&'static str>,
     /// The first entry of a new credential, awaiting its confirmation.
@@ -138,9 +136,6 @@ pub struct LoginView {
     live: bool,
 }
 
-const DECRYPTING: &str = "Decrypting your keys...";
-const ENCRYPTING: &str = "Encrypting your keys...";
-
 impl LoginView {
     /// The welcome screen, or the unlock step of an encrypted account (`security` "pin"/"password").
     pub fn new(unlock: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -154,17 +149,17 @@ impl LoginView {
             ..Default::default()
         };
         let key = cx.new(|cx| {
-            TextInput::new("Enter nsec or Seed Phrase...", cx)
+            TextInput::new(t::login_key_placeholder(), cx)
                 .with_look(field.clone())
                 .keep_on_submit()
         });
         let password = cx.new(|cx| {
-            TextInput::new("Enter Password...", cx)
+            TextInput::new(t::login_password_placeholder(), cx)
                 .with_look(field.clone())
                 .keep_on_submit()
         });
         let bunker_url = cx.new(|cx| {
-            TextInput::new("bunker:// from Amber, etc.", cx)
+            TextInput::new(t::login_bunker_placeholder(), cx)
                 .with_look(Look { masked: false, masked_size: None, ..field.clone() })
                 .keep_on_submit()
         });
@@ -194,6 +189,7 @@ impl LoginView {
             title: SharedString::default(),
             busy: false,
             error: false,
+            lockless: false,
             wrong: None,
             first: None,
             bg_hidden: false,
@@ -255,7 +251,7 @@ impl LoginView {
             .and_then(|a| p.rows.iter().find(|r| &r.npub == a));
         let label = match me {
             Some(r) => r.name.clone().unwrap_or_else(|| r.npub.clone()),
-            None => "Select Profile".into(),
+            None => t::login_select_profile().into(),
         };
         let avatar = match me.and_then(|r| r.avatar.clone()) {
             Some(path) => img(path).object_fit(gpui::ObjectFit::Cover)
@@ -510,7 +506,7 @@ impl LoginView {
             Ok::<_, String>(npub)
         });
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update(cx, |this, cx| match result {
                 Ok(_) => this.open_encryption(cx),
                 Err(e) => {
@@ -541,7 +537,7 @@ impl LoginView {
             Ok::<_, String>(imported)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(imported) => this.imported(imported, window, cx),
                 Err(e) => {
@@ -601,7 +597,7 @@ impl LoginView {
         };
         let rx = backend::run(backend::transfer::finish(add));
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(imported) => {
                     let _ = tx.send(Ok(()));
@@ -632,7 +628,8 @@ impl LoginView {
             "pin" => self.start_credential(Cred::Pin, window, cx),
             "password" => self.start_credential(Cred::Password, window, cx),
             _ => {
-                self.set_title("Setting up your account...", true, cx);
+                self.set_title(t::login_setting_up(), true, cx);
+                self.lockless = true;
                 self.cred = Cred::Choose;
                 self.commit(None, "pin", window, cx);
             }
@@ -644,17 +641,22 @@ impl LoginView {
         if !(self.unlock && self.busy) {
             return;
         }
-        let pct = if total > 0 { format!(" {}%", completed * 100 / total) } else { String::new() };
-        self.title = format!("Strengthening your encryption…{pct}").into();
+        self.title = if total > 0 { t::login_strengthening_at(completed * 100 / total) } else { t::login_strengthening() };
         cx.notify();
     }
 
-    fn set_title(&mut self, title: &'static str, busy: bool, cx: &mut Context<Self>) {
-        self.title = title.into();
+    fn set_title(&mut self, title: SharedString, busy: bool, cx: &mut Context<Self>) {
+        self.title = title;
         self.busy = busy;
-        self.error =
-            title.contains("Incorrect") || title.contains("match") || title.contains("at least");
+        self.error = false;
+        self.lockless = false;
         cx.notify();
+    }
+
+    /// A refusal in the title's place, until the next entry.
+    fn set_error_title(&mut self, title: SharedString, cx: &mut Context<Self>) {
+        self.set_title(title, false, cx);
+        self.error = true;
     }
 
     fn start_credential(&mut self, cred: Cred, window: &mut Window, cx: &mut Context<Self>) {
@@ -663,10 +665,10 @@ impl LoginView {
         self.pin.clear();
         self.wrong = None;
         let title = match (cred, self.unlock) {
-            (Cred::Pin, true) => "Enter Your Decryption Pin",
-            (Cred::Pin, false) => "Create Your Pin",
-            (_, true) => "Enter Your Password",
-            (_, false) => "Create Your Password",
+            (Cred::Pin, true) => t::login_enter_pin(),
+            (Cred::Pin, false) => t::login_create_your_pin(),
+            (_, true) => t::login_enter_password(),
+            (_, false) => t::login_create_your_password(),
         };
         self.set_title(title, false, cx);
         match cred {
@@ -720,11 +722,11 @@ impl LoginView {
     fn revert_error_title(&mut self, cx: &mut Context<Self>) {
         if self.error && self.cred == Cred::Pin {
             let title = if self.unlock {
-                "Enter Your Decryption Pin"
+                t::login_enter_pin()
             } else if self.first.is_some() {
-                "Re-enter Your Pin"
+                t::login_reenter_pin()
             } else {
-                "Create Your Pin"
+                t::login_create_your_pin()
             };
             self.wrong = None;
             self.set_title(title, false, cx);
@@ -741,7 +743,7 @@ impl LoginView {
             return;
         }
         if !self.unlock && self.first.is_none() && password.chars().count() < 4 {
-            self.set_title("Password must be at least 4 characters", false, cx);
+            self.set_error_title(t::login_password_short(), cx);
             return;
         }
         self.credential_entered(password, window, cx);
@@ -757,25 +759,17 @@ impl LoginView {
         let pin = self.cred == Cred::Pin;
         if self.unlock {
             self.wrong = None;
-            self.set_title(DECRYPTING, true, cx);
+            self.set_title(t::login_decrypting(), true, cx);
             self.finish_unlock(Some(value), window, cx);
             return;
         }
         match self.first.take() {
             None => {
                 self.first = Some(value);
-                self.set_title(
-                    if pin {
-                        "Re-enter Your Pin"
-                    } else {
-                        "Re-enter Your Password"
-                    },
-                    false,
-                    cx,
-                );
+                self.set_title(if pin { t::login_reenter_pin() } else { t::login_reenter_password() }, false, cx);
             }
             Some(first) if *first == *value => {
-                self.set_title(ENCRYPTING, true, cx);
+                self.set_title(t::login_encrypting(), true, cx);
                 self.commit(
                     Some(first),
                     if pin { "pin" } else { "password" },
@@ -784,15 +778,7 @@ impl LoginView {
                 );
             }
             Some(_) => {
-                self.set_title(
-                    if pin {
-                        "Pin doesn't match, re-try"
-                    } else {
-                        "Passwords don't match, re-try"
-                    },
-                    false,
-                    cx,
-                );
+                self.set_error_title(if pin { t::login_pin_mismatch() } else { t::login_password_mismatch() }, cx);
             }
         }
     }
@@ -806,7 +792,7 @@ impl LoginView {
     ) {
         let rx = backend::run(async move { account::commit(password, security).await });
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {
                     let npub = vector_core::my_public_key()
@@ -816,9 +802,9 @@ impl LoginView {
                 }
                 Err(e) => {
                     let mut p = Popup::notice(if security == "password" {
-                        "Could not save your password"
+                        t::login_save_password_failed()
                     } else {
-                        "Could not save your PIN"
+                        t::login_save_pin_failed()
                     });
                     p.icon = None;
                     p.text = Some(e.into());
@@ -845,20 +831,12 @@ impl LoginView {
             Ok::<_, String>(npub)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update_in(cx, |this, window, cx| match result {
                 Ok(npub) => cx.emit(LoggedIn { npub }),
-                Err(e) if e.contains("Incorrect") => {
+                Err(e) if e.contains("Incorrect") => { // i18n-exempt: core's words, matched
                     let pin = this.cred == Cred::Pin;
-                    this.set_title(
-                        if pin {
-                            "Incorrect pin, try again"
-                        } else {
-                            "Incorrect password, try again"
-                        },
-                        false,
-                        cx,
-                    );
+                    this.set_error_title(if pin { t::login_pin_incorrect() } else { t::login_password_incorrect() }, cx);
                     this.wrong = Some(if pin { "pin" } else { "password" });
                     this.pin.clear();
                     if pin {
@@ -868,15 +846,7 @@ impl LoginView {
                     }
                 }
                 Err(e) => {
-                    this.set_title(
-                        if this.cred == Cred::Pin {
-                            "Enter Your Decryption Pin"
-                        } else {
-                            "Enter Your Password"
-                        },
-                        false,
-                        cx,
-                    );
+                    this.set_title(if this.cred == Cred::Pin { t::login_enter_pin() } else { t::login_enter_password() }, false, cx);
                     if !this.offer_reauth(&e, cx) {
                         this.show_error(e, cx);
                     }
@@ -890,7 +860,7 @@ impl LoginView {
 
 // ── Painting ────────────────────────────────────────────────────────────────────────────
 
-fn lg_btn(id: &'static str, label: &'static str, kind: u8) -> gpui::Stateful<gpui::Div> {
+fn lg_btn(id: &'static str, label: SharedString, kind: u8) -> gpui::Stateful<gpui::Div> {
     // kind: 0 plain, 1 primary, 2 accent
     let base = div()
         .id(id)
@@ -941,11 +911,9 @@ fn lg_title(text: SharedString, lock: bool, color: u32) -> gpui::Div {
         )
 }
 
-fn lg_back(
-    prompt: &'static str,
-    label: &'static str,
-    on: impl Fn(&mut Window, &mut App) + 'static,
-) -> gpui::Div {
+/// A prompt with its `<back>` link.
+fn lg_back(text: SharedString, on: impl Fn(&mut Window, &mut App) + 'static) -> gpui::Div {
+    let (prompt, label, after) = kit::around(&text, "back");
     div()
         .mt(px(25.))
         .flex()
@@ -962,6 +930,7 @@ fn lg_back(
                 .on_click(move |_, w, cx| on(w, cx))
                 .child(kit::spaced(label, 1.1)),
         )
+        .when(!after.is_empty(), |d| d.child(kit::spaced(after, 1.1)))
 }
 
 impl LoginView {
@@ -969,7 +938,7 @@ impl LoginView {
         &self,
         input: Entity<TextInput>,
         eye: bool,
-        go: &'static str,
+        go: SharedString,
         on_go: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -1001,7 +970,7 @@ impl LoginView {
                         d.child(
                             div()
                                 .id("lg-eye")
-                                .aria_label(if self.reveal { "Hide password" } else { "Show password" })
+                                .aria_label(if self.reveal { t::login_hide_password() } else { t::login_show_password() })
                                 .h_full()
                                 .px(px(6.))
                                 .flex()
@@ -1086,11 +1055,11 @@ impl LoginView {
                     .gap(px(8.))
                     .text_size(px(16.))
                     .line_height(px(19.))
-                    .child("Sign in with")
+                    .child(t::login_sign_in_with())
                     .child(
                         div()
                             .id("lg-method-info")
-                            .aria_label("About these ways to sign in")
+                            .aria_label(t::login_sign_in_with_about())
                             .cursor_pointer()
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(MethodInfo)))
                             .child(
@@ -1104,7 +1073,7 @@ impl LoginView {
             .child(kit::select(
                 "lg-method",
                 150.,
-                METHODS,
+                methods(),
                 self.method,
                 self.select_open,
                 toggle,
@@ -1126,11 +1095,11 @@ impl LoginView {
                         .gap(px(13.))
                         .relative()
                         .child(
-                            lg_btn("lg-create", "Create Account", 1)
+                            lg_btn("lg-create", t::login_create_account(), 1)
                                 .when(self.net.hold, |d| d.bg(ca(51, 219, 152, 0.25)).border_color(gpui::transparent_black()))
                                 .on_click(cx.listener(|this, _, w, cx| this.create_account(w, cx))),
                         )
-                        .child(lg_btn("lg-login", "Login", 2)
+                        .child(lg_btn("lg-login", t::login_login(), 2)
                             .when(self.net.hold, |d| d.border_color(ca(51, 219, 152, 0.25)).text_color(white_a(0.25)))
                             .on_click(cx.listener(|this, _, w, cx| {
                             if let Err(e) = this.net_ready() {
@@ -1150,11 +1119,7 @@ impl LoginView {
                     let view = cx.entity();
                     let reserve = self.net.shown;
                     d.child(
-                        lg_back(
-                            "Changed your mind?\u{a0}",
-                            "Go Back",
-                            move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back)),
-                        )
+                        lg_back(t::login_back_changed_mind(), move |_, cx| view.update(cx, |_, cx| cx.emit(AddProfile::Back)))
                         .when(reserve, |d| d.mt(px(10.)))
                         .when(self.net.busy, |d| d.opacity(0.4).block_mouse_except_scroll()),
                     )
@@ -1167,19 +1132,19 @@ impl LoginView {
                     block = block.child(self.signer_block(cx));
                 } else if self.method == "key" {
                     block = block
-                        .child(lg_title("Enter Your Private Key".into(), true, 0xffffff))
+                        .child(lg_title(t::login_enter_key(), true, 0xffffff))
                         .child(self.field(
                             self.key.clone(),
                             false,
-                            "Login",
+                            t::login_login(),
                             |this, w, cx| this.import_key(w, cx),
                             cx,
                         ));
                 } else {
                     block = block
-                        .child(lg_title("Login with QR Code".into(), true, 0xffffff))
+                        .child(lg_title(t::login_with_qr(), true, 0xffffff))
                         .child(
-                            lg_btn("lg-device", "Sign in with Another Device", 1)
+                            lg_btn("lg-device", t::login_another_device(), 1)
                                 .w(px(300.))
                                 .text_size(px(18.))
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenTransfer))),
@@ -1187,18 +1152,12 @@ impl LoginView {
                 }
                 if self.reauth.is_some() {
                     return block
-                        .child(lg_back("Changed your mind?\u{a0}", "Go Back", move |_, cx| {
-                            back.update(cx, |this, cx| this.end_reauth(cx))
-                        }))
+                        .child(lg_back(t::login_back_changed_mind(), move |_, cx| back.update(cx, |this, cx| this.end_reauth(cx))))
                         .into_any_element();
                 }
                 block
                     .child(self.sign_in_with(cx))
-                    .child(lg_back(
-                        "Want to change accounts?\u{a0}",
-                        "Back to Login",
-                        move |w, cx| back.update(cx, |this, cx| this.back_to_start(w, cx)),
-                    ))
+                    .child(lg_back(t::login_back_change_accounts(), move |w, cx| back.update(cx, |this, cx| this.back_to_start(w, cx))))
                     .into_any_element()
             }
             Step::Encrypt => self.encrypt(window, cx),
@@ -1211,11 +1170,11 @@ impl LoginView {
             return block
                 .gap(px(16.))
                 .child(
-                    lg_btn("lg-skip", "Skip Encryption", 0)
+                    lg_btn("lg-skip", t::login_skip_encryption(), 0)
                         .on_click(cx.listener(|this, _, w, cx| this.choose("skip", w, cx))),
                 )
                 .child(
-                    lg_btn("lg-password", "Create Password", 0)
+                    lg_btn("lg-password", t::login_create_password(), 0)
                         .on_click(cx.listener(|this, _, w, cx| this.choose("password", w, cx))),
                 )
                 .child(
@@ -1224,10 +1183,10 @@ impl LoginView {
                         .text_size(px(10.))
                         .line_height(px(24.))
                         .text_color(c(ACCENT))
-                        .child("*Recommended Option"),
+                        .child(t::login_recommended()),
                 )
                 .child(
-                    lg_btn("lg-pin", "Create PIN", 1)
+                    lg_btn("lg-pin", t::login_create_pin(), 1)
                         .on_click(cx.listener(|this, _, w, cx| this.choose("pin", w, cx))),
                 )
                 .into_any_element();
@@ -1262,7 +1221,7 @@ impl LoginView {
                             ),
                     )
                     .child(
-                        kit::spaced(format!("Oops! You entered the wrong {what}!"), 1.4)
+                        kit::spaced(if what == "pin" { t::login_wrong_pin() } else { t::login_wrong_password() }, 1.4)
                             .mt(px(14.))
                             .text_size(px(14.))
                             .font_weight(FontWeight::BOLD)
@@ -1270,11 +1229,7 @@ impl LoginView {
                     )
                     .child(
                         kit::spaced(
-                            if what == "pin" {
-                                "Enter the Correct Pin."
-                            } else {
-                                "Enter the Correct Password."
-                            },
+                            if what == "pin" { t::login_correct_pin() } else { t::login_correct_password() },
                             2.4,
                         )
                         .mt(px(8.))
@@ -1302,7 +1257,7 @@ impl LoginView {
                     .gap(px(10.))
                     .mb(px(25.))
                     // An account left unencrypted has no lock to show.
-                    .when(self.title.as_ref() != "Setting up your account...", |d| {
+                    .when(!self.lockless, |d| {
                         d.child(img("icons/login/lock.svg").w(px(22.)).h(px(29.)))
                     })
                     .child(
@@ -1355,7 +1310,7 @@ impl LoginView {
                 block = block.child(self.field(
                     self.password.clone(),
                     true,
-                    "Continue",
+                    t::login_continue(),
                     |this, w, cx| this.submit_password(w, cx),
                     cx,
                 ));
@@ -1485,7 +1440,7 @@ fn head(lock_w: f32, lock_h: f32) -> gpui::Div {
 
 /// `.lg-foot`: the credits and links.
 fn foot(wide: bool, stacked: bool, toggle_row: f32) -> gpui::Div {
-    let link = |id: &'static str, label: &'static str, url: &'static str| {
+    let link = |id: &'static str, label: SharedString, url: &'static str| {
         div()
             .id(id)
             .cursor_pointer()
@@ -1520,13 +1475,13 @@ fn foot(wide: bool, stacked: bool, toggle_row: f32) -> gpui::Div {
                 .text_size(px(if wide { 12. } else { 8. }))
                 .line_height(px(24.))
                 .text_color(c(ICON_MUTED))
-                .child(link("lk-web", "Website", "https://vectorapp.io"))
+                .child(link("lk-web", t::login_link_website(), "https://vectorapp.io"))
                 .child(sep())
-                .child(link("lk-docs", "Documentation", "https://docs.vectorapp.io"))
+                .child(link("lk-docs", t::login_link_docs(), "https://docs.vectorapp.io"))
                 .child(sep())
-                .child(link("lk-privacy", "Privacy Policy", "https://vectorapp.io/privacy-policy"))
+                .child(link("lk-privacy", t::login_link_privacy(), "https://vectorapp.io/privacy-policy"))
                 .child(sep())
-                .child(link("lk-donate", "Donate", "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations")),
+                .child(link("lk-donate", t::login_link_donate(), "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations")),
         )
 }
 
@@ -1552,7 +1507,7 @@ fn bg_toggle(hidden: bool, stacked: bool, vw: f32) -> gpui::Stateful<gpui::Div> 
         } else {
             img("icons/login/hide.svg").w(px(17.)).h(px(16.))
         }))
-        .child(kit::spaced(if hidden { "Show Background" } else { "Hide Background" }, 0.8))
+        .child(kit::spaced(if hidden { t::login_show_background() } else { t::login_hide_background() }, 0.8))
 }
 
 /// The login frame while the account is found on disk (`.lg-booting`): three dots that fade in
