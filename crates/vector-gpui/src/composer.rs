@@ -312,11 +312,264 @@ const BULLET: &str = "\u{2022}";
 /// The drawn text as shaped: each hard line with its byte start and top.
 struct Layout {
     text: SharedString,
-    lines: Vec<(usize, Pixels, WrappedLine)>,
+    lines: Vec<(usize, Pixels, Para)>,
     line_height: Pixels,
+    /// The field's width, which a right-to-left paragraph's rows are set against.
+    width: Pixels,
     /// Centred within this width, each visual row on its own.
     align: Option<Pixels>,
     right: bool,
+}
+
+/// A hard line as shaped.
+enum Para {
+    /// GPUI's own wrapping, which keeps glyphs in byte order: text with no right-to-left run.
+    Plain(WrappedLine),
+    Bidi(BidiPara),
+}
+
+/// A line broken into rows in reading order, each shaped behind a mark that fixes the
+/// paragraph's direction, so every row is reordered on its own as a browser does.
+struct BidiPara {
+    rows: Vec<Row>,
+    rtl: bool,
+    len: usize,
+}
+
+struct Row {
+    /// Bytes of the hard line.
+    range: Range<usize>,
+    line: gpui::ShapedLine,
+    /// Glyph clusters left to right.
+    cells: Vec<Cell>,
+}
+
+/// A glyph cluster: the row bytes it draws, where, and which way its text runs.
+#[derive(Clone)]
+struct Cell {
+    range: Range<usize>,
+    x: Pixels,
+    w: Pixels,
+    rtl: bool,
+}
+
+const LRM: &str = "\u{200e}";
+const RLM: &str = "\u{200f}";
+
+/// `dir="auto"` while the UI reads right to left; left to right otherwise, as Tauri's textarea.
+fn para_rtl(line: &str) -> bool {
+    gpui::layout_rtl()
+        && line
+            .chars()
+            .find_map(|ch| match unicode_bidi::bidi_class(ch) {
+                unicode_bidi::BidiClass::L => Some(false),
+                unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL => Some(true),
+                _ => None,
+            })
+            .unwrap_or(true)
+}
+
+fn needs_bidi(line: &str) -> bool {
+    crate::inline::has_rtl(line) || para_rtl(line)
+}
+
+/// `runs` cut to `range`, the first widened over a `lead`-byte mark.
+fn clip_runs(runs: &[TextRun], range: Range<usize>, lead: usize) -> Vec<TextRun> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for run in runs {
+        let (s, e) = (at.max(range.start), (at + run.len).min(range.end));
+        at += run.len;
+        if s < e {
+            out.push(TextRun { len: e - s, ..run.clone() });
+        }
+    }
+    match out.first_mut() {
+        Some(first) => first.len += lead,
+        None => {
+            if let Some(run) = runs.last() {
+                out.push(TextRun { len: lead, ..run.clone() });
+            }
+        }
+    }
+    out
+}
+
+/// The clusters of a line shaped behind a `lead`-byte mark, left to right, in its own bytes.
+fn cells(line: &gpui::ShapedLine, lead: usize) -> Vec<Cell> {
+    let text = line.text.as_str();
+    let levels = unicode_bidi::BidiInfo::new(text, None).levels;
+    let glyphs: Vec<(usize, Pixels)> = line
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter().map(|g| (g.index, g.position.x)))
+        .collect();
+    let mut starts: Vec<usize> = glyphs.iter().map(|g| g.0).filter(|&i| i >= lead).collect();
+    starts.sort_unstable();
+    starts.dedup();
+    // A shaper may fold the mark into the first letter's cluster.
+    let mark_alone = starts.first() == Some(&lead);
+    // Glyphs come in either visual order, so each cluster starts at its leftmost glyph.
+    let mut left: std::collections::BTreeMap<usize, Pixels> = std::collections::BTreeMap::new();
+    for &(raw, x) in &glyphs {
+        let index = if raw < lead && !mark_alone { lead } else { raw };
+        if index >= lead && index < text.len() {
+            left.entry(index).and_modify(|l| *l = (*l).min(x)).or_insert(x);
+        }
+    }
+    let mut out: Vec<Cell> = left
+        .into_iter()
+        .map(|(index, x)| {
+            let end = starts.get(starts.partition_point(|&s| s <= index)).copied().unwrap_or(text.len());
+            Cell {
+                range: index - lead..end - lead,
+                x,
+                w: px(0.),
+                rtl: levels.get(index).is_some_and(|l| l.is_rtl()),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| f32::from(a.x).total_cmp(&f32::from(b.x)));
+    for k in 0..out.len() {
+        let next = out.get(k + 1).map_or(line.width, |n| n.x);
+        out[k].w = (next - out[k].x).max(px(0.));
+    }
+    out
+}
+
+impl Row {
+    fn width(&self) -> Pixels {
+        self.line.width
+    }
+
+    /// Where the caret before row byte `k` sits: the leading edge of what follows it, else the
+    /// trailing edge of what precedes it.
+    fn caret_x(&self, k: usize) -> Pixels {
+        if let Some(c) = self.cells.iter().find(|c| c.range.start == k) {
+            return if c.rtl { c.x + c.w } else { c.x };
+        }
+        if let Some(c) = self.cells.iter().find(|c| c.range.contains(&k)) {
+            let f = (k - c.range.start) as f32 / c.range.len() as f32;
+            return if c.rtl { c.x + c.w * (1. - f) } else { c.x + c.w * f };
+        }
+        if let Some(c) = self.cells.iter().find(|c| c.range.end == k) {
+            return if c.rtl { c.x } else { c.x + c.w };
+        }
+        px(0.)
+    }
+
+    /// The row byte nearest `x`: the cluster under it, before or after by which half.
+    fn index_at(&self, x: Pixels) -> usize {
+        let Some(c) = self.cells.iter().find(|c| x < c.x + c.w).or(self.cells.last()) else {
+            return 0;
+        };
+        if c.rtl == (x < c.x + c.w / 2.) { c.range.end } else { c.range.start }
+    }
+
+    /// The stretches `range` (row bytes) covers, left to right.
+    fn spans(&self, range: Range<usize>) -> Vec<(Pixels, Pixels)> {
+        let mut hit: Vec<(Pixels, Pixels)> = self
+            .cells
+            .iter()
+            .filter(|c| c.range.start < range.end && range.start < c.range.end)
+            .map(|c| (c.x, c.x + c.w))
+            .collect();
+        hit.sort_by(|a, b| f32::from(a.0).total_cmp(&f32::from(b.0)));
+        let mut out: Vec<(Pixels, Pixels)> = Vec::with_capacity(hit.len());
+        for (a, b) in hit {
+            match out.last_mut() {
+                Some(last) if a <= last.1 + px(0.5) => last.1 = last.1.max(b),
+                _ => out.push((a, b)),
+            }
+        }
+        out
+    }
+}
+
+impl BidiPara {
+    fn shape(text: &str, runs: &[TextRun], font_size: Pixels, wrap: Option<Pixels>, window: &Window) -> Self {
+        let rtl = para_rtl(text);
+        let mark = if rtl { RLM } else { LRM };
+        let shape = |range: Range<usize>| {
+            let line = window.text_system().shape_line(
+                format!("{mark}{}", &text[range.clone()]).into(),
+                font_size,
+                &clip_runs(runs, range.clone(), mark.len()),
+                None,
+            );
+            let cells = cells(&line, mark.len());
+            Row { range, line, cells }
+        };
+        let whole = shape(0..text.len());
+        let Some(wrap) = wrap.filter(|w| whole.width() > *w) else {
+            return Self { rows: vec![whole], rtl, len: text.len() };
+        };
+        // Break in reading order: after the last space that fits, else before the cluster
+        // that overflows.
+        let mut order = whole.cells.clone();
+        order.sort_by_key(|c| c.range.start);
+        let mut breaks = Vec::new();
+        let (mut row_start, mut w, mut last_space) = (0, px(0.), None::<(usize, Pixels)>);
+        for c in &order {
+            let space = text[c.range.clone()].chars().all(char::is_whitespace);
+            if !space && w + c.w > wrap && c.range.start > row_start {
+                match last_space.take().filter(|(b, _)| *b > row_start) {
+                    Some((b, wb)) => {
+                        breaks.push(b);
+                        row_start = b;
+                        w -= wb;
+                    }
+                    None => {
+                        breaks.push(c.range.start);
+                        row_start = c.range.start;
+                        w = px(0.);
+                    }
+                }
+            }
+            w += c.w;
+            if space {
+                last_space = Some((c.range.end, w));
+            }
+        }
+        let mut rows = Vec::with_capacity(breaks.len() + 1);
+        let mut at = 0;
+        for b in breaks.into_iter().chain([text.len()]) {
+            rows.push(shape(at..b));
+            at = b;
+        }
+        Self { rows, rtl, len: text.len() }
+    }
+
+    /// The row a caret before line byte `k` sits on: a break starts the next row.
+    fn row_of(&self, k: usize) -> usize {
+        self.rows
+            .iter()
+            .position(|r| k < r.range.end)
+            .unwrap_or(self.rows.len().saturating_sub(1))
+    }
+}
+
+impl Para {
+    fn len(&self) -> usize {
+        match self {
+            Para::Plain(l) => l.len(),
+            Para::Bidi(b) => b.len,
+        }
+    }
+
+    fn height(&self, line_height: Pixels) -> Pixels {
+        match self {
+            Para::Plain(l) => l.size(line_height).height,
+            Para::Bidi(b) => line_height * b.rows.len().max(1) as f32,
+        }
+    }
+
+    fn width(&self) -> Pixels {
+        match self {
+            Para::Plain(l) => l.width(),
+            Para::Bidi(b) => b.rows.iter().map(Row::width).fold(px(0.), Pixels::max),
+        }
+    }
 }
 
 impl Layout {
@@ -325,6 +578,7 @@ impl Layout {
         runs: &[TextRun],
         font_size: Pixels,
         wrap: Option<Pixels>,
+        width: Pixels,
         line_height: Pixels,
         window: &Window,
     ) -> Self {
@@ -335,8 +589,16 @@ impl Layout {
         let mut lines = Vec::with_capacity(shaped.len());
         let (mut start, mut y) = (0, px(0.));
         for line in shaped {
-            let (len, h) = (line.len(), line.size(line_height).height);
-            lines.push((start, y, line));
+            let len = line.len();
+            let hard = &text[start..start + len];
+            let para = if needs_bidi(hard) {
+                let runs = clip_runs(runs, start..start + len, 0);
+                Para::Bidi(BidiPara::shape(hard, &runs, font_size, wrap, window))
+            } else {
+                Para::Plain(line)
+            };
+            let h = para.height(line_height);
+            lines.push((start, y, para));
             start += len + 1;
             y += h;
         }
@@ -344,9 +606,19 @@ impl Layout {
             text,
             lines,
             line_height,
+            width,
             align: None,
             right: false,
         }
+    }
+
+    fn has_bidi(&self) -> bool {
+        self.lines.iter().any(|(_, _, p)| matches!(p, Para::Bidi(_)))
+    }
+
+    /// Whether the hard line holding `index` reads right to left.
+    fn rtl_at(&self, index: usize) -> bool {
+        matches!(self.line_at(index), Some((_, _, Para::Bidi(b))) if b.rtl)
     }
 
     /// How far a centred row sits right of the left edge.
@@ -371,15 +643,30 @@ impl Layout {
         if self.right { room } else { room / 2. }
     }
 
+    /// How far a reordered row sits right of the left edge.
+    fn row_x(&self, para: &BidiPara, row: &Row) -> Pixels {
+        let room = (self.align.unwrap_or(self.width) - row.width()).max(px(0.));
+        match self.align {
+            Some(_) if self.right => room,
+            Some(_) => room / 2.,
+            None if para.rtl => room,
+            None => px(0.),
+        }
+    }
+
     fn height(&self) -> Pixels {
         self.lines
             .last()
-            .map(|(_, y, l)| *y + l.size(self.line_height).height)
+            .map(|(_, y, l)| *y + l.height(self.line_height))
             .unwrap_or(self.line_height)
             .max(self.line_height)
     }
 
-    fn line_at(&self, index: usize) -> Option<&(usize, Pixels, WrappedLine)> {
+    fn first_width(&self) -> Pixels {
+        self.lines.first().map(|(_, _, l)| l.width()).unwrap_or_default()
+    }
+
+    fn line_at(&self, index: usize) -> Option<&(usize, Pixels, Para)> {
         self.lines
             .iter()
             .rev()
@@ -388,27 +675,36 @@ impl Layout {
 
     /// The char boundary after `index`.
     fn after(&self, index: usize) -> usize {
-        self.line_at(index).map_or(index, |(start, _, line)| {
-            let local = index - start;
-            index + line.text.get(local..).and_then(|t| t.chars().next()).map_or(0, char::len_utf8)
-        })
+        index + self.text.get(index..).and_then(|t| t.chars().next()).map_or(0, char::len_utf8)
     }
 
     /// Where `index` sits, from the text's top left.
     fn position(&self, index: usize) -> Point<Pixels> {
-        let Some((start, y, line)) = self.line_at(index) else {
+        let Some((start, y, para)) = self.line_at(index) else {
             return point(px(0.), px(0.));
         };
-        let local = index.saturating_sub(*start).min(line.len());
-        let p = line
-            .position_for_index(local, self.line_height)
-            .unwrap_or(point(line.width(), px(0.)));
-        let row = (p.y / self.line_height).floor() as usize;
-        point(p.x + self.shift(line, row), p.y + *y)
+        let local = index.saturating_sub(*start).min(para.len());
+        match para {
+            Para::Plain(line) => {
+                let p = line
+                    .position_for_index(local, self.line_height)
+                    .unwrap_or(point(line.width(), px(0.)));
+                let row = (p.y / self.line_height).floor() as usize;
+                point(p.x + self.shift(line, row), p.y + *y)
+            }
+            Para::Bidi(b) => {
+                let r = b.row_of(local);
+                let Some(row) = b.rows.get(r) else {
+                    return point(self.row_x(b, &b.rows[0]), *y);
+                };
+                let x = self.row_x(b, row) + row.caret_x(local - row.range.start);
+                point(x, *y + self.line_height * r as f32)
+            }
+        }
     }
 
     fn index_at(&self, p: Point<Pixels>) -> usize {
-        let Some((start, y, line)) = self
+        let Some((start, y, para)) = self
             .lines
             .iter()
             .rev()
@@ -417,19 +713,86 @@ impl Layout {
         else {
             return 0;
         };
-        let h = line.size(self.line_height).height;
+        let h = para.height(self.line_height);
         let ly = (p.y - *y).clamp(px(0.), (h - px(1.)).max(px(0.)));
-        let shift = self.shift(line, (ly / self.line_height).floor() as usize);
-        let local = point((p.x - shift).max(px(0.)), ly);
-        let i = match line.closest_index_for_position(local, self.line_height) {
-            Ok(i) | Err(i) => i,
-        };
-        start + i.min(line.len())
+        match para {
+            Para::Plain(line) => {
+                let shift = self.shift(line, (ly / self.line_height).floor() as usize);
+                let local = point((p.x - shift).max(px(0.)), ly);
+                let i = match line.closest_index_for_position(local, self.line_height) {
+                    Ok(i) | Err(i) => i,
+                };
+                start + i.min(line.len())
+            }
+            Para::Bidi(b) => {
+                let r = ((ly / self.line_height).floor() as usize).min(b.rows.len().saturating_sub(1));
+                let Some(row) = b.rows.get(r) else { return *start };
+                start + row.range.start + row.index_at(p.x - self.row_x(b, row))
+            }
+        }
+    }
+
+    /// The stretches `range` covers, `(left, right, top)` row by row. A range running on past
+    /// a row's end fills it to `full`, as a selection across lines does.
+    fn spans(&self, range: Range<usize>, full: Pixels) -> Vec<(Pixels, Pixels, Pixels)> {
+        let mut out = Vec::new();
+        if range.is_empty() {
+            return out;
+        }
+        for (start, y, para) in &self.lines {
+            let end = start + para.len();
+            if range.end <= *start || range.start > end {
+                continue;
+            }
+            let (a, b) = (range.start.max(*start), range.end.min(end));
+            match para {
+                Para::Plain(_) => {
+                    let (pa, pb) = (self.position(a), self.position(b));
+                    let on = range.end > end;
+                    let row = |p: Point<Pixels>| ((p.y - *y) / self.line_height).round() as usize;
+                    for r in row(pa)..=row(pb) {
+                        let top = *y + self.line_height * r as f32;
+                        let x0 = if r == row(pa) { pa.x } else { px(0.) };
+                        let x1 = if r == row(pb) && !on { pb.x } else { full };
+                        if x1 > x0 {
+                            out.push((x0, x1, top));
+                        }
+                    }
+                }
+                Para::Bidi(bp) => {
+                    for (r, row) in bp.rows.iter().enumerate() {
+                        let (ra, rb) = (row.range.start + start, row.range.end + start);
+                        if b <= ra || a >= rb {
+                            continue;
+                        }
+                        let x = self.row_x(bp, row);
+                        let top = *y + self.line_height * r as f32;
+                        for (x0, x1) in row.spans(a.max(ra) - ra..b.min(rb) - ra) {
+                            out.push((x + x0, x + x1, top));
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
 impl TextInput {
+    /// Whether the caret's line reads right to left, where ← and → swap meaning.
+    fn rtl_caret(&self) -> bool {
+        self.last_layout.as_ref().is_some_and(|l| l.rtl_at(self.to_display(self.cursor_offset())))
+    }
+
     fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rtl_caret() { self.forth(window, cx) } else { self.back(window, cx) }
+    }
+
+    fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rtl_caret() { self.back(window, cx) } else { self.forth(window, cx) }
+    }
+
+    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.edges && self.selected_range == (0..0) {
             return cx.emit(Edge::Start);
         }
@@ -440,7 +803,7 @@ impl TextInput {
         }
     }
 
-    fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
+    fn forth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let end = self.content.len();
         if self.edges && self.selected_range == (end..end) {
             return cx.emit(Edge::End);
@@ -453,11 +816,15 @@ impl TextInput {
     }
 
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.previous_boundary(self.cursor_offset()), window, cx);
+        let at = self.cursor_offset();
+        let to = if self.rtl_caret() { self.next_boundary(at) } else { self.previous_boundary(at) };
+        self.select_to(to, window, cx);
     }
 
     fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.next_boundary(self.cursor_offset()), window, cx);
+        let at = self.cursor_offset();
+        let to = if self.rtl_caret() { self.previous_boundary(at) } else { self.next_boundary(at) };
+        self.select_to(to, window, cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
@@ -933,20 +1300,31 @@ impl TextInput {
         self.out_of_sub(end, true)
     }
 
+    /// The next word edge leftward on screen: back in the text, forward on a right-to-left line.
+    fn word_leftward(&self) -> usize {
+        let at = self.cursor_offset();
+        if self.rtl_caret() { self.word_end(at) } else { self.word_start(at) }
+    }
+
+    fn word_rightward(&self) -> usize {
+        let at = self.cursor_offset();
+        if self.rtl_caret() { self.word_start(at) } else { self.word_end(at) }
+    }
+
     fn word_left(&mut self, _: &WordLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.word_start(self.cursor_offset()), window, cx);
+        self.move_to(self.word_leftward(), window, cx);
     }
 
     fn word_right(&mut self, _: &WordRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.word_end(self.cursor_offset()), window, cx);
+        self.move_to(self.word_rightward(), window, cx);
     }
 
     fn select_word_left(&mut self, _: &SelectWordLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.word_start(self.cursor_offset()), window, cx);
+        self.select_to(self.word_leftward(), window, cx);
     }
 
     fn select_word_right(&mut self, _: &SelectWordRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.word_end(self.cursor_offset()), window, cx);
+        self.select_to(self.word_rightward(), window, cx);
     }
 
     fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -1152,6 +1530,17 @@ impl EntityInputHandler for TextInput {
             return None;
         }
         let range = self.range_from_utf16(&range_utf16);
+        if layout.has_bidi() {
+            let spans = layout.spans(range.clone(), px(0.));
+            let (x0, x1, y) = match (spans.first(), spans.iter().filter(|s| s.2 == spans[0].2).last()) {
+                (Some(f), Some(l)) => (f.0, l.1, f.2),
+                _ => {
+                    let p = layout.position(range.start);
+                    (p.x, p.x, p.y)
+                }
+            };
+            return Some(Bounds::from_corners(bounds.origin + point(x0, y), bounds.origin + point(x1, y + layout.line_height)));
+        }
         let (a, b) = (layout.position(range.start), layout.position(range.end));
         let b = if b.y == a.y { b } else { point(a.x, a.y) };
         Some(Bounds::from_corners(
@@ -1432,7 +1821,7 @@ impl Element for TextElement {
                 gpui::AvailableSpace::Definite(w) => Some(w),
                 _ => None,
             });
-            let layout = Layout::shape(text.clone(), &runs, font_size, width, line_height, window);
+            let layout = Layout::shape(text.clone(), &runs, font_size, width, width.unwrap_or_default(), line_height, window);
             size(width.unwrap_or(px(0.)), layout.height())
         });
         (id, ())
@@ -1457,7 +1846,7 @@ impl Element for TextElement {
         let (text, runs, font_size) = input.display(window);
         let line_height = window.line_height();
         let wrap = input.multiline.map(|_| bounds.size.width);
-        let mut layout = Layout::shape(text, &runs, font_size, wrap, line_height, window);
+        let mut layout = Layout::shape(text, &runs, font_size, wrap, bounds.size.width, line_height, window);
         layout.align = (input.center || input.right).then_some(bounds.size.width);
         layout.right = input.right;
         let (start, end) = if input.content.is_empty() {
@@ -1476,7 +1865,7 @@ impl Element for TextElement {
         let field = bounds;
         let bounds = if input.multiline.is_none() && layout.align.is_none() {
             let w = bounds.size.width - px(2.);
-            let text_w = layout.lines.first().map(|(_, _, l)| l.width()).unwrap_or_default();
+            let text_w = layout.first_width();
             let x = layout.position(caret).x;
             let mut sx = input.hscroll.get();
             if x - sx > w {
@@ -1500,6 +1889,12 @@ impl Element for TextElement {
                 )),
                 Vec::new(),
             )
+        } else if layout.has_bidi() {
+            let tint = ca(89, 252, 179, 0.25);
+            let rects = layout.spans(start..end, bounds.size.width).into_iter().map(|(x0, x1, y)| {
+                fill(Bounds::from_corners(o + point(x0, y), o + point(x1, y + line_height)), tint)
+            });
+            (None, rects.collect())
         } else {
             let (a, b) = (layout.position(start), layout.position(end));
             let tint = ca(89, 252, 179, 0.25);
@@ -1532,7 +1927,11 @@ impl Element for TextElement {
                 .words
                 .iter()
                 .flat_map(|r| {
-                    let (a, b) = (layout.position(input.to_display(r.start)), layout.position(input.to_display(r.end)));
+                    let (start, end) = (input.to_display(r.start), input.to_display(r.end));
+                    if layout.has_bidi() {
+                        return layout.spans(start..end, px(0.)).into_iter().map(|(x0, x1, y)| (o.x + x0, o.x + x1, o.y + y)).collect();
+                    }
+                    let (a, b) = (layout.position(start), layout.position(end));
                     if a.y == b.y {
                         vec![(o.x + a.x, o.x + b.x, o.y + a.y)]
                     } else {
@@ -1548,7 +1947,10 @@ impl Element for TextElement {
             .iter()
             .filter_map(|sub| Some((sub, sub.src.clone()?)))
             .map(|(sub, src)| {
-                let p = layout.position(sub.display.start);
+                let p = match layout.has_bidi() {
+                    true => layout.spans(sub.display.clone(), px(0.)).first().map_or_else(|| layout.position(sub.display.start), |s| point(s.0, s.2)),
+                    false => layout.position(sub.display.start),
+                };
                 let mut art = crate::pic::img(src).size(side).into_any_element();
                 let at = o + point(p.x, p.y + (line_height - side) / 2.);
                 art.prepaint_as_root(
@@ -1599,6 +2001,16 @@ impl Element for TextElement {
             // A chip spans the text's 18px content box, not the 21px line.
             let inset = ((layout.line_height - px(18.)) / 2.).max(px(0.));
             for (range, fill, radius, pad) in self.input.read(cx).chips.borrow().iter() {
+                if layout.has_bidi() {
+                    for (x0, x1, y) in layout.spans(range.clone(), px(0.)) {
+                        let quad = Bounds::new(
+                            bounds.origin + point(x0 - px(*pad), y + inset),
+                            gpui::size(x1 - x0 + px(2. * pad), layout.line_height - inset * 2.),
+                        );
+                        window.paint_quad(gpui::fill(quad, *fill).corner_radii(gpui::Corners::all(px(*radius))));
+                    }
+                    continue;
+                }
                 let (mut a, b) = (layout.position(range.start), layout.position(range.end));
                 // A chip opening right at a soft wrap reads as the end of the row above.
                 let second = layout.after(range.start);
@@ -1621,7 +2033,17 @@ impl Element for TextElement {
                     window.paint_quad(gpui::fill(quad, *fill).corner_radii(gpui::Corners::all(px(*radius))));
                 }
             }
-            for (_, y, line) in &layout.lines {
+            for (_, y, para) in &layout.lines {
+                let line = match para {
+                    Para::Plain(line) => line,
+                    Para::Bidi(b) => {
+                        for (r, row) in b.rows.iter().enumerate() {
+                            let at = point(layout.row_x(b, row), *y + layout.line_height * r as f32);
+                            row.line.paint(bounds.origin + at, layout.line_height, gpui::TextAlign::Left, None, window, cx).ok();
+                        }
+                        continue;
+                    }
+                };
                 let align = if layout.right {
                     gpui::TextAlign::Right
                 } else if layout.align.is_some() {

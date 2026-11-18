@@ -837,6 +837,7 @@ impl CosmicTextSystemState {
         if let Some((sink, missing_glyphs)) = self.missing_glyph_sink.as_ref().zip(missing_glyphs) {
             sink.report(missing_glyphs);
         }
+        reorder_bidi(text, &mut runs, layout.w);
 
         LineLayout {
             font_size,
@@ -919,6 +920,57 @@ impl CosmicTextSystemState {
             FallbackFontClass::Monospace
         } else {
             FallbackFontClass::Proportional
+        }
+    }
+}
+
+/// Places every glyph cluster where UAX #9 orders it. cosmic-text keeps the words of a
+/// right-to-left run in reading order inside a left-to-right line, though each word is shaped
+/// right.
+fn reorder_bidi(text: &str, runs: &mut [ShapedRun], width: f32) {
+    use unicode_bidi::{BidiClass, BidiInfo, bidi_class};
+    if !text
+        .chars()
+        .any(|c| matches!(bidi_class(c), BidiClass::R | BidiClass::AL))
+    {
+        return;
+    }
+    let bidi = BidiInfo::new(text, None);
+    let Some(para) = bidi.paragraphs.first() else {
+        return;
+    };
+    let (levels, visual) = bidi.visual_runs(para, para.range.clone());
+    // Each cluster's leftmost glyph as laid, and its width up to the next cluster on screen.
+    let mut left: std::collections::BTreeMap<usize, f32> = std::collections::BTreeMap::new();
+    for glyph in runs.iter().flat_map(|r| r.glyphs.iter()) {
+        let x = f32::from(glyph.position.x);
+        left.entry(glyph.index)
+            .and_modify(|l| *l = l.min(x))
+            .or_insert(x);
+    }
+    let mut by_x: Vec<(usize, f32)> = left.iter().map(|(&i, &x)| (i, x)).collect();
+    by_x.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut advance: std::collections::HashMap<usize, f32> =
+        std::collections::HashMap::with_capacity(by_x.len());
+    for (k, &(i, x)) in by_x.iter().enumerate() {
+        let next = by_x.get(k + 1).map_or(width, |n| n.1);
+        advance.insert(i, (next - x).max(0.));
+    }
+    let mut placed: std::collections::HashMap<usize, f32> =
+        std::collections::HashMap::with_capacity(by_x.len());
+    let mut x = by_x.first().map_or(0., |c| c.1.min(0.));
+    for run in visual {
+        let rtl = levels.get(run.start).is_some_and(|l| l.is_rtl());
+        let clusters = left.range(run.clone()).map(|(&i, _)| i);
+        let order: Vec<usize> = if rtl { clusters.rev().collect() } else { clusters.collect() };
+        for i in order {
+            placed.insert(i, x);
+            x += advance[&i];
+        }
+    }
+    for glyph in runs.iter_mut().flat_map(|r| r.glyphs.iter_mut()) {
+        if let (Some(to), Some(from)) = (placed.get(&glyph.index), left.get(&glyph.index)) {
+            glyph.position.x += gpui::px(to - from);
         }
     }
 }
