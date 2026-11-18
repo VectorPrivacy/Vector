@@ -1759,7 +1759,7 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                         .when(!compact, |d| d.max_w(px(720.)).mx_auto().px(px(62.)).pt(px(12.)))
                         .when(compact, |d| d.px(px(18.)).pt(px(4.)))
                         .pb(px(140.))
-                        .child(body),
+                        .child(crate::kit::rise("cs-content-in", body, 300, (0., 8., 1.), crate::kit::bezier(0.22, 1., 0.36, 1.))),
                 ),
         )
         .children(save_bar(m, on, cx));

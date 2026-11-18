@@ -21,7 +21,7 @@ pub struct Key {
     pub path: [u16; 4],
 }
 
-fn msg_hash(id: &str) -> u64 {
+pub(crate) fn msg_hash(id: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut h);

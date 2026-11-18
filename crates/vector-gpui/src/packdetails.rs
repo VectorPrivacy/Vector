@@ -2,6 +2,7 @@
 //! `vector://emojis/pack/<naddr>` link names, with its emojis and Add or Remove.
 
 use crate::kit::Tipped as _;
+use gpui::AnimationExt as _;
 use std::rc::Rc;
 
 use gpui::{AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, ScrollHandle, StatefulInteractiveElement, Styled, Window, div, prelude::*, px, svg};
@@ -306,7 +307,8 @@ pub fn view(
         .bg(ca(0, 0, 0, 0.78))
         .font_family(INTER)
         .on_click(move |_, w, cx| backdrop(Act::Close, w, cx))
-        .child(
+        .child(crate::kit::rise(
+            "pack-details-rise",
             div()
                 .id("pack-details-card")
                 .relative()
@@ -353,6 +355,15 @@ pub fn view(
                         ),
                 )
                 .child(div().map(|d| if narrow { d.pt(px(24.)).px(px(18.)).pb(px(18.)) } else { d.pt(px(28.)).px(px(24.)).pb(px(20.)) }).child(body)),
+            240,
+            (0., 12., 0.98),
+            crate::kit::bezier(0.16, 1., 0.3, 1.),
+        ))
+        // `pack-details-fade`
+        .with_animation(
+            "pack-details-fade",
+            gpui::Animation::new(std::time::Duration::from_millis(180)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+            |d, t| d.bg(ca(0, 0, 0, 0.78 * t)),
         )
         .into_any_element()
 }

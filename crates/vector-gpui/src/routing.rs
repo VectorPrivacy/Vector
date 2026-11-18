@@ -1651,7 +1651,7 @@ pub fn notice_line(n: Notice, open: impl Fn(&gpui::ClickEvent, &mut gpui::Window
     let (rgb, text, dot): ((u8, u8, u8), u32, u32) = if n.warn { ((255, 193, 7), 0xffd98a, 0xffc107) } else { ((255, 120, 96), 0xffb3a3, 0xff7860) };
     let (bg, hover) = if n.warn { (0.06, 0.1) } else { (0.07, 0.12) };
     let tip = n.title;
-    div()
+    let line = div()
         .id("net-notice")
         .mx(px(15.))
         .mt(px(22.))
@@ -1675,6 +1675,6 @@ pub fn notice_line(n: Notice, open: impl Fn(&gpui::ClickEvent, &mut gpui::Window
         .on_click(open)
         .child(notice_dot(n.warn, dot))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(n.text))
-        .child(svg().path("ui/notice-go.svg").flex_shrink_0().w(px(6.)).h(px(10.)).text_color(c(text)).opacity(0.7))
-        .into_any_element()
+        .child(svg().path("ui/notice-go.svg").flex_shrink_0().w(px(6.)).h(px(10.)).text_color(c(text)).opacity(0.7));
+    crate::kit::rise("net-notice-in", line, 250, (0., -4., 1.), crate::kit::bezier(0., 0., 0.58, 1.))
 }

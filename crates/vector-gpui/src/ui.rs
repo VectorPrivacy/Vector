@@ -4510,6 +4510,7 @@ impl VectorApp {
     ) {
         match target {
             Target::Spoiler(id) => {
+                crate::inline::reveal(&msg_id, id);
                 self.revealed
                     .borrow_mut()
                     .entry(msg_id)
@@ -7076,7 +7077,7 @@ impl Render for VectorApp {
                     .and_then(|(id, shown)| store.invites.iter().find(|i| i.community_id == id).map(|inv| (inv, shown)))
                     .map(|(inv, shown)| {
                         let (a, b) = (inv.community_id.clone(), inv.community_id.clone());
-                        let el = crate::community::invite_details(
+                        let el = kit::closing(shown, || crate::community::invite_details(
                             &store,
                             inv,
                             Box::new(cx.listener(|app, _, _, cx| {
@@ -7089,7 +7090,7 @@ impl Render for VectorApp {
                             Box::new(cx.listener(move |app, _, window, cx| {
                                 app.answer_invite(b.clone(), false, window, cx)
                             })),
-                        );
+                        ));
                         if shown < 1. { kit::faded(el, shown, 13) } else { el.into_any_element() }
                     }),
             )
@@ -7891,7 +7892,13 @@ fn rail(
                                 .text_color(c(TEXT))
                                 .child("Collapse"),
                         )
-                    }),
+                    })
+                    // `ws-rail-toggle-in`: a fade, as the rail's width jumps when it unlocks.
+                    .with_animation(
+                        "ws-rail-toggle-in",
+                        gpui::Animation::new(std::time::Duration::from_millis(400)).with_easing(kit::bezier(0.25, 0.1, 0.25, 1.)),
+                        |d, t| d.opacity(0.4 * t),
+                    ),
             )
         })
         .when(slim, |d| {
@@ -19686,7 +19693,7 @@ impl VectorApp {
                         }),
                     )
                     .opacity(shown)
-                    .child(kit::pop("status-dialog-pop", card, 160))
+                    .child(kit::pop_or_out("status-dialog-pop", card, 160, shown))
                     .when(shown < 1., |d| d.child(kit::inert()))
                     .when(panel, |d| {
                         d.child(
@@ -19780,7 +19787,7 @@ impl VectorApp {
                         cx.listener(move |app, _, _, cx| close(app, cx)),
                     )
                     .opacity(shown)
-                    .child(kit::pop("qr-overlay-pop", card, 160))
+                    .child(kit::pop_or_out("qr-overlay-pop", card, 160, shown))
                     .when(shown < 1., |d| d.child(kit::inert())),
             )
             .with_priority(10)

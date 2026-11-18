@@ -6,7 +6,7 @@ use crate::{
 /// Draws `child` scaled about a point of its box, as CSS `transform: scale()` does: layout and
 /// hit testing keep the unscaled box.
 pub fn zoom(child: impl IntoElement) -> Zoom {
-    Zoom { child: child.into_any_element(), scale: 1., origin: point(0.5, 0.5), opacity: None }
+    Zoom { child: child.into_any_element(), scale: 1., origin: point(0.5, 0.5), opacity: None, shift: Point::default() }
 }
 
 /// See [`zoom`].
@@ -15,6 +15,7 @@ pub struct Zoom {
     scale: f32,
     origin: Point<f32>,
     opacity: Option<f32>,
+    shift: Point<Pixels>,
 }
 
 impl Zoom {
@@ -27,6 +28,12 @@ impl Zoom {
     /// The fixed point, as fractions of the box (`transform-origin`); the centre by default.
     pub fn origin(mut self, x: f32, y: f32) -> Self {
         self.origin = point(x, y);
+        self
+    }
+
+    /// Moves the drawn subtree by this much (`translate`), its layout left where it is.
+    pub fn shift(mut self, x: f32, y: f32) -> Self {
+        self.shift = point(crate::px(x), crate::px(y));
         self
     }
 
@@ -77,7 +84,7 @@ impl Element for Zoom {
     ) {
         let pivot = self.pivot(bounds);
         let opacity = self.opacity;
-        window.with_element_zoom(pivot, self.scale, |window| {
+        window.with_element_transform(pivot, self.scale, self.shift, |window| {
             window.with_element_opacity(opacity, |window| self.child.prepaint(window, cx))
         });
     }
@@ -94,7 +101,7 @@ impl Element for Zoom {
     ) {
         let pivot = self.pivot(bounds);
         let opacity = self.opacity;
-        window.with_element_zoom(pivot, self.scale, |window| {
+        window.with_element_transform(pivot, self.scale, self.shift, |window| {
             window.with_element_opacity(opacity, |window| self.child.paint(window, cx))
         });
     }

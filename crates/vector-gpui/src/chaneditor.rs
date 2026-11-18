@@ -1203,7 +1203,8 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
                 .pb(px(140.))
                 .when(m.busy, |d| d.opacity(0.6))
                 .when(compact, |d| d.pt(px(4.)))
-                .children(blocks.into_iter().map(|b| {
+                .children(blocks.into_iter().enumerate().map(|(i, b)| {
+                    let b = crate::kit::rise(("ce-content-in", i), b, 300, (0., 8., 1.), crate::kit::bezier(0.22, 1., 0.36, 1.));
                     div().w_full().map(|d| if compact { d.px(px(18.)) } else { d.max_w(px(720.)).mx_auto().px(px(62.)) }).child(b)
                 })),
         )

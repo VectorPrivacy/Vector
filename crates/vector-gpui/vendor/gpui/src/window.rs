@@ -4574,11 +4574,25 @@ impl Window {
     /// Draw `f` scaled by `scale` about `pivot` (CSS `transform: scale()`): painting only, layout and
     /// hit testing keep the unscaled boxes.
     pub fn with_element_zoom<R>(&mut self, pivot: Point<Pixels>, scale: f32, f: impl FnOnce(&mut Self) -> R) -> R {
-        if scale == 1. {
+        self.with_element_transform(pivot, scale, Point::default(), f)
+    }
+
+    /// [`Self::with_element_zoom`], the result then moved by `shift`.
+    pub fn with_element_transform<R>(
+        &mut self,
+        pivot: Point<Pixels>,
+        scale: f32,
+        shift: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if scale == 1. && shift == Point::default() {
             return f(self);
         }
         let (a, k) = self.element_zoom.unwrap_or((Point::default(), 1.));
-        let zoom = (point(a.x + pivot.x * (k * (1. - scale)), a.y + pivot.y * (k * (1. - scale))), k * scale);
+        let zoom = (
+            point(a.x + (pivot.x * (1. - scale) + shift.x) * k, a.y + (pivot.y * (1. - scale) + shift.y) * k),
+            k * scale,
+        );
         self.with_zoom_state(Some(zoom), f)
     }
 

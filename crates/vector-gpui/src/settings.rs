@@ -2721,6 +2721,22 @@ fn advanced_fold(open: bool, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+/// `remote-signer-dot-pulse`: the connecting dot's glow breathes, as a sprite strip so a long
+/// wait re-renders nothing.
+fn connecting_dot() -> impl IntoElement {
+    const SPAN: f32 = 1.2;
+    let strip = crate::sprite::strip("signer-connecting", 2., 26, &crate::sprite::times(SPAN, 20.), SPAN, |t, buf, k| {
+        let p = t / SPAN;
+        let w = if p < 0.5 { p * 2. } else { (1. - p) * 2. };
+        let w = w * w * (3. - 2. * w);
+        crate::sprite::glow(buf, 13. * k, 13. * k, 4. * k, 3. * k, 0xf1c40f, 0.6 * w);
+        crate::sprite::disc(buf, 13. * k, 13. * k, 4. * k, 0xf1c40f, 1.);
+    });
+    div().relative().flex_none().size(px(8.)).child(
+        gpui::img(gpui::ImageSource::Render(strip)).id("signer-connecting").absolute().left(px(-9.)).top(px(-9.)).size(px(26.)),
+    )
+}
+
 /// `.remote-signer-card`: who signs for this account, and a way to re-pair it.
 fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
     let short = if npub.len() > 18 { format!("{}…{}", &npub[..12], &npub[npub.len() - 6..]) } else { npub.to_string() };
@@ -2730,9 +2746,19 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
         "connecting" => (c(0xf1c40f), Some(ca(241, 196, 15, 0.6))),
         _ => (c(0x9aa0a6), None),
     };
-    let dot = div().size(px(8.)).flex_none().rounded_full().bg(fill).when_some(glow, |d, g| {
-        d.shadow(vec![gpui::BoxShadow { color: g, offset: gpui::point(px(0.), px(0.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
-    });
+    let dot = if dot == "connecting" {
+        connecting_dot().into_any_element()
+    } else {
+        div()
+            .size(px(8.))
+            .flex_none()
+            .rounded_full()
+            .bg(fill)
+            .when_some(glow, |d, g| {
+                d.shadow(vec![gpui::BoxShadow { color: g, offset: gpui::point(px(0.), px(0.)), blur_radius: px(6.), spread_radius: px(0.), inset: false }])
+            })
+            .into_any_element()
+    };
     // Its top margin collapses into the heading's.
     div()
         .mb(px(16.))
@@ -2841,12 +2867,13 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
     ));
     col = col.child(advanced_fold(s.sec_advanced, on));
     if s.sec_advanced {
-        col = col.child(st_row(
-            "keys",
-            "Private Keys",
-            "exportAccount",
-            st_btn("keys-btn", "Show", || Act::ShowKeys, on),
-            on,
+        // `blockedFadeIn`
+        col = col.child(crate::kit::rise(
+            "sec-advanced-row",
+            st_row("keys", "Private Keys", "exportAccount", st_btn("keys-btn", "Show", || Act::ShowKeys, on), on),
+            200,
+            (0., -8., 1.),
+            crate::kit::bezier(0.25, 0.1, 0.25, 1.),
         ));
     }
     col.into_any_element()

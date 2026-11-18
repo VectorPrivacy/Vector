@@ -599,12 +599,48 @@ pub fn popup(
 }
 
 /// `qr-overlay-pop`: a modal card grows from 0.92 and fades in over `ms` with CSS `ease-out`.
-pub fn pop(id: impl Into<ElementId>, el: impl IntoElement, ms: u64) -> gpui::AnimationElement<gpui::Zoom> {
-    gpui::zoom(el).with_animation(
-        id,
-        gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(bezier(0., 0., 0.58, 1.)),
-        |z, t| z.scale(0.92 + 0.08 * t).opacity(t),
-    )
+pub fn pop(id: impl Into<ElementId>, el: impl IntoElement, ms: u64) -> AnyElement {
+    pop_or_out(id, el, ms, CLOSING.get())
+}
+
+/// [`pop`], or `modal-card-pop-out` (scaling down to 0.92) while its modal fades at `shown`.
+pub fn pop_or_out(id: impl Into<ElementId>, el: impl IntoElement, ms: u64, shown: f32) -> AnyElement {
+    if shown < 1. {
+        return gpui::zoom(el).scale(0.92 + 0.08 * shown).into_any_element();
+    }
+    gpui::zoom(el)
+        .with_animation(
+            id,
+            gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(bezier(0., 0., 0.58, 1.)),
+            |z, t| z.scale(0.92 + 0.08 * t).opacity(t),
+        )
+        .into_any_element()
+}
+
+/// A CSS entrance on `transform` and `opacity`: drawn `dy` points lower (negative: higher) and
+/// at `scale`, rising into place and fading in over `ms`, eased by `ease`.
+pub fn rise(
+    id: impl Into<ElementId>,
+    el: impl IntoElement,
+    ms: u64,
+    (dx, dy, scale): (f32, f32, f32),
+    ease: impl Fn(f32) -> f32 + 'static,
+) -> AnyElement {
+    gpui::zoom(el)
+        .with_animation(id, gpui::Animation::new(std::time::Duration::from_millis(ms)).with_easing(ease), move |z, t| {
+            z.scale(scale + (1. - scale) * t).shift(dx * (1. - t), dy * (1. - t)).opacity(t)
+        })
+        .into_any_element()
+}
+
+thread_local!(static CLOSING: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) });
+
+/// Builds a closing modal: the card its view pops in with [`pop`] pops out instead.
+pub fn closing<R>(shown: f32, build: impl FnOnce() -> R) -> R {
+    let was = CLOSING.replace(shown);
+    let r = build();
+    CLOSING.set(was);
+    r
 }
 
 /// `cic-pop-in`: a card that just resolved settles in from 0.97 with a little overshoot.
@@ -757,7 +793,9 @@ impl<T> Linger<T> {
         }
         window.request_animation_frame();
         let last = self.last.borrow();
-        Some(draw(last.as_ref()?, 1. - bezier(0., 0., 0.58, 1.)(t), window))
+        let last = last.as_ref()?;
+        let shown = 1. - bezier(0., 0., 0.58, 1.)(t);
+        Some(closing(shown, || draw(last, shown, window)))
     }
 }
 

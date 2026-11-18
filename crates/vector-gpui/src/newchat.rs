@@ -485,7 +485,7 @@ pub fn view(
                         ),
                 )
                 .map(|d| match invite {
-                    Some(p) => d.child(link_card(p, member)).child(
+                    Some(p) => d.child(crate::kit::rise("cg-link-in", link_card(p, member), 320, (0., 10., 0.98), crate::kit::bezier(0.22, 1., 0.36, 1.))).child(
                         div()
                             .mt(px(14.))
                             .flex()

@@ -1276,6 +1276,19 @@ impl Element for Inline {
                             );
                         }
                     }
+                    Kind::Spoiler { id, revealed: true } if let Some(t) = self.select.as_ref().and_then(|k| revealing(k.msg, *id)) => {
+                        // `spoilerReveal`: the blur's copies thin out as the text comes back from the accent.
+                        window.request_animation_frame();
+                        let e = crate::kit::bezier(0., 0., 0.58, 1.)(t);
+                        let accent = mix(c(ACCENT), c(0x04110d), 0.3);
+                        for (dx, dy) in [(-1.5f32, -1.), (1.5, -1.), (-1.5, 1.), (1.5, 1.), (-3., 0.), (3., 0.), (0., -2.), (0., 2.)] {
+                            let line = shape(piece, look, accent.opacity(0.22 * (1. - e)), window);
+                            let _ = line.paint(origin + point(px(dx * (1. - e)), px(dy * (1. - e))), px(lh), TextAlign::Left, None, window, cx);
+                        }
+                        let color = mix(accent, look.color, e).opacity(0.7 + 0.3 * e);
+                        let line = shape(piece, look, color, window);
+                        let _ = line.paint(origin, px(lh), TextAlign::Left, None, window, cx);
+                    }
                     Kind::Action(_) if action_hot => {
                         let line = shape(piece, look, white_a(0.7), window);
                         let _ = line.paint(origin, px(lh), TextAlign::Left, None, window, cx);
@@ -1344,6 +1357,22 @@ impl Element for Inline {
             }
         });
     }
+}
+
+thread_local!(static REVEALS: RefCell<std::collections::HashMap<(u64, u32), std::time::Instant>> = RefCell::default());
+
+/// A spoiler just clicked open in message `msg`: it eases out of its cover over 0.3 s.
+pub fn reveal(msg: &str, id: u32) {
+    REVEALS.with_borrow_mut(|r| {
+        r.retain(|_, at| at.elapsed().as_secs_f32() < 1.);
+        r.insert((crate::select::msg_hash(msg), id), std::time::Instant::now());
+    });
+}
+
+/// How far a spoiler's reveal has run, while it runs.
+fn revealing(msg: u64, id: u32) -> Option<f32> {
+    let t = REVEALS.with_borrow(|r| r.get(&(msg, id)).map(|at| at.elapsed().as_secs_f32() / 0.3))?;
+    (t < 1.).then_some(t)
 }
 
 fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
