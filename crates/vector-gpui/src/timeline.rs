@@ -1034,6 +1034,7 @@ pub(crate) fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyEle
     match b {
         Block::Para(p) => {
             let el = inline(p.atoms.clone(), p.base.clone())
+                .dir_auto()
                 .id(SharedString::from(key.to_string()))
                 .on_click(click.clone())
                 .clock(clock);
@@ -1367,7 +1368,7 @@ fn table(
             Some(Alignment::Center) => d.flex().justify_center(),
             _ => d,
         };
-        let el = inline(p.atoms.clone(), base).on_click(click.clone()).clock(clock);
+        let el = inline(p.atoms.clone(), base).dir_auto().on_click(click.clone()).clock(clock);
         let el = match crate::select::key_for(&k) {
             Some(sel) => el.selectable(sel),
             None => el,

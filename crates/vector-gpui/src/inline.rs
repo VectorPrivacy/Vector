@@ -295,6 +295,8 @@ pub struct Inline {
     nowrap: bool,
     /// Paragraphs start left to right even in a right-to-left UI.
     ltr: bool,
+    /// Each paragraph sits at its own start edge rather than the UI's (`dir=auto`).
+    dir_auto: bool,
     /// Its pictures hold their first frame until their row is hovered (`data-motion="hover"`).
     held: bool,
 }
@@ -311,6 +313,7 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         select: None,
         nowrap: false,
         ltr: false,
+        dir_auto: false,
         held: false,
     }
 }
@@ -346,6 +349,13 @@ impl Inline {
     /// Code: its lines run left to right whatever the UI's direction.
     pub fn ltr(mut self) -> Self {
         self.ltr = true;
+        self
+    }
+
+    /// Message text: a paragraph that reads left to right stays left in a right-to-left UI,
+    /// where a label sits against the UI's start edge whatever its script.
+    pub fn dir_auto(mut self) -> Self {
+        self.dir_auto = true;
         self
     }
 
@@ -390,7 +400,8 @@ struct Line {
     /// How far the glyphs' own baseline sits above `baseline`: GPUI reports descent negative.
     sink: f32,
     items: Vec<Placed>,
-    /// Set against the right edge: a line of a right-to-left paragraph.
+    /// Set against the right edge: a right-to-left paragraph's line, or a label's in a
+    /// mirrored UI.
     right: bool,
 }
 
@@ -796,7 +807,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -
     for (line, right) in out.iter_mut().zip(flush_right) {
         line.right = right;
         if right {
-            let end = line.items.iter().map(|p| p.x + p.lead + p.width + p.tail).fold(0., f32::max);
+            let end = line_end(line);
             for p in &mut line.items {
                 p.x += block - end;
             }
@@ -808,6 +819,25 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -
         flush: block,
         ellipsis: None,
         size: size(px(block), px(top)),
+    }
+}
+
+fn line_end(line: &Line) -> f32 {
+    line.items.iter().map(|p| p.x + p.lead + p.width + p.tail).fold(0., f32::max)
+}
+
+/// Sets every line against the right edge, where a mirrored UI starts. A cut line fills its box.
+fn to_start(laid: &mut Laid) {
+    if laid.ellipsis.is_some() {
+        return;
+    }
+    let flush = laid.flush;
+    for line in laid.lines.iter_mut().filter(|l| !l.right) {
+        let shift = flush - line_end(line);
+        for p in &mut line.items {
+            p.x += shift;
+        }
+        line.right = true;
     }
 }
 
@@ -842,6 +872,11 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         laid.width = Some(width);
         laid.size.width = px(end.min(width).ceil());
         return laid;
+    }
+    // A right-to-left line keeps its start, on the right: cut it as its mirror image.
+    let rtl_line = line.right;
+    if rtl_line {
+        mirror_items(&mut line.items, end);
     }
     let look_of = |i: usize| match &atoms[i] {
         Atom::Text { look, .. } => look.clone(),
@@ -904,11 +939,29 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
             .unwrap_or(0.),
         0,
     ));
+    let cut = if rtl_line {
+        mirror_items(&mut keep, width);
+        let look = look_of(cut.1);
+        let ell = f32::from(shape("…", &look, look.color, window).width);
+        laid.flush = width;
+        (width - cut.0 - ell, cut.1)
+    } else {
+        cut
+    };
     line.items = keep;
     laid.ellipsis = Some(cut);
     laid.width = Some(width);
     laid.size.width = px(width);
     laid
+}
+
+/// Reflects a line's pieces within `width`, keeping them in left-to-right order.
+fn mirror_items(items: &mut [Placed], width: f32) {
+    for p in items.iter_mut() {
+        p.x = width - (p.x + p.lead + p.width + p.tail);
+        std::mem::swap(&mut p.lead, &mut p.tail);
+    }
+    items.reverse();
 }
 
 fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
@@ -1028,6 +1081,9 @@ impl Element for Inline {
                 } else {
                     layout(&self.atoms, &self.base, w, self.ltr, window)
                 };
+            }
+            if !self.dir_auto && window.mirrored() {
+                to_start(&mut s);
             }
             flush_to(&mut s, w);
         }

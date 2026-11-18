@@ -373,7 +373,7 @@ impl Nexus {
             spot_held: false,
             wash: HashMap::new(),
             scroll: ScrollHandle::new(),
-            shelves: HashMap::new(),
+            shelves: ["pad", "touch", "keys", "recent", "together", "tools"].into_iter().map(|k| (k, ScrollHandle::new())).collect(),
             turned: Instant::now(),
             returning: false,
             opened: Instant::now(),
@@ -1151,7 +1151,7 @@ fn shelf(
     handle: &ScrollHandle,
     on: &OnAct,
 ) -> AnyElement {
-    let at = -f32::from(handle.offset().x);
+    let at = crate::kit::scrolled(handle);
     let max = f32::from(handle.max_offset().x);
     let at_start = at <= 2.;
     let at_end = at >= max - 2.;

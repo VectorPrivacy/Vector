@@ -1174,7 +1174,7 @@ impl EmojiPicker {
                     .child(cat.name)
             });
             let max = self.kaomoji_strip.max_offset().x;
-            let x = -self.kaomoji_strip.offset().x;
+            let x = px(crate::kit::scrolled(&self.kaomoji_strip));
             let fade = |left: bool| {
                 let (from, to) = if left { (1., 0.) } else { (0., 1.) };
                 div()

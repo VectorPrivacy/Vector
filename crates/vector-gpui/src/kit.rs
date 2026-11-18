@@ -22,6 +22,17 @@ pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
     row
 }
 
+/// How far a sideways scroller has moved from its start, whichever way the layout runs.
+pub fn scrolled(handle: &gpui::ScrollHandle) -> f32 {
+    f32::from(handle.offset().x).abs()
+}
+
+/// Scrolls a sideways scroller to `at` from its start: mirrored content scrolls rightward.
+pub fn scroll_from_start(handle: &gpui::ScrollHandle, at: f32) {
+    let x = if gpui::layout_rtl() { at } else { -at };
+    handle.set_offset(gpui::point(px(x), handle.offset().y));
+}
+
 /// Letters `gap` apart, with no space after the last.
 pub fn gapped(text: &str, gap: f32) -> gpui::Div {
     if crate::inline::has_rtl(text) {

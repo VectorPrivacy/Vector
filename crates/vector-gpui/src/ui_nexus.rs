@@ -363,9 +363,9 @@ impl VectorApp {
                 let h = n.shelf(key);
                 let w = f32::from(h.bounds().size.width);
                 let max = f32::from(h.max_offset().x);
-                let at = -f32::from(h.offset().x);
+                let at = crate::kit::scrolled(&h);
                 let to = (at + dir * (w * 0.8).max(160.)).clamp(0., max);
-                h.set_offset(gpui::point(px(-to), px(0.)));
+                crate::kit::scroll_from_start(&h, to);
             }
             Act::PlayWith(id) => self.play_with(id, window, cx),
             Act::Publisher(npub) => {
