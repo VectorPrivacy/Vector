@@ -29,7 +29,7 @@ use crate::theme::*;
 use crate::timeline;
 use chrono::TimeZone;
 
-const CHROME_H: f32 = 32.;
+pub(crate) const CHROME_H: f32 = 32.;
 pub(crate) const RAIL_W: f32 = 201.;
 /// The collapsed rail, its border included.
 pub(crate) const RAIL_SLIM_W: f32 = 73.;

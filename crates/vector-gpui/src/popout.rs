@@ -2,6 +2,7 @@
 //! still playing, in a box that moves by dragging and resizes from any corner.
 
 use gpui::{Point, Pixels};
+use crate::ui::CHROME_H;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -203,10 +204,10 @@ impl Popout {
         if self.picture() { (width - 2.) / aspect + VIDEO_CHROME } else { self.measured.get().max(SOUND_H) }
     }
 
-    /// Kept inside the window.
+    /// Kept inside the window, below its title strip.
     pub fn clamp(&mut self, win: (f32, f32), size: (f32, f32)) {
         self.right = self.right.min(win.0 - size.0 - 8.).max(8.);
-        self.bottom = self.bottom.min(win.1 - size.1 - 8.).max(8.);
+        self.bottom = self.bottom.min(win.1 - size.1 - CHROME_H - 8.).max(8.);
     }
 
     /// A height change grows the box toward the open space: in the window's upper half it
@@ -279,7 +280,9 @@ impl Popout {
                         };
                         let room = (if pin_right { ax } else { win.0 - ax }) - 8.;
                         let (min, max) = if picture { VIDEO_LIMITS } else { AUDIO_LIMITS };
-                        let cap = if picture { min.max(video_cap(win, aspect)) } else { max };
+                        // A video's height grows with it: its free edge stops below the title strip or above the foot.
+                        let tall = (if pin_bottom { ay - CHROME_H } else { win.1 - ay }) - 8. - VIDEO_CHROME;
+                        let cap = if picture { min.max(video_cap(win, aspect).min(tall * aspect + 2.)) } else { max };
                         let nw = want.min(max).min(cap).min(room).max(min).round();
                         if picture {
                             self.widths.video = nw;
@@ -323,7 +326,7 @@ impl Popout {
 
 /// The picture keeps to about half the window's height, the box to 60% of its width.
 fn video_cap(win: (f32, f32), aspect: f32) -> f32 {
-    (win.0 * 0.6).min((win.1 * 0.55).min(win.1 - 160.) * aspect).max(160.)
+    (win.0 * 0.6).min((win.1 * 0.55).min(win.1 - CHROME_H - 160.) * aspect).max(160.)
 }
 
 #[cfg(test)]
@@ -368,6 +371,8 @@ mod tests {
         assert_eq!((p.right, p.bottom), (116., 116.));
         p.gesture(&Act::Drag(gpui::point(px(-500.), px(-500.))), win, 1.);
         assert_eq!(p.right, 1280. - 320. - 8.);
+        let h = p.height(p.width(win, 1.), 1.);
+        assert_eq!(win.1 - p.bottom - h, CHROME_H + 8., "below the title strip");
     }
 
     #[test]
