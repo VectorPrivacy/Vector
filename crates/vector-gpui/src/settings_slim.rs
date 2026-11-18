@@ -14,7 +14,7 @@ fn query(s: &Settings, cx: &App) -> String {
 fn hits(cat: &Category, query: &str) -> Vec<bool> {
     cat.anchors
         .iter()
-        .map(|a| query.is_empty() || format!("{} {} {}", cat.label, a.label, a.keys).to_lowercase().contains(query))
+        .map(|a| query.is_empty() || format!("{} {} {}", (cat.label)(), (a.label)(), (a.keys)()).to_lowercase().contains(query))
         .collect()
 }
 
@@ -31,7 +31,7 @@ fn heading(cat: &'static str, a: &Anchor, on: &OnAct) -> AnyElement {
         .line_height(px(22.))
         .font_weight(FontWeight::BOLD)
         .text_color(c(0xffffff))
-        .child(a.label)
+        .child((a.label)())
         .child(
             div()
                 .id(SharedString::from(format!("sm-link-{}", a.id)))
@@ -156,7 +156,7 @@ fn cat_row(cat: &Category, first: bool, open: bool, s: &Settings, on: &OnAct) ->
                 .text_size(px(17.))
                 .line_height(px(22.))
                 .text_color(label)
-                .child(cat.label),
+                .child((cat.label)()),
         )
         .child(
             svg()

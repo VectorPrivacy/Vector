@@ -316,12 +316,12 @@ fn resolve(key: &str, store: &Store) -> Resolved {
                 .and_then(|id| cat.anchors.iter().find(|a| a.id == *id))
             {
                 Some(a) => r(
-                    a.label.into(),
-                    &t::start_kind_settings_page(cat.label),
+                    (a.label)().to_string(),
+                    &t::start_kind_settings_page(&(cat.label)()),
                     icon(cat.icon),
                     false,
                 ),
-                None => r(cat.label.into(), &t::start_kind_settings(), icon(cat.icon), false),
+                None => r((cat.label)().to_string(), &t::start_kind_settings(), icon(cat.icon), false),
             }
         }
         ["requests"] => r(t::start_requests().to_string(), &t::start_kind_messages(), icon("mail"), false),
@@ -433,7 +433,7 @@ pub fn hits(sm: &StartMenu, store: &Store, query: &str) -> Vec<Hit> {
         updates: true,
     }) {
         places.push(format!("settings/{}", cat.id));
-        for a in cat.anchors.iter().filter(|a| a.label != cat.label) {
+        for a in cat.anchors.iter().filter(|a| (a.label)() != (cat.label)()) {
             places.push(format!("settings/{}/{}", cat.id, a.id));
         }
     }

@@ -12,6 +12,7 @@ use crate::pic::img;
 
 use crate::composer::TextInput;
 use crate::data::Store;
+use crate::t;
 use crate::settings::{Anchor, Category, NavOn, anchor};
 use crate::theme::*;
 
@@ -242,85 +243,39 @@ impl CommSettings {
         };
         let mut out = vec![
             section(
-                "overview",
-                "Overview",
-                "info",
+"overview", t::community_settings_page_overview, "info",
                 vec![
-                    anchor(
-                        "identity",
-                        "Icon & Name",
-                        "icon avatar logo picture image name title rename",
-                    ),
-                    anchor(
-                        "banner",
-                        "Banner",
-                        "banner cover header art background picture image",
-                    ),
-                    anchor(
-                        "description",
-                        "Description",
-                        "description about bio summary",
-                    ),
-                    anchor(
-                        "system-messages",
-                        "System Messages",
-                        "system messages join leave joined left welcome channel",
-                    ),
-                    anchor(
-                        "landing-channel",
-                        "Landing Channel",
-                        "landing channel first start new members rules welcome verify captcha onboarding",
-                    ),
+                    anchor("identity", t::community_settings_section_identity, t::community_settings_section_identity_keys),
+                    anchor("banner", t::community_settings_section_banner, t::community_settings_section_banner_keys),
+                    anchor("description", t::community_settings_section_description, t::community_settings_section_description_keys),
+                    anchor("system-messages", t::community_settings_section_system_messages, t::community_settings_section_system_messages_keys),
+                    anchor("landing-channel", t::community_settings_section_landing_channel, t::community_settings_section_landing_channel_keys),
                 ],
             ),
             section(
-                "relays",
-                "Relays",
-                "globe",
+"relays", t::community_settings_page_relays, "globe",
                 vec![
-                    anchor(
-                        "relay-list",
-                        "Hosting Relays",
-                        "relays servers hosting network nostr",
-                    ),
-                    anchor(
-                        "voice-relays",
-                        "Voice Relays",
-                        "voice relays iroh calls audio",
-                    ),
+                    anchor("relay-list", t::community_settings_section_relay_list, t::community_settings_section_relay_list_keys),
+                    anchor("voice-relays", t::community_settings_section_voice_relays, t::community_settings_section_voice_relays_keys),
                 ],
             ),
         ];
         if self.can("manage_roles") {
             out.push(section(
-                "roles",
-                "Roles",
-                "shield-filled",
+"roles", t::community_settings_page_roles, "shield-filled",
                 crate::roles::anchors(&self.roles),
             ));
         }
         if self.can("ban") {
             out.push(section(
-                "bans",
-                "Bans",
-                "x-user",
-                vec![anchor(
-                    "ban-list",
-                    "Banned Members",
-                    "bans banned unban blocked removed",
-                )],
+"bans", t::community_settings_page_bans, "x-user",
+                vec![anchor("ban-list", t::community_settings_section_ban_list, t::community_settings_section_ban_list_keys)],
             ));
         }
         if self.can("view_audit_log") {
             out.push(section(
-                "audit",
-                "Audit Log",
-                "clock",
-                vec![anchor(
-                    "audit-list",
-                    "Audit Log",
-                    "audit log history changes actions who when record",
-                )],
+"audit", t::community_settings_page_audit, "clock",
+                vec![anchor("audit-list", t::community_settings_section_audit_list, t::community_settings_section_audit_list_keys)],
             ));
         }
         out
@@ -1862,7 +1817,7 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                         .text_size(px(16.))
                         .line_height(px(19.))
                         .text_color(c(0xffffff))
-                        .child(section.label),
+                        .child((section.label)()),
                 )
                 .child(
                     div()
@@ -1996,7 +1951,7 @@ pub(crate) fn tab_strip(
                         .flex_shrink_0()
                         .text_color(if here { white_a(0.5) } else { c(0x5b6060) }),
                 )
-                .child(s.label),
+                .child((s.label)()),
         );
     }
     div()

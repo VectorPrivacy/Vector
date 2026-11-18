@@ -262,8 +262,8 @@ fn place_names(store: &Store, path: &str) -> (Part, Vec<String>) {
             };
             let want = second.unwrap_or(if direct.is_some() { "" } else { first });
             match cat.anchors.iter().find(|a| a.id == want) {
-                Some(a) => (icon, vec![cat.label.to_string(), a.label.to_string()]),
-                None => (icon, vec![cat.label.to_string()]),
+                Some(a) => (icon, vec![(cat.label)().to_string(), (a.label)().to_string()]),
+                None => (icon, vec![(cat.label)().to_string()]),
             }
         }
     }

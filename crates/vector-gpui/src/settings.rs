@@ -19,23 +19,27 @@ use crate::theme::*;
 mod slim;
 pub use slim::slim_view;
 
+/// A message, looked up each time it is shown so it follows the language.
+pub type Label = fn() -> SharedString;
+
 pub struct Anchor {
     pub id: &'static str,
-    pub label: &'static str,
-    pub keys: &'static str,
+    pub label: Label,
+    /// Words a search finds it by.
+    pub keys: Label,
     /// The release line it arrived in, for its NEW pill.
     since: Option<&'static str>,
 }
 
 pub struct Category {
     pub id: &'static str,
-    pub label: &'static str,
+    pub label: Label,
     pub icon: &'static str,
     pub danger: bool,
     pub anchors: Vec<Anchor>,
 }
 
-pub const fn anchor(id: &'static str, label: &'static str, keys: &'static str) -> Anchor {
+pub const fn anchor(id: &'static str, label: Label, keys: Label) -> Anchor {
     Anchor {
         id,
         label,
@@ -44,12 +48,7 @@ pub const fn anchor(id: &'static str, label: &'static str, keys: &'static str) -
     }
 }
 
-const fn fresh(
-    id: &'static str,
-    label: &'static str,
-    since: &'static str,
-    keys: &'static str,
-) -> Anchor {
+const fn fresh(id: &'static str, label: Label, since: &'static str, keys: Label) -> Anchor {
     Anchor {
         id,
         label,
@@ -62,34 +61,17 @@ const fn fresh(
 pub fn categories(offers: &Offers) -> Vec<Category> {
     let mut audio = Vec::new();
     if offers.voice {
-        audio.push(anchor(
-            "voice",
-            "Voice",
-            "voice whisper transcribe transcription translate model download",
-        ));
+        audio.push(anchor("voice", t::settings_section_voice, t::settings_section_voice_keys));
     }
-    audio.push(fresh("calls", "Calls", "0.5", "calls microphone speaker automatic gain echo cancellation noise suppression test mic device"));
+    audio.push(fresh("calls", t::settings_section_calls, "0.5", t::settings_section_calls_keys));
     let mut privacy = vec![
-        anchor(
-            "privacy",
-            "Privacy",
-            "web previews video players youtube embeds url tracking typing indicators proxy media",
-        ),
-        fresh(
-            "streamer",
-            "Streamer Mode",
-            "0.5",
-            "streamer stream streaming live obs twitch screen share hide names pictures notifications",
-        ),
+        anchor("privacy", t::settings_section_privacy, t::settings_section_privacy_keys),
+        fresh("streamer", t::settings_section_streamer, "0.5", t::settings_section_streamer_keys),
     ];
     if offers.routing {
-        privacy.push(fresh("routing", "Routing", "0.5", "routing network tor i2p onion standard clearnet bridges obfs4 circuit outproxy sam router anonymity"));
+        privacy.push(fresh("routing", t::settings_section_routing, "0.5", t::settings_section_routing_keys));
     }
-    privacy.push(anchor(
-        "blocked",
-        "Blocked Users",
-        "blocked users block unblock",
-    ));
+    privacy.push(anchor("blocked", t::settings_section_blocked, t::settings_section_blocked_keys));
     let cat = |id, label, icon, anchors| Category {
         id,
         label,
@@ -99,91 +81,49 @@ pub fn categories(offers: &Offers) -> Vec<Category> {
     };
     let mut out = vec![
         cat(
-            "appearance",
-            "Appearance",
-            "palette",
-            vec![anchor(
-                "display",
-                "Display",
-                "theme colour color vector satoshi chatstr cosmic purple neon xmr display image types background wallpaper rich composer emoticon suggestions time suggestions countdown autocorrect send on enter return key floating player main menu navbar navigation pins sidebar tabs",
-            )],
-        ),
-        cat("audio", "Audio", "volume-max", audio),
-        cat(
-            "notifications",
-            "Notifications",
-            "bell",
-            vec![anchor(
-                "notifications",
-                "Notifications",
-                "mute sounds everyone pings content privacy sound prelude techno custom",
-            )],
+"appearance", t::settings_page_appearance, "palette",
+            vec![anchor("display", t::settings_section_display, t::settings_section_display_keys)],
         ),
         cat(
-            "network",
-            "Network",
-            "globe",
+"audio", t::settings_page_audio, "volume-max", audio),
+        cat(
+"notifications", t::settings_page_notifications, "bell",
+            vec![anchor("notifications", t::settings_section_notifications, t::settings_section_notifications_keys)],
+        ),
+        cat(
+"network", t::settings_page_network, "globe",
             vec![
-                anchor("relays", "Nostr Relays", "network nostr relays add custom"),
-                anchor(
-                    "servers",
-                    "Media Servers",
-                    "network media servers blossom upload add custom",
-                ),
-                anchor(
-                    "clock",
-                    "Clock",
-                    "clock time date decentralised decentralized device relays slow fast timestamp",
-                ),
+                anchor("relays", t::settings_section_relays, t::settings_section_relays_keys),
+                anchor("servers", t::settings_section_servers, t::settings_section_servers_keys),
+                anchor("clock", t::settings_section_clock, t::settings_section_clock_keys),
             ],
         ),
         cat(
-            "storage",
-            "Storage",
-            "folder",
-            vec![anchor(
-                "storage",
-                "Storage",
-                "storage usage clear auto-download download limit gallery show save keep files unencrypted media video quality compression compress",
-            )],
+"storage", t::settings_page_storage, "folder",
+            vec![anchor("storage", t::settings_section_storage, t::settings_section_storage_keys)],
         ),
-        cat("privacy", "Privacy", "eye-off", privacy),
         cat(
-            "security",
-            "Security",
-            "locked",
-            vec![anchor(
-                "security",
-                "Security",
-                "security pin password biometric signer bunker encryption key",
-            )],
+"privacy", t::settings_page_privacy, "eye-off", privacy),
+        cat(
+"security", t::settings_page_security, "locked",
+            vec![anchor("security", t::settings_section_security, t::settings_section_security_keys)],
         ),
     ];
     if offers.updates {
         out.push(cat(
-            "updates",
-            "Updates",
-            "download",
-            vec![anchor(
-                "updates",
-                "Updates",
-                "updates version release changelog download install",
-            )],
+"updates", t::settings_page_updates, "download",
+            vec![anchor("updates", t::settings_section_updates, t::settings_section_updates_keys)],
         ));
     }
     out.push(Category {
         id: "danger",
-        label: "Danger Zone",
+        label: t::settings_page_danger,
         icon: "warning",
         danger: true,
         anchors: vec![
-            anchor(
-                "advanced",
-                "Advanced",
-                "advanced mode developer bot ids copy id identifier",
-            ),
-            anchor("logs", "Logs", "copy logs crash debug"),
-            anchor("logout", "Logout", "logout log out sign out"),
+            anchor("advanced", t::settings_section_advanced, t::settings_section_advanced_keys),
+            anchor("logs", t::settings_section_logs, t::settings_section_logs_keys),
+            anchor("logout", t::settings_section_logout, t::settings_section_logout_keys),
         ],
     });
     out
@@ -3806,7 +3746,7 @@ pub fn section_nav(
             .iter()
             .map(|a| {
                 query.is_empty()
-                    || format!("{} {} {}", cat.label, a.label, a.keys)
+                    || format!("{} {} {}", (cat.label)(), (a.label)(), (a.keys)())
                         .to_lowercase()
                         .contains(&query)
             })
@@ -3888,7 +3828,7 @@ pub fn section_nav(
                             })
                         }),
                 )
-                .child(div().min_w_0().truncate().child(cat.label))
+                .child(div().min_w_0().truncate().child((cat.label)()))
                 .when(flag, |d| d.child(badge_new())),
         );
         // `.cs-anchors-wrap`: the row grows while its anchors fade and settle into place.
@@ -3952,7 +3892,7 @@ pub fn section_nav(
                         .hover(|d| d.text_color(if on_it { c(0xffffff) } else { c(0xe6e6e6) }))
                         .cursor_pointer()
                         .on_click(move |_, w, cx| jump((cid, aid), w, cx))
-                        .child(div().min_w_0().truncate().child(a.label))
+                        .child(div().min_w_0().truncate().child((a.label)()))
                         .when(fresh.contains(&a.id), |d| d.child(badge_new())),
                 );
             }
@@ -4148,7 +4088,7 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
                         .line_height(px(28.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(c(0xffffff))
-                        .child(a.label)
+                        .child((a.label)())
                         .child(
                             div()
                                 .id(SharedString::from(format!("cs-link-{}", a.id)))
@@ -4193,7 +4133,7 @@ pub fn view(s: &Settings, width: f32, on: &OnAct, cx: &App) -> AnyElement {
                 .text_size(px(16.))
                 .line_height(px(19.))
                 .text_color(c(0xffffff))
-                .child(cat.label),
+                .child((cat.label)()),
         )
         .child(
             div()

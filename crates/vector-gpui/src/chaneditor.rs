@@ -13,7 +13,8 @@ use crate::kit::Tipped as _;
 use crate::commsettings::{block, field_head, heading, hint, input_box, lede, save_btn, short_npub, tab_strip, text_btn};
 use crate::composer::TextInput;
 use crate::data::Store;
-use crate::settings::{Anchor, Category, NavOn, anchor};
+use crate::settings::{Anchor, Category, Label, NavOn, anchor};
+use crate::t;
 use crate::theme::*;
 
 pub const NAME_MAX: usize = 64;
@@ -52,9 +53,9 @@ pub const VOICE: &[Perm] = &[
     perm(26, "Timeout Members", "Time out members beneath them here."),
 ];
 
-const GROUPS: [(&str, &str, &str, &[Perm]); 2] = [
-    ("perm-channel", "Channel", "view send threads attach files reactions history manage messages hide", CHANNEL),
-    ("perm-voice", "Voice", "connect speak video priority mute deafen move timeout", VOICE),
+const GROUPS: [(&str, Label, Label, &[Perm]); 2] = [
+    ("perm-channel", t::channel_editor_section_perm_channel, t::channel_editor_section_perm_channel_keys, CHANNEL),
+    ("perm-voice", t::channel_editor_section_perm_voice, t::channel_editor_section_perm_voice_keys, VOICE),
 ];
 
 const VIEWS: [(&str, &str, &str); 2] = [
@@ -451,29 +452,29 @@ impl ChannelEditor {
 
     pub fn sections(&self) -> Vec<Category> {
         let activated = self.perms.as_ref().is_some_and(|p| p.activated);
-        let mut overview = vec![anchor("ch-name", "Name", "name rename title")];
+        let mut overview = vec![anchor("ch-name", t::channel_editor_section_name, t::channel_editor_section_name_keys)];
         if !self.is_category {
-            overview.push(anchor("ch-topic", "Topic", "topic description about"));
-            overview.push(anchor("ch-view", "Opens As", "view text voice opens"));
+            overview.push(anchor("ch-topic", t::channel_editor_section_topic, t::channel_editor_section_topic_keys));
+            overview.push(anchor("ch-view", t::channel_editor_section_view, t::channel_editor_section_view_keys));
             if activated {
-                overview.push(anchor("ch-private", "Privacy", "private privacy public hidden key"));
+                overview.push(anchor("ch-private", t::channel_editor_section_private, t::channel_editor_section_private_keys));
             }
         }
         let mut permissions: Vec<Anchor> = Vec::new();
         if self.syncable() {
-            permissions.push(anchor("ch-sync", "Category Sync", "sync category inherit"));
+            permissions.push(anchor("ch-sync", t::channel_editor_section_sync, t::channel_editor_section_sync_keys));
         }
         let own = self.perms_open() && !self.perms.as_ref().is_some_and(|p| p.synced);
         if own {
-            permissions.push(anchor("ch-lock", "Lockdown", "lock lockdown locked spam read only announcements"));
+            permissions.push(anchor("ch-lock", t::channel_editor_section_lock, t::channel_editor_section_lock_keys));
         }
-        permissions.push(anchor("ch-targets", "Roles & Members", "roles members everyone overwrite who"));
+        permissions.push(anchor("ch-targets", t::channel_editor_section_targets, t::channel_editor_section_targets_keys));
         if own {
-            permissions.extend(GROUPS.iter().map(|(id, title, keys, _)| anchor(id, title, keys)));
+            permissions.extend(GROUPS.iter().map(|(id, title, keys, _)| anchor(id, *title, *keys)));
         }
         vec![
-            Category { id: "overview", label: "Overview", icon: "info", danger: false, anchors: overview },
-            Category { id: "permissions", label: "Permissions", icon: "shield-filled", danger: false, anchors: permissions },
+            Category { id: "overview", label: t::channel_editor_page_overview, icon: "info", danger: false, anchors: overview },
+            Category { id: "permissions", label: t::channel_editor_page_permissions, icon: "shield-filled", danger: false, anchors: permissions },
         ]
     }
 
@@ -1034,7 +1035,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                             .line_height(px(28.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(c(0xffffff))
-                            .child(title)
+                            .child(title())
                             .children(open_label.clone().map(|l| {
                                 div().ml(px(7.)).font_weight(FontWeight::NORMAL).text_color(c(0x8a8a8a)).child(format!("for {l}"))
                             })),
@@ -1261,7 +1262,7 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
                 .justify_between()
                 .border_b_1()
                 .border_color(c(0x171717))
-                .child(div().text_size(px(16.)).line_height(px(19.)).text_color(c(0xffffff)).child(section.label))
+                .child(div().text_size(px(16.)).line_height(px(19.)).text_color(c(0xffffff)).child((section.label)()))
                 .child(
                     div()
                         .id("ce-close")

@@ -14,6 +14,7 @@ use crate::commsettings::{
     input_box, lede, member_row, save_btn, search_box, short_npub, text_btn,
 };
 use crate::data::Store;
+use crate::t;
 use crate::theme::*;
 
 pub const NAME_MAX: usize = 64;
@@ -1263,35 +1264,15 @@ pub fn view(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement
 pub fn anchors(r: &Roles) -> Vec<crate::settings::Anchor> {
     use crate::settings::anchor;
     match &r.edit {
-        None => vec![anchor(
-            "role-list",
-            "Role List",
-            "roles role list order rank create permissions",
-        )],
-        Some(e) if e.everyone => vec![anchor(
-            "role-permissions",
-            "Permissions",
-            "everyone role permissions ban kick manage",
-        )],
+        None => vec![anchor("role-list", t::roles_section_role_list, t::roles_section_role_list_keys)],
+        Some(e) if e.everyone => vec![anchor("role-permissions", t::roles_section_everyone_permissions, t::roles_section_everyone_permissions_keys)],
         Some(e) => {
             let mut v = vec![
-                anchor(
-                    "role-display",
-                    "Display",
-                    "role name colour color access channel scope",
-                ),
-                anchor(
-                    "role-permissions",
-                    "Permissions",
-                    "role permissions ban kick manage",
-                ),
+                anchor("role-display", t::roles_section_role_display, t::roles_section_role_display_keys),
+                anchor("role-permissions", t::roles_section_role_permissions, t::roles_section_role_permissions_keys),
             ];
             if e.id.is_some() {
-                v.push(anchor(
-                    "role-members",
-                    "Members",
-                    "role members holders assign give",
-                ));
+                v.push(anchor("role-members", t::roles_section_role_members, t::roles_section_role_members_keys));
             }
             v
         }
