@@ -618,11 +618,15 @@ pub fn start_relay_monitor(client: &Client) {
                 );
 
                 // A reconnected socket carries no live subscriptions: Vector owns reconnects.
-                if status == RelayStatus::Connected {
-                    if let Some(c) = state::nostr_client() {
-                        vector_core::resubscribe_relay_after_reconnect(&c, &relay_url).await;
-                    }
-                    super::sync::after_reconnect();
+                if status == RelayStatus::Connected
+                    && let Some(c) = state::nostr_client()
+                {
+                    vector_core::resubscribe_relay_after_reconnect(&c, &relay_url).await;
+                    let (has_read, has_gossip) = match c.relay(&relay_url).await {
+                        Ok(Some(r)) => (r.capabilities().has_read(), r.capabilities().has_gossip()),
+                        _ => (false, false),
+                    };
+                    super::sync::relay_connected(url, has_read, has_gossip);
                 }
             }
         });

@@ -1,7 +1,7 @@
 //! Concord Communities: summaries, rosters, channel history and sends, and the catch-up that
 //! pages every held channel behind the live subscription.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
@@ -352,19 +352,9 @@ pub async fn control(channel_id: &str, target: &str, op: Control<'_>) -> Result<
 const WINDOW: usize = 6;
 /// The paint asks from a little before each channel's newest held message.
 const SINCE_SLACK_SECS: u64 = 3600;
-const COOLDOWN_MS: u64 = 20_000;
 
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static RERUN: AtomicBool = AtomicBool::new(false);
-static RECONNECT_ARMED: AtomicBool = AtomicBool::new(false);
-static LAST_END_MS: AtomicU64 = AtomicU64::new(0);
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
 
 /// Sweep every held channel, or queue one more behind a sweep already going: a relay that came
 /// up mid-run may hold what that run never asked it for.
@@ -380,23 +370,83 @@ fn rerun() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(run())
 }
 
-/// A burst of reconnects becomes one sweep once it settles.
-pub fn after_reconnect() {
-    if !realtime::subscription_ready() || RECONNECT_ARMED.swap(true, Ordering::SeqCst) {
+/// Relays back since the last pass, and whether one is ours (it also holds the Community List).
+struct Reconnected;
+struct Resyncing;
+
+/// A burst of reconnects becomes one catch-up, scoped to the Communities on those relays. One
+/// that lands mid-pass queues for the next.
+pub fn reconnected(relay: String, ours: bool) {
+    let session = db::current_session();
+    let pending = session.scoped::<Reconnected, std::sync::Mutex<(Vec<String>, bool)>>();
+    {
+        let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+        if !p.0.contains(&relay) {
+            p.0.push(relay);
+        }
+        p.1 |= ours;
+    }
+    let busy = session.scoped::<Resyncing, AtomicBool>();
+    if busy.swap(true, Ordering::AcqRel) {
         return;
     }
-    db::spawn_bound(async {
-        let cooling = (LAST_END_MS.load(Ordering::SeqCst) + COOLDOWN_MS).saturating_sub(now_ms());
-        tokio::time::sleep(Duration::from_millis(cooling.max(1500))).await;
-        RECONNECT_ARMED.store(false, Ordering::SeqCst);
-        request();
+    db::spawn_bound(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let (relays, ours) = {
+                let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
+                (std::mem::take(&mut p.0), std::mem::take(&mut p.1))
+            };
+            if !relays.is_empty() && !db::session_stopped() {
+                // The pool re-sends the DM sub on reconnect, not this targeted one.
+                if let Some(client) = vector_core::state::nostr_client() {
+                    realtime::refresh_subscription(&client).await;
+                }
+                resync(relays, ours).await;
+            }
+            busy.store(false, Ordering::Release);
+            let queued = !pending.lock().unwrap_or_else(|e| e.into_inner()).0.is_empty();
+            if !queued || db::session_stopped() || busy.swap(true, Ordering::AcqRel) {
+                break;
+            }
+        }
     });
+}
+
+/// Only the gap: each channel's latest page is floored at its newest cursor.
+async fn resync(relays: Vec<String>, ours: bool) {
+    use vector_core::inbox_relays::normalize_relay_url;
+    let back: std::collections::HashSet<String> = relays.iter().map(|r| normalize_relay_url(r)).collect();
+    let uses = |list: &[String]| list.iter().any(|r| back.contains(&normalize_relay_url(r)));
+    let mut channels: Vec<String> = Vec::new();
+    for id in db::community::list_community_ids().unwrap_or_default() {
+        let Ok(Some(c)) = db::community::load_community_v2(&id) else {
+            continue;
+        };
+        if !uses(&c.relays) {
+            continue;
+        }
+        // Its control, guestbook and rekeys may have moved in the gap too.
+        realtime::enqueue_follow(c.id());
+        channels.extend(c.channels.iter().map(|ch| bytes_to_hex_32(&ch.id.0)));
+    }
+    if ours {
+        db::spawn_bound(ingest_list());
+    }
+    stream::iter(channels)
+        .map(|cid| async move {
+            if !db::session_stopped() {
+                let _ = sync_channel(cid, None).await;
+            }
+        })
+        .buffer_unordered(WINDOW)
+        .collect::<Vec<()>>()
+        .await;
 }
 
 async fn run() {
     RERUN.store(false, Ordering::SeqCst);
     sweep().await;
-    LAST_END_MS.store(now_ms(), Ordering::SeqCst);
     IN_FLIGHT.store(false, Ordering::SeqCst);
     if RERUN.swap(false, Ordering::SeqCst) && !db::session_stopped() {
         IN_FLIGHT.store(true, Ordering::SeqCst);

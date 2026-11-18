@@ -113,9 +113,12 @@ pub async fn fetch_messages(init: bool) {
     }
     db::spawn_bound(async move {
         super::emit("sync_progress", serde_json::json!({ "mode": "Syncing" }));
+        let synced = db::current_session().scoped::<Synced, AtomicBool>();
+        synced.store(false, Ordering::SeqCst);
         if dms(false).await.reached_none() {
             watch_unreachable();
         }
+        synced.store(true, Ordering::SeqCst);
         super::emit("sync_finished", ());
         if init {
             db::spawn_bound(merge_media_servers());
@@ -188,49 +191,159 @@ pub fn notifs() {
 
 // ── Catch-up ────────────────────────────────────────────────────────────────
 
-/// Quiet time after a sweep before a reconnect buys another.
-const COOLDOWN_MS: u64 = 20_000;
-static RECONNECT_ARMED: AtomicBool = AtomicBool::new(false);
-static LAST_END_MS: AtomicU64 = AtomicU64::new(0);
+/// The login's DM sync has finished: until then it covers every relay itself.
+struct Synced;
+/// Relays that have connected at least once this session: only a reconnect can drop events.
+struct SeenConnected;
+/// Relays that came back mid-sync, caught up once it ends.
+struct AfterSync;
+/// When Connected last refolded the held Communities.
+struct LastRefold;
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+fn syncing() -> bool {
+    !db::current_session().scoped::<Synced, AtomicBool>().load(Ordering::SeqCst)
 }
 
-/// A burst of relay reconnects becomes one catch-up once it settles.
-pub fn after_reconnect() {
-    if !vector_core::community::v2::realtime::subscription_ready()
-        || RECONNECT_ARMED.swap(true, Ordering::SeqCst)
-    {
+/// A relay's socket came up. What it can have missed depends on what it is to us: DMs only
+/// where we read, Community planes only on a Community relay. Someone else's inbox, dialled for
+/// one send, is neither.
+pub fn relay_connected(url: String, has_read: bool, has_gossip: bool) {
+    refold_held();
+    let session = db::current_session();
+    let reconnect = !session
+        .scoped::<SeenConnected, std::sync::Mutex<std::collections::HashSet<String>>>()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(url.clone());
+    let discovery_only = !has_read && {
+        let norm = vector_core::inbox_relays::normalize_relay_url(&url);
+        let same = |d: &str| vector_core::inbox_relays::normalize_relay_url(d) == norm;
+        state::discovery_relay_iter().any(same) && !state::TRUSTED_RELAYS.iter().any(|d| same(d))
+    };
+    let todo = Owed::of(Seen { has_read, has_gossip, reconnect, syncing: syncing(), discovery_only });
+    let after_sync = session.scoped::<AfterSync, std::sync::Mutex<std::collections::HashSet<String>>>();
+    if todo.dms_after_sync && after_sync.lock().unwrap_or_else(|e| e.into_inner()).insert(url.clone()) {
+        let url = url.clone();
+        db::spawn_bound(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15 * 60);
+            while syncing() {
+                if db::session_stopped() || std::time::Instant::now() > deadline {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            after_sync.lock().unwrap_or_else(|e| e.into_inner()).remove(&url);
+            if !db::session_stopped() {
+                dms_from(vec![url]).await;
+            }
+        });
+    }
+    if todo.dms_now {
+        let url = url.clone();
+        db::spawn_bound(async move {
+            dms_from(vec![url]).await;
+        });
+    }
+    if todo.communities {
+        super::community::reconnected(url, has_read);
+    }
+}
+
+/// What a relay that just came up is to us.
+#[derive(Clone, Copy)]
+struct Seen {
+    has_read: bool,
+    has_gossip: bool,
+    reconnect: bool,
+    syncing: bool,
+    /// A discovery relay that isn't also one we read or a default: it holds no planes.
+    discovery_only: bool,
+}
+
+/// What a relay that came up can have missed, and so is asked for.
+#[derive(Debug, PartialEq)]
+struct Owed {
+    /// Its DMs once the login's sync ends: the sync may already have passed it.
+    dms_after_sync: bool,
+    dms_now: bool,
+    /// Plane fetches dial their relays themselves, so only a reconnect drops Community events.
+    communities: bool,
+}
+
+impl Owed {
+    fn of(s: Seen) -> Self {
+        Self {
+            dms_after_sync: s.has_read && s.syncing && s.reconnect,
+            dms_now: s.has_read && !s.syncing,
+            communities: !s.syncing && s.reconnect && (s.has_read || s.has_gossip) && !s.discovery_only,
+        }
+    }
+}
+
+/// A `limit(0)` subscription never replays what a relay missed while down: each Connected
+/// refolds the held Communities and re-tracks the subscription at their current epochs, once
+/// per burst.
+fn refold_held() {
+    let last = db::current_session().scoped::<LastRefold, AtomicU64>();
+    let now = vector_core::clock::now_ms();
+    let before = last.load(Ordering::SeqCst);
+    if now.saturating_sub(before) < 3000 || last.compare_exchange(before, now, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return;
     }
     db::spawn_bound(async {
-        let cooling = (LAST_END_MS.load(Ordering::SeqCst) + COOLDOWN_MS).saturating_sub(now_ms());
-        tokio::time::sleep(Duration::from_millis(cooling.max(1500))).await;
-        RECONNECT_ARMED.store(false, Ordering::SeqCst);
-        super::community::request();
-        dms(true).await;
-        LAST_END_MS.store(now_ms(), Ordering::SeqCst);
+        for c in vector_core::community::v2::realtime::load_held_v2() {
+            vector_core::community::v2::realtime::enqueue_follow(c.id());
+        }
+        if let Some(c) = state::nostr_client() {
+            vector_core::community::v2::realtime::refresh_subscription(&c).await;
+        }
     });
 }
 
 /// What a dropped live subscription or a stretch away missed.
 pub fn catch_up(what: vector_core::live_subs::CatchUp) {
-    if !vector_core::community::v2::realtime::subscription_ready() {
-        return;
-    }
-    match what {
-        vector_core::live_subs::CatchUp::Relay(_) => after_reconnect(),
-        vector_core::live_subs::CatchUp::All { .. } => {
-            super::community::request();
-            db::spawn_bound(async {
-                dms(true).await;
-            });
+    use vector_core::live_subs::CatchUp;
+    db::spawn_bound(async move {
+        let Some(client) = state::nostr_client() else { return };
+        match what {
+            CatchUp::Relay(url) => {
+                let has_read = matches!(client.relay(&url).await, Ok(Some(r)) if r.capabilities().has_read());
+                if has_read {
+                    dms_from(vec![url.clone()]).await;
+                }
+                super::community::reconnected(url, has_read);
+            }
+            CatchUp::All { .. } => {
+                if syncing() {
+                    return;
+                }
+                for (url, relay) in client.relays().await {
+                    super::community::reconnected(url.to_string(), relay.capabilities().has_read());
+                }
+                retrying(Opts { is_new: true, only: None, bootstrap: false }).await;
+            }
         }
+    });
+}
+
+/// What `relays` hold that we missed: news, so it notifies.
+async fn dms_from(relays: Vec<String>) {
+    retrying(Opts { is_new: true, only: Some(relays), bootstrap: false }).await;
+}
+
+async fn retrying(opts: Opts) -> Report {
+    let (is_new, bootstrap) = (opts.is_new, opts.bootstrap);
+    let report = dm_pass(opts).await;
+    if !report.complete() {
+        let first = report.clone();
+        db::spawn_bound(async move {
+            dm_catchup::retry_incomplete(&first, |relays| {
+                dm_pass(Opts { is_new, only: (!relays.is_empty()).then_some(relays), bootstrap })
+            })
+            .await;
+        });
     }
+    report
 }
 
 struct Bootstrapping;
@@ -238,25 +351,7 @@ struct Bootstrapping;
 /// Catch up on DMs: each read relay's window since its cursor, retried behind it until held.
 /// A relay with no cursor yet then reconciles its whole history once, in the background.
 pub async fn dms(is_new: bool) -> Report {
-    let report = dm_pass(Opts {
-        is_new,
-        only: None,
-        bootstrap: false,
-    })
-    .await;
-    if !report.complete() {
-        let first = report.clone();
-        db::spawn_bound(async move {
-            dm_catchup::retry_incomplete(&first, |relays| {
-                dm_pass(Opts {
-                    is_new,
-                    only: (!relays.is_empty()).then_some(relays),
-                    bootstrap: false,
-                })
-            })
-            .await;
-        });
-    }
+    let report = retrying(Opts { is_new, only: None, bootstrap: false }).await;
     bootstrap_cursorless().await;
     dm_catchup::start_safety_net(|| {
         dm_pass(Opts {
@@ -303,4 +398,31 @@ async fn bootstrap_cursorless() {
         .await;
         busy.store(false, Ordering::SeqCst);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Owed, Seen};
+
+    fn seen(has_read: bool, has_gossip: bool, reconnect: bool, syncing: bool) -> Seen {
+        Seen { has_read, has_gossip, reconnect, syncing, discovery_only: false }
+    }
+
+    #[test]
+    fn a_relay_is_asked_only_for_what_it_can_have_missed() {
+        // A read relay's first connect after the sync: its DMs, not its Communities.
+        assert_eq!(Owed::of(seen(true, false, false, false)), Owed { dms_after_sync: false, dms_now: true, communities: false });
+        // Its reconnect: both.
+        assert_eq!(Owed::of(seen(true, false, true, false)), Owed { dms_after_sync: false, dms_now: true, communities: true });
+        // Back mid-sync: its DMs once the sync ends, nothing now.
+        assert_eq!(Owed::of(seen(true, false, true, true)), Owed { dms_after_sync: true, dms_now: false, communities: false });
+        // A Community relay we don't read: its planes on a reconnect only.
+        assert_eq!(Owed::of(seen(false, true, true, false)), Owed { dms_after_sync: false, dms_now: false, communities: true });
+        assert_eq!(Owed::of(seen(false, true, false, false)), Owed { dms_after_sync: false, dms_now: false, communities: false });
+        // Someone else's inbox, dialled for one send.
+        assert_eq!(Owed::of(seen(false, false, true, false)), Owed { dms_after_sync: false, dms_now: false, communities: false });
+        // A discovery relay holds no planes.
+        let indexer = Seen { discovery_only: true, ..seen(false, true, true, false) };
+        assert_eq!(Owed::of(indexer), Owed { dms_after_sync: false, dms_now: false, communities: false });
+    }
 }
