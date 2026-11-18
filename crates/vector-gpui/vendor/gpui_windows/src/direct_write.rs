@@ -573,12 +573,18 @@ impl DirectWriteState {
             }
 
             if starts_right_to_left(text) {
-                // Right-aligned in a box exactly as wide as the line, which then spans 0..width.
-                text_layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                text_layout.SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT)?;
+                // Measured while the box is still unbounded and left-aligned (right-aligned, an
+                // infinite box has no edge), then right-aligned in a box exactly the line's width.
                 let mut metrics = DWRITE_TEXT_METRICS::default();
-                text_layout.GetMetrics(&mut metrics)?;
-                text_layout.SetMaxWidth(metrics.widthIncludingTrailingWhitespace)?;
+                text_layout.GetMetrics(&mut metrics).context("measuring a right-to-left line")?;
+                let width = metrics.widthIncludingTrailingWhitespace;
+                if width.is_finite() && width > 0.0 {
+                    text_layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP).context("SetWordWrapping")?;
+                    text_layout.SetMaxWidth(width).context("SetMaxWidth")?;
+                    text_layout
+                        .SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT)
+                        .context("SetReadingDirection")?;
+                }
             }
 
             let mut runs = Vec::new();
@@ -590,12 +596,14 @@ impl DirectWriteState {
                 layout: &text_layout,
                 width: 0.0,
             };
-            text_layout.Draw(
-                Some((&raw mut renderer_context).cast::<c_void>().cast_const()),
-                &components.text_renderer.0,
-                0.0,
-                0.0,
-            )?;
+            text_layout
+                .Draw(
+                    Some((&raw mut renderer_context).cast::<c_void>().cast_const()),
+                    &components.text_renderer.0,
+                    0.0,
+                    0.0,
+                )
+                .context("drawing a line")?;
             let width = px(renderer_context.width);
             // Runs left to right, whatever order a mixed-direction line was drawn in.
             runs.sort_by(|a, b| {

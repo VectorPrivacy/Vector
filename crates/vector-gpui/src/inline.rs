@@ -1935,6 +1935,7 @@ mod rtl_tests {
 
     #[test]
     fn the_platform_shaper_reads_a_hebrew_first_line_right_to_left() {
+        let _ = env_logger::builder().is_test(true).try_init();
         let ts = platform_text();
         ts.add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Rubik-Regular.ttf"))]).unwrap();
         let id = ts.font_id(&gpui::font("Rubik")).unwrap(); // i18n-exempt: font name
