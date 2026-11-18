@@ -26,7 +26,7 @@ fn failed(pairing: &vector_core::signer::PairingGuard, e: String) -> String {
 fn relays() -> Result<Vec<RelayUrl>, String> {
     // Multi-relay by design: one relay down must not lock the user out of their signer.
     let relays: Vec<RelayUrl> = state::TRUSTED_RELAYS.iter().filter_map(|s| RelayUrl::parse(s).ok()).collect();
-    if relays.is_empty() { Err("No trusted relays configured".into()) } else { Ok(relays) }
+    if relays.is_empty() { Err("No trusted relays configured".into()) } else { Ok(relays) } // i18n-exempt: developer error
 }
 
 /// Drop a pairing that never reached its security step, so the next attempt starts clean.
@@ -58,7 +58,7 @@ async fn refuse_if_signed_in() -> Result<(), String> {
         cancel().await;
     }
     if state::nostr_client().is_some() {
-        return Err("Another account is already signed in.".into());
+        return Err(crate::t::login_already_signed_in().into());
     }
     Ok(())
 }
@@ -76,7 +76,7 @@ async fn stage(remote: PublicKey, client_keys: &Keys, url: String) -> Result<Imp
         return Ok(Imported::Existing(npub));
     }
     if vector_core::bunker_signer().is_none() {
-        return Err("The signer went away before it was set up".into());
+        return Err(crate::t::login_signer_gone().into());
     }
     let client_nsec = Zeroizing::new(client_keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
     *PENDING_NSEC.lock().unwrap() = Some(String::clone(&client_nsec));
@@ -96,7 +96,7 @@ async fn stage(remote: PublicKey, client_keys: &Keys, url: String) -> Result<Imp
 pub async fn connect(url: String) -> Result<Imported, String> {
     let url = url.trim().to_string();
     if !url.to_ascii_lowercase().starts_with("bunker://") {
-        return Err("Must start with bunker://".into());
+        return Err(crate::t::login_signer_bunker().into());
     }
     refuse_if_signed_in().await?;
     let client_keys = Keys::generate();
@@ -106,7 +106,7 @@ pub async fn connect(url: String) -> Result<Imported, String> {
         Ok(done) => Ok(done),
         Err(e) => {
             cancel().await;
-            Err(format!("Bunker setup failed: {e}"))
+            Err(crate::t::login_signer_setup_failed(e.to_string()).to_string())
         }
     }
 }
@@ -140,7 +140,7 @@ pub async fn start_session(updates: UnboundedSender<Update>) -> Result<String, S
         let remote = match signer.get_public_key_async().await {
             Ok(pk) => pk,
             Err(e) => {
-                let e = failed(&pairing, format!("Signer didn't return your pubkey. If you're in Manual mode, check your signer app for an approval prompt. ({e})"));
+                let e = failed(&pairing, crate::t::login_signer_no_pubkey_manual(e.to_string()).to_string());
                 return done(Err(give_up(e).await));
             }
         };
@@ -169,15 +169,15 @@ pub async fn start_session(updates: UnboundedSender<Update>) -> Result<String, S
 /// refused) nothing is installed: the unlock runs again on the stored link.
 pub async fn reauthorize(updates: UnboundedSender<Update>) -> Result<String, String> {
     if vector_core::db::get_signer_type().ok().as_deref() != Some("bunker") {
-        return Err("This account is not a remote-signer account.".into());
+        return Err(crate::t::login_signer_not_remote().into());
     }
     let expected = vector_core::db::get_bunker_remote_pubkey()
         .ok()
         .flatten()
-        .ok_or("Bunker account missing cached remote pubkey")?
+        .ok_or("Bunker account missing cached remote pubkey")? // i18n-exempt: matched by the re-pair offer
         .to_ascii_lowercase();
     // owned-key: the NIP-46 client keypair, which the NostrConnect session owns for its life.
-    let client_keys = MY_SECRET_KEY.to_keys().ok_or("No client keypair loaded — please return to the login screen and try again")?;
+    let client_keys = MY_SECRET_KEY.to_keys().ok_or_else(|| crate::t::login_signer_no_client_key().to_string())?;
     let (nc, uri) = vector_core::build_nostrconnect_session(client_keys, relays()?, Duration::from_secs(120))?;
     let pairing = vector_core::signer::track_pairing(&nc);
     let session = vector_core::db::current_session();
@@ -197,12 +197,12 @@ pub async fn reauthorize(updates: UnboundedSender<Update>) -> Result<String, Str
             Ok(pk) => pk,
             Err(e) => {
                 let _ = nc.shutdown().await;
-                return done(Err(failed(&pairing, format!("Signer didn't return your pubkey. Check the signer app for an approval prompt. ({e})"))));
+                return done(Err(failed(&pairing, crate::t::login_signer_no_pubkey(e.to_string()).to_string())));
             }
         };
         if remote.to_hex() != expected {
             let _ = nc.shutdown().await;
-            return done(Err("Signer returned a different identity. Re-authorize is only for the original account — logout to switch accounts.".into()));
+            return done(Err(crate::t::login_signer_other_identity().into()));
         }
         if !session.is_live() {
             let _ = nc.shutdown().await;
@@ -210,7 +210,7 @@ pub async fn reauthorize(updates: UnboundedSender<Update>) -> Result<String, Str
         }
         if let Err(e) = vector_core::db::set_bunker_url(&storage_url).await {
             let _ = nc.shutdown().await;
-            return done(Err(format!("Failed to persist bunker URL: {e}")));
+            return done(Err(crate::t::login_signer_save_failed(e.to_string()).to_string()));
         }
         let npub = match remote.to_bech32() {
             Ok(n) => n,
@@ -245,19 +245,19 @@ pub async fn reauthorize(updates: UnboundedSender<Update>) -> Result<String, Str
 /// The signer of a stored bunker account, reconnected at unlock: the identity it returns must be
 /// the one on record. Returns that identity.
 pub async fn reconnect(client_keys: &Keys) -> Result<PublicKey, String> {
-    let url = vector_core::db::get_bunker_url().await?.ok_or("Bunker account missing bunker_url")?;
+    let url = vector_core::db::get_bunker_url().await?.ok_or("Bunker account missing bunker_url")?; // i18n-exempt: matched by the re-pair offer
     super::transport::wait_for_active_network().await;
     // An already-approved pairing: no human in the loop, so a short wait.
     let remote = vector_core::attempt_bunker_login(&url, client_keys.clone(), vector_core::relay_connect_timeout(Duration::from_secs(15)))
         .await
-        .map_err(|e| format!("Remote signer unreachable — please ensure your signer app is online and retry. ({e})"))?;
-    let expected = vector_core::db::get_bunker_remote_pubkey()?.ok_or("Bunker account missing cached remote pubkey")?;
+        .map_err(|e| format!("Remote signer unreachable — please ensure your signer app is online and retry. ({e})"))?; // i18n-exempt: matched by the re-pair offer
+    let expected = vector_core::db::get_bunker_remote_pubkey()?.ok_or("Bunker account missing cached remote pubkey")?; // i18n-exempt: matched by the re-pair offer
     if !remote.to_hex().eq_ignore_ascii_case(&expected) {
         if let Some(b) = vector_core::take_bunker_signer() {
             let _ = b.shutdown().await;
         }
         vector_core::set_bunker_state(BunkerConnectionState::Idle);
-        return Err("Remote signer returned a different identity than this account. Either re-authorize from Settings, or logout and re-add the account.".into());
+        return Err(crate::t::login_signer_wrong_identity().into());
     }
     vector_core::set_signer_kind(SignerKind::Bunker);
     Ok(remote)

@@ -56,10 +56,10 @@ static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
 fn device_rate() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
     let device = cpal::default_host()
         .default_output_device()
-        .ok_or("No output device found")?;
+        .ok_or("No output device found")?; // i18n-exempt: logged only
     let config = device
         .default_output_config()
-        .map_err(|e| format!("Failed to get output config: {e}"))?;
+        .map_err(|e| format!("Failed to get output config: {e}"))?; // i18n-exempt: logged only
     Ok((device, config))
 }
 
@@ -76,21 +76,21 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32), String> 
             &FormatOptions::default(),
             &MetadataOptions::default(),
         )
-        .map_err(|e| format!("Failed to probe audio format: {e}"))?;
+        .map_err(|e| format!("Failed to probe audio format: {e}"))?; // i18n-exempt: logged only
     let mut format = probed.format;
     let track = format
         .tracks()
         .iter()
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or("No supported audio tracks found")?;
+        .ok_or("No supported audio tracks found")?; // i18n-exempt: logged only
     let id = track.id;
     let mut rate = track
         .codec_params
         .sample_rate
-        .ok_or("Unknown sample rate")?;
+        .ok_or("Unknown sample rate")?; // i18n-exempt: logged only
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("Failed to create decoder: {e}"))?;
+        .map_err(|e| format!("Failed to create decoder: {e}"))?; // i18n-exempt: logged only
     let mut out = Vec::new();
     let mut buf: Option<SampleBuffer<f32>> = None;
     let mut channels = 1;
@@ -143,9 +143,9 @@ fn resample(samples: Vec<f32>, from: u32, to: u32) -> Vec<f32> {
 }
 
 fn load_raw(path: &Path) -> Result<Vec<f32>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read cache file: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read cache file: {e}"))?; // i18n-exempt: logged only
     if bytes.len() % 4 != 0 {
-        return Err("Invalid cache file size".into());
+        return Err("Invalid cache file size".into()); // i18n-exempt: logged only
     }
     Ok(bytes
         .chunks_exact(4)
@@ -168,7 +168,7 @@ fn samples_for(sound: &Sound, rate: u32) -> Result<Vec<f32>, String> {
                 .and_then(|s| s.to_str())
                 .and_then(|s| s.rsplit('_').next())
                 .and_then(|r| r.parse().ok())
-                .ok_or("Invalid cache filename format")?;
+                .ok_or("Invalid cache filename format")?; // i18n-exempt: logged only
             Ok(resample(load_raw(path)?, stored, rate))
         }
     }
@@ -191,7 +191,7 @@ fn play_now(sound: &Sound) -> Result<(), String> {
     let (device, config) = device_rate()?;
     let rate = config.sample_rate().0;
     let samples = {
-        let mut cache = CACHE.lock().map_err(|_| "cache poisoned")?;
+        let mut cache = CACHE.lock().map_err(|_| "cache poisoned")?; // i18n-exempt: logged only
         if cache.as_ref().is_some_and(|c| c.used.elapsed() > TTL) {
             *cache = None;
         }
@@ -216,7 +216,7 @@ fn play_now(sound: &Sound) -> Result<(), String> {
         }
     };
     if samples.is_empty() {
-        return Err("No audio data decoded".into());
+        return Err("No audio data decoded".into()); // i18n-exempt: logged only
     }
     let channels = config.channels() as usize;
     let total = samples.len();
@@ -247,10 +247,10 @@ fn play_now(sound: &Sound) -> Result<(), String> {
         cpal::SampleFormat::U16 => build!(u16, |s: f32| ((s.clamp(-1., 1.) + 1.)
             * 0.5
             * u16::MAX as f32) as u16),
-        f => return Err(format!("Unsupported sample format {f:?}")),
+        f => return Err(format!("Unsupported sample format {f:?}")), // i18n-exempt: logged only
     }
-    .map_err(|e| format!("Failed to open output: {e}"))?;
-    stream.play().map_err(|e| format!("Failed to play: {e}"))?;
+    .map_err(|e| format!("Failed to open output: {e}"))?; // i18n-exempt: logged only
+    stream.play().map_err(|e| format!("Failed to play: {e}"))?; // i18n-exempt: logged only
     let secs = (total as f32 / rate as f32).min(MAX_SECS);
     std::thread::sleep(Duration::from_secs_f32(secs + 0.15));
     Ok(())
@@ -265,13 +265,13 @@ pub fn purge() {
 
 /// Import a picked file: at most 1MB and 10 seconds, stored resampled for this device.
 pub fn import(source: &Path, sounds_dir: &Path) -> Result<PathBuf, String> {
-    let meta = std::fs::metadata(source).map_err(|e| format!("Failed to read file: {e}"))?;
+    let meta = std::fs::metadata(source).map_err(|e| format!("Failed to read file: {e}"))?; // i18n-exempt: logged only
     if meta.len() > MAX_BYTES {
         return Err("FILE_TOO_LARGE".into());
     }
     let (_, config) = device_rate()?;
     let rate = config.sample_rate().0;
-    let bytes = std::fs::read(source).map_err(|e| format!("Failed to read file: {e}"))?;
+    let bytes = std::fs::read(source).map_err(|e| format!("Failed to read file: {e}"))?; // i18n-exempt: logged only
     let (samples, from) = decode(bytes, source.extension().and_then(|e| e.to_str()))?;
     if samples.len() as f32 / from as f32 > MAX_SECS {
         return Err("AUDIO_TOO_LONG".into());
@@ -279,12 +279,12 @@ pub fn import(source: &Path, sounds_dir: &Path) -> Result<PathBuf, String> {
     let samples = resample(samples, from, rate);
     let stem = source
         .file_stem()
-        .ok_or("Invalid filename")?
+        .ok_or("Invalid filename")? // i18n-exempt: logged only
         .to_string_lossy();
     std::fs::create_dir_all(sounds_dir)
-        .map_err(|e| format!("Failed to create sounds cache dir: {e}"))?;
+        .map_err(|e| format!("Failed to create sounds cache dir: {e}"))?; // i18n-exempt: logged only
     let dest = sounds_dir.join(format!("{stem}_{rate}.raw"));
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    std::fs::write(&dest, bytes).map_err(|e| format!("Failed to write cache file: {e}"))?;
+    std::fs::write(&dest, bytes).map_err(|e| format!("Failed to write cache file: {e}"))?; // i18n-exempt: logged only
     Ok(dest)
 }

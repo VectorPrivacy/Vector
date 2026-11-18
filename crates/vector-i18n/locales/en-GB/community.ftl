@@ -120,3 +120,13 @@ community-invite-received = Received
 community-invite-expires = Expires
 community-invite-accept-short = Accept
 community-invite-decline-short = Decline
+
+## Why a community step failed
+
+community-not-found = Community not found
+community-unknown-channel = Unknown Community channel
+community-channel-not-found = Channel not found in Community
+community-channel-needs-name = A channel needs a name
+community-no-relays = No relays available to host the Community
+community-no-media-servers = No Blossom servers configured.
+community-first-channel = The community's first channel can't be deleted

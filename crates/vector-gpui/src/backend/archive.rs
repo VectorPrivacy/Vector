@@ -66,12 +66,12 @@ fn walk(
     depth: u32,
 ) -> Result<(), String> {
     if depth > MAX_DEPTH {
-        return Err("Directory nesting too deep (>128 levels)".into());
+        return Err(crate::t::preview_zip_too_deep().into());
     }
     let read = std::fs::read_dir(current)
-        .map_err(|e| format!("Failed to read directory {}: {e}", current.display()))?;
+        .map_err(|e| crate::t::preview_zip_read_dir_failed(e.to_string(), current.display().to_string()).to_string())?;
     for entry in read {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {e}"))?;
+        let entry = entry.map_err(|e| crate::t::preview_zip_read_entry_failed(e.to_string()).to_string())?;
         let path = entry.path();
         // Symlinks are skipped: no traversal out of the folder, no cycles.
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
@@ -130,9 +130,9 @@ pub fn archive_name(paths: &[PathBuf]) -> String {
         [only] if only.is_dir() => only
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("folder")
-            .to_string(),
-        _ => "Archive".into(),
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::t::preview_zip_folder().to_string()),
+        _ => crate::t::preview_zip_name().to_string(),
     }
 }
 
@@ -143,7 +143,7 @@ fn collect(paths: &[PathBuf]) -> Result<(String, Vec<Item>, u64), String> {
     {
         walk(only, "", &mut items, &mut total, 0)?;
         if items.is_empty() {
-            return Err("Directory is empty".into());
+            return Err(crate::t::preview_zip_empty().into());
         }
         return Ok((archive_name(paths), items, total));
     }
@@ -182,9 +182,9 @@ fn collect(paths: &[PathBuf]) -> Result<(String, Vec<Item>, u64), String> {
         }
     }
     if items.is_empty() {
-        return Err("Nothing to zip".into());
+        return Err(crate::t::preview_zip_nothing().into());
     }
-    Ok(("Archive".into(), items, total))
+    Ok((crate::t::preview_zip_name().to_string(), items, total))
 }
 
 /// Zip `paths`, reporting whole percents into `percent`; a set `cancel` stops it and removes the partial file.
@@ -199,13 +199,13 @@ pub fn zip_paths(
     let (name, items, total) = collect(paths)?;
     let file_name = format!("{name}.zip");
     let path = work_slot()
-        .map_err(|e| format!("Failed to create zip file: {e}"))?
+        .map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?
         .join(&file_name);
     let cancelled = || cancel.load(Ordering::Relaxed);
 
     let run = || -> Result<(u32, u32, Vec<Entry>), String> {
         let file =
-            std::fs::File::create(&path).map_err(|e| format!("Failed to create zip file: {e}"))?;
+            std::fs::File::create(&path).map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?;
         let mut zw = zip::ZipWriter::new(BufWriter::new(file));
         // Level 2: zlib-rs's level 1 is deflate_quick (up to ~20% larger); 2 still beats C zlib's 1.
         let options = SimpleFileOptions::default()
@@ -219,7 +219,7 @@ pub fn zip_paths(
                 dirs += 1;
                 let dir = format!("{rel}/");
                 zw.add_directory(&dir, options)
-                    .map_err(|e| format!("Failed to add directory: {e}"))?;
+                    .map_err(|e| crate::t::preview_zip_add_dir_failed(e.to_string()).to_string())?;
                 if entries.len() < LISTED {
                     entries.push(Entry {
                         path: dir,
@@ -230,7 +230,7 @@ pub fn zip_paths(
                 continue;
             }
             if cancelled() {
-                return Err("Cancelled".into());
+                return Err("Cancelled".into()); // i18n-exempt: never shown, the preview drops a cancelled zip
             }
             // Re-checked at zip time: a file swapped for a link since the walk is skipped.
             match std::fs::symlink_metadata(&item.source) {
@@ -240,16 +240,16 @@ pub fn zip_paths(
             }
             files += 1;
             zw.start_file(&rel, options.large_file(item.size >= u32::MAX as u64))
-                .map_err(|e| format!("Failed to start file in zip: {e}"))?;
+                .map_err(|e| crate::t::preview_zip_start_file_failed(e.to_string()).to_string())?;
             if item.size > 0 {
                 let data = std::fs::read(&item.source)
-                    .map_err(|e| format!("Failed to read file {}: {e}", item.source.display()))?;
+                    .map_err(|e| crate::t::preview_zip_read_file_failed(e.to_string(), item.source.display().to_string()).to_string())?;
                 for chunk in data.chunks(CHUNK) {
                     if cancelled() {
-                        return Err("Cancelled".into());
+                        return Err("Cancelled".into()); // i18n-exempt: never shown, the preview drops a cancelled zip
                     }
                     zw.write_all(chunk)
-                        .map_err(|e| format!("Failed to write to zip: {e}"))?;
+                        .map_err(|e| crate::t::preview_zip_write_failed(e.to_string()).to_string())?;
                     written += chunk.len() as u64;
                     if let Some(p) = (written * 100).checked_div(total) {
                         percent.store(p.min(100), Ordering::Relaxed);
@@ -265,7 +265,7 @@ pub fn zip_paths(
             }
         }
         zw.finish()
-            .map_err(|e| format!("Failed to finalize zip: {e}"))?;
+            .map_err(|e| crate::t::preview_zip_finish_failed(e.to_string()).to_string())?;
         Ok((files, dirs, entries))
     };
     match run() {

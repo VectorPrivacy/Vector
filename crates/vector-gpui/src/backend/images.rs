@@ -95,30 +95,55 @@ async fn fetch(url: &str, max: usize) -> Result<Vec<u8>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+        return Err(format!("HTTP {}", resp.status())); // i18n-exempt: stored and matched
     }
     // Sized once from the header: grown by doubling, a big picture churns twice its size.
     let declared = resp.content_length().map_or(0, |n| n as usize);
     if declared > max {
-        return Err("Image too large".into());
+        return Err(TOO_LARGE.into());
     }
     let mut out = Vec::with_capacity(declared);
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
         if out.len() + chunk.len() > max {
-            return Err("Image too large".into());
+            return Err(TOO_LARGE.into());
         }
         out.extend_from_slice(&chunk);
     }
     Ok(out)
 }
 
+/// A failure reason in the reader's language. The English is what's stored and matched.
+pub fn shown_reason(reason: &str) -> String {
+    use crate::t;
+    match reason {
+        TOO_LARGE => t::emoji_why_too_large().into(),
+        INVALID => t::emoji_why_invalid().into(),
+        NO_CACHE => t::emoji_why_no_cache().into(),
+        BAD_URL => t::emoji_why_bad_url().into(),
+        INTEGRITY => t::emoji_why_integrity().into(),
+        other => other.to_string(),
+    }
+}
+
+// i18n-exempt: stored and matched; shown through `shown_reason`
+const TOO_LARGE: &str = "Image too large";
+// i18n-exempt: stored and matched; shown through `shown_reason`
+const INVALID: &str = "Invalid image";
+// i18n-exempt: stored and matched; shown through `shown_reason`
+const NO_CACHE: &str = "No cache directory";
+// i18n-exempt: stored and matched; shown through `shown_reason`
+const BAD_URL: &str = "Invalid emoji URL";
+// i18n-exempt: stored and matched; shown through `shown_reason`
+const INTEGRITY: &str = "community image failed integrity check";
+
 /// How long a failure is believed (`unavailable_for`): a day for a file that is gone, too large
 /// or not a picture; an hour for a server error; not at all for a fetch that got no answer.
 /// Without it every launch downloads every broken avatar and banner again.
 fn unavailable_for(reason: &str) -> Option<u64> {
+    // i18n-exempt: stored reasons
     if reason.contains("too large") || reason.contains("HTTP 404") || reason.contains("HTTP 410") || reason.starts_with("Invalid") {
         Some(24 * 3600)
-    } else if reason.starts_with("HTTP ") {
+    } else if reason.starts_with("HTTP ") { // i18n-exempt: stored reasons
         Some(3600)
     } else {
         None
@@ -160,7 +185,7 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
     }
     let fetched = fetch(url, kind.max_bytes())
         .await
-        .and_then(|b| sniff(&b).map(|ext| (b, ext)).ok_or_else(|| "Invalid image".to_string()));
+        .and_then(|b| sniff(&b).map(|ext| (b, ext)).ok_or_else(|| INVALID.to_string()));
     let (bytes, mut ext) = fetched.inspect_err(|reason| remember_unavailable(url, kind, reason))?;
     // An SVG is kept as the pixels it draws.
     let bytes = if ext == "svg" {
@@ -173,7 +198,7 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
         bytes
     };
     let path = cache_dir(kind)
-        .ok_or("No cache directory")?
+        .ok_or(NO_CACHE)?
         .join(format!("{}.{ext}", cache_key(url)));
     vector_core::vcache::write(&path, &bytes)?;
     Ok(path.to_string_lossy().into_owned())
@@ -182,7 +207,7 @@ async fn cache(url: &str, kind: Kind) -> Result<String, String> {
 /// A custom emoji (or a pack's icon) on disk, or why it can't be.
 pub async fn emoji(url: String, icon: bool) -> Result<String, String> {
     if !url.starts_with("https://") {
-        return Err("Invalid emoji URL".into());
+        return Err(BAD_URL.into());
     }
     cache(&url, if icon { Kind::PackIcon } else { Kind::Emoji }).await
 }
@@ -315,16 +340,16 @@ pub async fn community_image(
     .await?;
     let plain = vector_core::crypto::decrypt_data_owned(encrypted, &image.key, &image.nonce)?;
     if !vector_core::crypto::sha256_hex(&plain).eq_ignore_ascii_case(&image.hash) {
-        return Err("community image failed integrity check".into());
+        return Err(INTEGRITY.into());
     }
     if vector_core::svg::looks_like_svg(&plain) {
         return Err(vector_core::community::SVG_REFUSED.into());
     }
     let ext = sniff(&plain)
         .filter(|e| *e != "svg")
-        .ok_or("Invalid image")?;
+        .ok_or(INVALID)?;
     let path = cache_dir(kind)
-        .ok_or("No cache directory")?
+        .ok_or(NO_CACHE)?
         .join(format!("{}.{ext}", cache_key(&image.url)));
     vector_core::vcache::write(&path, &plain)?;
     Ok(path.to_string_lossy().into_owned())

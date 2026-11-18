@@ -4580,7 +4580,7 @@ impl VectorApp {
             Target::Action(a) if a.as_ref() == "edited" => self.show_edit_history(msg_id, window, cx),
             Target::Action(a) if a.starts_with(crate::inline::EMOJI_MISSING) => {
                 let why = &a[crate::inline::EMOJI_MISSING.len()..];
-                let text = if why.is_empty() { t::emoji_unavailable_text() } else { t::emoji_unavailable_why(kit::escape(why)) };
+                let text = if why.is_empty() { t::emoji_unavailable_text() } else { t::emoji_unavailable_why(kit::escape(&backend::images::shown_reason(why))) };
                 let mut p = kit::Popup::notice(t::emoji_unavailable_title());
                 p.text = Some(text);
                 self.popup = Some((p, PopupAct::Notice));

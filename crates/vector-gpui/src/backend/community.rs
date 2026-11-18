@@ -20,7 +20,7 @@ use super::messaging::Callback;
 
 fn id32(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
-        return Err(format!("invalid id: {hex}"));
+        return Err(format!("invalid id: {hex}")); // i18n-exempt: developer error
     }
     Ok(vector_core::simd::hex::hex_to_bytes_32(hex))
 }
@@ -32,7 +32,7 @@ fn is_held(community_id: &str) -> bool {
 
 fn load(community_id: &str) -> Result<CommunityV2, String> {
     db::community::load_community_v2(&CommunityId(id32(community_id)?))?
-        .ok_or_else(|| "Community not found".to_string())
+        .ok_or_else(|| crate::t::community_not_found().to_string())
 }
 
 /// `list_communities`' shape, which `data::Community` reads.
@@ -123,7 +123,7 @@ pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<
         return Ok(false);
     };
     let community_id =
-        db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
+        db::community::community_id_for_channel(&channel_id)?.ok_or_else(|| crate::t::community_unknown_channel().to_string())?;
     if !is_held(&community_id) {
         return Ok(true);
     }
@@ -158,7 +158,7 @@ pub async fn walk_channel(channel_id: String, before_ms: u64) -> Result<(bool, u
         return Ok((false, 0, None));
     };
     let community_id =
-        db::community::community_id_for_channel(&channel_id)?.ok_or("Unknown Community channel")?;
+        db::community::community_id_for_channel(&channel_id)?.ok_or_else(|| crate::t::community_unknown_channel().to_string())?;
     if !is_held(&community_id) {
         return Ok((true, 0, None));
     }
@@ -177,7 +177,7 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
     db::scoped(async move {
         let reply = (!replied_to.is_empty()).then_some(replied_to);
         let community_id = db::community::community_id_for_channel(&channel_id)?
-            .ok_or("Unknown Community channel")?;
+            .ok_or_else(|| crate::t::community_unknown_channel().to_string())?;
         let (content, role_mentions) =
             vector_core::community::mentions::resolve_in(&community_id, &content);
         let (content, text_spans) = vector_core::text_spans::extract_own(&content);
@@ -190,12 +190,12 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
         extra_tags.extend(bot.map(|pk| vector_core::bot_interface::bot_tag(&pk)));
         let addressed_bots: Vec<String> = bot.and_then(|pk| pk.to_bech32().ok()).into_iter().collect();
 
-        let author = vector_core::my_public_key().ok_or("Public key not set")?;
+        let author = vector_core::my_public_key().ok_or("Public key not set")?; // i18n-exempt: developer error
         let community = load(&community_id)?;
         let ch = ChannelId(id32(&channel_id)?);
         let channel = community
             .channel(&ch)
-            .ok_or("Channel not found in Community")?;
+            .ok_or_else(|| crate::t::community_channel_not_found().to_string())?;
         let (_, epoch) = community.channel_secret(channel);
         let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -238,7 +238,7 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
             ms,
         );
         let rumor = vector_core::community::v2::service::outbound_rumor(&community, &ch, rumor);
-        let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
+        let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex(); // i18n-exempt: developer error
 
         let mut pending = Message {
             id: message_id.clone(),
@@ -593,7 +593,7 @@ pub async fn create_channel(
     db::scoped_result(async move {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Err("A channel needs a name".into());
+            return Err(crate::t::community_channel_needs_name().into());
         }
         let community = load(&community_id)?;
         let transport = LiveTransport::with_timeout(Duration::from_secs(20));
@@ -689,7 +689,7 @@ pub async fn create_community(name: String) -> Result<(String, String), String> 
             .map(|s| s.to_string())
             .collect();
         if relays.is_empty() {
-            return Err("No relays available to host the Community".into());
+            return Err(crate::t::community_no_relays().into());
         }
         let session = db::current_session();
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
@@ -704,7 +704,7 @@ pub async fn create_community(name: String) -> Result<(String, String), String> 
             .channels
             .first()
             .map(|ch| bytes_to_hex_32(&ch.id.0))
-            .ok_or("created community has no channel")?;
+            .ok_or("created community has no channel")?; // i18n-exempt: developer error
         VectorCore.register_v2_chats(&community, &session).await;
         if let Some(client) = vector_core::state::nostr_client() {
             realtime::refresh_subscription(&client).await;
@@ -903,7 +903,7 @@ pub async fn join_by_link(url: String) -> Result<String, String> {
             .get("community_id")
             .or_else(|| joined.get("id"))
             .and_then(Value::as_str)
-            .ok_or("join returned no community id")?
+            .ok_or("join returned no community id")? // i18n-exempt: developer error
             .to_string();
         if let Ok(c) = load(&id) {
             VectorCore
@@ -1416,7 +1416,7 @@ pub async fn set_image(
         let community = load(&community_id)?;
         let raw = tokio::fs::read(&path)
             .await
-            .map_err(|e| format!("read image: {e}"))?;
+            .map_err(|e| format!("read image: {e}"))?; // i18n-exempt: developer error
         if vector_core::svg::looks_like_svg(&raw) {
             return Err(vector_core::community::SVG_REFUSED.into());
         }
@@ -1428,10 +1428,10 @@ pub async fn set_image(
         let hash = vector_core::crypto::sha256_hex(&bytes);
         let params = vector_core::crypto::generate_encryption_params();
         let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
-        let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
+        let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?; // i18n-exempt: developer error
         let servers = vector_core::state::get_blossom_servers();
         if servers.is_empty() {
-            return Err("No Blossom servers configured.".into());
+            return Err(crate::t::community_no_media_servers().into());
         }
         let on: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, _| {
             progress(pct.unwrap_or(0));
@@ -1581,12 +1581,12 @@ pub async fn delete_channel(community_id: String, channel_id: String) -> Result<
         let community = load(&community_id)?;
         let ch = ChannelId(id32(&channel_id)?);
         if community.primary_channel().is_some_and(|p| p.id.0 == ch.0) {
-            return Err("The community's first channel can't be deleted".to_string());
+            return Err(crate::t::community_first_channel().to_string());
         }
         let name = community
             .channel(&ch)
             .map(|c| c.name.clone())
-            .ok_or("Channel not found in Community")?;
+            .ok_or_else(|| crate::t::community_channel_not_found().to_string())?;
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         vector_core::community::v2::service::delete_channel(&transport, &community, &ch, &name).await?;
         reregister(&community_id).await;

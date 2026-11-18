@@ -60,3 +60,16 @@ embed-reply-file = a file
 embed-reply-live = a live stream
 embed-reply-community = a community
 embed-reply-event = a Nostr event
+
+## Why a video in a post won't play
+
+embed-video-not-web = Not a web video
+embed-video-not-video = Not a video
+embed-video-memory-show = Too much media is open to show this one
+embed-video-memory-play = Too much media is open to play this one
+embed-video-downloading = This video is already downloading
+embed-video-too-large = This video is too large to play in chat
+embed-video-download-failed = Failed to download
+embed-video-server-error = Media server returned an error status
+embed-video-ended-early = The download ended early
+embed-video-fingerprint = The video doesn't match the post's fingerprint

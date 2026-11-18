@@ -213,3 +213,7 @@ request-accept = Accept
 emoji-why-cancelled = Cancelled
 emoji-why-not-found = Not found
 emoji-why-invalid = Invalid image
+emoji-why-too-large = Image too large
+emoji-why-no-cache = No cache directory
+emoji-why-bad-url = Invalid emoji URL
+emoji-why-integrity = The image failed its integrity check

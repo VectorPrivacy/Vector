@@ -47,3 +47,29 @@ preview-send = Send
 preview-too-large = Too Large
 # The file is still being prepared; it sends once it's ready.
 preview-sending-when-ready = Sending when ready
+
+## A folder that couldn't be zipped
+
+# The .zip's name when several files go together.
+preview-zip-name = Archive
+# The .zip's name when the folder has no name of its own.
+preview-zip-folder = folder
+preview-zip-empty = Directory is empty
+preview-zip-nothing = Nothing to zip
+preview-zip-too-deep = Directory nesting too deep (>128 levels)
+# $path is the folder; $error is why.
+preview-zip-read-dir-failed = Failed to read directory { $path }: { $error }
+# $error is why.
+preview-zip-read-entry-failed = Failed to read entry: { $error }
+# $error is why.
+preview-zip-create-failed = Failed to create zip file: { $error }
+# $error is why.
+preview-zip-add-dir-failed = Failed to add directory: { $error }
+# $error is why.
+preview-zip-start-file-failed = Failed to start file in zip: { $error }
+# $path is the file; $error is why.
+preview-zip-read-file-failed = Failed to read file { $path }: { $error }
+# $error is why.
+preview-zip-write-failed = Failed to write to zip: { $error }
+# $error is why.
+preview-zip-finish-failed = Failed to finalize zip: { $error }

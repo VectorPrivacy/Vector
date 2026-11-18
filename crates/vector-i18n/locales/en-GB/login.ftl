@@ -112,3 +112,31 @@ login-signer-open-title = Approve in your signer
 login-signer-open-text = Your signer asked you to open this page. It opens in your browser, outside your private network.<br><code>{ $link }</code>
 login-signer-offline = Remote signer offline. Please check your signer app.
 login-signer-online = Remote signer back online.
+
+## Why signing in or adding an account failed
+
+login-invalid-nsec = Invalid nsec
+login-invalid-seed = Invalid Seed Phrase
+login-already-signed-in = Another account is already signed in.
+login-password-empty = Password must not be empty.
+login-external-signer = This account signs with an external signer, which this client cannot use yet.
+login-no-private-key = No private key found
+login-invalid-stored-key = Invalid stored key
+# $error is why.
+login-remove-failed = Failed to remove account directory: { $error }
+
+## Why the remote signer couldn't be set up. "Bunker" is the remote signer's link.
+
+login-signer-gone = The signer went away before it was set up
+# $error is why.
+login-signer-setup-failed = Bunker setup failed: { $error }
+# $error is the signer's answer.
+login-signer-no-pubkey-manual = Signer didn't return your pubkey. If you're in Manual mode, check your signer app for an approval prompt. ({ $error })
+# $error is the signer's answer.
+login-signer-no-pubkey = Signer didn't return your pubkey. Check the signer app for an approval prompt. ({ $error })
+login-signer-not-remote = This account is not a remote-signer account.
+login-signer-no-client-key = No client keypair loaded — please return to the login screen and try again
+login-signer-other-identity = Signer returned a different identity. Re-authorize is only for the original account — logout to switch accounts.
+# $error is why.
+login-signer-save-failed = Failed to persist bunker URL: { $error }
+login-signer-wrong-identity = Remote signer returned a different identity than this account. Either re-authorize from Settings, or logout and re-add the account.

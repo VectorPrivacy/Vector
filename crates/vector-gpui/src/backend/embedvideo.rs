@@ -12,7 +12,7 @@ use serde_json::json;
 const MAX_VIDEO_BYTES: u64 = 1024 * 1024 * 1024;
 const CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ATTEMPTS: u32 = 3;
-const CANCELLED: &str = "Download cancelled";
+const CANCELLED: &str = "Download cancelled"; // i18n-exempt: sentinel, never shown
 
 /// Videos downloading, and those asked to stop at their next chunk.
 static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
@@ -60,6 +60,7 @@ fn stem(url: &str, sha256: Option<&str>) -> String {
 
 fn kind(head: &[u8]) -> Option<&'static str> {
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        // i18n-exempt: MP4 brand
         Some(if &head[8..12] == b"qt  " { "mov" } else { "mp4" })
     } else if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         Some("webm")
@@ -88,7 +89,7 @@ fn cached(dir: &Path, stem: &str) -> Option<Fetched> {
 /// whole file. The whole file, when it is already here, does as well.
 pub async fn preview(url: String, sha256: Option<String>) -> Result<Fetched, String> {
     if !url.starts_with("https://") {
-        return Err("Not a web video".into());
+        return Err(crate::t::embed_video_not_web().into());
     }
     let dir = dir()?;
     let stem = stem(&url, sha256.as_deref());
@@ -109,7 +110,7 @@ pub async fn preview(url: String, sha256: Option<String>) -> Result<Fetched, Str
     }
     let poster = vector_core::video_poster::fetch(&url).await?;
     if !vector_core::media::keep_media() {
-        vector_core::media::ram::insert(held, poster.bytes, mime(poster.ext)).map_err(|_| "Too much media is open to show this one".to_string())?;
+        vector_core::media::ram::insert(held, poster.bytes, mime(poster.ext)).map_err(|_| crate::t::embed_video_memory_show().to_string())?;
         return Ok(Fetched::Held(held));
     }
     let path = dir.join(format!("{named}.{}", poster.ext));
@@ -126,7 +127,7 @@ pub enum Playable {
 /// host that serves only whole files, goes the whole-file way.
 pub async fn play(url: String, size: Option<u64>, sha256: Option<String>, fallbacks: Vec<String>) -> Result<Playable, String> {
     if !url.starts_with("https://") {
-        return Err("Not a web video".into());
+        return Err(crate::t::embed_video_not_web().into());
     }
     let dir = dir()?;
     let stem = stem(&url, sha256.as_deref());
@@ -147,7 +148,7 @@ pub async fn play(url: String, size: Option<u64>, sha256: Option<String>, fallba
 
 pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallbacks: Vec<String>) -> Result<Fetched, String> {
     if !url.starts_with("https://") {
-        return Err("Not a web video".into());
+        return Err(crate::t::embed_video_not_web().into());
     }
     let dir = dir()?;
     let stem = stem(&url, sha256.as_deref());
@@ -157,7 +158,7 @@ pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallb
         return Ok(done);
     }
     if !RUNNING.lock().unwrap().insert(url.clone()) {
-        return Err("This video is already downloading".into());
+        return Err(crate::t::embed_video_downloading().into());
     }
     STOP.lock().unwrap().remove(&url);
     let result = async {
@@ -166,14 +167,14 @@ pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallb
             None => vector_core::net::get_remote_file_size(&url).await,
         };
         if declared.is_some_and(|n| n > MAX_VIDEO_BYTES) {
-            return Err("This video is too large to play in chat".to_string());
+            return Err(crate::t::embed_video_too_large().to_string());
         }
         // Attachment rules: held in memory when it fits and the account doesn't keep media.
         let in_memory = !vector_core::media::keep_media() && declared.is_some_and(|n| vector_core::media::ram::cache().admits(n));
         let mirrors: Vec<&str> = fallbacks.iter().map(String::as_str).filter(|u| u.starts_with("https://")).take(3).collect();
         let expected = sha256.as_deref().map(str::to_ascii_lowercase);
         let limit = declared.unwrap_or(MAX_VIDEO_BYTES).saturating_add(64 * 1024);
-        let mut last = "Failed to download".to_string();
+        let mut last = crate::t::embed_video_download_failed().to_string();
         for source in std::iter::once(url.as_str()).chain(mirrors) {
             for attempt in 1..=MAX_ATTEMPTS {
                 let got = if in_memory {
@@ -228,11 +229,11 @@ async fn stream(url: &str, source: &str, limit: u64, mut sink: impl FnMut(u64, &
         .await
         .map_err(|e| Fail::Dropped(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(Fail::Refused("Media server returned an error status".into()));
+        return Err(Fail::Refused(crate::t::embed_video_server_error().into()));
     }
     let total = resp.content_length().filter(|&n| n > 0);
     if total.is_some_and(|t| t > limit) {
-        return Err(Fail::Refused("This video is too large to play in chat".into()));
+        return Err(Fail::Refused(crate::t::embed_video_too_large().into()));
     }
     progress(url, if total.is_some() { 0 } else { -1 });
     let mut at = 0u64;
@@ -242,7 +243,7 @@ async fn stream(url: &str, source: &str, limit: u64, mut sink: impl FnMut(u64, &
             return Err(Fail::Cancelled);
         }
         if at + chunk.len() as u64 > limit {
-            return Err(Fail::Refused("This video is too large to play in chat".into()));
+            return Err(Fail::Refused(crate::t::embed_video_too_large().into()));
         }
         sink(at, &chunk).map_err(Fail::Refused)?;
         at += chunk.len() as u64;
@@ -255,17 +256,17 @@ async fn stream(url: &str, source: &str, limit: u64, mut sink: impl FnMut(u64, &
         }
     }
     if total.is_some_and(|t| at < t) {
-        return Err(Fail::Dropped("The download ended early".into()));
+        return Err(Fail::Dropped(crate::t::embed_video_ended_early().into()));
     }
     Ok(at)
 }
 
 fn verify(head: &[u8], hash: Option<String>, expected: Option<&str>) -> Result<&'static str, Fail> {
-    let ext = kind(head).ok_or_else(|| Fail::Refused("Not a video".into()))?;
+    let ext = kind(head).ok_or_else(|| Fail::Refused(crate::t::embed_video_not_video().into()))?;
     if let (Some(want), Some(got)) = (expected, hash)
         && got != want
     {
-        return Err(Fail::Refused("The video doesn't match the post's fingerprint".into()));
+        return Err(Fail::Refused(crate::t::embed_video_fingerprint().into()));
     }
     Ok(ext)
 }
@@ -285,7 +286,7 @@ async fn hold(url: &str, source: &str, key: [u8; 32], limit: u64, expected: Opti
     .await
     .map_err(|e| Fail::Refused(e.to_string()))?;
     let ext = verify(&body[..body.len().min(12)], hash, expected)?;
-    vector_core::media::ram::insert(key, body, mime(ext)).map_err(|_| Fail::Refused("Too much media is open to play this one".into()))?;
+    vector_core::media::ram::insert(key, body, mime(ext)).map_err(|_| Fail::Refused(crate::t::embed_video_memory_play().into()))?;
     Ok(Fetched::Held(key))
 }
 

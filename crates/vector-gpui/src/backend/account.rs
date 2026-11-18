@@ -62,7 +62,7 @@ pub(super) fn is_committed(npub: &str) -> bool {
         return false;
     };
     conn.query_row(
-        "SELECT 1 FROM settings WHERE key IN ('pkey', 'nip55_user_pubkey') LIMIT 1",
+        "SELECT 1 FROM settings WHERE key IN ('pkey', 'nip55_user_pubkey') LIMIT 1", // i18n-exempt: SQL
         [],
         |_| Ok(()),
     )
@@ -188,7 +188,7 @@ fn metadata(npub: &str) -> Account {
         return meta;
     };
     if let Ok((nickname, display, name, avatar_cached)) = conn.query_row(
-        "SELECT nickname, display_name, name, avatar_cached FROM profiles WHERE npub = ?1",
+        "SELECT nickname, display_name, name, avatar_cached FROM profiles WHERE npub = ?1", // i18n-exempt: SQL
         [npub],
         |r| {
             Ok((
@@ -205,6 +205,7 @@ fn metadata(npub: &str) -> Account {
         meta.avatar = (!avatar_cached.is_empty()).then_some(avatar_cached);
     }
     let setting = |key: &str| {
+        // i18n-exempt: SQL
         conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
             r.get::<_, String>(0)
         })
@@ -249,13 +250,13 @@ fn store_identity(keys: &Keys) {
 /// Sign in with an nsec or a BIP-39 seed phrase.
 pub async fn import(mut key: String) -> Result<Imported, String> {
     let keys = if key.starts_with("nsec") {
-        let parsed = Keys::parse(&key).map_err(|_| "Invalid nsec".to_string());
+        let parsed = Keys::parse(&key).map_err(|_| crate::t::login_invalid_nsec().to_string());
         key.zeroize();
         parsed?
     } else {
         let phrase = Zeroizing::new(std::mem::take(&mut key));
         Keys::from_mnemonic(phrase.trim(), Some(""))
-            .map_err(|_| "Invalid Seed Phrase".to_string())?
+            .map_err(|_| crate::t::login_invalid_seed().to_string())?
     };
     *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
@@ -264,7 +265,7 @@ pub async fn import(mut key: String) -> Result<Imported, String> {
         return Ok(Imported::Existing(npub));
     }
     if state::nostr_client().is_some() {
-        return Err("Another account is already signed in.".into());
+        return Err(crate::t::login_already_signed_in().into());
     }
     *PENDING_NSEC.lock().unwrap() = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
     if let Some(stale) = MNEMONIC_SEED.lock().unwrap().as_mut() {
@@ -302,14 +303,14 @@ pub async fn commit(
     security_type: &str,
 ) -> Result<(), String> {
     if password.as_ref().is_some_and(|p| p.trim().is_empty()) {
-        return Err("Password must not be empty.".into());
+        return Err(crate::t::login_password_empty().into());
     }
     let nsec = Zeroizing::new(
         PENDING_NSEC
             .lock()
             .unwrap()
             .clone()
-            .ok_or("No pending key")?,
+            .ok_or("No pending key")?, // i18n-exempt: developer error
     );
     let seed = MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
 
@@ -351,7 +352,7 @@ pub async fn commit(
     let security = password.as_ref().map(|_| security_type);
     if vector_core::signer_kind() == SignerKind::Bunker {
         let (url, remote_hex) = state::pending_bunker_setup()
-            .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?;
+            .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?; // i18n-exempt: matched by the re-pair offer
         db::settings::commit_bunker_account_setup(
             &stored_key,
             password.is_some(),
@@ -464,17 +465,17 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
     let bunker = matches!(kind, SignerKind::Bunker);
     if !matches!(kind, SignerKind::Local | SignerKind::Bunker) {
         return Err(
-            "This account signs with an external signer, which this client cannot use yet.".into(),
+            crate::t::login_external_signer().into(),
         );
     }
-    let stored = db::get_pkey()?.ok_or("No private key found")?;
+    let stored = db::get_pkey()?.ok_or_else(|| crate::t::login_no_private_key().to_string())?;
     let mut nsec = match &password {
         Some(pwd) => {
             // The vault takes the key only once it has opened the stored key.
             let kdf = vector_core::crypto::Kdf::of_account()?;
             let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
             let nsec = vector_core::crypto::decrypt_with_key(&stored, &key)
-                .map_err(|_| "Incorrect password".to_string())?;
+                .map_err(|_| "Incorrect password".to_string())?; // i18n-exempt: matched by the login screen
             vector_core::crypto::install_unlocked_key(&key, &kdf)?;
             match db::at_rest::upgrade_after_unlock(pwd, &key).await {
                 Ok(true) => {
@@ -487,7 +488,7 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
         }
         None => stored,
     };
-    let keys = Keys::parse(&nsec).map_err(|_| "Invalid stored key".to_string())?;
+    let keys = Keys::parse(&nsec).map_err(|_| crate::t::login_invalid_stored_key().to_string())?;
     nsec.zeroize();
     store_identity(&keys);
     // A bunker account's stored key is only its client keypair: the identity is the signer's.
@@ -503,7 +504,7 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
 /// client key and the stored link is the new pairing.
 pub async fn resume_bunker_unlock() -> Result<String, String> {
     // owned-key: the NIP-46 client keypair, which the login session owns for its life.
-    let keys = MY_SECRET_KEY.to_keys().ok_or("No client keypair loaded")?;
+    let keys = MY_SECRET_KEY.to_keys().ok_or("No client keypair loaded")?; // i18n-exempt: developer error
     let remote = super::bunker::reconnect(&keys).await?;
     drop(keys);
     state::set_my_public_key(remote);
@@ -515,7 +516,7 @@ async fn finish_unlock() -> Result<String, String> {
     install_client();
 
     let npub = vector_core::my_public_key()
-        .ok_or("no identity")?
+        .ok_or("no identity")? // i18n-exempt: developer error
         .to_bech32()
         .map_err(|e| e.to_string())?;
     insert_own_profile(&npub).await;
@@ -588,7 +589,7 @@ pub async fn reset() {
 pub async fn switch(npub: String) -> Result<(), String> {
     super::security::refuse_if_migrating()?;
     if !accounts().iter().any(|a| a.npub == npub) {
-        return Err(format!("Unknown account: {npub}"));
+        return Err(format!("Unknown account: {npub}")); // i18n-exempt: developer error
     }
     set_active(&npub)?;
     reset().await;
@@ -600,7 +601,7 @@ pub async fn switch(npub: String) -> Result<(), String> {
 pub async fn delete(npub: String) -> Result<bool, String> {
     super::security::refuse_if_migrating()?;
     if !accounts().iter().any(|a| a.npub == npub) {
-        return Err(format!("Unknown account: {npub}"));
+        return Err(format!("Unknown account: {npub}")); // i18n-exempt: developer error
     }
     super::notify::account_gone(&npub);
     let was_active = db::get_current_account().is_ok_and(|a| a == npub);
@@ -613,7 +614,7 @@ pub async fn delete(npub: String) -> Result<bool, String> {
     let dir = db::account_dir(&npub)?;
     match std::fs::remove_dir_all(&dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("Failed to remove account directory: {e}"));
+            return Err(crate::t::login_remove_failed(e.to_string()).to_string());
         }
         _ => {}
     }
@@ -661,7 +662,7 @@ pub async fn enter_add_mode(kind: Option<String>, mut opts: Option<serde_json::V
             return Ok(());
         }
         if v.kind != k.as_str() || !matches!(v.phase, transport::status::Phase::Starting) || std::time::Instant::now() > deadline {
-            return Err(format!("{} isn't connected yet. Try again, or pick another network.", k.label()));
+            return Err(crate::t::login_net_not_yet(k.label()).to_string());
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }

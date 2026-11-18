@@ -129,7 +129,7 @@ pub fn plain(content: &str) -> String {
     }
     let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() && ruled {
-        "Divider".into()
+        crate::t::preview_divider().into()
     } else {
         collapsed
     }
@@ -137,35 +137,36 @@ pub fn plain(content: &str) -> String {
 
 /// "Rust Codeblock" for a fence's language, else "Codeblock".
 fn codeblock_label(lang: &str) -> String {
+    // i18n-exempt: language names
     let name = match lang.to_ascii_lowercase().as_str() {
-        "rust" | "rs" => "Rust",
+        "rust" | "rs" => "Rust", // i18n-exempt: language names
         "js" | "javascript" => "JavaScript",
         "ts" | "typescript" => "TypeScript",
-        "py" | "python" => "Python",
-        "go" | "golang" => "Go",
+        "py" | "python" => "Python", // i18n-exempt: language names
+        "go" | "golang" => "Go", // i18n-exempt: language names
         "c" => "C",
         "cpp" | "c++" => "C++",
-        "java" => "Java",
+        "java" => "Java", // i18n-exempt: language names
         "json" => "JSON",
-        "bash" | "sh" | "shell" => "Bash",
+        "bash" | "sh" | "shell" => "Bash", // i18n-exempt: language names
         "html" | "xml" => "HTML",
         "css" => "CSS",
         "sql" => "SQL",
         "yaml" | "yml" => "YAML",
         "toml" => "TOML",
-        "kotlin" | "kt" => "Kotlin",
-        "swift" => "Swift",
-        "ruby" | "rb" => "Ruby",
+        "kotlin" | "kt" => "Kotlin", // i18n-exempt: language names
+        "swift" => "Swift", // i18n-exempt: language names
+        "ruby" | "rb" => "Ruby", // i18n-exempt: language names
         "php" => "PHP",
-        "lua" => "Lua",
-        "markdown" | "md" => "Markdown",
-        "diff" => "Diff",
+        "lua" => "Lua", // i18n-exempt: language names
+        "markdown" | "md" => "Markdown", // i18n-exempt: language names
+        "diff" => "Diff", // i18n-exempt: language names
         _ => "",
     };
     if name.is_empty() {
-        "Codeblock".into()
+        crate::t::preview_codeblock().into()
     } else {
-        format!("{name} Codeblock")
+        crate::t::preview_codeblock_named(name).into()
     }
 }
 

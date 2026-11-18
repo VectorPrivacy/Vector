@@ -9,6 +9,7 @@ use gpui::{
 
 use crate::backend::badges::Badges;
 use crate::profile::Badge;
+use crate::t;
 use crate::theme::*;
 
 #[derive(Clone, Copy)]
@@ -21,13 +22,13 @@ pub enum Run {
 
 pub struct Card {
     pub svg: SharedString,
-    pub title: &'static str,
+    pub title: SharedString,
     pub subtitle: Option<String>,
     /// Paragraphs of runs, each with the space below it.
     pub desc: Vec<(Vec<(String, Run)>, f32)>,
     /// Bug Hunter's tier rail: the held tier of three.
     pub tier: Option<u8>,
-    pub access: &'static str,
+    pub access: SharedString,
     /// The pointer over the card, from its centre, each axis in -1..1.
     pub tilt: Point<f32>,
     pub opened: std::time::Instant,
@@ -46,85 +47,45 @@ impl Card {
         ) = match which {
             Badge::Inviter => (
                 "icons/vector_badge_placeholder.svg".into(),
-                "Vector Beta Inviter",
+                t::badge_inviter(),
                 None,
-                vec![(
-                    vec![
-                        p("Acquired by inviting "),
-                        (
-                            format!(
-                                "{} {}",
-                                b.invites,
-                                if b.invites == 1 { "user" } else { "users" }
-                            ),
-                            Run::Bold,
-                        ),
-                        p(" to the Vector Beta!"),
-                    ],
-                    0.,
-                )],
+                vec![(bold_runs(&t::badge_inviter_text(b.invites)), 0.)],
                 None,
-                "",
+                SharedString::default(),
             ),
             Badge::Fawkes => (
                 "icons/fawkes_mask.svg".into(),
-                "V for Vector Badge",
+                t::badge_fawkes(),
                 None,
                 vec![
-                    (
-                        vec![p(
-                            "Acquired by logging in on Guy Fawkes Day\u{a0}(November 5, 2025).",
-                        )],
-                        21.,
-                    ),
-                    (
-                        vec![(
-                            "Remember, remember the 5th of November...".into(),
-                            Run::Aside,
-                        )],
-                        0.,
-                    ),
+                    (vec![p(&t::badge_fawkes_text())], 21.),
+                    (vec![(t::badge_fawkes_aside().to_string(), Run::Aside)], 0.),
                 ],
                 None,
-                "Full Premium Access",
+                t::badge_full_access(),
             ),
             Badge::BugHunter => (
                 format!("icons/bughunter_{}.svg", b.bug.clamp(1, 3)),
-                "Bug Hunter",
-                Some(format!("Tier {}", b.bug)),
-                vec![(
-                    vec![p(
-                        "Bug Hunter badges are one of the most prestigious awards to true contributors of Vector who have identified and reported bugs or issues.",
-                    )],
-                    0.,
-                )],
+                t::badge_bug_hunter(),
+                Some(t::badge_tier(b.bug).to_string()),
+                vec![(vec![p(&t::badge_bug_hunter_text())], 0.)],
                 Some(b.bug),
                 if b.bug >= 3 {
-                    "Full Premium Access"
+                    t::badge_full_access()
                 } else {
-                    "Partial Premium Access"
+                    t::badge_partial_access()
                 },
             ),
             Badge::V2026 => (
                 "icons/vforvector2026.svg".into(),
-                "V for Vector Badge",
-                Some("2026 Edition".into()),
+                t::badge_fawkes(),
+                Some(t::badge_v2026_edition().to_string()),
                 vec![
-                    (
-                        vec![p(
-                            "Remember, Remember... the\u{a0}Fifth\u{a0}of\u{a0}November.",
-                        )],
-                        10.,
-                    ),
-                    (
-                        vec![p(
-                            "\u{201c}People should not be afraid of their governments. Governments should be afraid of their people.\u{201d}",
-                        )],
-                        0.,
-                    ),
+                    (vec![p(&t::badge_v2026_text())], 10.),
+                    (vec![p(&t::badge_v2026_quote())], 0.),
                 ],
                 None,
-                "Partial Premium Access",
+                t::badge_partial_access(),
             ),
         };
         Self {
@@ -138,6 +99,25 @@ impl Card {
             opened: std::time::Instant::now(),
         }
     }
+}
+
+/// A message's `<b>` spans as bold runs, the rest plain.
+fn bold_runs(text: &str) -> Vec<(String, Run)> {
+    let mut runs = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("<b>") {
+        let after = &rest[open + 3..];
+        let close = after.find("</b>").unwrap_or(after.len());
+        if open > 0 {
+            runs.push((rest[..open].to_string(), Run::Plain));
+        }
+        runs.push((after[..close].to_string(), Run::Bold));
+        rest = after.get(close + 4..).unwrap_or("");
+    }
+    if !rest.is_empty() {
+        runs.push((rest.to_string(), Run::Plain));
+    }
+    runs
 }
 
 fn paragraph(runs: &[(String, Run)]) -> AnyElement {
@@ -248,7 +228,7 @@ pub fn view(
                         .flex_shrink_0()
                         .text_color(c(ACCENT)),
                 )
-                .child(card.access),
+                .child(card.access.clone()),
             14.,
         )
     });
@@ -335,7 +315,7 @@ pub fn view(
                             .mb(px(10.)),
                         26.,
                     )
-                    .child(card.title),
+                    .child(card.title.clone()),
                 )
                 .children(card.subtitle.clone().map(|s| {
                     shift(

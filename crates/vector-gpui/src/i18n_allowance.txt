@@ -1,18 +1,12 @@
-# Hard-coded English left per file (588 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (389 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
-backend/account.rs 19
 backend/actions.rs 9
-backend/archive.rs 16
 backend/attachments.rs 6
 backend/badges.rs 2
-backend/bunker.rs 16
 backend/calls.rs 1
 backend/chatlist.rs 3
-backend/community.rs 17
 backend/community_files.rs 13
-backend/embedvideo.rs 16
 backend/gifs.rs 3
-backend/images.rs 14
 backend/inline.rs 3
 backend/market.rs 4
 backend/mediaport.rs 6
@@ -22,7 +16,6 @@ backend/pivx.rs 1
 backend/prefs.rs 1
 backend/rail.rs 1
 backend/security.rs 10
-backend/sound.rs 19
 backend/storage.rs 3
 backend/stream.rs 13
 backend/sync.rs 2
@@ -33,7 +26,6 @@ backend/updates.rs 4
 backend/upload.rs 5
 backend/xdcurl.rs 2
 badge.rs 2
-badgecard.rs 17
 callvideo/camera.rs 5
 callvideo/screen.rs 13
 callvideo/vp8.rs 4
@@ -59,14 +51,12 @@ pic.rs 2
 picker.rs 1
 pickers.rs 4
 pins.rs 7
-preview.rs 14
 qr.rs 7
 rail.rs 10
 reactpop.rs 5
 rekey.rs 2
 screenpick.rs 7
 scrollbar.rs 4
-secretguard.rs 16
 settings_slim.rs 7
 shortcodes.rs 2
 spell.rs 1
@@ -74,10 +64,8 @@ textcolor.rs 3
 theme.rs 5
 transcript.rs 7
 ui_art.rs 10
-ui_miniapps.rs 19
 ui_miniprofile.rs 3
 ui_pins.rs 1
-ui_popout.rs 16
 ui_qrscan.rs 6
 ui_rail.rs 11
 ui_secretguard.rs 2

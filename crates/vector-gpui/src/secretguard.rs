@@ -9,6 +9,7 @@ use gpui::{AnyElement, App, SharedString, Window, div, px};
 use vector_core::secrets::SecretKind;
 
 use crate::security::{actions, button, card, head_tinted, overlay_dismiss};
+use crate::t;
 use crate::theme::*;
 
 const WAIT_SECS: u64 = 10;
@@ -67,27 +68,26 @@ fn lead(text: &str, color: gpui::Hsla) -> gpui::Div {
 pub fn render(g: &Guard, on: &OnAnswer) -> AnyElement {
     let key = g.kind == SecretKind::NostrKey;
     let title = match g.kind {
-        SecretKind::NostrKey => "This is a private key",
-        SecretKind::SeedPhrase => "This is a seed phrase",
-        SecretKind::WalletKey => "This is a wallet key",
+        SecretKind::NostrKey => t::secret_key_title(),
+        SecretKind::SeedPhrase => t::secret_seed_title(),
+        SecretKind::WalletKey => t::secret_wallet_title(),
     };
-    let what = if g.kind == SecretKind::SeedPhrase { "seed phrase" } else { "wallet private key" };
-    let first = if key {
-        "Your message contains an **nsec**: the private key to a Nostr account. Whoever has it can read every private message, post as that account and take it over, for good. Once sent, it can't be taken back.".to_string()
-    } else {
-        format!("Your message looks like a **{what}**. Whoever has it can take everything in that wallet, instantly and for good.")
+    let first = match g.kind {
+        SecretKind::NostrKey => t::secret_key_text(),
+        SecretKind::SeedPhrase => t::secret_seed_text(),
+        SecretKind::WalletKey => t::secret_wallet_text(),
     };
-    let place = &g.place;
+    let place = &*g.place;
     let loud = if g.community {
-        format!("This is a community. Everyone in **{place}** would see it, and so would anyone who joins later.")
+        t::secret_community(place)
     } else if key {
-        format!("No one ever needs your private key: not Vector, not support, not a friend. If **{place}** asked you for it, it's almost certainly a scam.")
+        t::secret_key_scam(place)
     } else {
-        format!("Scammers pose as support staff, giveaways and friends to ask for these. If **{place}** asked, stop and check who they really are.")
+        t::secret_wallet_scam(place)
     };
     let timer = match g.timer {
-        Timer::Offer => Some("If you're sure, turn on a **Self-Destruct Timer** first, so it doesn't stay on devices and relays forever."),
-        Timer::On => Some("This chat's Self-Destruct Timer is on, so it won't stay on devices and relays."),
+        Timer::Offer => Some(t::secret_timer_offer()),
+        Timer::On => Some(t::secret_timer_on()),
         Timer::None => None,
     };
     let answer = |a: Answer| {
@@ -96,11 +96,11 @@ pub fn render(g: &Guard, on: &OnAnswer) -> AnyElement {
     };
     let wait = g.wait();
     let gray = white_a(0.62);
-    let mut buttons = actions().child(button("secret-keep", "Don't Send", false, true, answer(Answer::Keep)));
+    let mut buttons = actions().child(button("secret-keep", t::secret_keep(), false, true, answer(Answer::Keep)));
     if g.timer == Timer::Offer {
-        buttons = buttons.child(button("secret-timer", "Set a Self-Destruct Timer", true, true, answer(Answer::Timer)));
+        buttons = buttons.child(button("secret-timer", t::secret_set_timer(), true, true, answer(Answer::Timer)));
     }
-    let label: SharedString = if wait > 0 { format!("Send Anyway ({wait})").into() } else { "Send Anyway".into() };
+    let label: SharedString = if wait > 0 { t::secret_send_wait(wait) } else { t::secret_send() };
     buttons = buttons.child(
         div()
             .id("secret-send")
@@ -134,7 +134,7 @@ pub fn render(g: &Guard, on: &OnAnswer) -> AnyElement {
             ))
             .child(lead(&first, gray))
             .child(lead(&loud, c(0xffb3ba)))
-            .children(timer.map(|t| lead(t, gray)))
+            .children(timer.map(|t| lead(&t, gray)))
             .child(buttons),
     )
 }

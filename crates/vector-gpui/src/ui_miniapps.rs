@@ -190,16 +190,12 @@ impl VectorApp {
                         if let Some(m) = app.mini.as_mut() {
                             m.just = false;
                         }
-                        let mut p = crate::kit::Popup::notice("Remove App?");
+                        let mut p = crate::kit::Popup::notice(t::miniapp_remove_title());
                         p.text = Some(
-                            format!(
-                                "Are you sure you want to remove <b>{}</b> from your recent Mini Apps?",
-                                name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-                            )
-                            .into(),
+                            t::miniapp_remove_text(name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")),
                         );
-                        p.confirm = "Confirm".into();
-                        p.cancel = Some("Cancel".into());
+                        p.confirm = t::dialog_confirm();
+                        p.cancel = Some(t::dialog_cancel());
                         app.popup = Some((p, super::PopupAct::RemoveMiniApp { name: name.clone(), pivx }));
                         cx.notify();
                     })),
@@ -316,7 +312,7 @@ impl VectorApp {
         let mut tiles: Vec<AnyElement> = Vec::new();
         if !searching {
             tiles.push(
-                tile(0, "mini-nexus".into(), svg().path("icons/nexus.svg").size(px(26.)).text_color(c(PRIMARY)).into_any_element(), "App Store".into(), true)
+                tile(0, "mini-nexus".into(), svg().path("icons/nexus.svg").size(px(26.)).text_color(c(PRIMARY)).into_any_element(), t::store_title(), true)
                     .on_click(cx.listener(|app, _, window, cx| app.show_nexus(Some(crate::nexus::View::Discover), window, cx)))
                     .into_any_element(),
             );
@@ -347,11 +343,12 @@ impl VectorApp {
                     .into_any_element(),
             );
         }
-        let pivx_match = "pivx".contains(&query) || "pivx wallet".contains(&query);
+        // i18n-exempt: English search alias, alongside the translated name
+        let pivx_match = "pivx".contains(&query) || "pivx wallet".contains(&query) || t::miniapp_pivx_wallet().to_lowercase().contains(&query);
         if if m.pivx_hidden { searching && pivx_match } else { !searching || pivx_match } {
             let i = tiles.len();
             let t = tile(i, "mini-pivx".into(), img("icons/pivx.svg").size(px(38.)).into_any_element(), "PIVX".into(), false);
-            let t = if m.pivx_hidden { t } else { self.editable(t, "PIVX Wallet".into(), true, cx) };
+            let t = if m.pivx_hidden { t } else { self.editable(t, t::miniapp_pivx_wallet().into(), true, cx) };
             tiles.push(
                 t.on_click(cx.listener(|app, _, _, cx| {
                     cx.stop_propagation();
@@ -360,8 +357,8 @@ impl VectorApp {
                     }
                     if app.mini.as_ref().is_some_and(|m| m.pivx_hidden) {
                         app.set_pivx_hidden(false, cx);
-                        let mut p = crate::kit::Popup::notice("PIVX Wallet Restored");
-                        p.text = Some("The PIVX Wallet has been restored to your Mini Apps panel.".into());
+                        let mut p = crate::kit::Popup::notice(t::miniapp_pivx_restored());
+                        p.text = Some(t::miniapp_pivx_restored_text());
                         p.icon = None;
                         app.popup = Some((p, super::PopupAct::Notice));
                         cx.notify();
@@ -402,7 +399,7 @@ impl VectorApp {
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(c(0x000000))
-                            .child("Back"),
+                            .child(t::miniapp_back()),
                     ),
             )
             .child(
@@ -457,7 +454,7 @@ impl VectorApp {
                                     .justify_center()
                                     .text_size(px(12.))
                                     .text_color(white_a(0.5))
-                                    .child("No recent Mini Apps"),
+                                    .child(t::miniapp_no_recent()),
                             )
                         })
                         .when(none_found, |d| {
@@ -471,12 +468,12 @@ impl VectorApp {
                                     .py(px(12.))
                                     .text_size(px(13.))
                                     .text_color(white_a(0.6))
-                                    .child("No Mini Apps found")
+                                    .child(t::miniapp_none_found())
                                     .child(
                                         div()
                                             .text_size(px(12.))
                                             .text_color(white_a(0.4))
-                                            .child("Try a different search, or check out the App Store!"),
+                                            .child(t::miniapp_none_found_hint()),
                                     ),
                             )
                         }),
@@ -488,7 +485,7 @@ impl VectorApp {
     /// `LaunchDialog`: play and invite the open chat, or play alone.
     pub(super) fn launch_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let l = self.launch.as_ref()?;
-        let verb = if l.app.game() { "Play" } else { "Open" };
+        let game = l.app.game();
         let initial = l
             .app
             .name
@@ -570,7 +567,7 @@ impl VectorApp {
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child("Play here, or bring this chat along"),
+                            .child(t::miniapp_launch_hint()),
                     ),
             )
             .child(
@@ -598,8 +595,8 @@ impl VectorApp {
             .child(head)
             .child(
                 crate::security::actions()
-                    .child(crate::security::button("ma-invite", format!("{verb} & Invite"), false, true, invite))
-                    .child(crate::security::button("ma-solo", format!("{verb} Alone"), true, true, solo)),
+                    .child(crate::security::button("ma-invite", if game { t::miniapp_play_invite() } else { t::miniapp_open_invite() }, false, true, invite))
+                    .child(crate::security::button("ma-solo", if game { t::miniapp_play_alone() } else { t::miniapp_open_alone() }, true, true, solo)),
             );
         let backdrop = cx.listener(|a, _: &gpui::MouseDownEvent, _, cx| {
             a.launch = None;
@@ -738,7 +735,7 @@ impl VectorApp {
         .detach();
         cx.spawn(async move |this, cx| {
             if let Ok(Err(e)) = send.await {
-                this.update(cx, |this, cx| this.notice("Upload Failed", e, cx)).ok();
+                this.update(cx, |this, cx| this.notice(&t::miniapp_upload_failed(), e, cx)).ok();
             }
         })
         .detach();

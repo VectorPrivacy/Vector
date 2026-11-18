@@ -86,3 +86,10 @@ invite-card-unavailable-text = This invite could not be loaded — it may be rev
 # Opens a community you're already in.
 invite-card-open = Open
 invite-card-join = Join
+
+## A reply's one-line preview of a message that is only a rule or a code block
+
+preview-divider = Divider
+preview-codeblock = Codeblock
+# $name is the code's language, like "Rust".
+preview-codeblock-named = { $name } Codeblock
