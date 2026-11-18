@@ -37,6 +37,26 @@ client's selective static build with `FFMPEG_DIR` set and `--features video-stat
 
 GPUI is pinned to one Zed revision in `Cargo.toml`, and moves only on purpose.
 
+## Text and languages
+
+Every string a person reads comes from `crates/vector-i18n/locales/en-GB` through `t::`, and the
+`i18n_audit` test fails on new hard-coded English. Translators work from
+`crates/vector-i18n/TRANSLATING.md`.
+
+A right-to-left language mirrors the layout inside the GPUI fork (`gpui::layout_rtl()`), so most
+screens need nothing. The exceptions:
+
+- `.keep_ltr()` on what reads left to right in every language: code, PIN and digit entry,
+  playback controls, a picture panned under the pointer.
+- Message text is `Inline::dir_auto()`, so an English paragraph stays left; any other `Inline`
+  sits at the start edge.
+- A sideways scroller reads its position with `kit::scrolled` and moves with
+  `kit::scroll_from_start`.
+- An icon that points along the reading direction goes in `lang::MIRRORED_ICONS`.
+- Counts and clocks built in code go through `lang::num` and `lang::digits`.
+
+`VECTOR_LANG=ar-XB` shows English mirrored, for checking a screen.
+
 ## Parity checks
 
 `reference/` renders the real Tauri frontend in Chromium on the same fixtures, so the two can be

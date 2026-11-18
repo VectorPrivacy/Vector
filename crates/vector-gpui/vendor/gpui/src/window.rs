@@ -4691,6 +4691,7 @@ impl Window {
         }
     }
 
+    /// Asks the containing list to scroll `bounds` into view; see [`Self::take_autoscroll`].
     pub fn request_autoscroll(&mut self, bounds: Bounds<Pixels>) {
         self.invalidator.debug_assert_prepaint();
         self.requested_autoscroll = Some(bounds);
@@ -5658,6 +5659,7 @@ impl Window {
         }
     }
 
+    /// Paints the visible part of `image_bounds` within `bounds`: one frame of `data`.
     pub fn paint_image(
         &mut self,
         bounds: Bounds<Pixels>,
