@@ -380,7 +380,7 @@ impl LoginView {
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_size(px(14.))
                                     .line_height(px(24.))
-                                    .child(r.name.clone().unwrap_or_else(|| "Unnamed".into())),
+                                    .child(r.name.clone().unwrap_or_else(|| crate::t::account_unnamed().into())),
                             )
                             .child(
                                 div()

@@ -666,7 +666,7 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
             row = row.child(
                 div()
                     .id(SharedString::from(format!("stm-pin-{ix}")))
-                    .tip(if pinned { "Unpin" } else { "Pin to Main Menu" })
+                    .tip(if pinned { crate::t::main_menu_unpin() } else { crate::t::main_menu_pin() })
                     .p(px(6.))
                     .rounded(px(8.))
                     .opacity(if selected || pinned { 1. } else { 0.35 })
@@ -1319,7 +1319,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             .enumerate()
             .map(|(ix, a)| {
                 let current = a.npub == me;
-                let label = a.name.clone().unwrap_or_else(|| "Unnamed".into());
+                let label = a.name.clone().unwrap_or_else(|| crate::t::account_unnamed().into());
                 let g = match &a.avatar {
                     Some(p) => Glyph::Picture(p.clone(), true),
                     None => Glyph::Initial(initial(&label), true),

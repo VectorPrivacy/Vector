@@ -18,3 +18,31 @@ copy-id-community = Copy Community ID
     .done = Copied Community ID
 copy-id-channel = Copy Channel ID
     .done = Copied Channel ID
+
+## Lengths of time, for choices like a timeout's
+
+time-seconds = { $count ->
+    [one] { $count } second
+   *[other] { $count } seconds
+}
+time-minutes = { $count ->
+    [one] { $count } minute
+   *[other] { $count } minutes
+}
+time-hours = { $count ->
+    [one] { $count } hour
+   *[other] { $count } hours
+}
+time-days = { $count ->
+    [one] { $count } day
+   *[other] { $count } days
+}
+time-weeks = { $count ->
+    [one] { $count } week
+   *[other] { $count } weeks
+}
+
+## The Main Menu toggle on anything that can be pinned there
+
+main-menu-pin = Pin to Main Menu
+main-menu-unpin = Unpin

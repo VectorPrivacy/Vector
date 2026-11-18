@@ -1,4 +1,4 @@
-# Hard-coded English left per file (4262 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (4216 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -66,7 +66,7 @@ inline.rs 7
 invite.rs 20
 kit.rs 2
 linkcard.rs 3
-login.rs 69
+login.rs 68
 loginnet.rs 28
 loginsigner.rs 24
 main.rs 1
@@ -111,8 +111,7 @@ settings.rs 355
 settings_slim.rs 7
 shortcodes.rs 2
 spell.rs 1
-startmenu.rs 56
-switcher.rs 3
+startmenu.rs 53
 textcolor.rs 3
 texttime.rs 53
 theme.rs 5
@@ -122,8 +121,6 @@ transfer.rs 50
 ui.rs 584
 ui_art.rs 10
 ui_chaneditor.rs 12
-ui_chatlist.rs 13
-ui_members.rs 26
 ui_miniapps.rs 25
 ui_miniprofile.rs 3
 ui_moderation.rs 47

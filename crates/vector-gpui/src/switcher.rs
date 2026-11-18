@@ -109,7 +109,7 @@ fn row(s: &Switcher, r: &Row, last: bool, compact: bool, on: &OnAct) -> AnyEleme
                         .text_size(px(16.))
                         .line_height(px(24.))
                         .text_color(c(0xf7f4f4))
-                        .child(r.name.clone().unwrap_or_else(|| "Unnamed".into())),
+                        .child(r.name.clone().unwrap_or_else(|| crate::t::account_unnamed().into())),
                 )
                 .when(!compact, |d| d.child(
                     div()
@@ -181,11 +181,7 @@ pub fn view(s: &Switcher, top: f32, left: f32, viewport: (f32, f32), anchor: Anc
                     .size(px(24.))
                     .text_color(if s.at_cap { white_a(0.35) } else { c(ACCENT) }),
             )
-            .child(if s.at_cap {
-                "Maximum Accounts"
-            } else {
-                "Add Profile"
-            })
+            .child(if s.at_cap { crate::t::account_max() } else { crate::t::account_add() })
     });
     let panel = div()
         .id("profile-switcher-panel")

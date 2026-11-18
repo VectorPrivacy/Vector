@@ -291,7 +291,7 @@ impl VectorApp {
                                                     .text_size(px(15.))
                                                     .line_height(px(20.))
                                                     .text_color(white_a(0.75))
-                                                    .child("Archived Chats"),
+                                                    .child(crate::t::chats_archived()),
                                             )
                                             .child(
                                                 div()
@@ -370,9 +370,9 @@ impl VectorApp {
     pub(super) fn start_pin_row(&self, key: String) -> Option<(kit::MenuItem, MenuAct)> {
         self.start_menu_on().then(|| {
             let item = if self.start_pinned(&key) {
-                kit::MenuItem::new("Unpin", "pin").danger()
+                kit::MenuItem::new(crate::t::main_menu_unpin(), "pin").danger()
             } else {
-                kit::MenuItem::new("Pin to Main Menu", "pin")
+                kit::MenuItem::new(crate::t::main_menu_pin(), "pin")
             };
             (item, MenuAct::StartTogglePin(key))
         })
@@ -395,16 +395,16 @@ impl VectorApp {
         };
         let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if unread {
-            rows.push((kit::MenuItem::new("Mark as Read", "check"), MenuAct::ChatRead(id.clone())));
+            rows.push((kit::MenuItem::new(crate::t::chats_mark_read(), "check"), MenuAct::ChatRead(id.clone())));
         } else if !muted && can_unread {
-            rows.push((kit::MenuItem::new("Mark as Unread", "eye-off"), MenuAct::ChatUnread(id.clone())));
+            rows.push((kit::MenuItem::new(crate::t::chats_mark_unread(), "eye-off"), MenuAct::ChatUnread(id.clone())));
         }
         if !(self.live && self.syncing) {
             rows.extend(self.notify_rows(&id, None));
         }
-        rows.push((kit::MenuItem::new(if pinned { "Unpin" } else { "Pin" }, "pin"), MenuAct::ChatPin(id.clone(), !pinned)));
+        rows.push((kit::MenuItem::new(if pinned { crate::t::chats_unpin() } else { crate::t::chats_pin() }, "pin"), MenuAct::ChatPin(id.clone(), !pinned)));
         rows.push((
-            kit::MenuItem::new(if archived { "Unarchive" } else { "Archive" }, "archive"),
+            kit::MenuItem::new(if archived { crate::t::chats_unarchive() } else { crate::t::chats_archive() }, "archive"),
             MenuAct::ChatArchive(id.clone(), !archived),
         ));
         if !me {
@@ -414,7 +414,7 @@ impl VectorApp {
             rows.push((kit::MenuItem::new(crate::t::copy_id_user(), "channel-hash"), MenuAct::CopyId(id.clone(), crate::t::copy_id_user_done())));
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
-        rows.push((kit::MenuItem::new("Block", "x-user").danger(), MenuAct::ChatBlock(id)));
+        rows.push((kit::MenuItem::new(crate::t::chats_block(), "x-user").danger(), MenuAct::ChatBlock(id)));
         self.show_menu(at, rows, cx);
     }
 
@@ -547,14 +547,11 @@ impl VectorApp {
             self.archive.revealed = true;
         }
         if !archive {
-            return self.show_toast("Chat Unarchived", cx);
+            return self.show_toast(&crate::t::chats_unarchived(), cx);
         }
         let hinted = backend::device::get("archive_hint_shown").is_some();
         backend::device::set("archive_hint_shown", "1");
-        self.show_toast(
-            if hinted { "Chat Archived" } else { "Chat Archived. Pull or scroll past the top of your chats to find it." },
-            cx,
-        );
+        self.show_toast(&if hinted { crate::t::chats_archived_toast() } else { crate::t::chats_archived_hint() }, cx);
     }
 
     /// `revokeOutlivedArchives`: a newer message brings a chat back on every device.
