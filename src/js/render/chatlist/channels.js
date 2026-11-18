@@ -402,6 +402,15 @@ function openCategoryMenu(communityId, category, x, y) {
     ] });
 }
 
+/** The menu on the channel pane's empty space. */
+function openChannelsMenu(communityId, x, y) {
+    if (!communityCanAddChannels(communityId)) return;
+    showContextMenu({ x, y, items: [
+        { label: 'Create Channel', icon: 'channel-hash', onClick: () => promptCreateChannel(communityId) },
+        { label: 'Create Category', icon: 'plus', onClick: () => promptCreateCategory(communityId) },
+    ] });
+}
+
 /** Channel Settings, with its permissions read alongside on the new roles. */
 function openChannelEditorFor(communityId, channel, isCategory = false) {
     VectorSvelte.openChannelEditor(communityId, channel, isCategory);

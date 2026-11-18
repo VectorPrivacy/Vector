@@ -211,6 +211,7 @@ function chatlistSnapshot() {
  * @property {(communityId: string, channelId: string, categoryId: string|null, index: number) => void} moveChannel
  * @property {(communityId: string, categoryId: string, index: number) => void} moveCategory
  * @property {(communityId: string, category: object, x: number, y: number) => void} openCategoryMenu
+ * @property {(communityId: string, x: number, y: number) => void} openChannelsMenu   the pane's empty space
  * @property {(image: string) => Promise<string|null>} cacheInviteLogo
  * @property {(npub: string) => boolean} npubIsKnown   their invites show their icon
  * @property {(invite: object) => void} acceptInvite
@@ -297,6 +298,7 @@ function chatlistHelpers() {
         moveChannel: moveCommunityChannel,
         moveCategory: moveCommunityCategory,
         openCategoryMenu,
+        openChannelsMenu,
         // invite rows
         cacheInviteLogo: (image) => invoke('cache_invite_logo', { image }).then(path => path ? convertFileSrc(path) : null),
         npubIsKnown,
