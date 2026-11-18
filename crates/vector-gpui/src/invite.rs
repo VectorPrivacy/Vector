@@ -155,7 +155,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
             }
         })
         .child(crate::kit::spaced(
-            if m.public { "PUBLIC" } else { "PRIVATE" },
+            if m.public { crate::t::invite_public() } else { crate::t::invite_private() }.to_uppercase(),
             0.6,
         ));
     let others_total: usize = m.others.iter().map(|o| o.1).sum();

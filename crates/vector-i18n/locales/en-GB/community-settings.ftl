@@ -70,6 +70,8 @@ community-settings-iroh-relays = Using iroh's public relays, run by n0.
 community-settings-learn-more = Learn more
 community-settings-relays-lede = Every message, channel and member list in this community lives on these relays, end-to-end encrypted.
 community-settings-relays-hint = A new relay is checked and given this community's whole history before anyone moves to it, and the old relays tell members where everyone went.
+# Tag on a relay that asks members to sign in before reading. Shown in capitals.
+community-settings-relay-auth = Auth
 community-settings-voice-relays-lede = Voice channels connect through these relays, end-to-end encrypted. Each relay sees where callers connect from.
 
 ## Bans

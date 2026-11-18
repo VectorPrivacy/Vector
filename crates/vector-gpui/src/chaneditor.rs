@@ -1288,7 +1288,7 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
                                 .group_hover("ce-close", |d| d.text_color(c(0xffffff)).border_color(c(0x6a6a6a)))
                                 .child("✕"),
                         )
-                        .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(9.)).line_height(px(10.)).text_color(c(0x9a9a9a)).child("ESC")),
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(9.)).line_height(px(10.)).text_color(c(0x9a9a9a)).child("ESC")), // i18n-exempt: key name
                 ),
         )
         .child(

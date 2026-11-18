@@ -738,7 +738,7 @@ impl VectorApp {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c(0xffffff))
                 .child(format!("{b:.2}"))
-                .child(div().text_color(c(PURPLE)).child("PIV"))
+                .child(div().text_color(c(PURPLE)).child("PIV")) // i18n-exempt: currency code
                 .into_any_element(),
         };
         let fade = ease(since / 0.25);
@@ -954,7 +954,7 @@ impl VectorApp {
                 .border_1()
                 .border_color(white_a(0.1))
                 .child(div().w(px(179.)).h(px(57.8)).flex().items_center().justify_end().child(input.clone()))
-                .child(div().text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(white_a(0.6)).child("PIV"))
+                .child(div().text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(white_a(0.6)).child("PIV")) // i18n-exempt: currency code
         };
         let text_box = |input: &Entity<TextInput>| {
             let focused = gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window);

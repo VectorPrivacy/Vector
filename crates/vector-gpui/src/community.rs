@@ -1229,7 +1229,7 @@ pub fn author_badge(store: &Store, chat_id: &str, npub: &str) -> Option<AnyEleme
     }
     let owner = com.owner_npub.as_deref() == Some(npub);
     owner.then(|| {
-        crate::kit::spaced("OWNER", 0.5)
+        crate::kit::spaced(t::community_owner().to_uppercase(), 0.5)
             .flex_shrink_0()
             .pt(px(2.75))
             .pb(px(1.25))

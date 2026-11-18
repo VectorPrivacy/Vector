@@ -58,3 +58,9 @@ server-cap-public = Public
 server-cap-max = { $size } max
 # $size is a file size, like "25 MB".
 server-cap-rejects-from = rejects ≥ { $size }
+
+## Why a media server couldn't be added or changed
+
+server-exists = Server already exists
+server-not-found = Server not found
+server-is-default = Cannot add a default server as custom

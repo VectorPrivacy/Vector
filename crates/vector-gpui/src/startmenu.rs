@@ -1415,7 +1415,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
             .font_weight(FontWeight::BOLD)
             .text_color(c(0x8a8a8a))
             .child(back(on))
-            .child(crate::kit::spaced("ACCOUNTS", 11. * 0.09))
+            .child(crate::kit::spaced(crate::t::start_accounts().to_uppercase(), 11. * 0.09))
             .child(
                 div()
                     .ml_auto()

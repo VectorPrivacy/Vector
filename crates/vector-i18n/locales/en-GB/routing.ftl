@@ -189,3 +189,15 @@ routing-bridges-off = Bridges off. Tor will connect directly.
 routing-bridges-saved = Bridges saved. Tor will use them.
 routing-bridges-applied = Bridges applied. Tor reconnected.
 routing-port-range = Enter a port from 1 to 65535.
+
+## Why a network change was refused
+
+routing-pref-not-loaded = The network preference isn't loaded.
+routing-change-before-login = The network can only be changed here before signing in.
+routing-finish-signer = Finish or cancel the signer connection first.
+routing-end-call = End the call to change networks.
+routing-save-failed = Couldn't save the network choice. It applies until Vector restarts.
+routing-alias-needs-network = Use Tor or I2P to check this address.
+routing-alias-own-relays = Vector looks these up only for your own relays.
+routing-tor-before-login = Tor can only be switched here before signing in.
+routing-circuit-timeout = Timed out building/reading circuit (20s)

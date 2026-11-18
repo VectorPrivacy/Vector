@@ -266,7 +266,7 @@ pub async fn get_relays() -> Result<Value, String> {
 
 pub async fn toggle_default_relay(url: String, enabled: bool) -> Result<bool, String> {
     if !is_default_relay(&url) {
-        return Err("Not a default relay".to_string());
+        return Err(crate::t::relay_not_default().to_string());
     }
     let normalized = url.trim().trim_end_matches('/').to_string();
     let mut disabled = disabled_default_relays()?;
@@ -294,17 +294,17 @@ pub async fn add_custom_relay(url: String, mode: Option<String>) -> Result<Custo
     let normalized = validate_relay_url(&url)?;
     let mode = mode.unwrap_or_else(default_relay_mode);
     if !["read", "write", "both"].contains(&mode.as_str()) {
-        return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
+        return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string()); // i18n-exempt: developer error
     }
     let mut relays = load_custom_relays()?;
     if relays
         .iter()
         .any(|r| r.url.eq_ignore_ascii_case(&normalized))
     {
-        return Err("Relay already exists".to_string());
+        return Err(crate::t::relay_exists().to_string());
     }
     if is_default_relay(&normalized) {
-        return Err("Cannot add default relay as custom relay".to_string());
+        return Err(crate::t::relay_is_default().to_string());
     }
     let relay = CustomRelay {
         url: normalized,
@@ -347,7 +347,7 @@ pub async fn toggle_custom_relay(url: String, enabled: bool) -> Result<bool, Str
     let relay = relays
         .iter_mut()
         .find(|r| r.url.eq_ignore_ascii_case(&url))
-        .ok_or("Relay not found")?;
+        .ok_or_else(|| crate::t::relay_not_found().to_string())?;
     relay.enabled = enabled;
     let mode = relay.mode.clone();
     save_custom_relays(&relays)?;
@@ -367,13 +367,13 @@ pub async fn toggle_custom_relay(url: String, enabled: bool) -> Result<bool, Str
 
 pub async fn update_relay_mode(url: String, mode: String) -> Result<bool, String> {
     if !["read", "write", "both"].contains(&mode.as_str()) {
-        return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string());
+        return Err("Invalid mode. Must be 'read', 'write', or 'both'".to_string()); // i18n-exempt: developer error
     }
     let mut relays = load_custom_relays()?;
     let relay = relays
         .iter_mut()
         .find(|r| r.url.eq_ignore_ascii_case(&url))
-        .ok_or("Relay not found")?;
+        .ok_or_else(|| crate::t::relay_not_found().to_string())?;
     relay.mode = mode.clone();
     let enabled = relay.enabled;
     save_custom_relays(&relays)?;
@@ -865,7 +865,7 @@ pub async fn add_server(url: String) -> Result<(), String> {
     db::scoped(async move {
         let normalized = bs::validate_url(&url)?;
         if bs::is_default_server(&normalized) {
-            return Err("Cannot add a default server as custom".to_string());
+            return Err(crate::t::server_is_default().to_string());
         }
         let key = normalized.to_lowercase();
         let mut customs = bs::load_custom_blossom_servers()?;
@@ -873,7 +873,7 @@ pub async fn add_server(url: String) -> Result<(), String> {
             .iter()
             .any(|c| c.url.trim_end_matches('/').to_lowercase() == key)
         {
-            return Err("Server already exists".to_string());
+            return Err(crate::t::server_exists().to_string());
         }
         customs.push(bs::CustomBlossomServer {
             url: normalized.clone(),
@@ -926,7 +926,7 @@ pub async fn toggle_server(url: String, enabled: bool) -> Result<(), String> {
             customs
                 .iter_mut()
                 .find(|c| c.url.trim_end_matches('/').to_lowercase() == key)
-                .ok_or("Server not found")?
+                .ok_or_else(|| crate::t::server_not_found().to_string())?
                 .enabled = enabled;
             bs::save_custom_blossom_servers(&customs)?;
         }

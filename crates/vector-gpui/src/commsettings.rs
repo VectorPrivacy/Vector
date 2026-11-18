@@ -918,7 +918,7 @@ fn relay_row(
                         .text_color(c(0xf2b84b))
                         .on_click(click(&on, || Act::ExplainAuth))
                         .child(svg().path("icons/locked.svg").size(px(11.)).text_color(c(0xf2b84b)))
-                        .child(crate::kit::spaced("AUTH", 0.44)),
+                        .child(crate::kit::spaced(crate::t::community_settings_relay_auth().to_uppercase(), 0.44)),
                 )
             })
         })
@@ -1828,7 +1828,7 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                                 .text_size(px(9.))
                                 .line_height(px(10.))
                                 .text_color(c(0x9a9a9a))
-                                .child("ESC"),
+                                .child("ESC"), // i18n-exempt: key name
                         ),
                 ),
         )

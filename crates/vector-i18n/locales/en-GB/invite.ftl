@@ -40,3 +40,8 @@ invite-sent = { $count ->
 }
 # $ok is how many invites went out and $failed how many didn't.
 invite-partial = Invited { $ok }, { $failed } failed.
+
+## A community link's visibility tag. Shown in capitals.
+
+invite-public = Public
+invite-private = Private

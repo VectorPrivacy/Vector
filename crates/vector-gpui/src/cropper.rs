@@ -456,7 +456,7 @@ impl Render for Cropper {
                     .line_height(px(24.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(gpui::white().opacity(0.4))
-                    .child("PREVIEW"),
+                    .child(crate::t::crop_preview().to_uppercase()),
             )
             .child(
                 div()

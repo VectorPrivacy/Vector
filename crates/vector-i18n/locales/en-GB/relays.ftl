@@ -22,3 +22,10 @@ relay-mode = Mode
 relay-activity = Recent Activity
 relay-copy-logs = Copy logs to clipboard
 relay-disconnected = Disconnected
+
+## Why a relay couldn't be added or changed
+
+relay-exists = Relay already exists
+relay-not-found = Relay not found
+relay-is-default = Cannot add default relay as custom relay
+relay-not-default = Not a default relay

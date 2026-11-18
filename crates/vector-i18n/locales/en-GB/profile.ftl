@@ -33,3 +33,8 @@ profile-status-none = No status
 profile-status-clear = Clear Status
 profile-status-failed = Status Update Failed!
 profile-status-failed-text = Failed to broadcast status update to the network.
+
+## Edit Mode field labels. Shown in capitals.
+
+profile-username = Username
+profile-bio = Bio

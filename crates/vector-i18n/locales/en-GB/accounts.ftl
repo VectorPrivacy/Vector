@@ -17,3 +17,5 @@ account-remove-text = { $name } will be permanently removed from this device, wi
 account-remove-last = This is your only Vector account on this device. All downloaded attachments will also be removed. Copy any files you want to keep before continuing.
 account-syncing = Syncing your account — try again in a moment
 account-sign-out-first = Sign out of this account first
+# A step was asked of an account that is no longer the one on screen.
+account-changed = The account changed. Try again.

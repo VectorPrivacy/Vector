@@ -376,7 +376,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
             .flex_col()
             .gap(px(5.))
             .child(
-                crate::kit::spaced("ROLES", 0.63)
+                crate::kit::spaced(crate::t::member_roles().to_uppercase(), 0.63)
                     .mt(px(4.))
                     .text_size(px(10.5))
                     .line_height(px(24.))

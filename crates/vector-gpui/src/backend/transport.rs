@@ -36,7 +36,7 @@ pub fn ensure_live() -> Result<(), String> {
     if vector_core::db::current_session_id() == vector_core::db::live_session_id() {
         Ok(())
     } else {
-        Err("The account changed. Try again.".into())
+        Err(crate::t::account_changed().into())
     }
 }
 
@@ -46,7 +46,7 @@ pub fn running_prelogin() -> bool {
 }
 
 fn parse_kind(kind: &str) -> Result<Kind, String> {
-    let k = Kind::parse(kind).ok_or_else(|| format!("Unknown network: {kind}"))?;
+    let k = Kind::parse(kind).ok_or_else(|| format!("Unknown network: {kind}"))?; // i18n-exempt: developer error
     if !k.compiled() {
         return Err(status::not_in_build(k).text);
     }
@@ -57,7 +57,7 @@ fn parse_kind(kind: &str) -> Result<Kind, String> {
 /// for `owner` while it is the live session: the dirs and config are the live account's.
 async fn start_ctx(kind: Kind, prelogin: bool, owner: u64) -> Result<StartCtx, String> {
     if owner != vector_core::db::live_session_id() {
-        return Err("The account changed. Try again.".into());
+        return Err(crate::t::account_changed().into());
     }
     match kind {
         #[cfg(feature = "tor")]
@@ -106,7 +106,7 @@ async fn start_kind(kind: Kind, prelogin: Option<u64>, owner: u64) -> Result<boo
     };
     if owner != vector_core::db::live_session_id() {
         inst.shutdown().await;
-        return Err("The account changed. Try again.".into());
+        return Err(crate::t::account_changed().into());
     }
     // Landed after the choice moved on: installing it would only cut the sockets of the network
     // in use, twice.
@@ -164,7 +164,7 @@ pub async fn start_for_active_account() -> Result<(), String> {
         match transport::preference() {
             None => {
                 host::deactivate(true).await;
-                return Err("The network preference isn't loaded.".into());
+                return Err(crate::t::routing_pref_not_loaded().into());
             }
             Some(Kind::Clearnet) => {
                 if host::active().is_some() {
@@ -400,10 +400,10 @@ pub async fn apply_prelogin(choice: PreloginChoice) -> Result<(), String> {
 /// Profile keeps its own), then applied.
 pub async fn set_prelogin(kind: &str, remember: Option<bool>, opts: Option<&Value>) -> Result<(), String> {
     if account_booted() {
-        return Err("The network can only be changed here before signing in.".into());
+        return Err(crate::t::routing_change_before_login().into());
     }
     if vector_core::signer::pairing_pending() {
-        return Err("Finish or cancel the signer connection first.".into());
+        return Err(crate::t::routing_finish_signer().into());
     }
     let choice = prelogin_choice(kind, opts)?;
     if remember != Some(false) {
@@ -435,7 +435,7 @@ async fn set_kind(kind: String, keep_realtime: Option<bool>) -> Result<Transport
     let _serial = LIFECYCLE.lock().await;
     ensure_live()?;
     if status::call_active() {
-        return Err("End the call to change networks.".into());
+        return Err(crate::t::routing_end_call().into());
     }
     let live = vector_core::db::live_session_id();
     let current = transport::preference();
@@ -473,7 +473,7 @@ async fn set_kind(kind: String, keep_realtime: Option<bool>) -> Result<Transport
     let started = start_kind(k, None, live).await;
     emit_view();
     started?;
-    saved.map_err(|_| "Couldn't save the network choice. It applies until Vector restarts.".to_string())?;
+    saved.map_err(|_| crate::t::routing_save_failed().to_string())?;
     Ok(view())
 }
 
@@ -579,7 +579,7 @@ pub async fn transport_set_alias(host: String, kind: String, address: Option<Str
 }
 
 async fn set_alias(host: String, kind: String, address: Option<String>) -> Result<Option<AliasEntry>, String> {
-    let k = Kind::parse(&kind).ok_or_else(|| format!("Unknown network: {kind}"))?;
+    let k = Kind::parse(&kind).ok_or_else(|| format!("Unknown network: {kind}"))?; // i18n-exempt: developer error
     let address = address.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(str::to_string);
     let entry = {
         let _serial = LIFECYCLE.lock().await;
@@ -617,7 +617,7 @@ async fn check_alias(host: String) -> Result<AliasEntry, String> {
     #[cfg(not(any(feature = "tor", feature = "i2p")))]
     {
         let _ = host;
-        Err("Use Tor or I2P to check this address.".into())
+        Err(crate::t::routing_alias_needs_network().into())
     }
 }
 
@@ -630,7 +630,7 @@ pub async fn transport_find_alias(url: String) -> Result<Value, String> {
 async fn find_alias(url: String) -> Result<Value, String> {
     ensure_live()?;
     if !super::network::is_own_relay(&url) {
-        return Err("Vector looks these up only for your own relays.".into());
+        return Err(crate::t::routing_alias_own_relays().into());
     }
     #[cfg(any(feature = "tor", feature = "i2p"))]
     {
@@ -646,7 +646,7 @@ async fn find_alias(url: String) -> Result<Value, String> {
     #[cfg(not(any(feature = "tor", feature = "i2p")))]
     {
         let _ = url;
-        Err("Use Tor or I2P to check this address.".into())
+        Err(crate::t::routing_alias_needs_network().into())
     }
 }
 
@@ -848,7 +848,7 @@ pub(crate) async fn tor_data_dirs() -> Result<(std::path::PathBuf, std::path::Pa
 /// transport in line. Only while no account is signed in.
 pub async fn tor_set_prelogin(enabled: bool, remember: Option<bool>) -> Result<TorState, String> {
     if account_booted() {
-        return Err("Tor can only be switched here before signing in.".to_string());
+        return Err(crate::t::routing_tor_before_login().to_string());
     }
     #[cfg(feature = "tor")]
     {
@@ -867,7 +867,7 @@ pub async fn tor_set_prelogin(enabled: bool, remember: Option<bool>) -> Result<T
     {
         let _ = remember;
         if enabled {
-            return Err("This Vector build was compiled without the `tor` feature.".to_string());
+            return Err("This Vector build was compiled without the `tor` feature.".to_string()) // i18n-exempt: developer build;
         }
     }
     Ok(tor_get_state())
@@ -1058,13 +1058,13 @@ pub async fn tor_get_circuits(force_new: Option<bool>) -> Result<CircuitOut, Str
             vector_core::tor::current_circuit_hops(),
         )
         .await
-        .map_err(|_| "Timed out building/reading circuit (20s)".to_string())??;
+        .map_err(|_| crate::t::routing_circuit_timeout().to_string())??;
         Ok(CircuitOut { host, hops: hops.into_iter().map(hop_out).collect(), circuits, hosts })
     }
     #[cfg(not(feature = "tor"))]
     {
         let _ = force_new;
-        Err("This Vector build was compiled without the `tor` feature.".to_string())
+        Err("This Vector build was compiled without the `tor` feature.".to_string()) // i18n-exempt: developer build
     }
 }
 
@@ -1231,6 +1231,7 @@ pub async fn tor_set_enabled(enabled: bool) -> Result<TorState, String> {
     #[cfg(not(feature = "tor"))]
     {
         if enabled {
+            // i18n-exempt: developer build
             return Err("This Vector build was compiled without the `tor` feature. Re-build with `--features tor` to enable Tor support.".to_string());
         }
     }
@@ -1307,7 +1308,7 @@ pub async fn i2p_set_exit(mode: String) -> Result<TransportStateView, String> {
     let mode = match mode.as_str() {
         "allow" => ExitPolicy::Allow,
         "off" => ExitPolicy::Off,
-        _ => return Err(format!("Unknown I2P-Only mode: {mode}")),
+        _ => return Err(format!("Unknown I2P-Only mode: {mode}")), // i18n-exempt: developer error
     };
     vector_core::db::scoped_result(set_i2p_exit(mode)).await
 }

@@ -396,3 +396,32 @@ settings-mic-test-stopped = The microphone test stopped
 settings-logout-title = Going Incognito?
 # <b> is bold, <br> a line break.
 settings-logout-text = Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br>That said, would you like to continue?
+
+## Installing an update in the app
+
+settings-update-bad-signature = The update's signature is malformed
+settings-update-bad-key = The release key is malformed
+settings-update-signature-mismatch = The update's signature does not match, so it was not installed
+# $error is why.
+settings-update-download-failed = Update download failed: { $error }
+# $status is the server's answer, like "404 Not Found".
+settings-update-download-http = Update download failed: HTTP { $status }
+# $error is why.
+settings-update-download-interrupted = Update download interrupted: { $error }
+# $error is why the folder couldn't be made.
+settings-update-folder-failed = Update folder: { $error }
+# $error is why the file couldn't be saved.
+settings-update-file-failed = Update file: { $error }
+settings-update-manual = This copy of Vector can't update itself; install the new release by hand
+# $error is why.
+settings-update-stage-failed = Couldn't stage the update: { $error }
+# $error is why.
+settings-update-replace-failed = Couldn't replace the app: { $error }
+settings-update-no-folder = The app has no folder
+# $error is why.
+settings-update-unpack-failed = Couldn't unpack the update: { $error }
+settings-update-empty = The update holds no app
+# $error is why.
+settings-update-installer-failed = Couldn't start the installer: { $error }
+settings-update-unsupported = No in-app updates on this platform
+settings-update-nothing-to-start = Nothing to start

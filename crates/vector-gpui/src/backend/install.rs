@@ -55,24 +55,24 @@ fn verify_with(pubkey: &str, bytes: &[u8], signature: &str) -> Result<(), String
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
     let text = |s: &str| {
-        b64.decode(s.trim()).ok().and_then(|b| String::from_utf8(b).ok()).ok_or("The update's signature is malformed")
+        b64.decode(s.trim()).ok().and_then(|b| String::from_utf8(b).ok()).ok_or_else(|| crate::t::settings_update_bad_signature().to_string())
     };
-    let key = minisign_verify::PublicKey::decode(&text(pubkey)?).map_err(|_| "The release key is malformed")?;
-    let sig = minisign_verify::Signature::decode(&text(signature)?).map_err(|_| "The update's signature is malformed")?;
-    key.verify(bytes, &sig, false).map_err(|_| "The update's signature does not match, so it was not installed".to_string())
+    let key = minisign_verify::PublicKey::decode(&text(pubkey)?).map_err(|_| crate::t::settings_update_bad_key().to_string())?;
+    let sig = minisign_verify::Signature::decode(&text(signature)?).map_err(|_| crate::t::settings_update_bad_signature().to_string())?;
+    key.verify(bytes, &sig, false).map_err(|_| crate::t::settings_update_signature_mismatch().to_string())
 }
 
 /// Download and verify the bundle, reporting `(received, total)`; the checked file's path.
 pub async fn download(asset: Asset, progress: impl Fn(u64, u64)) -> Result<PathBuf, String> {
     let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::transfer_stall()), true)?;
-    let mut resp = client.get(&asset.url).send().await.map_err(|e| format!("Update download failed: {e}"))?;
+    let mut resp = client.get(&asset.url).send().await.map_err(|e| crate::t::settings_update_download_failed(e.to_string()).to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Update download failed: HTTP {}", resp.status()));
+        return Err(crate::t::settings_update_download_http(resp.status().to_string()).to_string());
     }
     let total = resp.content_length().unwrap_or(0);
     let mut bytes = Vec::with_capacity(total as usize);
     let mut shown = 0u64;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("Update download interrupted: {e}"))? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| crate::t::settings_update_download_interrupted(e.to_string()).to_string())? {
         bytes.extend_from_slice(&chunk);
         let got = bytes.len() as u64;
         if got - shown >= 256 * 1024 || got == total {
@@ -83,15 +83,15 @@ pub async fn download(asset: Asset, progress: impl Fn(u64, u64)) -> Result<PathB
     verify(&bytes, &asset.signature)?;
     let name = asset.url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("update").to_string();
     let dir = std::env::temp_dir().join("io.vectorapp.gpui-update");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Update folder: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| crate::t::settings_update_folder_failed(e.to_string()).to_string())?;
     let path = dir.join(name);
-    std::fs::write(&path, &bytes).map_err(|e| format!("Update file: {e}"))?;
+    std::fs::write(&path, &bytes).map_err(|e| crate::t::settings_update_file_failed(e.to_string()).to_string())?;
     Ok(path)
 }
 
 /// Put the verified bundle in place. On Windows the installer takes over and the app must quit.
 pub fn install(bundle: &Path) -> Result<(), String> {
-    let target = target().ok_or("This copy of Vector can't update itself; install the new release by hand")?;
+    let target = target().ok_or_else(|| crate::t::settings_update_manual().to_string())?;
     install_at(bundle, &target)
 }
 
@@ -99,35 +99,35 @@ pub fn install(bundle: &Path) -> Result<(), String> {
 fn install_at(bundle: &Path, appimage: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let staged = appimage.with_extension("update");
-    std::fs::copy(bundle, &staged).map_err(|e| format!("Couldn't stage the update: {e}"))?;
+    std::fs::copy(bundle, &staged).map_err(|e| crate::t::settings_update_stage_failed(e.to_string()).to_string())?;
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-    std::fs::rename(&staged, appimage).map_err(|e| format!("Couldn't replace the app: {e}"))?;
+    std::fs::rename(&staged, appimage).map_err(|e| crate::t::settings_update_replace_failed(e.to_string()).to_string())?;
     let _ = std::fs::remove_file(bundle);
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn install_at(bundle: &Path, app: &Path) -> Result<(), String> {
-    let parent = app.parent().ok_or("The app has no folder")?;
+    let parent = app.parent().ok_or_else(|| crate::t::settings_update_no_folder().to_string())?;
     let staging = parent.join(".vector-update");
     let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|e| format!("Couldn't stage the update: {e}"))?;
+    std::fs::create_dir_all(&staging).map_err(|e| crate::t::settings_update_stage_failed(e.to_string()).to_string())?;
     let file = std::fs::File::open(bundle).map_err(|e| e.to_string())?;
     tar::Archive::new(flate2::read::GzDecoder::new(file))
         .unpack(&staging)
-        .map_err(|e| format!("Couldn't unpack the update: {e}"))?;
+        .map_err(|e| crate::t::settings_update_unpack_failed(e.to_string()).to_string())?;
     let fresh = std::fs::read_dir(&staging)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .find(|p| p.extension().is_some_and(|e| e == "app"))
-        .ok_or("The update holds no app")?;
+        .ok_or_else(|| crate::t::settings_update_empty().to_string())?;
     // Swapped by rename, so a failure part way leaves the old app where it was.
     let old = staging.join("previous.app");
-    std::fs::rename(app, &old).map_err(|e| format!("Couldn't replace the app: {e}"))?;
+    std::fs::rename(app, &old).map_err(|e| crate::t::settings_update_replace_failed(e.to_string()).to_string())?;
     if let Err(e) = std::fs::rename(&fresh, app) {
         let _ = std::fs::rename(&old, app);
-        return Err(format!("Couldn't replace the app: {e}"));
+        return Err(crate::t::settings_update_replace_failed(e.to_string()).to_string());
     }
     let _ = std::fs::remove_dir_all(&staging);
     let _ = std::fs::remove_file(bundle);
@@ -142,12 +142,12 @@ fn install_at(bundle: &Path, dir: &Path) -> Result<(), String> {
         .args(["/P".into(), "/R".into(), format!("/D={}", dir.display())])
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("Couldn't start the installer: {e}"))
+        .map_err(|e| crate::t::settings_update_installer_failed(e.to_string()).to_string())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn install_at(_: &Path, _: &Path) -> Result<(), String> {
-    Err("No in-app updates on this platform".into())
+    Err(crate::t::settings_update_unsupported().into())
 }
 
 /// Start the installed copy once this process has gone, so it isn't handed back to us as a
@@ -155,11 +155,12 @@ fn install_at(_: &Path, _: &Path) -> Result<(), String> {
 pub fn relaunch() -> Result<(), String> {
     #[cfg(unix)]
     {
-        let target = target().ok_or("Nothing to start")?;
+        let target = target().ok_or_else(|| crate::t::settings_update_nothing_to_start().to_string())?;
+        // i18n-exempt: shell
         let start = if cfg!(target_os = "macos") { "open -n \"$1\"" } else { "exec \"$1\"" };
         std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg(format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; {start}", std::process::id()))
+            .arg(format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; {start}", std::process::id())) // i18n-exempt: shell
             .arg("vector-relaunch")
             .arg(target)
             .spawn()

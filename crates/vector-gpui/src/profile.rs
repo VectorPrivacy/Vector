@@ -981,7 +981,7 @@ fn edit_bar(dirty: bool, on: &OnAct) -> gpui::Div {
 
 /// `ProfileEditFields`: Remove Banner, Username and Bio.
 fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
-    let label = |text: &'static str| {
+    let label = |text: String| {
         div()
             .w_full()
             .text_center()
@@ -1022,9 +1022,9 @@ fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
                     .child("Remove Banner"),
             )
         })
-        .child(label("USERNAME"))
+        .child(label(crate::t::profile_username().to_uppercase()))
         .child(wrapper().child(div().h(px(24.)).flex().items_center().child(e.name.clone())))
-        .child(div().mt(px(12.)).child(label("BIO")))
+        .child(div().mt(px(12.)).child(label(crate::t::profile_bio().to_uppercase())))
         .child(
             wrapper()
                 .pb(px(12.))
