@@ -81,7 +81,7 @@ impl VectorApp {
                     break;
                 }
             }
-            let res = rx.await.unwrap_or_else(|_| Err("The upload stopped".into()));
+            let res = rx.await.unwrap_or_else(|_| Err(crate::t::community_art_upload_stopped().into()));
             this.update(cx, |this, cx| {
                 this.overview_icon = None;
                 match res {
@@ -89,7 +89,7 @@ impl VectorApp {
                         this.resolve_art(Some(id.clone()), cx);
                         this.reload_communities(cx);
                     }
-                    Err(e) => this.notice_plain("Couldn’t Update the Icon", &e, cx),
+                    Err(e) => this.notice_plain(&crate::t::community_art_icon_failed(), &e, cx),
                 }
                 cx.notify();
             })
@@ -111,17 +111,17 @@ impl VectorApp {
             directories: false,
             multiple: false,
             filters: crate::pickers::picture(),
-            prompt: Some(if matches!(art, Art::NewIcon | Art::OverviewIcon) { "Choose Community Icon" } else { "Choose Image" }.into()),
+            prompt: Some(if matches!(art, Art::NewIcon | Art::OverviewIcon) { crate::t::community_art_pick_icon() } else { crate::t::community_art_pick_image() }),
         });
         let window = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let gone = |this: &gpui::WeakEntity<VectorApp>, cx: &mut gpui::AsyncApp, toast: Option<&'static str>| {
+            let gone = |this: &gpui::WeakEntity<VectorApp>, cx: &mut gpui::AsyncApp, toast: Option<gpui::SharedString>| {
                 this.update(cx, |this, cx| {
                     if art == Art::OverviewIcon {
                         this.overview_icon = None;
                     }
                     if let Some(t) = toast {
-                        this.show_toast(t, cx);
+                        this.show_toast(&t, cx);
                     }
                     cx.notify();
                 })
@@ -131,7 +131,7 @@ impl VectorApp {
                 return gone(&this, cx, None);
             };
             let Some(ext) = backend::upload::picture_ext(&path) else {
-                return gone(&this, cx, Some("That image could not be read"));
+                return gone(&this, cx, Some(crate::t::community_art_unreadable()));
             };
             let file = path.clone();
             let decoded = cx
@@ -143,7 +143,7 @@ impl VectorApp {
                 })
                 .await;
             let Some((image, w, h)) = decoded else {
-                return gone(&this, cx, Some("That image could not be read"));
+                return gone(&this, cx, Some(crate::t::community_art_unreadable()));
             };
             let pick = Pick {
                 path,
@@ -193,11 +193,11 @@ impl VectorApp {
                 image,
                 (w, h),
                 match art {
-                    Art::Banner => "Crop Banner",
-                    Art::Icon | Art::OverviewIcon => "Crop Icon",
-                    Art::NewIcon => "Crop Community Icon",
+                    Art::Banner => crate::t::crop_banner_title(),
+                    Art::Icon | Art::OverviewIcon => crate::t::crop_icon_title(),
+                    Art::NewIcon => crate::t::crop_community_icon_title(),
                 },
-                "Drag to move, or drag a corner to resize.",
+                crate::t::crop_avatar_hint(),
                 false,
                 window,
                 cx,

@@ -47,6 +47,7 @@ msg-react-failed = Reaction Failed
 msg-delete-failed = Delete Failed
 msg-edit-failed = Edit Failed
 msg-retry-impossible = Cannot retry
+msg-retry-file-missing = This file is no longer on this device. Attach it again to send it.
 msg-react-denied = You can't react in this channel
 # $error is why, as the relay or app gave it.
 msg-react-not-sent = Reaction not sent: { $error }
@@ -93,3 +94,4 @@ preview-divider = Divider
 preview-codeblock = Codeblock
 # $name is the code's language, like "Rust".
 preview-codeblock-named = { $name } Codeblock
+msg-react-not-yours = Cannot revoke a reaction that isn't yours

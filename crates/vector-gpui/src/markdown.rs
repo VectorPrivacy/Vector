@@ -14,11 +14,11 @@ use crate::emoji;
 use crate::inline::{Atom, Kind, Look};
 
 pub const MONO: &str = if cfg!(target_os = "macos") {
-    "Menlo"
+    "Menlo" // i18n-exempt: font name
 } else if cfg!(target_os = "windows") {
-    "Consolas"
+    "Consolas" // i18n-exempt: font name
 } else {
-    "DejaVu Sans Mono"
+    "DejaVu Sans Mono" // i18n-exempt: font name
 };
 
 /// First code point of the markers standing in for spoilers and shrugs while Marked's grammar
@@ -1546,7 +1546,7 @@ mod custom_tests {
         let pic = std::sync::Arc::new(gpui::RenderImage::new(Vec::new()));
         let f = |c: &str| (c == "grin").then(|| crate::media::Custom::Ready(pic.clone()));
         let ctx = Ctx {
-            base: Look::new("Rubik", 15., 21., gpui::white()),
+            base: Look::new("Rubik", 15., 21., gpui::white()), // i18n-exempt: font name
             revealed: &revealed,
             custom: Some(&f),
             now: 0.,
@@ -1556,7 +1556,7 @@ mod custom_tests {
             colors: &[],
             go: None,
         };
-        let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx);
+        let blocks = parse("Have you seen this? :grin: and 21:20:30", &ctx); // i18n-exempt: fixture
         let Block::Para(p) = &blocks[0] else { panic!() };
         assert!(p.atoms.iter().any(|a| matches!(
             a,
@@ -1574,7 +1574,7 @@ mod custom_tests {
         let pic = std::sync::Arc::new(gpui::RenderImage::new(Vec::new()));
         let f = |c: &str| c.starts_with("love~").then(|| crate::media::Custom::Ready(pic.clone()));
         let ctx = Ctx {
-            base: Look::new("Rubik", 15., 21., gpui::white()),
+            base: Look::new("Rubik", 15., 21., gpui::white()), // i18n-exempt: font name
             revealed: &revealed,
             custom: Some(&f),
             now: 0.,
@@ -1584,7 +1584,7 @@ mod custom_tests {
             colors: &[],
             go: None,
         };
-        let blocks = parse(":love~2: and :love~3: but ~gone~", &ctx);
+        let blocks = parse(":love~2: and :love~3: but ~gone~", &ctx); // i18n-exempt: fixture
         let Block::Para(p) = &blocks[0] else { panic!() };
         let images = p.atoms.iter().filter(|a| matches!(a, Atom::Image { .. })).count();
         assert_eq!(images, 2);
@@ -1598,7 +1598,7 @@ mod custom_tests {
         let revealed = HashSet::new();
         let mask = |t: &str| t.contains("npub1").then(|| t.replace("npub1", "•••"));
         let ctx = Ctx {
-            base: Look::new("Rubik", 15., 21., gpui::white()),
+            base: Look::new("Rubik", 15., 21., gpui::white()), // i18n-exempt: font name
             revealed: &revealed,
             custom: None,
             now: 0.,
@@ -1634,7 +1634,7 @@ mod html_tests {
     fn atoms(src: &str) -> Vec<Atom> {
         let revealed = HashSet::new();
         let ctx = Ctx {
-            base: Look::new("Rubik", 15., 21., gpui::white()),
+            base: Look::new("Rubik", 15., 21., gpui::white()), // i18n-exempt: font name
             revealed: &revealed,
             custom: None,
             now: 0.,
@@ -1665,7 +1665,7 @@ mod html_tests {
 
     #[test]
     fn inline_tags_style_the_text() {
-        let a = atoms("a <u>line</u> H<sub>2</sub>O x<sup>2</sup> <small>fine</small>");
+        let a = atoms("a <u>line</u> H<sub>2</sub>O x<sup>2</sup> <small>fine</small>"); // i18n-exempt: fixture
         assert!(look_of(&a, "line").underline);
         assert!(look_of(&a, "2").rise != 0.);
         assert!(look_of(&a, "fine").size < 15.);
@@ -1674,7 +1674,7 @@ mod html_tests {
 
     #[test]
     fn details_hide_their_body_behind_a_tap() {
-        let a = atoms("<details>\n<summary>Plot</summary>\nThe butler did it.\n</details>");
+        let a = atoms("<details>\n<summary>Plot</summary>\nThe butler did it.\n</details>"); // i18n-exempt: fixture
         assert_eq!(look_of(&a, "Plot").weight, FontWeight::BOLD);
         let body = a.iter().any(|x| matches!(x, Atom::Text { text, kind: Kind::Spoiler { revealed: false, .. }, .. } if text.contains("butler")));
         assert!(body, "the body is a closed spoiler");
@@ -1683,7 +1683,7 @@ mod html_tests {
 
     #[test]
     fn unknown_tags_stay_as_written() {
-        let a = atoms("Fill in <insert name here> please");
+        let a = atoms("Fill in <insert name here> please"); // i18n-exempt: fixture
         assert!(a.iter().any(|x| matches!(x, Atom::Text { text, .. } if text.contains("<insert name here>"))));
     }
 }

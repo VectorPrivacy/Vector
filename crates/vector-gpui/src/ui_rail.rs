@@ -4,7 +4,7 @@ use gpui::{AppContext, Context, Focusable, Pixels, Point, SharedString, Window};
 use vector_core::rail_layout::{RailDrag, RailDrop, RailLayout, RailNode};
 
 use super::{MenuAct, PopupAct, VectorApp};
-use crate::{backend, kit};
+use crate::{backend, kit, t};
 
 const OPEN_KEY: &str = "rail_open_folders";
 
@@ -76,7 +76,7 @@ impl VectorApp {
 
     fn rail_commit(&mut self, rx: futures::channel::oneshot::Receiver<Result<RailLayout, String>>, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Backend stopped".into()));
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
             this.update(cx, |this, cx| {
                 match result {
                     Ok(layout) => this.store.borrow_mut().rail = layout,
@@ -112,22 +112,22 @@ impl VectorApp {
         };
         let mut rows: Vec<(kit::MenuItem, MenuAct)> = Vec::new();
         if !members.is_empty() {
-            rows.push((kit::MenuItem::new("Mark as Read", "check"), MenuAct::RailRead(members)));
+            rows.push((kit::MenuItem::new(t::chats_mark_read(), "check"), MenuAct::RailRead(members)));
             rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         }
-        rows.push((kit::MenuItem::new("Rename Folder", "edit"), MenuAct::RailRename(folder.clone())));
-        let mut items = vec![kit::MenuItem::new("Grey", "").swatch(crate::rail::tint(None)).checked(hue.is_none())];
+        rows.push((kit::MenuItem::new(t::start_folder_rename(), "edit"), MenuAct::RailRename(folder.clone())));
+        let mut items = vec![kit::MenuItem::new(t::start_folder_grey(), "").swatch(crate::rail::tint(None)).checked(hue.is_none())];
         let mut acts = vec![MenuAct::RailHue(folder.clone(), None)];
         for (label, h) in crate::rail::HUES {
-            items.push(kit::MenuItem::new(label, "").swatch(crate::rail::tint(Some(h))).checked(hue == Some(h)));
+            items.push(kit::MenuItem::new(label(), "").swatch(crate::rail::tint(Some(h))).checked(hue == Some(h)));
             acts.push(MenuAct::RailHue(folder.clone(), Some(h)));
         }
         rows.push((
-            kit::MenuItem::new("Colour", "palette").sub(),
-            MenuAct::Sub(SharedString::from("Colour"), items, acts),
+            kit::MenuItem::new(t::start_folder_colour(), "palette").sub(),
+            MenuAct::Sub(t::start_folder_colour(), items, acts),
         ));
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
-        rows.push((kit::MenuItem::new("Ungroup", "folder"), MenuAct::RailUngroup(folder)));
+        rows.push((kit::MenuItem::new(t::start_ungroup(), "folder"), MenuAct::RailUngroup(folder)));
         self.show_menu(at, rows, cx);
     }
 
@@ -160,7 +160,7 @@ impl VectorApp {
             _ => None,
         });
         let Some(current) = current else { return };
-        let placeholder = if current.is_empty() { "Folder Name".to_string() } else { current };
+        let placeholder = if current.is_empty() { t::start_folder_name().to_string() } else { current };
         let input = cx.new(|cx| {
             crate::composer::TextInput::new(placeholder, cx)
                 .with_look(kit::field_look())
@@ -176,10 +176,10 @@ impl VectorApp {
         })
         .detach();
         window.focus(&input.focus_handle(cx), cx);
-        let mut popup = kit::Popup::notice("Rename Folder");
+        let mut popup = kit::Popup::notice(t::start_folder_rename());
         popup.icon = None;
-        popup.confirm = "Confirm".into();
-        popup.cancel = Some("Cancel".into());
+        popup.confirm = t::dialog_confirm();
+        popup.cancel = Some(t::dialog_cancel());
         popup.input = Some(input);
         self.popup = Some((popup, PopupAct::RailRename(folder)));
         cx.notify();

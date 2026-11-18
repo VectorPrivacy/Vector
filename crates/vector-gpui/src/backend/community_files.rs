@@ -24,7 +24,7 @@ struct Prepared {
 
 fn id32(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
-        return Err(format!("expected 64 hex chars, got {}", hex.len()));
+        return Err(format!("expected 64 hex chars, got {}", hex.len())); // i18n-exempt: developer error
     }
     Ok(vector_core::simd::hex::hex_to_bytes_32(hex))
 }
@@ -82,7 +82,7 @@ async fn prepare(
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| format!("read attachment: {e}"))?;
+    .map_err(|e| format!("read attachment: {e}"))?; // i18n-exempt: developer error
     prepare_bytes(bytes, &name, compress, keep_metadata, precompressed).await
 }
 
@@ -112,7 +112,7 @@ async fn prepare_path(path: PathBuf, name: String) -> Result<Prepared, String> {
         .await
         .map_err(|e| e.to_string())??;
     if len == 0 {
-        return Err("Empty attachment".into());
+        return Err(crate::t::community_empty_attachment().into());
     }
     Ok(stage(FileSource::Path(path), len, hash, extension, name, None))
 }
@@ -125,7 +125,7 @@ async fn prepare_bytes(
     precompressed: Option<CachedCompressedImage>,
 ) -> Result<Prepared, String> {
     if bytes.is_empty() {
-        return Err("Empty attachment".into());
+        return Err(crate::t::community_empty_attachment().into());
     }
     let sent_as = Path::new(file_name)
         .extension()
@@ -246,17 +246,17 @@ async fn dispatch(
 ) -> Result<Option<String>, String> {
     vector_core::db::scoped(async move {
         let reply = (!replied_to.is_empty()).then_some(replied_to);
-        let author = vector_core::my_public_key().ok_or("Public key not set")?;
+        let author = vector_core::my_public_key().ok_or("Public key not set")?; // i18n-exempt: developer error
         let my_npub = author.to_bech32().ok();
         let community_id = vector_core::db::community::community_id_for_channel(&channel)?
-            .ok_or("Unknown Community channel")?;
+            .ok_or_else(|| crate::t::community_unknown_channel().to_string())?;
         let (content, _) = vector_core::community::mentions::resolve_in(&community_id, &content);
         let (content, text_spans) = vector_core::text_spans::extract_own(&content);
         let community = vector_core::db::community::load_community_v2(&CommunityId(id32(&community_id)?))?
-            .ok_or("Community not found")?;
+            .ok_or_else(|| crate::t::community_not_found().to_string())?;
         let ch = vector_core::community::ChannelId(id32(&channel)?);
         if community.channel(&ch).is_none() {
-            return Err("Channel not found in Community".to_string());
+            return Err(crate::t::community_channel_not_found().to_string());
         }
 
         let ms = vector_core::clock::now_ms();
@@ -287,11 +287,11 @@ async fn dispatch(
         Callback.on_pending(&channel, &pending);
         let cancel = Callback.cancel_token(&pending_id);
 
-        let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+        let signer = vector_core::signer::active_signer().map_err(|e| crate::t::community_signer_unavailable(e.to_string()).to_string())?;
         let servers = vector_core::state::get_blossom_servers();
         if servers.is_empty() {
             mark_failed(&channel, &pending_id).await;
-            return Err("No Blossom servers configured.".to_string());
+            return Err(crate::t::community_no_media_servers().to_string());
         }
 
         let mut uploaded = Vec::with_capacity(prepared.len());
@@ -376,7 +376,7 @@ async fn dispatch(
                         );
                     }
                     mark_failed(&channel, &pending_id).await;
-                    return Err(format!("Upload failed: {e}"));
+                    return Err(crate::t::community_upload_failed(e.to_string()).to_string());
                 }
             };
             if vector_core::media::keep_media()
@@ -485,6 +485,7 @@ async fn dispatch(
     .await
 }
 
+// i18n-exempt: sentinel, matched and shown translated
 pub const RETRY_FILE_MISSING: &str = "This file is no longer on this device. Attach it again to send it.";
 
 /// `retry_failed_community_message`: republish the retained wrap, else send the files again from
@@ -496,7 +497,7 @@ pub async fn retry(message_id: String) -> Result<bool, String> {
             state.find_message(&message_id).map(|(chat, m)| (chat.id().to_string(), m))
         };
         if !failed.as_ref().is_some_and(|(_, m)| m.failed) {
-            return Err("Message is not failed or does not exist".into());
+            return Err("Message is not failed or does not exist".into()); // i18n-exempt: developer error
         }
         if vector_core::community::v2::service::retry_unconfirmed(&message_id).await {
             return Ok(true);

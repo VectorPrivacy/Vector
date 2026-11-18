@@ -54,7 +54,7 @@ async fn site_metadata(url: &str) -> Result<SiteMetadata, String> {
         Some(server) => unfurl_via(&server, url).await,
         // Allowed only because the address is hidden: a switch to Clearnet meanwhile fails it.
         None if off_clearnet() => fetch_head(url, false).await,
-        None => Err("no configured server offers link previews".into()),
+        None => Err("no configured server offers link previews".into()), // i18n-exempt: developer error
     }
 }
 
@@ -70,7 +70,7 @@ async fn unfurl_via(server: &str, url: &str) -> Result<SiteMetadata, String> {
     let status = response.status();
     let body: Value = response.json().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("unfurl refused: {status}"));
+        return Err(format!("unfurl refused: {status}")); // i18n-exempt: developer error
     }
     let proxy_server = proxy::server_offering(proxy::PROXY_EXT).await;
     Ok(from_answer(&body, url, proxy_server.as_deref()))
@@ -148,22 +148,22 @@ async fn fetch_twitter(url: &str, direct: bool) -> Result<SiteMetadata, String> 
         .await
         .map_err(|e| e.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("oEmbed: {}", response.status()));
+        return Err(format!("oEmbed: {}", response.status())); // i18n-exempt: developer error
     }
     let data: Value = response.json().await.map_err(|e| e.to_string())?;
-    let author = data["author_name"].as_str().unwrap_or("Twitter");
+    let author = data["author_name"].as_str().unwrap_or("Twitter"); // i18n-exempt: stored link preview metadata, as Tauri writes it
     let text = html_meta::extract_first_p_inner_html(data["html"].as_str().unwrap_or(""))
         .map(|h| h.split("<a ").next().unwrap_or("").trim().to_string())
         .unwrap_or_default();
     Ok(SiteMetadata {
         domain: "https://x.com/".into(),
-        og_title: Some(format!("{author} on X")),
+        og_title: Some(format!("{author} on X")), // i18n-exempt: stored link preview metadata, as Tauri writes it
         og_description: Some(text),
         og_image: data["thumbnail_url"].as_str().map(str::to_string),
         og_url: Some(url.to_string()),
         og_type: Some("article".into()),
-        title: Some(format!("{author} on X")),
-        description: Some(format!("Post by {author}")),
+        title: Some(format!("{author} on X")), // i18n-exempt: stored link preview metadata, as Tauri writes it
+        description: Some(format!("Post by {author}")), // i18n-exempt: stored link preview metadata, as Tauri writes it
         favicon: Some("https://abs.twimg.com/favicons/twitter.3.ico".into()),
     })
 }
@@ -181,7 +181,7 @@ async fn fetch_head(url: &str, direct: bool) -> Result<SiteMetadata, String> {
     const MAX_HEAD: usize = 512 * 1024;
     let mut response = client(15, direct)?
         .get(url)
-        .header("Range", "bytes=0-32768")
+        .header("Range", "bytes=0-32768") // i18n-exempt: HTTP header
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -212,7 +212,7 @@ async fn fetch_head(url: &str, direct: bool) -> Result<SiteMetadata, String> {
         .or_else(|| candidates.iter().find(|(u, _)| u.ends_with(".png")))
         .or_else(|| {
             candidates.iter().find(|(_, rel)| {
-                rel.eq_ignore_ascii_case("icon") || rel.eq_ignore_ascii_case("shortcut icon")
+                rel.eq_ignore_ascii_case("icon") || rel.eq_ignore_ascii_case("shortcut icon") // i18n-exempt: HTML attribute value
             })
         })
         .map(|(u, _)| u.clone())

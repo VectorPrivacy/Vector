@@ -73,3 +73,10 @@ embed-video-download-failed = Failed to download
 embed-video-server-error = Media server returned an error status
 embed-video-ended-early = The download ended early
 embed-video-fingerprint = The video doesn't match the post's fingerprint
+embed-video-host-silent = The video host stopped answering
+embed-video-host-stalled = The video host stalled
+embed-video-stopped-loading = The video stopped loading
+embed-video-no-ranges = The video host stopped answering ranges
+# $status is the server's answer, like "404 Not Found".
+embed-video-host-status = The video host answered { $status }
+embed-video-short-range = The video host sent a short range

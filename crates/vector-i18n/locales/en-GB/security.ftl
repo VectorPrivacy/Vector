@@ -108,3 +108,13 @@ security-keys-reveal = Tap to reveal
 security-keys-done = Done
 security-keys-moving = Moving to another device? Sign in there with a code instead
 security-export-failed = Export Failed
+
+## Why an encryption change or key export was refused
+
+security-migration-running = A migration is already in progress
+security-wait-for-change = Wait for the encryption change to finish
+security-not-enabled = Local Encryption is not enabled
+security-already-enabled = Encryption is already enabled
+security-account-changed = Account changed, nothing was modified
+security-export-external = This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.
+security-export-account-changed = The account changed, so nothing was exported

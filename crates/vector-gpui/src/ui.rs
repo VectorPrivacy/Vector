@@ -4992,9 +4992,8 @@ impl VectorApp {
                         }
                         Err(e) => {
                             this.set_send_state(&chat, &id, true, false);
-                            // i18n-exempt: core's English
-                            if e.contains("no longer on this device") {
-                                this.notice(&t::msg_retry_impossible(), e, cx);
+                            if e == backend::community_files::RETRY_FILE_MISSING {
+                                this.notice(&t::msg_retry_impossible(), t::msg_retry_file_missing().into(), cx);
                             }
                             cx.notify();
                         }

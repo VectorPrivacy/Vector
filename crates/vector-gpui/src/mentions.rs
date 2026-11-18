@@ -257,8 +257,8 @@ pub fn filter(pool: &[Item], query: &str, max: usize) -> Vec<Item> {
 /// What a pick puts in place of `@query` or `#query`.
 pub fn insert(item: &Item) -> String {
     match &item.kind {
-        Kind::Channel { url, .. } => format!("{url} "),
-        Kind::Time => "@time ".into(),
+        Kind::Channel { url, .. } => format!("{url} "), // i18n-exempt: inserted syntax
+        Kind::Time => "@time ".into(), // i18n-exempt: inserted syntax
         _ => format!("@{} ", item.name),
     }
 }
@@ -300,15 +300,15 @@ pub fn resolve(text: &str, tracked: &[(String, String)]) -> String {
 
 pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyElement {
     let header = match p.items.first().map(|i| &i.kind) {
-        Some(Kind::Channel { .. }) => "Channels",
-        _ if p.items.iter().any(|i| !matches!(i.kind, Kind::Time)) => "Members",
-        _ => "Time",
+        Some(Kind::Channel { .. }) => crate::t::mention_channels(),
+        _ if p.items.iter().any(|i| !matches!(i.kind, Kind::Time)) => crate::t::mention_members(),
+        _ => crate::t::mention_time(),
     };
     let rows = p
         .items
         .iter()
         .map(|item| {
-            let (art, hint): (AnyElement, Option<&str>) = match &item.kind {
+            let (art, hint): (AnyElement, Option<SharedString>) = match &item.kind {
                 Kind::Member { avatar } => (
                     img(avatar.clone().map_or_else(
                         || gpui::ImageSource::from("icons/user-placeholder.svg"),
@@ -347,7 +347,7 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                             .bg(tint.opacity(0.16))
                             .child(svg().path("icons/at.svg").size(px(16.)).text_color(tint))
                             .into_any_element(),
-                        Some("Role"),
+                        Some(crate::t::mention_role()),
                     )
                 }
                 Kind::Time => (
@@ -359,7 +359,7 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                         .justify_center()
                         .child(svg().path("icons/clock.svg").size(px(18.)).text_color(c(PRIMARY)))
                         .into_any_element(),
-                    Some("A time everyone sees in their own zone"),
+                    Some(crate::t::mention_time_hint()),
                 ),
                 Kind::Channel { voice, .. } => (
                     div()
@@ -379,19 +379,19 @@ pub fn view(p: &Popup, pick: Rc<dyn Fn(usize, &mut Window, &mut App)>) -> AnyEle
                                 .text_color(c(0xb2b2b2)),
                         )
                         .into_any_element(),
-                    Some(if *voice { "Voice" } else { "Text" }),
+                    Some(if *voice { crate::t::mention_voice() } else { crate::t::mention_text() }),
                 ),
             };
             Row {
                 art: Some(art),
                 label: SharedString::from(item.name.clone()),
-                hint: hint.map(SharedString::from),
+                hint,
             }
         })
         .collect();
     panel(
         "mention-selector",
-        crate::shortcodes::title(header, None),
+        crate::shortcodes::title(&header, None),
         None,
         rows,
         p.active,

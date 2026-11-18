@@ -24,14 +24,14 @@ pub fn import(path: &std::path::Path) -> Result<Vec<u8>, String> {
     }
     let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
         .with_guessed_format()
-        .map_err(|e| format!("sniff: {e}"))?;
+        .map_err(|e| format!("sniff: {e}"))?; // i18n-exempt: developer error
     reader.limits(vector_core::crypto::bounded_image_limits());
     let img = reader
         .decode()
-        .map_err(|_| "Image couldn't be read (unsupported or corrupt file)".to_string())?;
+        .map_err(|_| crate::t::packs_image_unreadable().to_string())?;
     let mut png = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|e| format!("png encode: {e}"))?;
+        .map_err(|e| format!("png encode: {e}"))?; // i18n-exempt: developer error
     Ok(png)
 }
 
@@ -47,21 +47,17 @@ pub fn dims(bytes: &[u8]) -> Option<(u32, u32)> {
 /// Upload one emoji or pack logo; the URL it landed at, its bytes kept as the local copy.
 pub async fn upload(bytes: Arc<Vec<u8>>, icon: bool) -> Result<String, String> {
     if bytes.len() > MAX_EMOJI_BYTES {
-        return Err(format!(
-            "File is {} KB, max is {} KB.",
-            bytes.len() / 1024,
-            MAX_EMOJI_BYTES / 1024
-        ));
+        return Err(crate::t::packs_file_too_large(MAX_EMOJI_BYTES / 1024, bytes.len() / 1024).to_string());
     }
     if bytes.is_empty() {
-        return Err("File is empty.".into());
+        return Err(crate::t::packs_file_empty().into());
     }
-    vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
+    vector_core::state::nostr_client().ok_or("Nostr client not initialised")?; // i18n-exempt: developer error
     let signer =
-        vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?;
+        vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?; // i18n-exempt: developer error
     let servers = vector_core::blossom_servers::compute_enabled_servers();
     if servers.is_empty() {
-        return Err("No Blossom servers configured.".into());
+        return Err(crate::t::packs_no_media_servers().into());
     }
     let source = bytes.clone();
     let prepared =
@@ -110,7 +106,7 @@ pub async fn publish(
         })
         .collect();
     if emojis.is_empty() {
-        return Err("A pack needs at least one emoji.".into());
+        return Err(crate::t::packs_needs_emoji().into());
     }
     let pack = EmojiPack {
         id: String::new(),
@@ -130,9 +126,9 @@ pub async fn publish(
 }
 
 pub async fn delete_blob(url: String) -> Result<(), String> {
-    vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
+    vector_core::state::nostr_client().ok_or("Nostr client not initialised")?; // i18n-exempt: developer error
     let signer =
-        vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?;
+        vector_core::signer::active_signer().map_err(|e| format!("Failed to get signer: {e}"))?; // i18n-exempt: developer error
     vector_core::blossom::delete_blob_by_url(signer, &url).await
 }
 

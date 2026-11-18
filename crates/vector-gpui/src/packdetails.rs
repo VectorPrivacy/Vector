@@ -66,7 +66,7 @@ pub fn view(
                 div()
                     .text_size(px(13.))
                     .text_color(white_a(0.55))
-                    .child("Loading pack…"),
+                    .child(crate::t::packs_loading()),
             )
             .into_any_element(),
         State::Failed(e, _) => div()
@@ -81,14 +81,14 @@ pub fn view(
                     .text_size(px(16.))
                     .font_weight(FontWeight::BOLD)
                     .text_color(c(DANGER))
-                    .child("Pack unavailable"),
+                    .child(crate::t::packs_unavailable()),
             )
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(white_a(0.55))
                     .child(if e.is_empty() {
-                        "Failed to fetch".to_string()
+                        crate::t::packs_fetch_failed().to_string()
                     } else {
                         e.clone()
                     }),
@@ -99,7 +99,7 @@ pub fn view(
                 .into_iter()
                 .find(|t| !t.is_empty())
                 .cloned()
-                .unwrap_or_else(|| "Untitled".into());
+                .unwrap_or_else(|| crate::t::packs_untitled().into());
             let letter = title
                 .trim()
                 .chars()
@@ -155,7 +155,7 @@ pub fn view(
                         .text_center()
                         .text_size(px(13.))
                         .text_color(white_a(0.4))
-                        .child("Empty pack"),
+                        .child(crate::t::packs_empty()),
                 );
             }
             let mut it = thumbs.into_iter().peekable();
@@ -182,10 +182,10 @@ pub fn view(
             let busy = media.packs.busy.contains(&pack.id);
             let subscribed = media.packs.subscribed.contains(&pack.id);
             let label = match (busy, subscribed) {
-                (true, true) => "Removing…",
-                (true, false) => "Adding…",
-                (false, true) => "Remove Pack",
-                (false, false) => "Add Pack",
+                (true, true) => crate::t::packs_removing(),
+                (true, false) => crate::t::packs_adding(),
+                (false, true) => crate::t::packs_remove(),
+                (false, false) => crate::t::packs_add_pack(),
             };
             let toggle = on.clone();
             div()

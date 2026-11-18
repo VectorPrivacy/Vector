@@ -114,3 +114,31 @@ packs-deleting-orphans = { $count ->
    *[other] Cleaning up { $count } orphan files…
 }
 packs-deleting-pack = Removing pack from Nostr…
+
+## A pack's card and details
+
+packs-loading = Loading pack…
+packs-unavailable = Pack unavailable
+packs-fetch-failed = Failed to fetch
+# A pack with no name.
+packs-untitled = Untitled
+packs-empty = Empty pack
+packs-removing = Removing…
+packs-adding = Adding…
+packs-card-remove = Remove
+packs-add-pack = Add Pack
+packs-copy-share-link = Copy share link
+# $count is how many emoji the pack holds.
+packs-emoji-count = { $count ->
+    [one] { $count } emoji
+   *[other] { $count } emojis
+}
+
+## Why an emoji or pack couldn't be uploaded
+
+packs-image-unreadable = Image couldn't be read (unsupported or corrupt file)
+# $size is the file's size and $max the limit, both in KB.
+packs-file-too-large = File is { $size } KB, max is { $max } KB.
+packs-file-empty = File is empty.
+packs-no-media-servers = No Blossom servers configured.
+packs-needs-emoji = A pack needs at least one emoji.

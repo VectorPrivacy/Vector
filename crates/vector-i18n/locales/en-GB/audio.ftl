@@ -32,3 +32,12 @@ audio-repeat-all = Repeat all
 # $count is how many songs the album has.
 audio-show-all = Show all { $count } songs
 audio-show-fewer = Show fewer
+
+## A video's controls
+
+video-speed = Playback speed
+video-mute = Mute
+video-unmute = Unmute
+video-volume = Volume
+video-full-screen = Full screen
+video-exit-full-screen = Exit full screen

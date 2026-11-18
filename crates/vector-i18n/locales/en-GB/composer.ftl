@@ -25,3 +25,23 @@ composer-voice-failed = Voice Message Failed
 composer-slide-cancel = Slide to cancel
 composer-hold-record = Hold to record
 composer-dictate = Turn into text
+
+## The text box's right-click menu
+
+composer-spell-no-guesses = No Guesses Found
+composer-spell-ignore = Ignore Spelling
+composer-spell-learn = Learn Spelling
+composer-cut = Cut
+composer-copy = Copy
+composer-paste = Paste
+composer-select-all = Select All
+
+## Suggestions while typing @ or #
+
+mention-channels = Channels
+mention-members = Members
+mention-time = Time
+mention-role = Role
+mention-time-hint = A time everyone sees in their own zone
+mention-voice = Voice
+mention-text = Text

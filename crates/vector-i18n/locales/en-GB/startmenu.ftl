@@ -82,3 +82,15 @@ start-pins-syncing = Still syncing your pins, try again in a moment
 start-not-member = You're not in this community
 start-unsupported = This pin opens something not in this build yet
 start-resize-tip = Drag to resize (double-click to reset)
+# A folder's colour menu. Grey is the colour it has by default.
+start-folder-colour = Colour
+start-folder-grey = Grey
+start-folder-name = Folder Name
+start-folder-red = Red
+start-folder-orange = Orange
+start-folder-yellow = Yellow
+start-folder-green = Green
+start-folder-teal = Teal
+start-folder-blue = Blue
+start-folder-purple = Purple
+start-folder-pink = Pink

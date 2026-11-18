@@ -127,7 +127,7 @@ pub struct Stream<R: Ranges> {
 
 fn kind(head: &[u8]) -> Option<&'static str> {
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
-        Some(if &head[8..12] == b"qt  " { "video/quicktime" } else { "video/mp4" })
+        Some(if &head[8..12] == b"qt  " { "video/quicktime" } else { "video/mp4" }) // i18n-exempt: MP4 brand
     } else if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         Some("video/webm")
     } else {
@@ -143,7 +143,7 @@ pub async fn open<R: Ranges>(ranges: R, expected: Option<String>) -> Result<Arc<
         Some(t) if first.ranged => t,
         _ => return Err(Open::NoRanges),
     };
-    let mime = kind(&first.bytes).ok_or_else(|| Open::Failed("Not a video".into()))?;
+    let mime = kind(&first.bytes).ok_or_else(|| Open::Failed(crate::t::embed_video_not_video().into()))?;
     let s = Arc::new(Stream {
         len: total,
         mime,
@@ -319,9 +319,9 @@ impl<R: Ranges> Stream<R> {
     #[cfg(test)]
     fn dump(&self) -> String {
         let st = self.state.lock().unwrap();
-        let heads: Vec<String> = st.heads.iter().map(|h| format!("{:?}@{}..{}{}", h.reader, h.at / CHUNK, h.last / CHUNK, if h.waiting { " waiting" } else { "" })).collect();
-        let conns: Vec<String> = st.conns.iter().map(|c| format!("#{}@{} read {:?} ago", c.id, c.chunk, c.used.elapsed())).collect();
-        format!("heads {heads:?}, conns {conns:?}, gaps {:?}, failures {}, window {} chunks", self.gaps(&st), st.failures, self.window(&st) / CHUNK)
+        let heads: Vec<String> = st.heads.iter().map(|h| format!("{:?}@{}..{}{}", h.reader, h.at / CHUNK, h.last / CHUNK, if h.waiting { " waiting" } else { "" })).collect(); // i18n-exempt: diagnostic log
+        let conns: Vec<String> = st.conns.iter().map(|c| format!("#{}@{} read {:?} ago", c.id, c.chunk, c.used.elapsed())).collect(); // i18n-exempt: diagnostic log
+        format!("heads {heads:?}, conns {conns:?}, gaps {:?}, failures {}, window {} chunks", self.gaps(&st), st.failures, self.window(&st) / CHUNK) // i18n-exempt: diagnostic log
     }
 
     /// A read is waiting on the network.
@@ -362,7 +362,7 @@ impl<R: Ranges> Stream<R> {
         {
             let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
             if &got != want {
-                st.error = Some("The video doesn't match the post's fingerprint".into());
+                st.error = Some(crate::t::embed_video_fingerprint().into());
             }
         }
     }
@@ -494,7 +494,7 @@ async fn connection<R: Ranges>(weak: Weak<Stream<R>>, ranges: Arc<R>, id: u64, s
     let mut body = match opening {
         Ok(Ok(body)) => body,
         Ok(Err(e)) => return failed(&weak, id, e),
-        Err(_) => return failed(&weak, id, "The video host stopped answering".into()),
+        Err(_) => return failed(&weak, id, crate::t::embed_video_host_silent().into()),
     };
     let (mut chunk, mut buf, mut used, mut answered) = (start, Vec::new(), opened, false);
     // Bytes and time spent waiting on the body since the last rate sample.
@@ -524,7 +524,7 @@ async fn connection<R: Ranges>(weak: Weak<Stream<R>>, ranges: Arc<R>, id: u64, s
             Ok(Ok(None)) => return s.state.lock().unwrap().conns.retain(|c| c.id != id),
             Ok(Err(_)) | Err(_) if parked => return s.state.lock().unwrap().conns.retain(|c| c.id != id),
             Ok(Err(e)) => return failed(&weak, id, e),
-            Err(_) => return failed(&weak, id, "The video host stalled".into()),
+            Err(_) => return failed(&weak, id, crate::t::embed_video_host_stalled().into()),
         };
         if !answered {
             answered = true;
@@ -605,7 +605,7 @@ impl<R: Ranges> vector_core::media::MediaSource for Stream<R> {
                 return Err(std::io::Error::other(e.clone()));
             }
             if waited >= READ_TIMEOUT {
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "The video stopped loading"));
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, crate::t::embed_video_stopped_loading().to_string()));
             }
             self.touch(&mut st, at, true);
             self.moved.notify_one();
@@ -656,8 +656,8 @@ impl Ranges for Web {
             .map_err(|e| e.to_string())?;
         match resp.status() {
             reqwest::StatusCode::PARTIAL_CONTENT => Ok(WebBody(resp)),
-            s if s.is_success() => Err("The video host stopped answering ranges".into()),
-            s => Err(format!("The video host answered {s}")),
+            s if s.is_success() => Err(crate::t::embed_video_no_ranges().into()),
+            s => Err(crate::t::embed_video_host_status(s.to_string()).to_string()),
         }
     }
 
@@ -674,7 +674,7 @@ impl Ranges for Web {
             return if status.is_success() {
                 Ok(Got { bytes: Vec::new(), total: resp.content_length(), ranged: false })
             } else {
-                Err(format!("The video host answered {status}"))
+                Err(crate::t::embed_video_host_status(status.to_string()).to_string())
             };
         }
         let total = resp
@@ -685,7 +685,7 @@ impl Ranges for Web {
             .and_then(|t| t.parse().ok());
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
         if bytes.len() as u64 != end - start {
-            return Err("The video host sent a short range".into());
+            return Err(crate::t::embed_video_short_range().into());
         }
         Ok(Got { bytes: bytes.into(), total, ranged: true })
     }

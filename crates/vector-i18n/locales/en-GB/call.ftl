@@ -143,3 +143,15 @@ call-sound-permission = System permission required
 call-sound-unavailable = Not offered by this window
 call-their-camera = Their camera
 call-their-screen = Their screen
+
+## Choosing what to share
+
+call-share-unavailable = Screen sharing is not available on this system
+call-share-entire-screen = Entire screen
+# $number counts the screens from 1.
+call-share-screen = Screen { $number }
+# $title is the window's title; $app is the app it belongs to.
+call-share-window = { $title } — { $app }
+call-share-screen-gone = The screen is gone
+call-share-window-closed = The window was closed
+call-share-pixel-format = This screen's pixel format isn't supported

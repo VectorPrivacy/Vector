@@ -130,3 +130,8 @@ community-channel-needs-name = A channel needs a name
 community-no-relays = No relays available to host the Community
 community-no-media-servers = No Blossom servers configured.
 community-first-channel = The community's first channel can't be deleted
+community-empty-attachment = Empty attachment
+# $error is why.
+community-signer-unavailable = Signer unavailable: { $error }
+# $error is why.
+community-upload-failed = Upload failed: { $error }

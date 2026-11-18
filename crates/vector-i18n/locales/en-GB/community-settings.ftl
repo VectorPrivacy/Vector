@@ -189,3 +189,11 @@ community-settings-caution-i2p-last = { $count ->
     [one] { $relays } can only be reached over I2P. Members using Vector over Standard or Tor won't reach it, and with no other relay left they'd lose this community.
    *[other] { $relays } can only be reached over I2P. Members using Vector over Standard or Tor won't reach them, and with no other relay left they'd lose this community.
 }
+
+## Changing a community's icon or banner
+
+community-art-upload-stopped = The upload stopped
+community-art-icon-failed = Couldn’t Update the Icon
+community-art-pick-icon = Choose Community Icon
+community-art-pick-image = Choose Image
+community-art-unreadable = That image could not be read

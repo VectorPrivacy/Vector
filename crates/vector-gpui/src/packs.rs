@@ -242,7 +242,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .text_size(px(14.))
                     .line_height(px(19.6))
                     .text_color(c(0xffffff))
-                    .child("Pack unavailable")
+                    .child(crate::t::packs_unavailable())
                     .into_any_element(),
                 div()
                     .text_size(px(11.))
@@ -250,7 +250,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .text_color(white_a(0.55))
                     .line_clamp(2)
                     .child(if err.is_empty() {
-                        "Failed to fetch".to_string()
+                        crate::t::packs_fetch_failed().to_string()
                     } else {
                         err.clone()
                     })
@@ -266,7 +266,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .text_center()
                     .text_size(px(13.))
                     .text_color(white_a(0.4))
-                    .child("Empty pack")
+                    .child(crate::t::packs_empty())
                     .into_any_element()
             } else {
                 let shown = &pack.emojis[..count.min(cols * rows)];
@@ -337,10 +337,10 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                 });
             drop(media);
             let label = match (busy, subscribed) {
-                (true, true) => "Removing…",
-                (true, false) => "Adding…",
-                (false, true) => "Remove",
-                (false, false) => "Add Pack",
+                (true, true) => crate::t::packs_removing(),
+                (true, false) => crate::t::packs_adding(),
+                (false, true) => crate::t::packs_card_remove(),
+                (false, false) => crate::t::packs_add_pack(),
             };
             let (s1, s2, n1, n2) = (send.clone(), send, naddr.clone(), naddr.clone());
             let actions = div()
@@ -352,7 +352,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                 .child(
                     div()
                         .id(SharedString::from(format!("{key}-copy")))
-                        .tip("Copy share link")
+                        .tip(crate::t::packs_copy_share_link())
                         .w(px(28.))
                         .h_full()
                         .flex_shrink_0()
@@ -439,10 +439,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                         .text_size(px(11.))
                         .line_height(px(15.4))
                         .text_color(white_a(0.5))
-                        .child(format!(
-                            "{count} emoji{}",
-                            if count == 1 { "" } else { "s" }
-                        ))
+                        .child(crate::t::packs_emoji_count(count))
                         .into_any_element(),
                     (!pack.description.is_empty())
                         .then(|| {

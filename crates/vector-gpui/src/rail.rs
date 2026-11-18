@@ -78,15 +78,15 @@ pub fn painted(store: &Store, layout: &RailLayout) -> Vec<String> {
 }
 
 /// Folder colours: neutral grey by default, then a spread around the wheel.
-pub const HUES: [(&str, u16); 8] = [
-    ("Red", 0),
-    ("Orange", 28),
-    ("Yellow", 50),
-    ("Green", 140),
-    ("Teal", 175),
-    ("Blue", 212),
-    ("Purple", 265),
-    ("Pink", 320),
+pub const HUES: [(fn() -> gpui::SharedString, u16); 8] = [
+    (crate::t::start_folder_red, 0),
+    (crate::t::start_folder_orange, 28),
+    (crate::t::start_folder_yellow, 50),
+    (crate::t::start_folder_green, 140),
+    (crate::t::start_folder_teal, 175),
+    (crate::t::start_folder_blue, 212),
+    (crate::t::start_folder_purple, 265),
+    (crate::t::start_folder_pink, 320),
 ];
 
 pub fn tint(hue: Option<u16>) -> Hsla {
@@ -370,7 +370,7 @@ fn community_muted(store: &Store, com: &Community) -> bool {
 fn voice_badge(mine: bool) -> impl IntoElement {
     div()
         .id("rail-voice")
-        .tip(if mine { "You are in a voice call here" } else { "Someone is in a voice call" })
+        .tip(if mine { crate::t::voice_here_you() } else { crate::t::voice_here_someone() })
         .absolute()
         .left(px(2.))
         .bottom(px(2.))

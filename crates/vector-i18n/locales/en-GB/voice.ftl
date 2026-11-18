@@ -90,3 +90,5 @@ voice-in-call-time = { $count ->
 }
 # Stands in for a voice channel's name before it has loaded.
 voice-fallback-name = Voice
+voice-here-you = You are in a voice call here
+voice-here-someone = Someone is in a voice call

@@ -1,7 +1,7 @@
 //! `.downgrade-block`: a full takeover for a build older than the account's database. There is
 //! no way past it: continuing would write an older schema over a newer one.
 
-use gpui::{AnyElement, FontWeight, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px};
+use gpui::{AnyElement, FontWeight, SharedString, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px};
 
 use crate::theme::{INTER, TEXT, c, ca, white_a};
 use crate::timeline::DANGER;
@@ -15,18 +15,18 @@ pub fn display(raw: &str) -> String {
     }
     let pre: Option<u32> = pre.and_then(|p| p.bytes().take_while(u8::is_ascii_digit).map(char::from).collect::<String>().parse().ok());
     match pre {
-        Some(n) => format!("v{core} Preview {n}"),
-        None => format!("v{core}"),
+        Some(n) => crate::t::version_preview(n, core).to_string(),
+        None => format!("v{core}"), // i18n-exempt: version number
     }
 }
 
 /// This build's version and the one the account needs, already displayed.
 pub fn versions(block: &vector_core::db::DowngradeBlock) -> (String, String) {
-    let required = block.last_app_version.as_deref().map_or_else(|| "A newer version".to_string(), display);
+    let required = block.last_app_version.as_deref().map_or_else(|| crate::t::downgrade_newer().to_string(), display);
     (display(env!("CARGO_PKG_VERSION")), required)
 }
 
-fn version(label: &'static str, value: &str, accent: bool) -> impl IntoElement {
+fn version(label: SharedString, value: &str, accent: bool) -> impl IntoElement {
     div()
         .flex_1()
         .min_w_0()
@@ -47,7 +47,7 @@ fn version(label: &'static str, value: &str, accent: bool) -> impl IntoElement {
         )
 }
 
-fn button(id: &'static str, label: &'static str, accept: bool, on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static) -> impl IntoElement {
+fn button(id: &'static str, label: SharedString, accept: bool, on: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static) -> impl IntoElement {
     div()
         .id(id)
         .w_full()
@@ -67,7 +67,7 @@ fn button(id: &'static str, label: &'static str, accept: bool, on: impl Fn(&mut 
 }
 
 pub fn render(current: &str, required: &str) -> AnyElement {
-    let dim = |o: f32, size: f32, lh: f32, text: &'static str| {
+    let dim = |o: f32, size: f32, lh: f32, text: SharedString| {
         div().text_size(px(size)).line_height(px(lh)).text_center().text_color(ca(246, 246, 246, o)).child(text)
     };
     let card = div()
@@ -93,9 +93,9 @@ pub fn render(current: &str, required: &str) -> AnyElement {
                 .line_height(px(24.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(c(DANGER))
-                .child("Vector can't open this account"),
+                .child(crate::t::downgrade_title()),
         )
-        .child(dim(0.8, 14., 21., "Your data was last used with a newer version of Vector. Opening it with this older build would damage your message history.").mb(px(20.)))
+        .child(dim(0.8, 14., 21., crate::t::downgrade_text()).mb(px(20.)))
         .child(
             div()
                 .w_full()
@@ -103,14 +103,14 @@ pub fn render(current: &str, required: &str) -> AnyElement {
                 .flex()
                 .rounded(px(8.))
                 .bg(white_a(0.04))
-                .child(version("This build", current, false))
+                .child(version(crate::t::downgrade_this_build(), current, false))
                 .child(div().w(px(1.)).my(px(10.)).bg(white_a(0.1)))
-                .child(version("Your data needs", required, true)),
+                .child(version(crate::t::downgrade_data_needs(), required, true)),
         )
-        .child(dim(0.55, 13., 19.5, "Nothing has been lost. Your messages are intact and will open again on the newer version.").mb(px(20.)))
-        .child(button("downgrade-latest", "Get the latest version", true, |_, cx| cx.open_url("https://vectorapp.io")).into_any_element())
+        .child(dim(0.55, 13., 19.5, crate::t::downgrade_safe()).mb(px(20.)))
+        .child(button("downgrade-latest", crate::t::downgrade_get_latest(), true, |_, cx| cx.open_url("https://vectorapp.io")).into_any_element())
         .child(div().h(px(10.)))
-        .child(button("downgrade-quit", "Quit Vector", false, |_, cx| cx.quit()));
+        .child(button("downgrade-quit", crate::t::downgrade_quit(), false, |_, cx| cx.quit()));
     div()
         .id("downgrade-block")
         .absolute()

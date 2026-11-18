@@ -18,7 +18,7 @@ impl Migrating {
     fn enter() -> Result<Self, String> {
         MIGRATING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "A migration is already in progress".to_string())?;
+            .map_err(|_| crate::t::security_migration_running().to_string())?;
         Ok(Self)
     }
 }
@@ -32,7 +32,7 @@ impl Drop for Migrating {
 /// A swap mid-sweep would pull the connection out from under its transaction.
 pub fn refuse_if_migrating() -> Result<(), String> {
     if MIGRATING.load(Ordering::Acquire) {
-        Err("Wait for the encryption change to finish".into())
+        Err(crate::t::security_wait_for_change().into())
     } else {
         Ok(())
     }
@@ -56,7 +56,7 @@ pub async fn verify(credential: Zeroizing<String>) -> Result<(), String> {
 /// The key from the user's own proof, never the vault.
 async fn prove(credential: Option<Zeroizing<String>>) -> Result<Zeroizing<[u8; 32]>, String> {
     if !state::is_encryption_enabled_fast() {
-        return Err("Local Encryption is not enabled".into());
+        return Err(crate::t::security_not_enabled().into());
     }
     let credential = credential
         .filter(|c| !c.is_empty())
@@ -78,7 +78,7 @@ pub async fn enable(
     progress: impl Fn(MigrationProgress),
 ) -> Result<(), String> {
     if state::is_encryption_enabled_fast() {
-        return Err("Encryption is already enabled".into());
+        return Err(crate::t::security_already_enabled().into());
     }
     let session = db::current_session();
     let kdf = vector_core::crypto::Kdf::fresh();
@@ -86,10 +86,10 @@ pub async fn enable(
     drop(credential);
     let _one = Migrating::enter()?;
     if !session.is_live() {
-        return Err("Account changed, nothing was modified".into());
+        return Err(crate::t::security_account_changed().into());
     }
     if state::is_encryption_enabled_fast() {
-        return Err("Encryption is already enabled".into());
+        return Err(crate::t::security_already_enabled().into());
     }
     sweep(|| at_rest::enable(&key, &kdf, &kind, None, None, &progress))
 }
@@ -102,7 +102,7 @@ pub async fn disable(
     let key = prove(credential).await?;
     let _one = Migrating::enter()?;
     if !session.is_live() {
-        return Err("Account changed, nothing was modified".into());
+        return Err(crate::t::security_account_changed().into());
     }
     sweep(|| at_rest::disable(&key, &progress))
 }
@@ -122,7 +122,7 @@ pub async fn rekey(
     let new_key = Zeroizing::new(vector_core::crypto::derive_key(&new, &kdf).await);
     drop(new);
     if !session.is_live() {
-        return Err("Account changed, nothing was modified".into());
+        return Err(crate::t::security_account_changed().into());
     }
     sweep(|| at_rest::rekey(&old_key, &new_key, &kdf, &kind, None, &progress))
 }
@@ -133,7 +133,7 @@ pub async fn export(
     credential: Option<Zeroizing<String>>,
 ) -> Result<(Zeroizing<String>, Option<Zeroizing<String>>), String> {
     if vector_core::is_keyless() {
-        return Err("This is an external signer account. Your identity key lives on your signer app, never on this device, so there's nothing to export here.".into());
+        return Err(crate::t::security_export_external().into());
     }
     let session = db::current_session();
     let key = if state::is_encryption_enabled_fast() {
@@ -143,7 +143,7 @@ pub async fn export(
     };
     let secrets = at_rest::open_identity_secrets(key.as_deref())?;
     if !session.is_live() {
-        return Err("The account changed, so nothing was exported".into());
+        return Err(crate::t::security_export_account_changed().into());
     }
     Ok(secrets)
 }

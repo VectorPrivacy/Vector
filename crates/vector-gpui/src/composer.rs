@@ -245,7 +245,7 @@ const EMOJI_SLOT: &str = "\u{2003}\u{2005}";
 
 /// Rubik has no em or quarter-em space, so a fallback font would pick the slot's width and lift the
 /// line; `assets/fonts/VectorSlot.ttf` has only those two, at exactly 1em and 0.25em, on Rubik's metrics.
-const SLOT_FAMILY: &str = "Vector Slot";
+const SLOT_FAMILY: &str = "Vector Slot"; // i18n-exempt: font name
 
 /// Shapes each emoji slot in [`SLOT_FAMILY`].
 fn slot_runs(runs: Vec<TextRun>, slots: &[Range<usize>]) -> Vec<TextRun> {
@@ -599,20 +599,20 @@ impl TextInput {
         let mut items = Vec::new();
         if let Some((_, guesses)) = self.spell.as_ref().and_then(|s| s.menu.as_ref()) {
             if guesses.is_empty() {
-                items.push(MenuItem::new("No Guesses Found", "").disabled(true));
+                items.push(MenuItem::new(crate::t::composer_spell_no_guesses(), "").disabled(true));
             }
             items.extend(guesses.iter().map(|g| MenuItem::new(g.clone(), "")));
             items.push(MenuItem::divider());
-            items.push(MenuItem::new("Ignore Spelling", ""));
-            items.push(MenuItem::new("Learn Spelling", ""));
+            items.push(MenuItem::new(crate::t::composer_spell_ignore(), ""));
+            items.push(MenuItem::new(crate::t::composer_spell_learn(), ""));
             items.push(MenuItem::divider());
         }
         items.extend([
-            MenuItem::new("Cut", "").disabled(!picked),
-            MenuItem::new("Copy", "").disabled(!picked),
-            MenuItem::new("Paste", ""),
+            MenuItem::new(crate::t::composer_cut(), "").disabled(!picked),
+            MenuItem::new(crate::t::composer_copy(), "").disabled(!picked),
+            MenuItem::new(crate::t::composer_paste(), ""),
             MenuItem::divider(),
-            MenuItem::new("Select All", "").disabled(self.content.is_empty()),
+            MenuItem::new(crate::t::composer_select_all(), "").disabled(self.content.is_empty()),
         ]);
         items
     }
@@ -2493,7 +2493,7 @@ mod npub_tests {
     #[test]
     fn pasted_npub_mentions_outside_code() {
         let n = "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6";
-        let text = format!("hi @{n} and `@{n}` and @npub1bad");
+        let text = format!("hi @{n} and `@{n}` and @npub1bad"); // i18n-exempt: fixture
         let found = npub_mentions(&text);
         assert_eq!(found.len(), 1);
         assert_eq!(&text[found[0].clone()], format!("@{n}"));
@@ -2593,7 +2593,7 @@ mod spell_tests {
 
     #[test]
     fn words_clear_of_an_edit_follow_it() {
-        let old = "teh cat hsa ran";
+        let old = "teh cat hsa ran"; // i18n-exempt: fixture
         let words = [0..3, 8..11];
         // Typing in the middle shifts the word after it.
         assert_eq!(carry_words(old, "teh big cat hsa ran", &words), [0..3, 12..15]);

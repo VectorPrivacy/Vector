@@ -74,9 +74,9 @@ mod imp {
     impl Session {
         pub fn open() -> Result<Self, String> {
             if std::env::var_os("DISPLAY").is_none() {
-                return Err("Screen sharing is not available on this system".into());
+                return Err(crate::t::call_share_unavailable().into());
             }
-            let (conn, n) = x11rb::connect(None).map_err(|_| "Screen sharing is not available on this system".to_string())?;
+            let (conn, n) = x11rb::connect(None).map_err(|_| crate::t::call_share_unavailable().to_string())?;
             let root = conn.setup().roots[n].root;
             Ok(Self { conn, root })
         }
@@ -88,7 +88,7 @@ mod imp {
         fn rects(&self) -> Vec<(u32, String, (i16, i16, u16, u16))> {
             let Ok(Ok(r)) = self.conn.randr_get_monitors(self.root, true).map(|c| c.reply()) else {
                 let g = self.conn.get_geometry(self.root).ok().and_then(|c| c.reply().ok());
-                return g.map(|g| vec![(0, "Entire screen".into(), (0, 0, g.width, g.height))]).unwrap_or_default();
+                return g.map(|g| vec![(0, crate::t::call_share_entire_screen().into(), (0, 0, g.width, g.height))]).unwrap_or_default();
             };
             r.monitors
                 .iter()
@@ -100,7 +100,7 @@ mod imp {
                         .ok()
                         .and_then(|c| c.reply().ok())
                         .map(|n| String::from_utf8_lossy(&n.name).into_owned())
-                        .unwrap_or_else(|| format!("Screen {}", i + 1));
+                        .unwrap_or_else(|| crate::t::call_share_screen(i + 1).to_string());
                     (i as u32, name, (m.x, m.y, m.width, m.height))
                 })
                 .collect()
@@ -119,7 +119,7 @@ mod imp {
         pub fn list(&self) -> Vec<(Target, String)> {
             let mut out: Vec<(Target, String)> = self.rects().into_iter().map(|(i, name, _)| (Target::Monitor(i), name)).collect();
             if out.len() == 1 {
-                out[0].1 = "Entire screen".into();
+                out[0].1 = crate::t::call_share_entire_screen().into();
             }
             let Some(list) = self.atom("_NET_CLIENT_LIST") else { return out };
             let Ok(Ok(r)) = self.conn.get_property(false, self.root, list, AtomEnum::WINDOW, 0, 4096).map(|c| c.reply()) else { return out };
@@ -137,16 +137,16 @@ mod imp {
 
         pub fn grab(&self, t: Target) -> Result<Grab, String> {
             let (drawable, (x, y, w, h)) = match t {
-                Target::Monitor(i) => (self.root, self.rects().into_iter().find(|r| r.0 == i).ok_or("The screen is gone")?.2),
+                Target::Monitor(i) => (self.root, self.rects().into_iter().find(|r| r.0 == i).ok_or_else(|| crate::t::call_share_screen_gone().to_string())?.2),
                 Target::Window(w) => {
-                    let g = self.conn.get_geometry(w).map_err(err)?.reply().map_err(|_| "The window was closed".to_string())?;
+                    let g = self.conn.get_geometry(w).map_err(err)?.reply().map_err(|_| crate::t::call_share_window_closed().to_string())?;
                     (w, (0, 0, g.width, g.height))
                 }
             };
             let img = self.conn.get_image(ImageFormat::Z_PIXMAP, drawable, x, y, w, h, !0).map_err(err)?.reply().map_err(err)?;
             let (w, h) = (w as usize, h as usize);
             if img.data.len() < w * h * 4 {
-                return Err("This screen's pixel format isn't supported".into());
+                return Err(crate::t::call_share_pixel_format().into());
             }
             Ok(Grab { w, h, stride: img.data.len() / h, bgr: true, data: img.data })
         }
@@ -175,7 +175,7 @@ mod imp {
                 let one = ms.len() == 1;
                 for (i, m) in ms.iter().enumerate() {
                     let Ok(id) = m.id() else { continue };
-                    let name = if one { "Entire screen".into() } else { m.friendly_name().or_else(|_| m.name()).unwrap_or_else(|_| format!("Screen {}", i + 1)) };
+                    let name = if one { crate::t::call_share_entire_screen().into() } else { m.friendly_name().or_else(|_| m.name()).unwrap_or_else(|_| crate::t::call_share_screen(i + 1).to_string()) };
                     out.push((Target::Monitor(id), name));
                 }
             }
@@ -189,7 +189,7 @@ mod imp {
                         continue;
                     }
                     let app = w.app_name().unwrap_or_default();
-                    out.push((Target::Window(id), if app.is_empty() || app == title { title } else { format!("{title} — {app}") }));
+                    out.push((Target::Window(id), if app.is_empty() || app == title { title } else { crate::t::call_share_window(&*app, &*title).to_string() }));
                 }
             }
             out
@@ -198,11 +198,11 @@ mod imp {
         pub fn grab(&self, t: Target) -> Result<Grab, String> {
             match t {
                 Target::Monitor(id) => {
-                    let m = xcap::Monitor::all().map_err(|e| e.to_string())?.into_iter().find(|m| m.id().ok() == Some(id)).ok_or("The screen is gone")?;
+                    let m = xcap::Monitor::all().map_err(|e| e.to_string())?.into_iter().find(|m| m.id().ok() == Some(id)).ok_or_else(|| crate::t::call_share_screen_gone().to_string())?;
                     m.capture_image().map(grab_of).map_err(|e| e.to_string())
                 }
                 Target::Window(id) => {
-                    let w = xcap::Window::all().map_err(|e| e.to_string())?.into_iter().find(|w| w.id().ok() == Some(id)).ok_or("The window was closed")?;
+                    let w = xcap::Window::all().map_err(|e| e.to_string())?.into_iter().find(|w| w.id().ok() == Some(id)).ok_or_else(|| crate::t::call_share_window_closed().to_string())?;
                     w.capture_image().map(grab_of).map_err(|e| e.to_string())
                 }
             }

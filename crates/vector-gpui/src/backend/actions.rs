@@ -76,13 +76,13 @@ pub async fn delete(message_id: String) -> Result<(), String> {
     let (chat_id, msg) = VectorCore
         .get_message(&message_id)
         .await
-        .ok_or_else(|| format!("Message not found (id: {message_id})"))?;
+        .ok_or_else(|| format!("Message not found (id: {message_id})"))?; // i18n-exempt: developer error
     if !is_dm(&chat_id) {
         return super::community::control(&chat_id, &message_id, super::community::Control::Delete)
             .await;
     }
     let rumor_id =
-        EventId::from_hex(&message_id).map_err(|e| format!("Invalid message id: {e}"))?;
+        EventId::from_hex(&message_id).map_err(|e| format!("Invalid message id: {e}"))?; // i18n-exempt: developer error
     if msg.mine {
         vector_core::delete_own_dm(&rumor_id).await?;
     } else {
@@ -110,7 +110,7 @@ pub async fn remove_failed(message_id: &str, drop_files: bool) -> Result<(), Str
         let mut state = STATE.lock().await;
         match state.find_message(&message_id) {
             Some((_, m)) if m.failed => state.remove_message(&message_id),
-            Some(_) => return Err("Message is not failed or does not exist".into()),
+            Some(_) => return Err("Message is not failed or does not exist".into()), // i18n-exempt: developer error
             None => None,
         }
     };
@@ -118,7 +118,7 @@ pub async fn remove_failed(message_id: &str, drop_files: bool) -> Result<(), Str
         Some(found) => found,
         None => match VectorCore.get_message(&message_id).await {
             Some((c, m)) if m.failed => (c, m),
-            _ => return Err("Message is not failed or does not exist".into()),
+            _ => return Err("Message is not failed or does not exist".into()), // i18n-exempt: developer error
         },
     };
     if drop_files {
@@ -158,7 +158,7 @@ pub async fn retry(receiver: String, message_id: String) -> Result<bool, String>
         .await
         .is_some_and(|(_, m)| m.failed);
     if !failed {
-        return Err("Message is not failed or does not exist".into());
+        return Err("Message is not failed or does not exist".into()); // i18n-exempt: developer error
     }
     let callback: Arc<dyn SendCallback> = Arc::new(Callback);
     vector_core::sending::resend_failed_dm(&receiver, &message_id, &SendConfig::gui(), callback)
@@ -169,9 +169,9 @@ pub async fn retry(receiver: String, message_id: String) -> Result<bool, String>
 pub async fn unreact(reaction_id: String) -> Result<(), String> {
     let found = STATE.lock().await.find_reaction(&reaction_id);
     let (chat_id, message_id, author, is_community) =
-        found.ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?;
+        found.ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?; // i18n-exempt: developer error
     if author != db::get_current_account()? {
-        return Err("Cannot revoke a reaction that isn't yours".into());
+        return Err(crate::t::msg_react_not_yours().into());
     }
     let updated = STATE
         .lock()
@@ -187,9 +187,9 @@ pub async fn unreact(reaction_id: String) -> Result<(), String> {
     if is_community {
         return super::community::control(&chat_id, &reaction_id, super::community::Control::Delete).await;
     }
-    let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
+    let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?; // i18n-exempt: developer error
     let recipient =
-        PublicKey::parse(&chat_id).map_err(|e| format!("Invalid DM counterpart: {e}"))?;
+        PublicKey::parse(&chat_id).map_err(|e| format!("Invalid DM counterpart: {e}"))?; // i18n-exempt: developer error
     vector_core::deletion::delete_own_reaction(&rid, recipient)
         .await
         .map(|_| ())
