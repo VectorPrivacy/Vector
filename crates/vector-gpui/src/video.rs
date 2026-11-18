@@ -164,6 +164,8 @@ pub struct Clip {
     scrub: Option<f32>,
     /// Since when it has sat paused or ended with its decoder held.
     still: Option<Instant>,
+    /// Since when it has been loading: a wait too short to notice shows no spinner.
+    waiting: Option<Instant>,
 }
 
 impl Default for Clip {
@@ -184,11 +186,20 @@ impl Default for Clip {
             moved: None,
             scrub: None,
             still: None,
+            waiting: None,
         }
     }
 }
 
 impl Clip {
+    /// How far the loading spinner has faded in.
+    pub fn spinner(&self) -> f32 {
+        match self.waiting {
+            Some(t) if self.loading => ((t.elapsed().as_secs_f32() - SPIN_AFTER) / SPIN_FADE).clamp(0., 1.),
+            _ => 0.,
+        }
+    }
+
     pub fn position(&self) -> u64 {
         if let Some(f) = self.scrub
             && let Some(i) = &self.info
@@ -577,6 +588,7 @@ impl Videos {
             if c.hovered && c.playing && c.moved.is_some_and(|t| t.elapsed() < IDLE + Duration::from_millis(200)) {
                 moving = true;
             }
+            c.waiting = if c.loading { c.waiting.or_else(|| Some(Instant::now())) } else { None };
             let gain = c.gain();
             let Some(p) = &mut c.play else { continue };
             let duration = c.info.as_ref().map_or(0, |i| i.duration);
@@ -727,6 +739,10 @@ fn seek(c: &mut Clip, ms: u64, input: Option<AudioInputSpec>, scale: f32) {
         c.play = start(input, info, ms, scale, c.big, c.speed);
     }
 }
+
+/// Seconds of loading before its spinner shows, and then fades in over.
+const SPIN_AFTER: f32 = 0.3;
+const SPIN_FADE: f32 = 0.15;
 
 /// The box a window-filling clip decodes for: a large display's, never past the source.
 const BIG: (f32, f32) = (2560., 1440.);
@@ -1145,14 +1161,15 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     .child(svg().path("icons/play.svg").size(px(22.)).text_color(gpui::white())),
             )
     });
-    let spin = (clip.loading && !dim).then(|| {
+    let spun = clip.spinner();
+    let spin = (spun > 0. && !dim).then(|| {
         div()
             .absolute()
             .inset_0()
             .flex()
             .items_center()
             .justify_center()
-            .child(div().size(px(36.)).child(crate::attachments::spinner(36., 3., 1., 0.25, white_a(0.2), gpui::white())))
+            .child(div().size(px(36.)).child(crate::attachments::spinner(36., 3., 1., 0.25, white_a(0.2 * spun), white_a(spun))))
     });
     div()
         .id(SharedString::from(format!("video-{id}")))

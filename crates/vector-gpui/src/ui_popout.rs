@@ -358,7 +358,7 @@ impl VectorApp {
             }
             Kind::Video => (
                 clip.is_some_and(|c| c.playing),
-                clip.is_some_and(|c| c.loading),
+                clip.is_some_and(|c| c.spinner() > 0.),
                 clip.map_or(0, |c| c.position()),
                 clip.map_or(0, |c| c.duration()),
                 Vec::new(),
