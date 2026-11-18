@@ -1,0 +1,4 @@
+Second preview of 0.5.2.
+- Android: biometric unlock works again, and so do microphone and camera prompts, Amber signing and push setup
+- Right-click the empty space under a Community's channels to create a Channel or Category
+- Jumping to a replied-to message flashes it reliably
