@@ -17,6 +17,7 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import { anchorScroll } from '../lib/anchorscroll.svelte.js';
     import SectionNav from '../settings/SectionNav.svelte';
+    import Select from '../ui/Select.svelte';
 
     // h: close(), pickIcon(), pickBanner(), removeIcon(), removeBanner(), save(), reset(), unban() (the selection), name(npub), veiled(npub), searchName(npub), profile(npub),
     //    avatarSrc(npub), copyIdItems(what, id), copyBannedId(npub), showContextMenu(menu), loadAudit(communityId), openLink(key),
@@ -27,6 +28,16 @@
     const ov = csOverlay.state();
     const st = csState();
     const dirty = $derived(csDirty());
+
+    const lineOptions = $derived([
+        ...st.pickChannels.filter((c) => c.view === 'chat').map((c) => ({ value: c.channel_id, label: c.name, private: c.private })),
+        { value: '', label: 'Off' },
+    ]);
+    const landingOptions = $derived([
+        { value: '', label: 'First channel they can read', auto: true },
+        // A joiner holds no private channel's key on arrival.
+        ...st.pickChannels.filter((c) => !c.private).map((c) => ({ value: c.channel_id, label: c.name })),
+    ]);
 
     const NAME_MAX = 32;
     const DESCRIPTION_MAX = 500;
@@ -52,6 +63,8 @@
                 { id: 'identity', label: 'Icon & Name', icon: 'image', keys: 'icon avatar logo picture image name title rename' },
                 { id: 'banner', label: 'Banner', icon: 'image', keys: 'banner cover header art background picture image' },
                 { id: 'description', label: 'Description', icon: 'align-left', keys: 'description about bio summary' },
+                { id: 'system-messages', label: 'System Messages', icon: 'users-multi', keys: 'system messages join leave joined left welcome channel' },
+                { id: 'landing-channel', label: 'Landing Channel', icon: 'list', keys: 'landing channel first start new members rules welcome verify captcha onboarding' },
             ],
         },
         {
@@ -266,6 +279,13 @@
     }
 </script>
 
+{#snippet lineLead(o)}
+    {#if o.auto}<span class="icon icon-list"></span>
+    {:else if !o.value}<span class="icon icon-eye-off"></span>
+    {:else if o.private}<span class="icon icon-locked"></span>
+    {:else}<span class="icon icon-channel-hash"></span>{/if}
+{/snippet}
+
 <svelte:window onkeydown={(e) => { if (ov.active && e.key === 'Escape') { e.preventDefault(); h.close(); } }} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -361,6 +381,26 @@
                                 <textarea id="cs-description" class="cs-input cs-textarea" rows="5" maxlength={DESCRIPTION_MAX}
                                           disabled={!st.canEdit} placeholder="Tell people what brings everyone here"
                                           value={st.draft.description} oninput={(e) => csSetDraft({ description: e.currentTarget.value })}></textarea>
+                            </div>
+                        </section>
+
+                        <section class="cs-block" data-anchor="system-messages">
+                            <h3 class="cs-heading">System Messages</h3>
+                            <div class="cs-field">
+                                <span class="cs-label">Join and leave messages</span>
+                                <Select class="vselect-fill" label="Join and leave messages" options={lineOptions} value={st.draft.systemChannel ?? ''}
+                                        lead={lineLead} disabled={!st.canEdit} onchange={(v) => csSetDraft({ systemChannel: v || null })} />
+                                <p class="cs-hint">In a private channel, only the members who can read it see them.</p>
+                            </div>
+                        </section>
+
+                        <section class="cs-block" data-anchor="landing-channel">
+                            <h3 class="cs-heading">Landing Channel</h3>
+                            <div class="cs-field">
+                                <span class="cs-label">Where new members start</span>
+                                <Select class="vselect-fill" label="Where new members start" options={landingOptions} value={st.draft.landingChannel ?? ''}
+                                        lead={lineLead} disabled={!st.canEdit} onchange={(v) => csSetDraft({ landingChannel: v || null })} />
+                                <p class="cs-hint">It opens first after joining, until they pick another channel.</p>
                             </div>
                         </section>
                     {:else if section.id === 'roles'}

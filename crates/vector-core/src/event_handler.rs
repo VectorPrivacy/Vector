@@ -12,6 +12,27 @@ use crate::rumor::{RumorProcessingResult, RumorEvent, RumorContext, Conversation
 use crate::types::Message;
 use crate::state::WRAPPER_ID_CACHE;
 
+/// A Join or Leave, and where its line belongs.
+#[derive(Debug, Clone, Copy)]
+pub struct Presence<'a> {
+    pub community_id: &'a str,
+    /// The channel that keeps the line: the System Messages channel, or the default while
+    /// `shown` is false. A line is always kept, since the member list reads it.
+    pub channel_id: &'a str,
+    /// Whether the line is drawn: false while the Community has them off, or sends them to a
+    /// channel this account can't read.
+    pub shown: bool,
+    pub npub: &'a str,
+    pub joined: bool,
+    /// The Join or Leave rumor's id, which keys its line.
+    pub event_id: &'a str,
+    /// The authenticated inner timestamp, in seconds.
+    pub created_at: u64,
+    /// The invite link's creator and label, when the joiner's client named them.
+    pub invited_by: Option<&'a str>,
+    pub invited_label: Option<&'a str>,
+}
+
 /// Platform-specific callbacks for inbound event processing.
 ///
 /// Same pattern as SendCallback/ProfileSyncHandler — trait with default no-ops.
@@ -47,19 +68,8 @@ pub trait InboundEventHandler: Send + Sync {
     /// A Community message was removed (cooperative delete / moderation tombstone).
     fn on_community_removed(&self, _chat_id: &str, _target_id: &str) {}
 
-    /// A join/leave presence announcement. `created_at` is the authenticated inner timestamp;
-    /// `invited_by`/`invited_label` carry invite attribution when present.
-    #[allow(clippy::too_many_arguments)]
-    fn on_community_presence(
-        &self,
-        _chat_id: &str,
-        _npub: &str,
-        _joined: bool,
-        _event_id: &str,
-        _created_at: u64,
-        _invited_by: Option<&str>,
-        _invited_label: Option<&str>,
-    ) {}
+    /// A Join or Leave in a Community's Guestbook.
+    fn on_community_presence(&self, _presence: &Presence<'_>) {}
 
     /// A Community typing indicator (ephemeral). `until` is the unix-secs the typer stops being active.
     fn on_community_typing(&self, _chat_id: &str, _npub: &str, _until: u64) {}
@@ -391,17 +401,8 @@ impl InboundEventHandler for BatchingPersist<'_> {
     fn on_community_removed(&self, chat_id: &str, target_id: &str) {
         self.inner.on_community_removed(chat_id, target_id)
     }
-    fn on_community_presence(
-        &self,
-        chat_id: &str,
-        npub: &str,
-        joined: bool,
-        event_id: &str,
-        created_at: u64,
-        invited_by: Option<&str>,
-        invited_label: Option<&str>,
-    ) {
-        self.inner.on_community_presence(chat_id, npub, joined, event_id, created_at, invited_by, invited_label)
+    fn on_community_presence(&self, presence: &Presence<'_>) {
+        self.inner.on_community_presence(presence)
     }
     fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
         self.inner.on_community_typing(chat_id, npub, until)

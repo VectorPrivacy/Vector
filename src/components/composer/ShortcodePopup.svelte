@@ -4,7 +4,7 @@
     import AnchoredPanel from './AnchoredPanel.svelte';
     import { composerPopup } from '../lib/composer.svelte.js';
 
-    let { anchor, h } = $props();   // h: bindCachedEmojiImg(img, url, kind), twemojiUrl(emoji)
+    let { anchor, h } = $props();   // h: bindCachedEmojiImg(img, url, kind), twemojiUrl(emoji), plain(emoji)
 
     const open = $derived(composerPopup().kind === 'shortcode');
     let view = $state.raw({ header: '', items: [], active: 0, pick: () => {} });
@@ -32,7 +32,7 @@
             {:else if h.twemojiUrl(item.emoji)}
                 <img src={h.twemojiUrl(item.emoji)} alt={item.emoji} />
             {:else}
-                <span class="emoji-shortcode-item-fallback">{item.emoji}</span>
+                <span class="emoji-shortcode-item-fallback">{h.plain(item.emoji)}</span>
             {/if}
             <span class="emoji-shortcode-item-label">{label(item)}</span>
         </div>

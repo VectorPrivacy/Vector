@@ -1,5 +1,6 @@
 <script>
     // Make a Channel or a Category: its kind and privacy, then its name, in one card.
+    // Duplicating a Channel asks only for the name.
     import { createChannelModal, patchCreateChannel } from '../lib/create-channel.svelte.js';
     import { popIn } from '../lib/popin.js';
     let { h } = $props();   // h: submit() (create what the draft describes), close()
@@ -13,8 +14,10 @@
     const bytes = $derived(new TextEncoder().encode(st.name).length);
     const valid = $derived(st.name.trim().length > 0 && bytes <= MAX);
     const noun = $derived(st.category ? 'Category' : 'Channel');
+    const verb = $derived(st.source ? 'Duplicate' : 'Create');
+    const picks = $derived(!st.category && !st.source);
     let input = $state(null);
-    $effect(() => { st.tick; if (st.active) input?.focus(); });
+    $effect(() => { st.tick; if (st.active) { input?.focus(); if (st.source) input?.select(); } });
     function submit() {
         if (valid && !st.busy) h.submit();
     }
@@ -28,13 +31,14 @@
     <div class="ccm-card" use:popIn={st.tick} role="dialog" aria-modal="true" aria-labelledby="ccm-title">
         <div class="ccm-head">
             <div class="ccm-heading">
-                <h2 id="ccm-title" class="ccm-title">Create {noun}</h2>
-                {#if st.categoryName}<span class="ccm-sub cutoff">in {st.categoryName}</span>{/if}
+                <h2 id="ccm-title" class="ccm-title">{verb} {noun}</h2>
+                {#if st.source}<span class="ccm-sub cutoff">of {st.source.name}</span>
+                {:else if st.categoryName}<span class="ccm-sub cutoff">in {st.categoryName}</span>{/if}
             </div>
             <button class="status-dialog-x" aria-label="Close" onclick={() => h.close()}>&#x2715;</button>
         </div>
 
-        {#if !st.category}
+        {#if picks}
             <span class="ccm-label">Channel Type</span>
             <div class="ccm-types" role="radiogroup" aria-label="Channel Type">
                 {#each TYPES as t (t.kind)}
@@ -63,7 +67,9 @@
             {#if bytes > MAX - 16}<span class="cs-count ccm-count" class:warn={bytes > MAX}>{MAX - bytes}</span>{/if}
         </div>
 
-        {#if !st.category}
+        {#if st.source}<p class="ccm-note">Same settings and permissions, a fresh history.</p>{/if}
+
+        {#if picks}
             <label class="toggle-container cs-perm ccm-private">
                 <span class="cs-perm-text">
                     <span class="cs-perm-name"><span class="icon icon-locked"></span>Private Channel</span>
@@ -78,7 +84,7 @@
 
         <div class="ccm-actions">
             <button class="cs-btn-text" onclick={() => h.close()}>Cancel</button>
-            <button class="cs-btn-save" disabled={!valid || st.busy} onclick={submit}>{st.busy ? 'Creating…' : `Create ${noun}`}</button>
+            <button class="cs-btn-save" disabled={!valid || st.busy} onclick={submit}>{st.busy ? (st.source ? 'Duplicating…' : 'Creating…') : `${verb} ${noun}`}</button>
         </div>
     </div>
 </div>

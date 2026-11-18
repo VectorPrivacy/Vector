@@ -326,6 +326,9 @@ pub trait Transport {
     fn detached(&self) -> Option<std::sync::Arc<dyn Transport + Send + Sync>> {
         None
     }
+
+    /// Dial `relays` for plane reads ahead of the first one, in the background.
+    fn prewarm_planes(&self, _relays: &[String]) {}
 }
 
 /// Per-relay broadcast cap: retry each relay up to this many times before giving up on it (matching the
@@ -2173,6 +2176,24 @@ impl Transport for LiveTransport {
 
     fn detached(&self) -> Option<std::sync::Arc<dyn Transport + Send + Sync>> {
         Some(std::sync::Arc::new(LiveTransport { timeout: self.timeout }))
+    }
+
+    fn prewarm_planes(&self, relays: &[String]) {
+        let (relays, timeout) = (relays.to_vec(), self.timeout);
+        crate::db::spawn_bound(async move {
+            if wait_transport_ready().await.is_err() {
+                return;
+            }
+            let Ok(relays) = drop_refused(relays) else { return };
+            let generation = crate::db::current_session_id();
+            // A relay known to gate reads is dialled as each plane, with its key.
+            let open = relays.iter().filter(|r| !breaker_tripped(r) && plane_gate(generation, r) != Some(RelayGate::Auth));
+            futures_util::future::join_all(open.map(|r| async move {
+                let key = crate::inbox_relays::normalize_relay_url(r);
+                drop(open_plane_client(generation, r, &key, timeout).await);
+            }))
+            .await;
+        });
     }
 }
 

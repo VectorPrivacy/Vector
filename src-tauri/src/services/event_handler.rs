@@ -268,23 +268,15 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         }));
     }
 
-    fn on_community_presence(
-        &self,
-        chat_id: &str,
-        npub: &str,
-        joined: bool,
-        event_id: &str,
-        created_at: u64,
-        invited_by: Option<&str>,
-        invited_label: Option<&str>,
-    ) {
-        let (chat_id, npub, event_id) = (chat_id.to_string(), npub.to_string(), event_id.to_string());
-        let invited_by = invited_by.map(str::to_string);
-        let invited_label = invited_label.map(str::to_string);
+    fn on_community_presence(&self, p: &vector_core::Presence<'_>) {
+        let (chat_id, npub, event_id) = (p.channel_id.to_string(), p.npub.to_string(), p.event_id.to_string());
+        let invited_by = p.invited_by.map(str::to_string);
+        let invited_label = p.invited_label.map(str::to_string);
+        let (joined, created_at, shown) = (p.joined, p.created_at, p.shown);
         vector_core::db::spawn_bound(async move {
             crate::commands::community::apply_community_presence(
                 &chat_id, &npub, joined, &event_id, created_at,
-                invited_by.as_deref(), invited_label.as_deref(),
+                invited_by.as_deref(), invited_label.as_deref(), shown,
             ).await;
         });
     }

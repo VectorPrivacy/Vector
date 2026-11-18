@@ -2065,10 +2065,10 @@ fn surface_presence(
 ) {
     use super::guestbook::GuestbookEntry;
     use nostr_sdk::prelude::ToBech32;
-    let Some(primary) = community.primary_channel() else {
+    let Some(home) = community.presence_home() else {
         return;
     };
-    let chat_id = crate::simd::hex::bytes_to_hex_32(&primary.id.0);
+    let channel_id = crate::simd::hex::bytes_to_hex_32(&home.channel.id.0);
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let banned = crate::db::community::banned_set(&cid_hex);
     for ev in fresh {
@@ -2087,7 +2087,17 @@ fn surface_presence(
             None => (None, None),
         };
         if crate::news::first_telling(&ev.rumor_id) {
-            handler.on_community_presence(&chat_id, &npub, joined, &event_id, at_ms / 1000, by, label);
+            handler.on_community_presence(&crate::Presence {
+                community_id: &cid_hex,
+                channel_id: &channel_id,
+                shown: home.shown,
+                npub: &npub,
+                joined,
+                event_id: &event_id,
+                created_at: at_ms / 1000,
+                invited_by: by,
+                invited_label: label,
+            });
         }
     }
 }

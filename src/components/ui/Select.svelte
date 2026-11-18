@@ -5,27 +5,59 @@
     // options: [{ value, label, tag?, disabled? }]; lead(option) draws what sits before a
     // label, and a tag is a small pill after it that never truncates.
     // label: the accessible name, when no <label> points at the button.
+    import { tick } from 'svelte';
+
     let { options, value, onchange, lead = null, id = undefined, label = undefined, class: cls = '', disabled = false } = $props();
+
+    const CAP = 320;   // .vselect-list's max-height
 
     let open = $state(false);
     let up = $state(false);
     let hi = $state(0);
     let root = $state(null);
     let list = $state(null);
+    let room = $state(null);    // px the open list may take
     const current = $derived(options.find((o) => o.value === value) || options[0]);
 
-    // Opens downward unless the list would run past the window and there is more room above.
+    // The band of the window the list can be seen in: inside every ancestor that clips it,
+    // so a scrolling pane under a header doesn't hide its top.
+    function visibleBand() {
+        let top = 0, bottom = window.innerHeight;
+        for (let el = root.parentElement; el; el = el.parentElement) {
+            if (getComputedStyle(el).overflowY === 'visible') continue;
+            const r = el.getBoundingClientRect();
+            top = Math.max(top, r.top);
+            bottom = Math.min(bottom, r.bottom);
+        }
+        return { top, bottom };
+    }
+    // Opens downward unless it doesn't fit there and there is more room above, and is never
+    // taller than the side it opens on; past that it scrolls.
     function place() {
         const box = root.getBoundingClientRect();
-        const need = list.scrollHeight + 12;
-        up = window.innerHeight - box.bottom < need && box.top > window.innerHeight - box.bottom;
+        const band = visibleBand();
+        // The gap to the button, the list's own padding and border, and a margin from the edge.
+        const below = band.bottom - box.bottom - 24;
+        const above = box.top - band.top - 24;
+        up = below < Math.min(list.scrollHeight, CAP) && above > below;
+        room = Math.max(96, Math.min(CAP, up ? above : below));
     }
-    function toggle() {
+    async function toggle() {
         if (disabled) return;
         open = !open;
         if (!open) return;
         hi = Math.max(0, options.findIndex((o) => o.value === value));
         place();
+        await tick();
+        reveal();
+    }
+    // Scrolls the list, never the page around it, to the highlighted option.
+    function reveal() {
+        const item = list?.children[hi];
+        if (!item) return;
+        const top = item.offsetTop, bottom = top + item.offsetHeight;
+        if (top < list.scrollTop) list.scrollTop = top - 4;
+        else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight + 4;
     }
     function pick(o) {
         if (o.disabled) return;
@@ -35,7 +67,7 @@
     function step(dir) {
         for (let n = 0; n < options.length; n++) {
             hi = (hi + dir + options.length) % options.length;
-            if (!options[hi].disabled) return;
+            if (!options[hi].disabled) { reveal(); return; }
         }
     }
     function onkey(e) {
@@ -61,7 +93,7 @@
         {#if current?.tag}<span class="vselect-tag">{current.tag}</span>{/if}
         <span class="vselect-caret"></span>
     </button>
-    <div class="vselect-list" role="listbox" bind:this={list}>
+    <div class="vselect-list" role="listbox" bind:this={list} style:max-height={room ? `${room}px` : null}>
         {#each options as o, i (o.value)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div class="vselect-item" class:hi={i === hi && !o.disabled} class:selected={o.value === value} class:disabled={o.disabled}

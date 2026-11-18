@@ -67,6 +67,27 @@ pub struct DeleteOutcome {
     pub any_network_action: bool,
 }
 
+/// Take back a DM whose send was given up on: a wrap that no relay confirmed may still have
+/// landed. Its copies leave the relays by the keys kept for them and the recipient is asked
+/// to hide it. Returns whether that request went out, which is what lets its files go.
+pub async fn take_back_failed_dm(rumor_id: &EventId, recipient: &nostr_sdk::prelude::PublicKey) -> bool {
+    let Some(client) = nostr_client() else { return false };
+    let rumor_hex = rumor_id.to_hex();
+    if let Err(e) = crate::db::events::add_message_tombstone(&rumor_hex) {
+        crate::log_warn!("[NIP-17 delete] tombstone write failed: {}", e);
+    }
+    crate::state::note_message_deleted(&rumor_hex);
+    let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(rumor_id).unwrap_or_default();
+    dispatch_wrap_deletions(&client, &keys, None).await;
+    match publish_cooperative_hide(&client, rumor_id, Some(recipient), 14).await {
+        Ok(()) => true,
+        Err(e) => {
+            crate::log_warn!("[NIP-17 delete] couldn't take back a failed DM: {}", e);
+            false
+        }
+    }
+}
+
 /// Delete an outbound DM from the network: our own copies of it with our key, the hide
 /// request for the recipient's, its attachments from Blossom. Every relay round trip runs
 /// in the background; the call returns once the local state is gone.

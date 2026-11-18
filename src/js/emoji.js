@@ -2223,7 +2223,7 @@ _webpProbe.src = 'data:image/webp;base64,UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERG
  */
 function spriteEmoji(cell, emoji) {
     const slot = twemojiSheets.slots[emoji];
-    if (slot === undefined || !twemojiSheetsDecode) return false;
+    if (slot === undefined || !twemojiSheetsDecode || plainTextSymbols(emoji) !== emoji) return false;
     const { per, cols } = twemojiSheets;
     const sheet = Math.floor(slot / per);
     const at = slot % per;
@@ -2239,6 +2239,18 @@ function spriteEmoji(cell, emoji) {
     return true;
 }
 
+/** ©, ® and ™ in their emoji form, which Twemoji draws dark for a light page. */
+const TEXT_SYMBOL_EMOJI = /([\u00A9\u00AE\u2122])\uFE0F/g;
+
+/**
+ * `text` with ©, ® and ™ as plain symbols, which take the font and colour around them.
+ * @param {string} text
+ * @returns {string}
+ */
+function plainTextSymbols(text) {
+    return text.replace(TEXT_SYMBOL_EMOJI, '$1');
+}
+
 function twemojify(domElement, opts) {
     // Strip skin tone modifiers from text nodes — our Twemoji set only has neutral/yellow variants.
     // Also normalize ZWJ sequences whose Twemoji regex entry omits FE0F variation selectors
@@ -2250,6 +2262,7 @@ function twemojify(domElement, opts) {
         let next = node.textContent.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, '');
         // 👁️‍🗨️ eye-in-speech-bubble (1F441 FE0F? 200D 1F5E8 FE0F?) → unqualified form
         next = next.replace(/\u{1F441}\u{FE0F}?\u{200D}\u{1F5E8}\u{FE0F}?/gu, '\u{1F441}\u{200D}\u{1F5E8}');
+        next = plainTextSymbols(next);
         if (next !== node.textContent) node.textContent = next;
     }
     twemoji.parse(domElement, { callback: (icon, _) => '/twemoji/svg/' + icon + '.svg' });

@@ -32,7 +32,7 @@ pub use relocate::{check_relays, move_relays, RelayCheck, RelayMove, RETIRED_REL
 pub(crate) use relocate::{clean_relays, relays_moved, resume_relay_copy, retired_relays};
 pub(crate) use audit::{note_moderation_delete, note_voice_directive};
 mod outbox;
-pub use outbox::{confirm_in, discard_unconfirmed, retry_unconfirmed};
+pub use outbox::{confirm_in, discard_unconfirmed, mark_unsent, retry_unconfirmed};
 mod purge;
 mod writing;
 mod sealing;
@@ -217,6 +217,40 @@ pub async fn send_chat_message<T: Transport + ?Sized>(
     send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, next_send_ms()).await
 }
 
+/// A send no relay confirmed. `kept` names the signed message while it is held to go out
+/// again: it may still land, so it is retried, taken back and shown under that id alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsent {
+    pub kept: Option<String>,
+    pub error: String,
+}
+
+impl From<String> for Unsent {
+    fn from(error: String) -> Self {
+        Self { kept: None, error }
+    }
+}
+
+impl From<&str> for Unsent {
+    fn from(error: &str) -> Self {
+        Self { kept: None, error: error.to_string() }
+    }
+}
+
+/// [`send_chat_message`] for a caller that shows the message as it sends: a failure says
+/// which signed message it left behind, so the row on screen becomes that message.
+pub async fn try_send_chat_message<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    content: &str,
+    reply_to: Option<(&str, &str)>,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+) -> Result<String, Unsent> {
+    try_send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, next_send_ms()).await
+}
+
 /// [`send_chat_message`] with an explicit event time. The rumor id is a pure
 /// function of its inputs, so a GUI that picks `at_ms` can precompute the id for
 /// its optimistic pending row — the in-process echo and the finalize then key
@@ -232,6 +266,21 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
     at_ms: u64,
 ) -> Result<String, String> {
+    try_send_chat_message_at(transport, community, channel_id, content, reply_to, emoji, extra_tags, at_ms).await.map_err(|unsent| unsent.error)
+}
+
+/// [`send_chat_message_at`], naming the signed message a failure left behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn try_send_chat_message_at<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    channel_id: &ChannelId,
+    content: &str,
+    reply_to: Option<(&str, &str)>,
+    emoji: &[(&str, &str)],
+    extra_tags: Vec<nostr_sdk::prelude::Tag>,
+    at_ms: u64,
+) -> Result<String, Unsent> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     refuse_while_timed_out(community, &author_pk)?;
     // An honest client posts only where it holds Send Messages (CORD-04 §8).
@@ -242,10 +291,10 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
             .channel_permissions(owner.as_deref(), &author_pk.to_hex(), &crate::simd::hex::bytes_to_hex_32(&channel_id.0), community.channel(channel_id).is_some_and(|c| c.private))
             .contains(crate::community::roles::Permissions::SEND_MESSAGES)
     {
-        return Err("you can't send messages in this channel".to_string());
+        return Err("you can't send messages in this channel".into());
     }
     let rumor = chat::build_message_rumor(author_pk, channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
-    publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
+    publish_chat_tracked(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
 /// A member timed out doesn't post, edit or react until it ends (CORD-04 §8).
@@ -622,6 +671,21 @@ async fn publish_chat<T: Transport + ?Sized>(
     at_ms: u64,
     ephemeral: bool,
 ) -> Result<String, String> {
+    publish_chat_tracked(transport, community, group, author_pk, channel_id, epoch, rumor, at_ms, ephemeral).await.map_err(|unsent| unsent.error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_chat_tracked<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    group: &GroupKey,
+    author_pk: PublicKey,
+    channel_id: &ChannelId,
+    epoch: Epoch,
+    rumor: nostr_sdk::prelude::UnsignedEvent,
+    at_ms: u64,
+    ephemeral: bool,
+) -> Result<String, Unsent> {
     crate::db::scoped(async move {
         let ch = community.channel(channel_id).ok_or("no such channel in this community")?;
         let (sending, wepoch) = writing::send_group(community, ch, group, rumor.kind.as_u16())?;
@@ -653,13 +717,16 @@ async fn publish_chat<T: Transport + ?Sized>(
         if kept {
             outbox::keep(&rumor_id, &wrap);
         }
+        let began = web_time::Instant::now();
         if let Err(e) = transport.publish(&wrap, &community.relays).await {
             // No relay answered, which is not the same as none taking it: ask before failing.
-            if !outbox::on_relays(transport, group.keys(), &wrap, &community.relays).await {
+            if !outbox::on_relays(transport, group.keys(), &wrap, &community.relays).await
+                && !(kept && outbox::again_once_reconnected(transport, group.keys(), &wrap, &community.relays, began).await)
+            {
                 if kept {
                     outbox::resend_later(rumor_id.clone());
                 }
-                return Err(e);
+                return Err(Unsent { kept: kept.then(|| rumor_id.clone()), error: e });
             }
         }
         if kept {
@@ -2438,22 +2505,22 @@ async fn accept_bundle<T: Transport + ?Sized>(
                 && v.community_id == community.id().0
                 && v.community_root == community.community_root
         });
-        let (community, join_heads, join_banlist, (join_pins, join_writers), join_banlist_content, join_roles, join_authority_heads) =
+        let (community, join_heads, join_banlist, (join_pins, join_writers), join_banlist_content, join_roles, join_authority_heads, dissolved) =
             match handoff {
                 Some(v) => {
                     let mut c = v.folded;
                     // The preview holds no acquisition time — stamp the JOIN's.
                     c.created_at_ms = held_since;
-                    (c, v.heads, v.banned, (v.pins, v.writers), v.banlist_persist, v.roles, v.authority_heads)
+                    (c, v.heads, v.banned, (v.pins, v.writers), v.banlist_persist, v.roles, v.authority_heads, v.dissolved)
                 }
                 None => {
-                    let vj = verify_owner_root_and_reconcile(transport, community).await?;
-                    (vj.community, vj.heads, vj.banned, (vj.pins, vj.writers), vj.banlist_persist, vj.roles, vj.authority_heads)
+                    let (vj, dissolved) = verify_and_check_dissolved(transport, community).await?;
+                    (vj.community, vj.heads, vj.banned, (vj.pins, vj.writers), vj.banlist_persist, vj.roles, vj.authority_heads, dissolved)
                 }
             };
 
         // A dissolved community is a grave (CORD-02 §9): refuse to join it.
-        if is_dissolved(transport, &community).await {
+        if dissolved {
             return Err(ERR_DISSOLVED.to_string());
         }
 
@@ -2534,7 +2601,14 @@ async fn accept_bundle<T: Transport + ?Sized>(
             let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
             let join_rumor = guestbook::build_join_rumor(my_pk, attr_ref, at_ms);
             if let Ok((join_wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &join_rumor, &gb_group, Timestamp::from_secs(at_ms / 1000)).await {
-                publish_my_join(transport, &community, join_wrap).await;
+                // The seat is taken once it's saved: the announcement doesn't hold the joiner at the door.
+                match transport.detached() {
+                    Some(owned) => {
+                        let joined = community.clone();
+                        crate::db::spawn_bound(async move { publish_my_join(&*owned, &joined, join_wrap).await });
+                    }
+                    None => publish_my_join(transport, &community, join_wrap).await,
+                }
             }
         }
 
@@ -2548,18 +2622,37 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // the whole document N times, concurrently, every copy identical, on the boot path
         // that is already the slowest thing the app does.
         if announce_join {
-            match republish_community_list(transport, Some(community.id())).await {
-                Ok(true) => {}
-                Ok(false) => republish_community_list_durable(Some(*community.id())),
-                Err(e) => {
-                    crate::log_warn!("[CommunityList] failed to record this join across devices ({}) — retrying", e);
-                    republish_community_list_durable(Some(*community.id()));
+            // Kept pending until it lands, across a restart too, so it needn't hold the joiner either.
+            if transport.detached().is_some() {
+                republish_community_list_durable(Some(*community.id()));
+            } else {
+                match republish_community_list(transport, Some(community.id())).await {
+                    Ok(true) => {}
+                    Ok(false) => republish_community_list_durable(Some(*community.id())),
+                    Err(e) => {
+                        crate::log_warn!("[CommunityList] failed to record this join across devices ({}) — retrying", e);
+                        republish_community_list_durable(Some(*community.id()));
+                    }
                 }
             }
         }
         Ok(community)
     })
     .await
+}
+
+/// [`verify_owner_root_and_reconcile`] with the dissolution check beside it, not after: both
+/// are read from the same relays and neither waits on the other. The relays are dialled for
+/// its channels meanwhile, so the first page a joiner opens doesn't pay for that.
+async fn verify_and_check_dissolved<T: Transport + ?Sized>(transport: &T, community: CommunityV2) -> Result<(VerifiedJoin, bool), String> {
+    transport.prewarm_planes(&community.relays);
+    let (verified, mut dissolved) = futures_util::future::join(verify_owner_root_and_reconcile(transport, community.clone()), is_dissolved(transport, &community)).await;
+    let verified = verified?;
+    // The fold may name relays the bundle didn't: a tombstone lives where the community does.
+    if !dissolved && verified.community.relays != community.relays {
+        dissolved = is_dissolved(transport, &verified.community).await;
+    }
+    Ok((verified, dissolved))
 }
 
 /// Prove the delivered `community_root` is genuinely the owner's, and reconcile
@@ -2913,8 +3006,36 @@ struct VerifiedPreview {
     banlist_persist: Option<(Vec<String>, u64)>,
     roles: Option<(crate::community::roles::CommunityRoles, i64)>,
     authority_heads: Vec<FoldedHead>,
+    /// Whether the same look found the community dissolved, so the join needn't ask again.
+    dissolved: bool,
 }
 static VERIFIED_PREVIEW: std::sync::Mutex<Option<VerifiedPreview>> = std::sync::Mutex::new(None);
+
+/// The bundle a preview last read, for the join that follows within seconds: the session it
+/// was read under (held weakly), when, the link, and the bundle.
+type PreviewedBundle = (std::sync::Weak<crate::db::Session>, web_time::Instant, String, CommunityInvite);
+static PREVIEWED_BUNDLE: std::sync::Mutex<Option<PreviewedBundle>> = std::sync::Mutex::new(None);
+/// How long a previewed bundle stands in for the join's own read. A link revoked inside it
+/// still lets that one previewer in.
+const PREVIEWED_BUNDLE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// [`fetch_public_bundle`] for a preview, kept so joining right after needn't read it again.
+pub async fn fetch_public_bundle_for_preview<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityInvite, String> {
+    // The link's own relays are usually the community's: dialled now, they're up by the join.
+    if let Ok(parsed) = invite::parse_invite_link(url) {
+        transport.prewarm_planes(&parsed.bootstrap_relays);
+    }
+    let bundle = fetch_public_bundle(transport, url).await?;
+    *PREVIEWED_BUNDLE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::sync::Arc::downgrade(&crate::db::current_session()), web_time::Instant::now(), url.to_string(), bundle.clone()));
+    Ok(bundle)
+}
+
+/// The bundle this account just previewed `url` with, once.
+fn take_previewed_bundle(url: &str) -> Option<CommunityInvite> {
+    let (session, at, link, bundle) = PREVIEWED_BUNDLE.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+    (link == url && at.elapsed() < PREVIEWED_BUNDLE_TTL && session.upgrade().is_some_and(|s| s.is_live())).then_some(bundle)
+}
 const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Park a verified preview for the join, dropping it once its TTL lapses unjoined:
@@ -2948,7 +3069,7 @@ fn expire_verified_preview(seq: u64) {
 /// fold/transport failure the bundle snapshot is the fallback. Nothing persists
 /// — the caller hasn't joined.
 pub async fn preview_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
-    let bundle = fetch_public_bundle(transport, url).await?;
+    let bundle = fetch_public_bundle_for_preview(transport, url).await?;
     preview_bundle(transport, &bundle).await
 }
 
@@ -2964,8 +3085,8 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
 /// description and icon are the link creator's word.
 pub async fn preview_bundle_checked<T: Transport + ?Sized>(transport: &T, bundle: &CommunityInvite) -> Result<(CommunityV2, bool), String> {
     let community = CommunityV2::from_bundle(bundle, 0)?;
-    match verify_owner_root_and_reconcile(transport, community.clone()).await {
-        Ok(vj) => {
+    match verify_and_check_dissolved(transport, community.clone()).await {
+        Ok((vj, dissolved)) => {
             let folded = vj.community;
             stash_verified_preview(VerifiedPreview {
                 session: std::sync::Arc::downgrade(&crate::db::current_session()),
@@ -2981,6 +3102,7 @@ pub async fn preview_bundle_checked<T: Transport + ?Sized>(transport: &T, bundle
                 banlist_persist: vj.banlist_persist,
                 roles: vj.roles,
                 authority_heads: vj.authority_heads,
+                dissolved,
             });
             Ok((folded, true))
         }
@@ -2988,11 +3110,15 @@ pub async fn preview_bundle_checked<T: Transport + ?Sized>(transport: &T, bundle
     }
 }
 
-/// Accept a public invite link: fetch its bundle (revocation-aware) and join.
+/// Accept a public invite link: fetch its bundle (revocation-aware), or take the one a
+/// preview read moments ago, and join.
 pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         // Held across the network fetch so the join stays with one account.
-        let bundle = fetch_public_bundle(transport, url).await?;
+        let bundle = match take_previewed_bundle(url) {
+            Some(bundle) => bundle,
+            None => fetch_public_bundle(transport, url).await?,
+        };
         accept_bundle(transport, &bundle, None, None).await
     })
     .await
@@ -7828,15 +7954,16 @@ pub async fn set_overwrite<T: Transport + ?Sized>(
         }
         // Who might gain or lose a key must be readable before anything is published.
         access_candidates(community, &view.roles)?;
-        let rank = match &target {
-            OverwriteTarget::Everyone => u32::MAX,
-            OverwriteTarget::Role(id) => view.roles.role(id).map(|r| r.position).ok_or("no such role")?,
+        match &target {
+            OverwriteTarget::Role(id) if view.roles.role(id).is_none() => return Err("no such role".to_string()),
             OverwriteTarget::Member(m) if *m == author.owner_hex => return Err("the owner holds every permission everywhere".to_string()),
-            OverwriteTarget::Member(m) => view.roles.highest_position(m).unwrap_or(u32::MAX),
-        };
+            _ => {}
+        }
         let current = view.roles.overwrites.iter().find(|o| o.scope == scope_hex && o.target == target);
         let (was_allow, was_deny) = current.map_or((0, 0), |o| (o.allow.0, o.deny.0));
-        if !author.supports(rank, allow | deny | ((was_allow ^ allow) | (was_deny ^ deny))) {
+        // The editor offers exactly this, so what it lets you pick is what saves.
+        let touched = allow | deny | ((was_allow ^ allow) | (was_deny ^ deny));
+        if !view.roles.overwrite_support(&author.me_hex, &author.owner_hex, &target).is_some_and(|held| touched & !held == 0) {
             return Err("you can only set permissions you hold, for roles and members beneath you".to_string());
         }
         let target_bytes = super::roles::overwrite_target_bytes(community.id(), &target).ok_or("malformed target")?;
@@ -10125,6 +10252,100 @@ pub async fn create_channel_in<T: Transport + ?Sized>(transport: &T, community: 
         }
     }
     Ok(id)
+}
+
+/// Make a Channel like `source` under `name`: as private, opening the same way with the same
+/// topic, in its Category right after it, and under the same rules: its own, and its
+/// Category's when it syncs (its own then lie dormant, as the original's do). Nothing said
+/// there comes along.
+///
+/// Every rule must be one this account could set itself, checked before anything is made: a
+/// copy missing one could be more open than what it copies.
+pub async fn duplicate_channel<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, source: &ChannelId, name: &str) -> Result<ChannelId, String> {
+    use crate::community::roles::OverwriteTarget;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a channel needs a name".to_string());
+    }
+    let me = me_pk()?;
+    ensure_channel_manager(community, &me)?;
+    let src = community.channel(source).ok_or("no such channel")?.clone();
+    if src.private && src.key.is_none() {
+        return Err("you can't duplicate a private channel you can't read".to_string());
+    }
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let src_hex = crate::simd::hex::bytes_to_hex_32(&source.0);
+    let (me_hex, owner_hex) = (me.to_hex(), community.owner()?.to_hex());
+    let v2 = roles_v2_held(community);
+    let roster = crate::db::community::get_community_roles(&cid_hex)?;
+    let category = src.category().filter(|k| community.categories.iter().any(|c| c.id == *k));
+    let synced = v2.then(|| roster.syncs.get(&src_hex).and_then(|k| crate::simd::hex::hex_to_bytes_32_checked(k))).flatten();
+    // @everyone first: a public copy stands open until its rules land.
+    let mut rules: Vec<(OverwriteTarget, u64, u64)> =
+        if v2 { roster.overwrites.iter().filter(|o| o.scope == src_hex).map(|o| (o.target.clone(), o.allow.0, o.deny.0)).collect() } else { Vec::new() };
+    rules.sort_by_key(|(t, ..)| *t != OverwriteTarget::Everyone);
+    let refused = "this channel has permissions set above your roles, so only someone above you can duplicate it";
+    if rules.iter().any(|(t, allow, deny)| !roster.overwrite_support(&me_hex, &owner_hex, t).is_some_and(|held| (allow | deny) & !held == 0)) {
+        return Err(refused.to_string());
+    }
+    if let Some(cat) = synced {
+        let cat_hex = crate::simd::hex::bytes_to_hex_32(&cat);
+        if !may_swap_overwrites(&roster, Some(&owner_hex), &me_hex, &[cat_hex.as_str()], &|_| 0) {
+            return Err(refused.to_string());
+        }
+    }
+    // On the legacy roster a private channel's readers hold its access Role.
+    let readers: Vec<PublicKey> = if v2 || !src.private {
+        Vec::new()
+    } else {
+        let access = roster.channel_role_ids(&src_hex);
+        roster.grants.iter().filter(|g| g.member != me_hex && g.role_ids.iter().any(|r| access.contains(r))).filter_map(|g| PublicKey::from_hex(&g.member).ok()).collect()
+    };
+
+    let id = if src.private { create_private_channel(transport, community, name).await? } else { create_public_channel(transport, community, name).await? };
+    // The Channel stands from here, so a failure says so: a retry would make a second.
+    dress_duplicate(transport, community, &src, &id, category, synced, rules).await.map_err(|e| format!("the channel was made, but not everything was copied onto it: {e}"))?;
+    let held = || crate::db::community::load_community_v2(community.id()).and_then(|c| c.ok_or_else(|| "v2 community not found".to_string()));
+    for reader in readers {
+        if let Err(e) = grant_channel_access(transport, &held()?, &id, &reader).await {
+            crate::log_warn!("[v2:duplicate] a reader of the original isn't let into the copy: {e}");
+        }
+    }
+    Ok(id)
+}
+
+/// Give a fresh duplicate `src`'s details, its place right after it, and its rules.
+async fn dress_duplicate<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    src: &ChannelV2,
+    id: &ChannelId,
+    category: Option<[u8; 32]>,
+    synced: Option<[u8; 32]>,
+    rules: Vec<(crate::community::roles::OverwriteTarget, u64, u64)>,
+) -> Result<(), String> {
+    let held = || crate::db::community::load_community_v2(community.id()).and_then(|c| c.ok_or_else(|| "v2 community not found".to_string()));
+    let now = held()?;
+    let made = now.channel(id).ok_or("the new channel isn't held")?;
+    let mut meta = made.metadata();
+    if let Some(topic) = src.topic() {
+        meta.extra.insert("topic".into(), topic.into());
+    }
+    if src.view() != made.view() {
+        meta.extra.insert("view".into(), src.view().as_str().into());
+    }
+    meta.custom = src.meta_custom.clone();
+    edit_channel_metadata(transport, &now, id, &meta).await?;
+    let now = held()?;
+    let after = now.sidebar().into_iter().find(|(c, _)| c.map(|c| c.id) == category).and_then(|(_, group)| group.iter().filter(|c| c.id.0 != id.0).position(|c| c.id.0 == src.id.0));
+    move_channel(transport, &now, id, category, after.map_or(usize::MAX, |i| i + 1)).await?;
+    if let Some(cat) = synced {
+        set_channel_sync(transport, &held()?, id, Some(cat)).await?;
+    }
+    for (target, allow, deny) in rules {
+        set_overwrite(transport, &held()?, id.0, target, allow, deny).await?;
+    }
+    Ok(())
 }
 
 /// A sidebar entry a reorder may need to key first.
@@ -13833,7 +14054,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
 
 /// Whether `author_hex` could write every overwrite in `scopes` as it stands: what a sync
 /// swaps all at once (CORD-04 §8). `sealed_over` lends a Tenure's standing to one edition.
-fn may_swap_overwrites(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>, author_hex: &str, scopes: &[&str], sealed_over: &dyn Fn(u32) -> u64) -> bool {
+pub(crate) fn may_swap_overwrites(roles: &crate::community::roles::CommunityRoles, owner_hex: Option<&str>, author_hex: &str, scopes: &[&str], sealed_over: &dyn Fn(u32) -> u64) -> bool {
     use crate::community::roles::{OverwriteTarget, Permissions};
     if owner_hex == Some(author_hex) {
         return true;
@@ -16940,6 +17161,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_bubble_becomes_the_message_that_was_signed() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        // A file send shows a placeholder until its message exists.
+        {
+            let mut st = crate::state::STATE.lock().await;
+            st.ensure_community_chat(&channel);
+            st.add_message_to_chat(&channel, &crate::types::Message { id: "pending-123".into(), mine: true, pending: true, ..Default::default() });
+        }
+        let unsent = try_send_chat_message(&Unreachable(&relay), &community, &general, "lost", None, &[], vec![]).await.unwrap_err();
+        let id = unsent.kept.clone().expect("the signed message is named");
+        assert!(outbox::kept(&id).is_some(), "and it is the one kept to go again");
+
+        let row = mark_unsent(&channel, "pending-123", &unsent).await.expect("the row stands");
+        assert_eq!(row.id, id, "the bubble is the message now");
+        assert!(row.failed && !row.pending);
+        assert!(crate::state::STATE.lock().await.find_message("pending-123").is_none(), "one row, not two");
+
+        // Landing later finds that row and shows it as sent.
+        relay.publish(&outbox::kept(&id).unwrap(), &community.relays).await.unwrap();
+        let me = crate::my_public_key().unwrap();
+        for f in fetch_channel(&relay, &community, &general, 100).await.unwrap() {
+            crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &f.event, &channel, &me);
+        }
+        let st = crate::state::STATE.lock().await;
+        let (_, row) = st.find_message(&id).expect("still one row");
+        assert!(!row.failed && !row.pending);
+    }
+
+    #[tokio::test]
+    async fn a_send_that_signed_nothing_names_nothing() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let unsent = try_send_chat_message(&relay, &community, &ChannelId([9; 32]), "nowhere", None, &[], vec![]).await.unwrap_err();
+        assert_eq!(unsent.kept, None, "refused before a message existed");
+    }
+
+    #[tokio::test]
+    async fn giving_up_on_a_failed_message_takes_it_back() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let (community, general, id) = unconfirmed_send(&relay).await;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        // It landed after all, unseen.
+        relay.publish(&outbox::kept(&id).unwrap(), &community.relays).await.unwrap();
+
+        assert!(!outbox::discard_unconfirmed_over(&Unreachable(&relay), &channel, &id).await, "its delete reached no relay: a copy can still be read");
+        assert!(outbox::kept(&id).is_none(), "it stops going out either way");
+
+        assert!(outbox::discard_unconfirmed_over(&relay, &channel, &id).await, "taken back");
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        assert!(
+            page.iter().any(|f| matches!(&f.event, ChatEvent::Delete { target, .. } if crate::simd::hex::bytes_to_hex_32(target) == id)),
+            "readers are told to drop it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_placeholder_that_never_became_a_message_has_nothing_to_take_back() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let held = relay.stored_count();
+        assert!(outbox::discard_unconfirmed_over(&relay, &channel, "pending-123").await);
+        assert_eq!(relay.stored_count(), held, "and nothing was said about it");
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_arrives_before_its_message_still_removes_it() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let me = crate::my_public_key().unwrap();
+        let id = send_message(&relay, &community, &general, "gone").await.unwrap();
+        send_delete(&relay, &community, &general, &id, crate::community::v2::kind::MESSAGE, None).await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let message = page.iter().find(|f| matches!(f.event, ChatEvent::Message { .. })).expect("the message is on the relay");
+        let delete = page.iter().find(|f| matches!(f.event, ChatEvent::Delete { .. })).expect("and so is its delete");
+
+        // A reader that meets them the wrong way round.
+        crate::state::clear_message_tombstones();
+        let early = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &delete.event, &channel, &me);
+        assert!(early.is_none(), "nothing to remove yet");
+        let late = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &message.event, &channel, &me);
+        assert!(matches!(late, Some(crate::community::v2::inbound::ChatPersist::Removed { .. })), "the delete waited for it");
+        assert!(crate::state::STATE.lock().await.find_message(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_strangers_early_delete_removes_nothing() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Chat", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let channel = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let me = crate::my_public_key().unwrap();
+        let id = send_message(&relay, &community, &general, "stays").await.unwrap();
+        let other = send_message(&relay, &community, &general, "other").await.unwrap();
+        send_delete(&relay, &community, &general, &other, crate::community::v2::kind::MESSAGE, None).await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 100).await.unwrap();
+        let message = page.iter().find(|f| f.event.opened().rumor_id.to_hex() == id).expect("the message is on the relay");
+        let forged = match &page.iter().find(|f| matches!(f.event, ChatEvent::Delete { .. })).expect("a delete to borrow").event {
+            ChatEvent::Delete { opened, target_kind, .. } => {
+                let mut opened = opened.clone();
+                opened.author = Keys::generate().public_key();
+                ChatEvent::Delete { opened, target: crate::simd::hex::hex_to_bytes_32(&id), target_kind: *target_kind }
+            }
+            _ => unreachable!(),
+        };
+
+        // The reader holds nothing of the message yet.
+        crate::state::STATE.lock().await.remove_message(&id);
+        crate::db::events::delete_event(&id).await.unwrap();
+        let early = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &forged, &channel, &me);
+        assert!(early.is_none());
+        let late = crate::community::v2::inbound::apply_chat_to_state(&mut *crate::state::STATE.lock().await, &message.event, &channel, &me);
+        assert!(matches!(late, Some(crate::community::v2::inbound::ChatPersist::New(_))), "only its author or a moderator deletes it");
+        assert!(crate::state::STATE.lock().await.find_message(&id).is_some());
+    }
+
+    #[tokio::test]
     async fn owner_sends_and_reads_back_a_message() {
         let (_tmp, _guard, _owner) = init_test_db();
         let relay = MemoryRelay::new();
@@ -17632,6 +17982,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_system_channel_reaches_members_and_outlives_a_rename() {
+        use super::super::community::{set_system_channel_in, SystemChannel};
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Lines", bed.relays.clone(), None).await.unwrap();
+        let welcome = create_public_channel(&bed.relay, &community, "welcome").await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held().metadata();
+        meta.custom = serde_json::json!({ "rules": "be kind" }).as_object().cloned();
+        set_system_channel_in(&mut meta, Some(&welcome));
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        let link = mint_public_link(&bed.relay, &held(), "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(joined.system_channel(), SystemChannel::Named(welcome));
+
+        bed.swap_to(&owner);
+        let mut meta = held().metadata();
+        meta.name = "Renamed".into();
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().name, "Renamed");
+        assert_eq!(held().system_channel(), SystemChannel::Named(welcome), "a rename carries it");
+        assert_eq!(held().meta_custom.unwrap()["rules"], "be kind");
+
+        bed.swap_to(&owner);
+        let mut meta = held().metadata();
+        set_system_channel_in(&mut meta, None);
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert_eq!(held().system_channel(), SystemChannel::Off);
+    }
+
+    #[tokio::test]
+    async fn a_joiner_learns_where_to_land_before_opening_anything() {
+        use super::super::community::{set_landing_channel_in, set_system_channel_in, SystemChannel};
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Landing", bed.relays.clone(), None).await.unwrap();
+        let rules = create_public_channel(&bed.relay, &community, "rules").await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let mut meta = held().metadata();
+        set_system_channel_in(&mut meta, None);
+        set_landing_channel_in(&mut meta, Some(&rules));
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        let link = mint_public_link(&bed.relay, &held(), "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&bed.relay, &link.url).await.unwrap();
+        assert_eq!(joined.landing_channel().map(|c| c.id), Some(rules), "the join's own fold carries it");
+        assert_eq!(joined.system_channel(), SystemChannel::Off, "beside the other setting, untouched");
+
+        bed.swap_to(&owner);
+        let mut meta = held().metadata();
+        set_landing_channel_in(&mut meta, None);
+        edit_community_metadata(&bed.relay, &held(), &meta).await.unwrap();
+        bed.swap_to(&member);
+        follow_control(&bed.relay, &held()).await.unwrap();
+        assert!(held().landing_channel().is_none());
+        assert_eq!(held().system_channel(), SystemChannel::Off);
+    }
+
+    #[tokio::test]
     async fn an_own_metadata_edit_reads_back_before_any_control_pass() {
         let (bed, owner, _member) = TestBed::new();
         bed.swap_to(&owner);
@@ -17662,6 +18078,142 @@ mod tests {
         // The slot was CONSUMED by the join — proving the handoff path ran (a
         // verify re-walk would have left the preview's entry in place).
         assert!(VERIFIED_PREVIEW.lock().unwrap().is_none(), "the handoff slot must be consumed by the join");
+    }
+
+    #[tokio::test]
+    async fn a_dissolved_community_seen_in_preview_is_refused_without_asking_again() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Grave", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        dissolve_community(&bed.relay, &community).await.unwrap();
+
+        bed.swap_to(&member);
+        let (_, verified) = preview_bundle_checked(&bed.relay, &bundle).await.unwrap();
+        assert!(verified, "a grave still verifies as its owner's");
+        let err = accept_parked_invite(&bed.relay, &serde_json::to_string(&bundle).unwrap(), None).await.unwrap_err();
+        assert_eq!(err, ERR_DISSOLVED);
+        assert!(VERIFIED_PREVIEW.lock().unwrap().is_none(), "the refusal came from the preview's own look");
+        assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "nothing was saved");
+    }
+
+    #[tokio::test]
+    async fn a_grave_is_found_on_the_relays_the_community_moved_to() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Moved", vec!["wss://old".into()], None).await.unwrap();
+        // A link minted before the move names only the old relay.
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let mut meta = community.metadata();
+        meta.relays = vec!["wss://new".into()];
+        edit_community_metadata(&bed.relay, &community, &meta).await.unwrap();
+        let moved = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(moved.relays, vec!["wss://new".to_string()]);
+        dissolve_community(&bed.relay, &moved).await.unwrap();
+        assert!(!is_dissolved(&bed.relay, &community).await, "the old relay never saw the tombstone");
+
+        bed.swap_to(&member);
+        let err = accept_parked_invite(&bed.relay, &serde_json::to_string(&bundle).unwrap(), None).await.unwrap_err();
+        assert_eq!(err, ERR_DISSOLVED);
+    }
+
+    /// A relay that takes what it's given and answers no read.
+    struct NoReads<'a>(&'a MemoryRelay);
+    #[async_trait::async_trait]
+    impl Transport for NoReads<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, _q: &Query, _r: &[String]) -> Result<Vec<Event>, String> {
+            Err("no relay answered".into())
+        }
+        async fn fetch_plane(&self, _p: &Keys, _q: &Query, _r: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            Err("no relay answered".into())
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_join_moments_after_its_preview_reads_nothing_again() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Once", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+        let other = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        preview_public_link(&bed.relay, &link.url).await.unwrap();
+        // Another link's preview stands in for nothing, and asking spends it.
+        let kept = PREVIEWED_BUNDLE.lock().unwrap().clone();
+        assert!(take_previewed_bundle(&other.url).is_none());
+        assert!(PREVIEWED_BUNDLE.lock().unwrap().is_none());
+        *PREVIEWED_BUNDLE.lock().unwrap() = kept;
+
+        let joined = accept_public_link(&NoReads(&bed.relay), &link.url).await.unwrap();
+        assert_eq!(joined.id().0, community.id().0, "joined on what the preview read");
+        assert!(accept_public_link(&NoReads(&bed.relay), &link.url).await.is_err(), "spent: the next join reads the link itself");
+
+        // A preview older than the window is read again, and so is another account's.
+        preview_public_link(&bed.relay, &other.url).await.unwrap();
+        let fresh = PREVIEWED_BUNDLE.lock().unwrap().clone();
+        let aged = web_time::Instant::now().checked_sub(PREVIEWED_BUNDLE_TTL).expect("a clock that old");
+        PREVIEWED_BUNDLE.lock().unwrap().as_mut().unwrap().1 = aged;
+        assert!(take_previewed_bundle(&other.url).is_none());
+        *PREVIEWED_BUNDLE.lock().unwrap() = fresh;
+        bed.swap_to(&owner);
+        assert!(take_previewed_bundle(&other.url).is_none(), "a preview belongs to the account that made it");
+    }
+
+    /// A relay that hands out a transport for work to finish on after the call returns.
+    struct Detaching(std::sync::Arc<MemoryRelay>);
+    #[async_trait::async_trait]
+    impl Transport for Detaching {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+        fn detached(&self) -> Option<std::sync::Arc<dyn Transport + Send + Sync>> {
+            Some(std::sync::Arc::new(Detaching(self.0.clone())))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_joiner_is_seated_before_the_announcements_that_follow() {
+        let (bed, owner, member) = TestBed::new();
+        let relay = std::sync::Arc::new(MemoryRelay::new());
+        bed.swap_to(&owner);
+        let community = create_community(&*relay, "Quick", bed.relays.clone(), None).await.unwrap();
+        let link = mint_public_link(&*relay, &community, "https://vectorapp.io", None, None).await.unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_public_link(&Detaching(relay.clone()), &link.url).await.unwrap();
+        assert!(crate::db::community::load_community_v2(joined.id()).unwrap().is_some(), "the seat is saved on return");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(load_pending().joins.iter().any(|j| j.community_id == cid_hex), "the List write is kept until it lands");
+
+        // The Join lands on its own.
+        let me = member.keys.public_key();
+        let mut announced = false;
+        for _ in 0..100 {
+            let book = sync_guestbook(&*relay, &joined).await.unwrap_or_default();
+            let (held, _) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+            announced = book.iter().chain(held.iter()).any(|e| matches!(&e.entry, guestbook::GuestbookEntry::Join { member, .. } if *member == me));
+            if announced {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(announced, "the Guestbook Join still reaches the relay");
     }
 
     #[tokio::test]
@@ -28888,6 +29440,35 @@ mod tests {
         assert!(may_send(&fetch_control(&relay, &held()).await, &news), "the low manager's re-sync is refused");
     }
 
+    #[tokio::test]
+    async fn a_synced_channel_names_its_category_and_holds_its_own_rules_dormant() {
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Dormant", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let staff = create_category(&relay, &held(), "Staff").await.unwrap();
+        let news = create_channel_in(&relay, &held(), "news", false, Some(staff)).await.unwrap();
+        let vault = create_channel_in(&relay, &held(), "vault", true, Some(staff)).await.unwrap();
+        let synced_to = |ch: &ChannelId| crate::VectorCore.channel_synced_to(&cid_hex, &crate::simd::hex::bytes_to_hex_32(&ch.0).to_ascii_uppercase()).unwrap();
+        assert_eq!(synced_to(&news), Some(crate::simd::hex::bytes_to_hex_32(&staff)), "a public Channel made in a Category");
+        assert_eq!(synced_to(&vault), None, "a private one keeps its own rules");
+        assert_eq!(synced_to(&community.channels[0].id), None, "as does one outside any Category");
+
+        let m = Keys::generate().public_key().to_hex();
+        let may_send = |eds: &[ParsedEdition]| {
+            let r = fold_authority(&held(), eds, &Floors::default()).roles;
+            r.channel_permissions(Some(&owner.public_key().to_hex()), &m, &crate::simd::hex::bytes_to_hex_32(&news.0), false).contains(Permissions::SEND_MESSAGES)
+        };
+        set_overwrite(&relay, &held(), news.0, crate::community::roles::OverwriteTarget::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        assert!(may_send(&fetch_control(&relay, &held()).await), "synced, its own deny is stored and not applied");
+        set_channel_sync(&relay, &held(), &news, None).await.unwrap();
+        assert_eq!(synced_to(&news), None);
+        assert!(!may_send(&fetch_control(&relay, &held()).await), "unsynced, the same rule applies");
+    }
+
     /// A Roles v2 community with an admin `x` (Manage Roles, Manage Channels, the channel basics).
     async fn v2_bed_with_admin(name: &str) -> (TestBed, Actor, Keys, CommunityV2) {
         let (bed, owner, _m) = TestBed::new();
@@ -28902,6 +29483,153 @@ mod tests {
         set_member_roles(&bed.relay, &held, &x.public_key(), vec![admin]).await.unwrap();
         follow_control(&bed.relay, &held).await.unwrap();
         (bed, owner, x, crate::db::community::load_community_v2(community.id()).unwrap().unwrap())
+    }
+
+    /// A channel's own rules as the relays hold them, in a stable order.
+    async fn rules_of(relay: &MemoryRelay, community: &CommunityV2, channel: &ChannelId) -> Vec<(String, u64, u64)> {
+        let roles = fold_authority(community, &fetch_control(relay, community).await, &Floors::default()).roles;
+        let scope = crate::simd::hex::bytes_to_hex_32(&channel.0);
+        let mut rules: Vec<_> = roles.overwrites.iter().filter(|o| o.scope == scope).map(|o| (format!("{:?}", o.target), o.allow.0, o.deny.0)).collect();
+        rules.sort();
+        rules
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_takes_its_originals_details_place_and_rules() {
+        use crate::community::roles::OverwriteTarget as T;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Copy", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let info = create_category(&relay, &held(), "Info").await.unwrap();
+        let news = create_channel_in(&relay, &held(), "news", false, Some(info)).await.unwrap();
+        set_channel_sync(&relay, &held(), &news, None).await.unwrap();
+        edit_channel_details(&relay, &held(), &news, "news", Some("Read this first"), super::super::community::ChannelView::Forum).await.unwrap();
+        let mut meta = held().channel(&news).unwrap().metadata();
+        meta.custom = Some([("slowmode".to_string(), serde_json::Value::from(30))].into_iter().collect());
+        edit_channel_metadata(&relay, &held(), &news, &meta).await.unwrap();
+        create_channel_in(&relay, &held(), "later", false, Some(info)).await.unwrap();
+        let writers = create_role_v2(&relay, &held(), "Writers", 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let member = Keys::generate().public_key().to_hex();
+        set_overwrite(&relay, &held(), news.0, T::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        set_overwrite(&relay, &held(), news.0, T::Role(writers), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        set_overwrite(&relay, &held(), news.0, T::Member(member), 0, Permissions::ADD_REACTIONS).await.unwrap();
+        send_chat_message(&relay, &held(), &news, "said in the original", None, &[], vec![]).await.unwrap();
+
+        let copy = duplicate_channel(&relay, &held(), &news, " news-2 ").await.unwrap();
+        let c = held();
+        let (a, b) = (c.channel(&news).unwrap(), c.channel(&copy).unwrap());
+        assert_eq!(b.name, "news-2");
+        assert_eq!((b.private, b.topic(), b.view(), b.category()), (a.private, a.topic(), a.view(), a.category()));
+        assert_eq!(b.topic(), Some("Read this first"));
+        assert_eq!(b.meta_custom, a.meta_custom);
+        assert!(b.meta_custom.is_some());
+        let group: Vec<&str> = c.sidebar().into_iter().find(|(k, _)| k.map(|k| k.id) == Some(info)).unwrap().1.iter().map(|ch| ch.name.as_str()).collect();
+        assert_eq!(group, vec!["news", "news-2", "later"], "right after the one it copies");
+        let rules = rules_of(&relay, &c, &copy).await;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules, rules_of(&relay, &c, &news).await, "every rule, as it was");
+        assert!(fetch_channel(&relay, &c, &copy, 100).await.unwrap().is_empty(), "nothing said comes along");
+        assert!(duplicate_channel(&relay, &c, &news, "  ").await.is_err(), "it needs a name");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_of_a_synced_channel_syncs_and_of_a_private_one_is_private() {
+        use crate::community::roles::OverwriteTarget as T;
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Kinds", vec!["wss://r".into()], None).await.unwrap();
+        activate_roles_v2(&relay, &community, crate::community::v2::roles::EVERYONE_DEFAULT).await.unwrap();
+        follow_control(&relay, &community).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let hex = |ch: &ChannelId| crate::simd::hex::bytes_to_hex_32(&ch.0);
+        let staff = create_category(&relay, &held(), "Staff").await.unwrap();
+        set_overwrite(&relay, &held(), staff, T::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        let synced = create_channel_in(&relay, &held(), "notes", false, Some(staff)).await.unwrap();
+
+        let copy = duplicate_channel(&relay, &held(), &synced, "notes-2").await.unwrap();
+        let roles = fold_authority(&held(), &fetch_control(&relay, &held()).await, &Floors::default()).roles;
+        assert_eq!(roles.syncs.get(&hex(&copy)), Some(&crate::simd::hex::bytes_to_hex_32(&staff)), "it follows the same Category");
+        assert!(rules_of(&relay, &held(), &copy).await.is_empty(), "with no rules of its own");
+
+        // A synced Channel's own rules lie dormant until it unsyncs, and the copy keeps them so.
+        set_overwrite(&relay, &held(), synced.0, T::Everyone, 0, Permissions::ADD_REACTIONS).await.unwrap();
+        let copy = duplicate_channel(&relay, &held(), &synced, "notes-3").await.unwrap();
+        let roles = fold_authority(&held(), &fetch_control(&relay, &held()).await, &Floors::default()).roles;
+        assert_eq!(roles.syncs.get(&hex(&copy)), Some(&crate::simd::hex::bytes_to_hex_32(&staff)));
+        assert_eq!(rules_of(&relay, &held(), &copy).await.len(), 1);
+        assert_eq!(rules_of(&relay, &held(), &copy).await, rules_of(&relay, &held(), &synced).await);
+
+        let mods = create_role_v2(&relay, &held(), "Mods", 0, Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).await.unwrap();
+        let den = create_channel_in(&relay, &held(), "den", true, None).await.unwrap();
+        set_overwrite(&relay, &held(), den.0, T::Role(mods.clone()), Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let moderator = Keys::generate().public_key();
+        set_member_roles(&relay, &held(), &moderator, vec![mods]).await.unwrap();
+
+        let den2 = duplicate_channel(&relay, &held(), &den, "den-2").await.unwrap();
+        let c = held();
+        let made = c.channel(&den2).unwrap();
+        assert!(made.private && made.key.is_some(), "private, with a key of its own");
+        assert_ne!(made.key, c.channel(&den).unwrap().key);
+        assert_eq!(rules_of(&relay, &c, &den2).await, rules_of(&relay, &c, &den).await);
+        let roles = fold_authority(&c, &fetch_control(&relay, &c).await, &Floors::default()).roles;
+        let owner = c.owner().unwrap().to_hex();
+        assert!(roles.is_entitled(Some(&owner), &moderator.to_hex(), &hex(&den2), &[], &[]), "who read the original reads the copy");
+        assert!(!roles.is_entitled(Some(&owner), &Keys::generate().public_key().to_hex(), &hex(&den2), &[], &[]));
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_is_refused_whole_when_a_rule_is_set_above_its_maker() {
+        use crate::community::roles::OverwriteTarget as T;
+        let (bed, owner, x, community) = v2_bed_with_admin("Above").await;
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let top = "f7".repeat(32);
+        publish_role_v2(&bed.relay, &held(), &owner.keys, &role_v2(&top, "Top", "1", 0), 1).await;
+        follow_control(&bed.relay, &held()).await.unwrap();
+        let guarded = create_public_channel(&bed.relay, &held(), "guarded").await.unwrap();
+        set_overwrite(&bed.relay, &held(), guarded.0, T::Role(top), Permissions::SEND_MESSAGES, 0).await.unwrap();
+        let plain = create_public_channel(&bed.relay, &held(), "plain").await.unwrap();
+        set_overwrite(&bed.relay, &held(), plain.0, T::Everyone, 0, Permissions::SEND_MESSAGES).await.unwrap();
+        // A rule for someone below its maker, in a permission the maker doesn't hold.
+        let unheld = create_public_channel(&bed.relay, &held(), "unheld").await.unwrap();
+        set_overwrite(&bed.relay, &held(), unheld.0, T::Everyone, Permissions::MANAGE_MESSAGES, 0).await.unwrap();
+        follow_control(&bed.relay, &held()).await.unwrap();
+
+        crate::state::MY_SECRET_KEY.store_from_keys(&x, &[]);
+        crate::state::set_my_public_key(x.public_key());
+        let before = held().channels.len();
+        let err = duplicate_channel(&bed.relay, &held(), &guarded, "guarded-2").await.unwrap_err();
+        assert!(err.contains("above your roles"), "{err}");
+        assert_eq!(held().channels.len(), before, "nothing was made");
+        let err = duplicate_channel(&bed.relay, &held(), &unheld, "unheld-2").await.unwrap_err();
+        assert!(err.contains("above your roles"), "{err}");
+        assert_eq!(held().channels.len(), before, "nothing was made");
+        let copy = duplicate_channel(&bed.relay, &held(), &plain, "plain-2").await.unwrap();
+        assert_eq!(rules_of(&bed.relay, &held(), &copy).await, rules_of(&bed.relay, &held(), &plain).await, "a rule within reach is copied");
+    }
+
+    #[tokio::test]
+    async fn on_the_legacy_roster_a_private_duplicate_lets_the_same_readers_in() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Legacy", vec!["wss://r".into()], None).await.unwrap();
+        let held = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let den = create_private_channel(&relay, &held(), "den").await.unwrap();
+        let reader = Keys::generate().public_key();
+        grant_channel_access(&relay, &held(), &den, &reader).await.unwrap();
+        let attic = create_private_channel(&relay, &held(), "attic").await.unwrap();
+        let elsewhere = Keys::generate().public_key();
+        grant_channel_access(&relay, &held(), &attic, &elsewhere).await.unwrap();
+
+        let copy = duplicate_channel(&relay, &held(), &den, "den-2").await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let owner = held().owner().unwrap().to_hex();
+        let copy_hex = crate::simd::hex::bytes_to_hex_32(&copy.0);
+        assert!(roster.is_entitled(Some(&owner), &reader.to_hex(), &copy_hex, &[], &[]));
+        assert!(!roster.is_entitled(Some(&owner), &elsewhere.to_hex(), &copy_hex, &[], &[]), "a reader of another channel stays out");
     }
 
     #[tokio::test]

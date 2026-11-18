@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-duplicate-community-channel"
+description = "Enables the duplicate_community_channel command without any pre-configured scope."
+commands.allow = ["duplicate_community_channel"]
+
+[[permission]]
+identifier = "deny-duplicate-community-channel"
+description = "Denies the duplicate_community_channel command without any pre-configured scope."
+commands.deny = ["duplicate_community_channel"]

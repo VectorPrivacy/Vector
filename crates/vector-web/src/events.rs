@@ -132,21 +132,13 @@ impl InboundEventHandler for WebEventHandler {
         vector_core::emit_event("message_removed", &json!({ "id": target_id, "chat_id": chat_id, "reason": "deleted" }));
     }
 
-    fn on_community_presence(
-        &self,
-        chat_id: &str,
-        npub: &str,
-        joined: bool,
-        event_id: &str,
-        created_at: u64,
-        invited_by: Option<&str>,
-        invited_label: Option<&str>,
-    ) {
-        let (chat_id, npub, event_id) = (chat_id.to_string(), npub.to_string(), event_id.to_string());
-        let (invited_by, invited_label) = (invited_by.map(str::to_string), invited_label.map(str::to_string));
+    fn on_community_presence(&self, p: &vector_core::Presence<'_>) {
+        let (chat_id, npub, event_id) = (p.channel_id.to_string(), p.npub.to_string(), p.event_id.to_string());
+        let (invited_by, invited_label) = (p.invited_by.map(str::to_string), p.invited_label.map(str::to_string));
+        let (joined, created_at, shown) = (p.joined, p.created_at, p.shown);
         db::spawn_bound(async move {
             crate::community::apply_presence(
-                &chat_id, &npub, joined, &event_id, created_at, invited_by.as_deref(), invited_label.as_deref(),
+                &chat_id, &npub, joined, &event_id, created_at, invited_by.as_deref(), invited_label.as_deref(), shown,
             )
             .await;
         });

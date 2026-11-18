@@ -217,11 +217,14 @@ pub async fn get_system_events<R: Runtime>(
             .map(|tag| tag[1].clone())
             .unwrap_or_default();
 
+        let tag = |name: &str| event.tags.iter().find(|t| t.len() >= 2 && t[0] == name).map(|t| t[1].clone());
         serde_json::json!({
             "id": event.id,
             "event_type": event_type,
             "content": event.content,
             "member_npub": member_npub,
+            "invited_by": tag("invited-by").as_deref().and_then(vector_core::community::inviter_npub),
+            "invited_label": tag("invited-label"),
             "at": event.created_at * 1000, // Convert to milliseconds for JS
         })
     }).collect();

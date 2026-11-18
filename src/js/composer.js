@@ -69,7 +69,7 @@ function cmpTwemojiUrl(emoji) {
     let url = null;
     if (window.twemoji) {
         const span = document.createElement('span');
-        span.textContent = emoji;
+        span.textContent = plainTextSymbols(emoji);
         window.twemoji.parse(span, { callback: (icon) => '/twemoji/svg/' + icon + '.svg' });
         const img = span.querySelector('img');
         url = img ? img.getAttribute('src') : null;

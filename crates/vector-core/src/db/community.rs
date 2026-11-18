@@ -2921,7 +2921,77 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
     // The save may have pruned channels (DELETE ... NOT IN the new set); evict so a
     // pruned channel stops resolving to this community.
     forget_community_channels(&id_hex);
+    drop(conn);
+    match settle_presence_lines(c) {
+        Ok(true) => crate::emit_event("community_presence_lines", &serde_json::json!({ "community_id": id_hex })),
+        Ok(false) => {}
+        Err(e) => crate::log_warn!("[presence] settling {}'s join lines: {e}", &id_hex[..12]),
+    }
     Ok(())
+}
+
+/// The setting that remembers where a community keeps its Join/Leave lines: the channel,
+/// with `:hidden` when they don't show.
+fn presence_lines_key(community_id: &str) -> String {
+    format!("presence_lines:{community_id}")
+}
+
+/// A Join/Leave line among the events rows: a system event of type 0 (left) or 1 (joined).
+const PRESENCE_LINE: &str = "instr(tags, '[\"d\",\"system-event\"]') > 0 AND (instr(tags, '[\"event-type\",\"1\"]') > 0 OR instr(tags, '[\"event-type\",\"0\"]') > 0)";
+
+/// Gather every Join/Leave line of a community into its presence home, and remember where
+/// that is. True when lines moved or where they show changed.
+pub fn settle_presence_lines(c: &crate::community::v2::community::CommunityV2) -> Result<bool, String> {
+    let cid = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+    let Some(home) = c.presence_home() else { return Ok(false) };
+    let home_hex = crate::simd::hex::bytes_to_hex_32(&home.channel.id.0);
+    let key = presence_lines_key(&cid);
+    let stamp = if home.shown { home_hex.clone() } else { format!("{home_hex}:hidden") };
+    let prev = super::settings::get_sql_setting(key.clone())?;
+    let home_row = super::id_cache::get_chat_id_by_identifier(&home_hex).ok();
+    let mut sources = community_chat_row_ids(&cid)?;
+    // A home that was deleted is no longer among the channels: its lines come out too.
+    if let Some(prev_home) = prev.as_deref().and_then(|p| p.get(..64)).filter(|p| *p != home_hex) {
+        sources.extend(super::id_cache::get_chat_id_by_identifier(prev_home).ok());
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    sources.retain(|r| Some(*r) != home_row);
+    let mut moved = 0;
+    if !sources.is_empty() {
+        let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
+        let placeholders = std::iter::repeat_n("?", sources.len()).collect::<Vec<_>>().join(",");
+        let stray: bool = {
+            let conn = super::get_db_connection_guard_static()?;
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM events WHERE chat_id IN ({placeholders}) AND kind = {sys} AND {PRESENCE_LINE})");
+            conn.query_row(&sql, rusqlite::params_from_iter(sources.iter()), |r| r.get(0)).map_err(|e| e.to_string())?
+        };
+        if stray {
+            let home_row = match home_row {
+                Some(r) => r,
+                None => super::id_cache::get_or_create_chat_id(&home_hex)?,
+            };
+            let conn = super::get_write_connection_guard_static()?;
+            let sql = format!("UPDATE events SET chat_id = ? WHERE chat_id IN ({placeholders}) AND kind = {sys} AND {PRESENCE_LINE}");
+            let binds = std::iter::once(home_row).chain(sources.iter().copied());
+            moved = conn.execute(&sql, rusqlite::params_from_iter(binds)).map_err(|e| format!("move join lines: {e}"))?;
+        }
+    }
+    let changed = prev.as_deref() != Some(stamp.as_str());
+    if changed {
+        super::settings::set_sql_setting(key, stamp)?;
+    }
+    Ok(moved > 0 || changed)
+}
+
+/// Whether `channel_id` shows its community's Join/Leave lines. A community never settled
+/// yet shows them wherever they are.
+pub fn presence_lines_shown_in(channel_id: &str) -> Result<bool, String> {
+    let Some(cid) = community_id_for_channel(channel_id)? else { return Ok(true) };
+    Ok(match super::settings::get_sql_setting(presence_lines_key(&cid))? {
+        Some(stamp) => stamp == channel_id,
+        None => true,
+    })
 }
 
 /// Load a v2 community by id, or `None` if absent / not a v2 community.
@@ -3518,6 +3588,132 @@ mod tests {
         .unwrap();
         let relays = relays.iter().map(|r| r.to_string()).collect();
         crate::community::v2::community::CommunityV2::from_genesis(&g, name, None, relays, 1_000)
+    }
+
+    fn lines_channel(id: u8, name: &str) -> crate::community::v2::community::ChannelV2 {
+        crate::community::v2::community::ChannelV2 {
+            id: ChannelId([id; 32]), name: name.into(), private: false, key: None, epoch: Epoch(0), voice: None,
+            meta_custom: None, meta_extra: Default::default(), writers: None, sealed: None,
+        }
+    }
+
+    fn lines_to(c: &mut crate::community::v2::community::CommunityV2, channel: Option<&ChannelId>) {
+        let mut meta = c.metadata();
+        crate::community::v2::community::set_system_channel_in(&mut meta, channel);
+        c.meta_custom = meta.custom;
+    }
+
+    async fn save_line(channel: &str, n: u64, kind: crate::stored_event::SystemEventType, npub: &str) {
+        crate::db::events::save_system_event_at(&format!("{n:064x}"), channel, kind, npub, None, 1_000 + n, None, None).await.unwrap();
+    }
+
+    /// Every system row a channel keeps, shown or not.
+    fn kept_in(channel: &str) -> usize {
+        let Ok(row) = super::super::id_cache::get_chat_id_by_identifier(channel) else { return 0 };
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND kind = ?2",
+            params![row, crate::stored_event::event_kind::APPLICATION_SPECIFIC as i32],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap() as usize
+    }
+
+    fn shown_in(channel: &str) -> usize {
+        crate::db::events::get_system_events_for_chat(channel).map_or(0, |e| e.len())
+    }
+
+    #[tokio::test]
+    async fn join_lines_move_to_the_system_channel_and_show_only_there() {
+        use crate::stored_event::SystemEventType::{MemberJoined, MemberLeft, PinsModified};
+        let (_tmp, _guard) = init_test_db();
+        let mut c = v2_fixture("Lines", &["wss://r"]);
+        c.channels.push(lines_channel(7, "welcome"));
+        save_community_v2(&c).unwrap();
+        let general = crate::simd::hex::bytes_to_hex_32(&c.channels[0].id.0);
+        let welcome = crate::simd::hex::bytes_to_hex_32(&[7; 32]);
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        save_line(&general, 1, MemberJoined, &npub).await;
+        save_line(&general, 2, MemberLeft, &npub).await;
+        save_line(&general, 3, PinsModified, &npub).await;
+        assert_eq!(shown_in(&general), 3);
+
+        lines_to(&mut c, Some(&ChannelId([7; 32])));
+        save_community_v2(&c).unwrap();
+        assert_eq!(kept_in(&welcome), 2, "both lines moved");
+        assert_eq!(shown_in(&welcome), 2);
+        assert_eq!(kept_in(&general), 1, "a pins line belongs to its own channel");
+        assert_eq!(shown_in(&general), 1);
+
+        // One that landed in the old home on the way still comes over on the next save.
+        save_line(&general, 4, MemberJoined, &npub).await;
+        save_community_v2(&c).unwrap();
+        assert_eq!(kept_in(&welcome), 3);
+    }
+
+    #[tokio::test]
+    async fn join_lines_turned_off_stay_kept_for_the_member_list() {
+        use crate::stored_event::SystemEventType::{MemberJoined, MemberLeft};
+        let (_tmp, _guard) = init_test_db();
+        let mut c = v2_fixture("Quiet", &["wss://r"]);
+        lines_to(&mut c, None);
+        save_community_v2(&c).unwrap();
+        let cid = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+        let general = crate::simd::hex::bytes_to_hex_32(&c.channels[0].id.0);
+        let (stays, went) = (Keys::generate().public_key().to_bech32().unwrap(), Keys::generate().public_key().to_bech32().unwrap());
+        save_line(&general, 1, MemberJoined, &stays).await;
+        save_line(&general, 2, MemberJoined, &went).await;
+        save_line(&general, 3, MemberLeft, &went).await;
+        assert_eq!(shown_in(&general), 0, "off: nothing shows");
+        assert_eq!(kept_in(&general), 3);
+        let members: Vec<String> = community_member_activity(&cid).unwrap().into_iter().map(|(n, _)| n).collect();
+        assert!(members.contains(&stays), "a join still counts");
+        assert!(!members.contains(&went), "and a leave still removes");
+
+        c.meta_custom = None;
+        save_community_v2(&c).unwrap();
+        assert_eq!(shown_in(&general), 3, "back on, every line is there");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_system_channel_hands_its_lines_back() {
+        use crate::stored_event::SystemEventType::MemberJoined;
+        let (_tmp, _guard) = init_test_db();
+        let mut c = v2_fixture("Gone", &["wss://r"]);
+        c.channels.push(lines_channel(7, "welcome"));
+        lines_to(&mut c, Some(&ChannelId([7; 32])));
+        save_community_v2(&c).unwrap();
+        let general = crate::simd::hex::bytes_to_hex_32(&c.channels[0].id.0);
+        let welcome = crate::simd::hex::bytes_to_hex_32(&[7; 32]);
+        let npub = Keys::generate().public_key().to_bech32().unwrap();
+        save_line(&welcome, 1, MemberJoined, &npub).await;
+        save_line(&welcome, 2, MemberJoined, &npub).await;
+
+        c.channels.pop();
+        save_community_v2(&c).unwrap();
+        assert_eq!(kept_in(&welcome), 0);
+        assert_eq!(shown_in(&general), 2, "the default takes them");
+    }
+
+    #[tokio::test]
+    async fn join_lines_for_a_channel_without_its_key_wait_hidden_until_it_lands() {
+        use crate::stored_event::SystemEventType::MemberJoined;
+        let (_tmp, _guard) = init_test_db();
+        let mut c = v2_fixture("Staff", &["wss://r"]);
+        let mut staff = lines_channel(7, "staff");
+        staff.private = true;
+        c.channels.push(staff);
+        lines_to(&mut c, Some(&ChannelId([7; 32])));
+        save_community_v2(&c).unwrap();
+        let general = crate::simd::hex::bytes_to_hex_32(&c.channels[0].id.0);
+        let staff = crate::simd::hex::bytes_to_hex_32(&[7; 32]);
+        save_line(&general, 1, MemberJoined, &Keys::generate().public_key().to_bech32().unwrap()).await;
+        assert_eq!(shown_in(&general), 0, "not shown where it waits");
+
+        c.channels[1].key = Some([3; 32]);
+        save_community_v2(&c).unwrap();
+        assert_eq!(shown_in(&staff), 1, "the key brings them in");
+        assert_eq!(kept_in(&general), 0);
     }
 
     /// A saved v2 community with the hex ids of it and its `#general` channel.

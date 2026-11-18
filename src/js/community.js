@@ -113,9 +113,7 @@ function showInviteMenu(invite, x, y) {
 async function surfaceCommunitySummary(summary) {
     if (!summary) return null;
     let firstChannel = null;
-    let firstSync = null;
     let fallbackChannel = null;
-    let fallbackSync = null;
     for (const ch of summary.channels || []) {
         const chat = getOrCreateChat(ch.channel_id, 'Community');
         chat.metadata = chat.metadata || {};
@@ -139,23 +137,26 @@ async function surfaceCommunitySummary(summary) {
         if (summary.owner_npub) chat.metadata.custom_fields.owner_npub = summary.owner_npub;
         else delete chat.metadata.custom_fields.owner_npub;
         if (summary.has_icon) chat.metadata.custom_fields.icon = '1';
-        // The page-1 sync pulls existing history (e.g. the owner's welcome message) so the
-        // channel isn't empty on open. Backend anti-stampede dedups a later open.
-        const p = invoke('sync_community_channel', { channelId: ch.channel_id, beforeMs: null }).catch(() => {});
         // Navigate to a channel we can actually READ. A private channel we hold no
         // key for renders empty and refuses every send, so landing there reads as
         // the community being broken. Falls back to the first channel when nothing
         // is readable, so a community never becomes unopenable.
-        if (ch.readable !== false && !firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
-        if (!fallbackChannel) { fallbackChannel = ch.channel_id; fallbackSync = p; }
+        if (ch.readable !== false && !firstChannel) firstChannel = ch.channel_id;
+        if (!fallbackChannel) fallbackChannel = ch.channel_id;
     }
     loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
     listChanged();
-    // Await the first sync, or a fresh join would open to an empty chat.
-    const openChannel = firstChannel || fallbackChannel;
-    const openSync = firstChannel ? firstSync : fallbackSync;
-    if (openSync) await openSync;
+    communityLandingCache.set(summary.community_id, summary.landing_channel || null);
+    // Where its managers have new members start, when this account can read it.
+    const landing = (summary.channels || []).find(ch => ch.channel_id === summary.landing_channel && ch.readable !== false);
+    const openChannel = landing?.channel_id || firstChannel || fallbackChannel;
+    // The page-1 sync pulls existing history (e.g. the owner's welcome message) so the
+    // channel isn't empty on open. The one being opened goes first and alone: its siblings
+    // would queue ahead of it on each relay. Backend anti-stampede dedups a later open.
+    const sync = (channelId) => invoke('sync_community_channel', { channelId, beforeMs: null }).catch(() => {});
+    if (openChannel) await sync(openChannel);
+    for (const ch of summary.channels || []) if (ch.channel_id !== openChannel) sync(ch.channel_id);
     communityChanged(summary.community_id);
     return openChannel;
 }
@@ -1190,6 +1191,20 @@ async function communityLeaveOrDelete(chat) {
     } catch (e) {
         await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
+}
+
+/**
+ * Learn whether this account sees which invite link brought each member of `communityId`.
+ * `fresh` asks again, for a community already asked about.
+ */
+function ensureInviteSight(communityId, fresh = false) {
+    if (!communityId) return;
+    const known = VectorSvelte.inviteSight(communityId) !== undefined;
+    if (known !== fresh) return;
+    if (!known) VectorSvelte.setInviteSight(communityId, false);
+    invoke('get_community_capabilities', { communityId })
+        .then((caps) => VectorSvelte.setInviteSight(communityId, !!caps?.create_invite))
+        .catch(() => {});
 }
 
 async function openCommunityInvitePanel(chat) {

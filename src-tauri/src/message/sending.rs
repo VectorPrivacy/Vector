@@ -24,7 +24,7 @@ pub(crate) static UPLOADS_PUBLISHING: LazyLock<std::sync::Mutex<HashSet<String>>
 static FAIL_REASONS: LazyLock<std::sync::Mutex<HashMap<String, String>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-use crate::{STATE, nostr_client};
+use crate::STATE;
 use crate::TAURI_APP;
 
 use super::types::{AttachmentFile, Message};
@@ -516,28 +516,6 @@ pub(crate) async fn remove_failed_message(message_id: &str, drop_files: bool) ->
                 }
             }
         }
-        // Best-effort: free any blob already uploaded before the wrap failed,
-        // mirrors included.
-        let remote_urls: Vec<String> = msg.attachments.iter()
-            .flat_map(|a| a.all_urls().map(str::to_string))
-            .collect();
-        // Smart-forward gate: a failed REUSING send points at a blob the
-        // original message still needs — scrub only what nothing else rides.
-        let remote_urls =
-            vector_core::db::attachments::urls_unreferenced_elsewhere(&remote_urls, &message_id)
-                .unwrap_or_default();
-        if !remote_urls.is_empty() {
-            // Best-effort blob cleanup — route through the active client
-            // signer so bunker users sign auth events under their identity
-            // instead of the client-key (which would fail with the server's
-            // pubkey check).
-            if let Some(_client) = nostr_client() {
-                if let Ok(signer) = vector_core::signer::active_signer() {
-                    vector_core::blossom::delete_blobs_best_effort(signer, remote_urls);
-                }
-            }
-        }
-
         // Delete from database
         if let Err(e) = crate::db::delete_event(&message_id).await {
             eprintln!("[delete_failed_message] DB delete failed: {}", e);
@@ -552,10 +530,11 @@ pub(crate) async fn remove_failed_message(message_id: &str, drop_files: bool) ->
             })).ok();
         }
 
-        // A Community message that went unconfirmed may have landed anyway: take it back.
+        // A message that went unconfirmed may have landed anyway: it is taken back first, and
+        // its uploads go only once nothing signed can still be read with them.
         let id = message_id.clone();
         vector_core::db::spawn_bound(async move {
-            vector_core::community::v2::service::discard_unconfirmed(&chat_id, &id).await;
+            vector_core::sending::abandon_failed_send(&chat_id, &id, &msg.attachments).await;
         });
     } else {
         return Err("Message is not failed or does not exist".to_string());

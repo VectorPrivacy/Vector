@@ -951,7 +951,7 @@ function insertAtCursor(text, autoSpace = false) {
 
     const before = value.substring(0, start);
     const after = value.substring(end);
-    const insertText = prefix + text + suffix;
+    const insertText = prefix + plainTextSymbols(text) + suffix;
     input.value = before + insertText + after;
     // Move cursor to end of inserted text
     const newPos = start + insertText.length;

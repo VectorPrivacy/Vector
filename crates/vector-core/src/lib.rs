@@ -514,7 +514,7 @@ pub use deletion::{delete_own_dm, delete_received_dm, DeleteOutcome};
 pub use stored_event::{StoredEvent, StoredEventBuilder, SystemEventType};
 pub use rumor::{RumorEvent, RumorContext, ConversationType, RumorProcessingResult, process_rumor};
 pub use profile::{SyncPriority, ProfileSyncHandler, NoOpProfileSyncHandler};
-pub use event_handler::{InboundEventHandler, LiveOnly, NoOpEventHandler, PreparedEvent, process_event};
+pub use event_handler::{InboundEventHandler, LiveOnly, NoOpEventHandler, PreparedEvent, Presence, process_event};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1834,6 +1834,8 @@ impl VectorCore {
                 }))
                 .collect::<Vec<_>>(),
             "categories": Self::categories_json(community),
+            "system_channel": community.system_lines_target().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)),
+            "landing_channel": community.landing_channel().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)),
         })
     }
 
@@ -1881,6 +1883,13 @@ pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::co
     // first changes are news rather than the baseline itself.
     crate::community::v2::changes::prime(community);
     crate::db::scoped(async move {
+        // Boot registers every held community: one saved before its Join/Leave lines had a
+        // home settles here.
+        match crate::db::community::settle_presence_lines(community) {
+            Ok(true) => crate::emit_event("community_presence_lines", &serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&community.id().0) })),
+            Ok(false) => {}
+            Err(e) => crate::log_warn!("[presence] settling join lines on register: {e}"),
+        }
         let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
             let me = state::my_public_key();
             let is_owner = me.is_some_and(|m| community.owner().is_ok_and(|o| o == m));
@@ -2211,13 +2220,34 @@ impl VectorCore {
         Ok(channel_id)
     }
 
+    /// Make a new Channel shaped like `channel_id`: its privacy, topic, view, Category and
+    /// permission rules, under a new name. No messages come along. Needs Manage Channels, and
+    /// every rule copied must be one the caller could set. Returns the new channel id.
+    pub async fn duplicate_channel(&self, community_id: &str, channel_id: &str, name: &str) -> Result<String> {
+        use crate::community::{v2::service, transport::LiveTransport};
+        let session = crate::db::current_session();
+        let community = Self::v2_community(community_id)?;
+        let source = crate::community::ChannelId(Self::id32(channel_id, "channel_id")?);
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        let id = service::duplicate_channel(&transport, &community, &source, name).await.map_err(VectorError::Other)?;
+        if let Ok(Some(fresh)) = crate::db::community::load_community_v2(community.id()) {
+            if session.is_live() {
+                self.register_v2_chats(&fresh, &session).await;
+            }
+        }
+        if let Some(client) = state::nostr_client() {
+            crate::community::v2::realtime::refresh_subscription(&client).await;
+        }
+        Ok(crate::simd::hex::bytes_to_hex_32(&id.0))
+    }
+
     /// What a public invite link shows before joining: name, description and icon, read from the
     /// Community's own Control Plane when its owner's root verifies (`verified`). Read-only.
     pub async fn preview_public_link(&self, url: &str) -> Result<LinkPreview> {
         use crate::community::{transport::LiveTransport, CommunityId};
         crate::community::v2::invite::parse_invite_link(url).map_err(|_| VectorError::Other("not a Vector invite link".into()))?;
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        let bundle = crate::community::v2::service::fetch_public_bundle(&transport, url).await.map_err(VectorError::Other)?;
+        let bundle = crate::community::v2::service::fetch_public_bundle_for_preview(&transport, url).await.map_err(VectorError::Other)?;
         // Self-certifying: verified as the bundle decrypts, so it names the Community unfolded.
         let community_id = bundle.community_id.clone();
         if let Ok(id) = Self::id32(&community_id, "community_id") {
@@ -4889,6 +4919,7 @@ impl VectorCore {
         let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
         let is_owner = me == owner_hex;
         let chan = channel_id.to_ascii_lowercase();
+        let support = |target: &OverwriteTarget| roster.overwrite_support(&me, &owner_hex, target).map(|b| b.to_string());
         let mut roles: Vec<&crate::community::roles::Role> = roster.roles.iter().collect();
         roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
         let overwrites: Vec<serde_json::Value> = roster
@@ -4902,7 +4933,7 @@ impl VectorCore {
                     OverwriteTarget::Member(m) => ("member", Some(m.clone())),
                 };
                 let npub = (kind == "member").then(|| id.as_deref().and_then(|m| nostr_sdk::prelude::PublicKey::from_hex(m).ok()).and_then(|pk| ToBech32::to_bech32(&pk).ok())).flatten();
-                serde_json::json!({ "kind": kind, "id": id, "npub": npub, "allow": o.allow.0.to_string(), "deny": o.deny.0.to_string() })
+                serde_json::json!({ "kind": kind, "id": id, "npub": npub, "allow": o.allow.0.to_string(), "deny": o.deny.0.to_string(), "support": support(&o.target) })
             })
             .collect();
         let category = crate::simd::hex::hex_to_bytes_32_checked(&chan)
@@ -4910,21 +4941,35 @@ impl VectorCore {
             .and_then(|c| c.category())
             .filter(|k| v2.categories.iter().any(|x| x.id == *k))
             .map(|k| crate::simd::hex::bytes_to_hex_32(&k));
+        // Syncing, or stopping, swaps every rule on both sides, so it needs each settable.
+        let can_sync = {
+            let mut scopes = vec![chan.as_str()];
+            scopes.extend(category.as_deref());
+            scopes.extend(roster.syncs.get(&chan).map(String::as_str));
+            crate::community::v2::service::may_swap_overwrites(&roster, Some(&owner_hex), &me, &scopes, &|_| 0)
+        };
         Ok(serde_json::json!({
             "activated": Self::roles_v2_active(community_id, &roster),
             // The Category the channel files under, and whether it takes that Category's rules.
             "category": category,
             "synced": roster.syncs.get(&chan),
+            "can_sync": can_sync,
             "can_manage": is_owner || roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_ROLES),
             "grantable": if is_owner { u64::MAX.to_string() } else { roster.effective_permissions(&me).0.to_string() },
-            "roles": roles.iter().map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position })).collect::<Vec<_>>(),
+            // Per target, the bits this account may set on it; null where it may set none.
+            "me": me,
+            "everyone_support": support(&OverwriteTarget::Everyone),
+            "roles": roles
+                .iter()
+                .map(|r| serde_json::json!({ "role_id": r.role_id, "name": r.name, "color": r.color, "position": r.position, "support": support(&OverwriteTarget::Role(r.role_id.clone())) }))
+                .collect::<Vec<_>>(),
             "overwrites": overwrites,
             // Who a member overwrite can name: everyone this device knows, but the owner.
             "members": crate::community::v2::service::stored_memberlist(&v2)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|pk| pk.to_hex() != owner_hex)
-                .map(|pk| serde_json::json!({ "id": pk.to_hex(), "npub": ToBech32::to_bech32(&pk).ok() }))
+                .map(|pk| serde_json::json!({ "id": pk.to_hex(), "npub": ToBech32::to_bech32(&pk).ok(), "support": support(&OverwriteTarget::Member(pk.to_hex())) }))
                 .collect::<Vec<_>>(),
         }))
     }
@@ -4960,6 +5005,13 @@ impl VectorCore {
         crate::community::v2::service::set_channel_sync(&transport, &v2, &channel, category).await.map_err(VectorError::Other)?;
         Self::converge_v2_authority(&transport, community_id).await;
         Ok(())
+    }
+
+    /// The Category a channel takes its permissions from while synced to one, read locally.
+    /// Its own overwrites are kept, and apply only once the sync stops.
+    pub fn channel_synced_to(&self, community_id: &str, channel_id: &str) -> Result<Option<String>> {
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        Ok(roster.syncs.get(&channel_id.to_ascii_lowercase()).cloned())
     }
 
     /// Of `npubs`, those who can't send in a channel by the roster as it stands (CORD-04 §8):
@@ -5798,6 +5850,55 @@ impl VectorCore {
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)?;
         Ok(clean)
+    }
+
+    /// Choose the chat channel a Community's Join/Leave lines go to, or `None` to turn them
+    /// off (MANAGE_METADATA). Other `system_messages` fields, a newer client's included, stay.
+    pub async fn set_system_channel(&self, community_id: &str, channel_id: Option<&str>) -> Result<()> {
+        use crate::community::{transport::LiveTransport, ChannelId, CommunityId};
+        let cid = CommunityId(Self::id32(community_id, "community_id")?);
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let named = match channel_id {
+            Some(ch) => {
+                let id = ChannelId(Self::id32(ch, "channel_id")?);
+                let channel = community.channel(&id).ok_or_else(|| VectorError::Other("no such channel in this community".into()))?;
+                if !crate::community::v2::community::takes_system_lines(channel) {
+                    return Err(VectorError::Other("join and leave messages go to a chat channel".into()));
+                }
+                Some(id)
+            }
+            None => None,
+        };
+        let mut meta = community.metadata();
+        crate::community::v2::community::set_system_channel_in(&mut meta, named.as_ref());
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)
+    }
+
+    /// Choose the channel new members open first, or `None` for the default (MANAGE_METADATA).
+    pub async fn set_landing_channel(&self, community_id: &str, channel_id: Option<&str>) -> Result<()> {
+        use crate::community::{transport::LiveTransport, ChannelId, CommunityId};
+        let cid = CommunityId(Self::id32(community_id, "community_id")?);
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let named = match channel_id {
+            Some(ch) => {
+                let id = ChannelId(Self::id32(ch, "channel_id")?);
+                let channel = community.channel(&id).ok_or_else(|| VectorError::Other("no such channel in this community".into()))?;
+                if !crate::community::v2::community::can_land_in(channel) {
+                    return Err(VectorError::Other("new members start in a public text or forum channel".into()));
+                }
+                Some(id)
+            }
+            None => None,
+        };
+        let mut meta = community.metadata();
+        crate::community::v2::community::set_landing_channel_in(&mut meta, named.as_ref());
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_community_metadata(&transport, &community, &meta).await.map_err(VectorError::Other)
     }
 
     /// Leave a Community: announce a best-effort "left" presence (before dropping keys), then

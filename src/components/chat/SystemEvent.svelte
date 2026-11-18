@@ -17,7 +17,9 @@
         profileVersion(npub);
         return { name: h.systemEventName(npub), src: h.getProfileAvatarSrc(h.getProfile(npub)) || null };
     });
-    const suffix = $derived(h.systemEventSuffix(type) + (mergeCount > 1 ? ` ${mergeCount} times` : ''));
+    // Which invite link brought them, for those who manage invites.
+    const via = $derived(h.systemEventVia(msg));
+    const suffix = $derived(h.systemEventSuffix(type) + (via?.text || '') + (mergeCount > 1 ? ` ${mergeCount} times` : ''));
 
     let avatarFailed = $state(false);
     $effect(() => { actor?.src; avatarFailed = false; });
@@ -47,7 +49,7 @@
                 <div class="placeholder-avatar system-event-avatar" style="min-height: 16px; min-width: 16px; max-height: 16px; max-width: 16px; background-image: url(&quot;icons/user-placeholder.svg&quot;); background-size: cover; background-position: center center;"></div>
             {/if}
             <span class="system-event-name" data-npub={npub}>{actor?.name}</span>
-            <span class="system-event-suffix">{suffix}</span>
+            <span class="system-event-suffix" title={via?.title}>{suffix}</span>
         </span>
     {:else}
         {msg.content}

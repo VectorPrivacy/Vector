@@ -37,7 +37,7 @@ function ensureMessageList() {
  * ListHelpers: the message list island. `row` is RowHelpers for every row it renders.
  * @typedef {Object} ListHelpers
  * @property {(chatId: string) => object[]} messages
- * @property {{ collapse: (prev: object, curr: object) => boolean, differentDay: (a: object, b: object) => boolean, isCommand: (m: object) => boolean, mergeable: (type: string) => boolean, blocked: (m: object) => boolean }} rules
+ * @property {{ collapse: (prev: object, curr: object) => boolean, differentDay: (a: object, b: object) => boolean, isCommand: (m: object) => boolean, mergeable: (type: string) => boolean, blocked: (m: object) => boolean, revealed: (m: object) => boolean }} rules
  * @property {(at: number) => string} dayLabel
  * @property {number} maxRows
  * @property {(msg: object) => object|null} senderFor
@@ -54,6 +54,7 @@ const _dmsgListHelpers = {
         isCommand: (m) => !!_dmsgCommandInfo(m),
         mergeable: (t) => MERGEABLE_SYSTEM_EVENTS.has(t),
         blocked: (m) => _dmsgListHelpers.ctxFor(m).blocked,
+        revealed: (m) => !!_dmsgListHelpers.ctxFor(m).revealedAs,
     },
     dayLabel: (at) => dayDividerHtml(at),
     get maxRows() { return typeof MAX_WINDOW_ROWS === 'number' ? MAX_WINDOW_ROWS : 80; },
@@ -76,6 +77,7 @@ const _dmsgListHelpers = {
             const timedOut = _dmsgPostedTimedOut(msg, ctx.currentChat);
             if (ctx.blocked === (isBlocked && !revealed) && ctx.revealedBlocked === (isBlocked && revealed)
                 && ctx.timedOut === (!isBlocked && !revealed ? timedOut : '')
+                && !!ctx.revealedAs === (revealed && (isBlocked || !!timedOut))
                 && ctx.held === chatIsRequest(ctx.currentChat)) return ctx;
         }
         const fresh = _dmsgRowCtx(msg);
@@ -117,7 +119,8 @@ function _dmsgRowCtx(msg) {
         const isGroupChat = chatIsGroup(currentChat);
         const blocked = _dmsgAuthorBlocked(msg, currentChat, isGroupChat);
         const revealed = revealedBlockedMessages.has(msg.id);
-        const timedOut = !blocked && !revealed ? _dmsgPostedTimedOut(msg, currentChat) : '';
+        const reason = blocked ? '' : _dmsgPostedTimedOut(msg, currentChat);
+        const timedOut = revealed ? '' : reason;
         const unauthorized = !blocked && !!msg.unauthorized;
         return {
             myNpub: strPubkey,
@@ -126,12 +129,25 @@ function _dmsgRowCtx(msg) {
             pinged: !unauthorized && !blocked && _dmsgIsPinged(msg, currentChat, isGroupChat),
             blocked: blocked && !revealed,
             revealedBlocked: (blocked || unauthorized) && revealed,
+            // What a revealed row was collapsed for: the line that hides it again says so.
+            revealedAs: revealed ? _dmsgHiddenLabel({ blocked, timedOut: reason }) : '',
+            revealedIcon: reason && reason !== 'unauthorized' ? 'clock' : 'cancel',
             // A reader collapses, never drops, what a timed-out member posted.
             timedOut,
             // A DM request: nothing its sender sent loads until it's accepted.
             held: chatIsRequest(currentChat),
         };
     }
+}
+/** Show collapsed rows, or collapse them again. In place: the rows and any quote of them re-derive, and the scroll stays put. */
+function _dmsgSetRevealed(msgs, on) {
+    for (const m of msgs) {
+        if (on) revealedBlockedMessages.add(m.id);
+        else revealedBlockedMessages.delete(m.id);
+        VectorSvelte.touchMessage(m.id);
+    }
+    VectorSvelte.touchWindow();
+    VectorSvelte.flushSync();
 }
 /** What a collapsed row says in place of its content, or '' when it shows the content. */
 function _dmsgHiddenLabel(ctx) {
@@ -393,10 +409,12 @@ const _dmsgMediaHelpers = {
  *   replyView: (msg: object, sender: object|null) => object|null,
  *   jumpToMessage: (id: string) => void,
  *   revealBlocked: (msgs: object[]) => void,
+ *   hideRevealed: (msgs: object[]) => void,
  *   hiddenLabel: (ctx: object) => string,
  *   renderCustomEmojiShortcodes: (el: Element, tags: object[]|null) => void,
  *   showMiniProfile: (npub: string, el: Element) => void,
  *   systemEventName: (npub: string) => string, systemEventSuffix: (type: string) => string,
+ *   systemEventVia: (msg: object) => ({ text: string, title: string }|null),
  *   reactionGroups: (msg: object) => Array<{ emoji: string, count: number, mine: boolean, url?: string }>,
  *   canAddReactionGroup: (msg: object, n: number) => boolean,
  *   reactionClick: (msgId: string, emoji: string) => void,
@@ -417,15 +435,8 @@ const _dmsgRowHelpers = {
     contentSig: (msg) => _dmsgContentSig(msg),
     replyView: (msg, sender) => _dmsgReplyView(msg, sender),
     jumpToMessage: (id) => jumpToMessage(id),
-    // In place: the rows and any quote of them re-derive, and the scroll stays put.
-    revealBlocked: (msgs) => {
-        for (const m of msgs) {
-            revealedBlockedMessages.add(m.id);
-            VectorSvelte.touchMessage(m.id);
-        }
-        VectorSvelte.touchWindow();
-        VectorSvelte.flushSync();
-    },
+    revealBlocked: (msgs) => _dmsgSetRevealed(msgs, true),
+    hideRevealed: (msgs) => _dmsgSetRevealed(msgs, false),
     hiddenLabel: (ctx) => _dmsgHiddenLabel(ctx),
     roleTag: (communityId, npub) => communityRoleTag(communityId, npub),
     roleColor: (communityId, npub) => communityRoleColor(communityId, npub),
@@ -433,6 +444,12 @@ const _dmsgRowHelpers = {
     showMiniProfile: (npub, el) => showMiniProfile(npub, el),
     systemEventName: (npub) => chatName(npub),
     systemEventSuffix: (type) => systemEventSuffix(type),
+    systemEventVia: (msg) => {
+        const se = msg.system_event;
+        if (se?.event_type !== SystemEventType.MemberJoined || !se.invited_label || !se.invited_by) return null;
+        if (!VectorSvelte.inviteSight(communityIdOfChat(arrChats.find(c => c.id === strOpenChat)))) return null;
+        return { text: ` via ${se.invited_label}`, title: `${chatName(se.invited_by)}'s invite link` };
+    },
     // Reactions
     reactionGroups: (msg) => Array.from(_dmsgAggregateReactions(msg), ([emoji, g]) => ({ emoji, ...g })),
     canAddReactionGroup: (msg, n) => _dmsgCanAddReactionGroup(msg, n),

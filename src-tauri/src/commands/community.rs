@@ -40,6 +40,10 @@ pub struct CommunitySummary {
     pub relays: Vec<String>,
     /// The iroh relays its voice channels use; empty is iroh's defaults.
     pub voice_relays: Vec<String>,
+    /// The chat channel Join/Leave lines go to; `None` while they're off.
+    pub system_channel: Option<String>,
+    /// The channel new members open first; `None` for the default.
+    pub landing_channel: Option<String>,
     /// The categories in sidebar order; `channels` is in sidebar order too.
     pub categories: serde_json::Value,
 }
@@ -108,6 +112,8 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
         dissolved: c.dissolved,
         relays: c.relays.clone(),
         voice_relays: c.voice_relays(),
+        system_channel: c.system_lines_target().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)),
+        landing_channel: c.landing_channel().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)),
     }
 }
 
@@ -740,7 +746,7 @@ pub async fn send_community_message(
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
         // Same tags as the precomputed rumor above — the rumor id is a pure
         // function of its inputs, so any divergence would fork the optimistic id.
-        let sent = vector_core::community::v2::service::send_chat_message_at(
+        let sent = vector_core::community::v2::service::try_send_chat_message_at(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
         )
         .await;
@@ -772,19 +778,13 @@ pub async fn send_community_message(
                 }
                 Ok(())
             }
-            Err(e) => {
-                // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
-                let failed = {
-                    let mut state = vector_core::state::STATE.lock().await;
-                    state.update_message(&message_id, |m| {
-                        m.set_failed(true);
-                        m.set_pending(false);
-                    })
-                };
-                if let Some((_cid, ref msg)) = failed {
-                    callback.on_failed(&channel_id, &message_id, msg);
+            Err(unsent) => {
+                // 3b. Failed — mark the optimistic message failed (offers retry in the UI),
+                // under the id it was signed with when an epoch rolled since the precompute.
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &message_id, &unsent).await {
+                    callback.on_failed(&channel_id, &message_id, &msg);
                 }
-                Err(e)
+                Err(unsent.error)
             }
         }
     })
@@ -1407,7 +1407,7 @@ async fn dispatch_community_attachment_message(
             imeta_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message(
+        let sent = vector_core::community::v2::service::try_send_chat_message(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, imeta_tags,
         )
         .await;
@@ -1444,9 +1444,13 @@ async fn dispatch_community_attachment_message(
                 let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
                 Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
             }
-            Err(e) => {
-                let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
-                Err(e)
+            Err(unsent) => {
+                // Signed and kept: the bubble becomes that message, so a retry sends it again
+                // as itself and a delete takes it back, with the files it names left alone.
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &pending_id, &unsent).await {
+                    callback.on_failed(&channel_id, &pending_id, &msg);
+                }
+                Err(unsent.error)
             }
         }
     })
@@ -2325,6 +2329,8 @@ pub async fn hide_community_message(channel_id: String, message_id: String) -> R
 /// Persist + surface a Community presence (join/leave) as a `MemberJoined`/`MemberLeft`
 /// system event. Dedups by inner event id (the save returns false on a known id), so relay
 /// replays and the sender's own echo are silent. Shared by the live subscription + sync paths.
+/// A line that isn't `shown` is still kept: the member list reads it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_community_presence(
     channel_id: &str,
     npub: &str,
@@ -2333,6 +2339,7 @@ pub(crate) async fn apply_community_presence(
     created_at: u64,
     invited_by: Option<&str>,
     invited_label: Option<&str>,
+    shown: bool,
 ) {
     vector_core::db::scoped(async move {
         let et = if joined {
@@ -2370,6 +2377,9 @@ pub(crate) async fn apply_community_presence(
                     false,
                 );
             }
+            if !shown {
+                return;
+            }
             vector_core::emit_event(
                 "system_event",
                 &serde_json::json!({
@@ -2378,7 +2388,7 @@ pub(crate) async fn apply_community_presence(
                     "event_type": et.as_u8(),
                     "member_pubkey": npub,
                     "member_name": serde_json::Value::Null,
-                    "invited_by": invited_by,
+                    "invited_by": invited_by.and_then(vector_core::community::inviter_npub),
                     "invited_label": invited_label,
                     // The event's REAL time (ms) so the UI sorts it chronologically. Without it the frontend
                     // stamps `now`, and a join replayed during history paging/rehydration sinks to the bottom.
@@ -2539,6 +2549,24 @@ pub async fn set_community_voice_relays(community_id: String, relays: Vec<String
     vector_core::db::scoped(async move { vector_core::VectorCore.set_voice_relays(&community_id, &relays).await.map_err(|e| e.to_string()) }).await
 }
 
+/// Send a community's Join/Leave lines to a chat channel, or `None` to turn them off.
+#[tauri::command]
+pub async fn set_community_system_channel(community_id: String, channel_id: Option<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_system_channel(&community_id, channel_id.as_deref()).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Choose the channel new members open first, or `None` for the default.
+#[tauri::command]
+pub async fn set_community_landing_channel(community_id: String, channel_id: Option<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.set_landing_channel(&community_id, channel_id.as_deref()).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Rename a channel (requires manage-channels authority) and republish its ChannelMetadata so members
 /// pick it up. `channel_id` is the channel's hex id.
 #[tauri::command]
@@ -2610,6 +2638,15 @@ async fn create_community_channel_inner(
     // from the stale in-memory copy would drop it again.
     reregister_channels(&community_id).await;
     Ok(channel_hex)
+}
+
+/// A new channel with another's settings and permission rules, under its own name.
+#[tauri::command]
+pub async fn duplicate_community_channel(community_id: String, channel_id: String, name: String) -> Result<String, String> {
+    vector_core::db::scoped_result(async move {
+        vector_core::VectorCore.duplicate_channel(&community_id, &channel_id, &name).await.map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Tombstone a channel in a **v2** Community (CORD-03 §2). The primary channel is refused:
@@ -2861,7 +2898,7 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
     vector_core::community::v2::invite::parse_invite_link(&url).map_err(|_| "Not a Vector invite link".to_string())?;
     {
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, &url).await?;
+        let bundle = vector_core::community::v2::service::fetch_public_bundle_for_preview(&transport, &url).await?;
         // The bundle's `community_id` is self-certifying (sha256 over owner+salt, verified as the
         // bundle is decrypted), so it names the community without folding anything.
         let community_id = bundle.community_id.clone();

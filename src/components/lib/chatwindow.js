@@ -16,8 +16,10 @@
  * @param {(msg) => boolean}        rules.isCommand      a command invocation renders as a continuation
  * @param {(type) => boolean}       rules.mergeable      MERGEABLE_SYSTEM_EVENTS.has
  * @param {(msg) => boolean}        rules.blocked        the row renders as a blocked placeholder
+ * @param {(msg) => boolean}        rules.revealed       the row was collapsed and is shown
  * @returns {Array<{ msg, kind: 'row'|'system', streak: 'first'|'continuation', dayBreak: boolean,
- *                   merged: boolean, mergeCount: number, blockedRun: object[]|null }>}
+ *                   merged: boolean, mergeCount: number, blockedRun: object[]|null,
+ *                   revealedRun: object[]|null }>}   revealedRun heads every shown run, of one row too
  */
 export function deriveWindow(messages, start, end, rules) {
     const items = [];
@@ -39,6 +41,11 @@ export function deriveWindow(messages, start, end, rules) {
         }
         blocked = [];
     };
+    let revealed = [];        // current run of one author's revealed rows (items)
+    const flushRevealed = () => {
+        if (revealed.length) revealed[0].revealedRun = revealed.map((it) => it.msg);
+        revealed = [];
+    };
     for (let i = start; i < end; i++) {
         const msg = messages[i];
         if (!msg) continue;
@@ -51,6 +58,7 @@ export function deriveWindow(messages, start, end, rules) {
             merged: false,
             mergeCount: 1,
             blockedRun: null,
+            revealedRun: null,
         };
         // A day separator heads the first day-content item and every day change.
         if (msg.at) {
@@ -59,6 +67,7 @@ export function deriveWindow(messages, start, end, rules) {
         }
         if (isSystem) {
             flushBlocked();
+            flushRevealed();
             const type = msg.system_event.event_type;
             const npub = msg.system_event.member_npub;
             if (rules.mergeable(type)) {
@@ -86,11 +95,17 @@ export function deriveWindow(messages, start, end, rules) {
                 if (blocked.length && (blocked[0].msg.npub !== msg.npub || item.dayBreak)) flushBlocked();
                 blocked.push(item);
             }
+            if (!rules.revealed(msg)) flushRevealed();
+            else {
+                if (revealed.length && (revealed[0].msg.npub !== msg.npub || item.dayBreak)) flushRevealed();
+                revealed.push(item);
+            }
         }
         items.push(item);
         prev = item;
     }
     flush();
     flushBlocked();
+    flushRevealed();
     return items;
 }

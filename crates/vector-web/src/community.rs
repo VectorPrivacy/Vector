@@ -59,6 +59,8 @@ pub(crate) fn summarize_v2(c: &CommunityV2) -> Value {
         "owner_npub": owner.and_then(|pk| pk.to_bech32().ok()),
         "dissolved": c.dissolved,
         "voice_relays": c.voice_relays(),
+        "system_channel": c.system_lines_target().map(|ch| bytes_to_hex_32(&ch.id.0)),
+        "landing_channel": c.landing_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
         "relays": c.relays,
     })
 }
@@ -220,7 +222,7 @@ pub async fn send_community_message(channel_id: String, content: String, replied
         callback.on_pending(&channel_id, &pending);
 
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message_at(
+        let sent = vector_core::community::v2::service::try_send_chat_message_at(
             &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
         )
         .await;
@@ -241,15 +243,11 @@ pub async fn send_community_message(channel_id: String, content: String, replied
                 }
                 Ok(())
             }
-            Err(e) => {
-                let failed = STATE.lock().await.update_message(&message_id, |m| {
-                    m.set_failed(true);
-                    m.set_pending(false);
-                });
-                if let Some((_, msg)) = failed {
+            Err(unsent) => {
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &message_id, &unsent).await {
                     callback.on_failed(&channel_id, &message_id, &msg);
                 }
-                Err(e)
+                Err(unsent.error)
             }
         }
     })
@@ -345,7 +343,7 @@ pub async fn preview_public_invite(url: &str) -> Result<Value, String> {
         return Err("Only Concord v2 invite links can be opened on Vector Web".into());
     }
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let bundle = vector_core::community::v2::service::fetch_public_bundle(&transport, url).await?;
+    let bundle = vector_core::community::v2::service::fetch_public_bundle_for_preview(&transport, url).await?;
     let community_id = bundle.community_id.clone();
     if let Ok(local) = load_v2(&community_id) {
         return Ok(json!({
@@ -383,7 +381,9 @@ pub async fn accept_community_invite(community_id: &str) -> Result<Value, String
     get_community(community_id)
 }
 
-/// Join/leave lines in a channel, saved once and painted live.
+/// Join/leave lines in a channel, saved once and painted live while `shown`. A hidden one
+/// is still kept: the member list reads it.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_presence(
     channel_id: &str,
     npub: &str,
@@ -392,6 +392,7 @@ pub async fn apply_presence(
     created_at: u64,
     invited_by: Option<&str>,
     invited_label: Option<&str>,
+    shown: bool,
 ) {
     use vector_core::stored_event::SystemEventType;
     let et = if joined { SystemEventType::MemberJoined } else { SystemEventType::MemberLeft };
@@ -413,12 +414,15 @@ pub async fn apply_presence(
     if nameless {
         vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::High, false);
     }
+    if !shown {
+        return;
+    }
     vector_core::emit_event(
         "system_event",
         &json!({
             "conversation_id": channel_id, "event_id": event_id, "event_type": et.as_u8(),
             "member_pubkey": npub, "member_name": null,
-            "invited_by": invited_by, "invited_label": invited_label,
+            "invited_by": invited_by.and_then(vector_core::community::inviter_npub), "invited_label": invited_label,
             "created_at_ms": created_at.saturating_mul(1000),
         }),
     );
@@ -540,10 +544,16 @@ pub async fn send_community_file(
         };
         let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message(&transport, &community, &ch, "", reply_ref, &[], tags).await;
+        let sent = vector_core::community::v2::service::try_send_chat_message(&transport, &community, &ch, "", reply_ref, &[], tags).await;
         let real_id = match sent {
             Ok(id) => id,
-            Err(e) => return failed(e).await,
+            // Signed and kept: the bubble becomes that message, files and all.
+            Err(unsent) => {
+                if let Some(msg) = vector_core::community::v2::service::mark_unsent(&channel_id, &pending_id, &unsent).await {
+                    callback.on_failed(&channel_id, &pending_id, &msg);
+                }
+                return Err(unsent.error);
+            }
         };
         let echoed = {
             let mut state = STATE.lock().await;

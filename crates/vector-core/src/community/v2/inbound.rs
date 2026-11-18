@@ -97,6 +97,58 @@ fn author_is_banned_here(channel_id: &str, community: Option<&[u8; 32]>, author:
 /// deleter needs `MANAGE_MESSAGES`, a strict outrank, and a synced citation.
 /// Blocked once dissolved: a dead community honors no new authority action, only
 /// the self-deletes its seal deliberately leaves open (CORD-02 §9).
+struct EarlyDeletes;
+
+/// How many targets' early deletes a session remembers; the oldest make way.
+const EARLY_DELETES_KEPT: usize = 2048;
+
+/// Deletes that arrived ahead of the message they name: who asked, and what they cited.
+#[derive(Default)]
+struct EarlyDeleteSet {
+    by_target: std::collections::HashMap<[u8; 32], Vec<(PublicKey, nostr_sdk::prelude::Tags)>>,
+    order: std::collections::VecDeque<[u8; 32]>,
+}
+
+fn early_deletes() -> std::sync::Arc<std::sync::Mutex<EarlyDeleteSet>> {
+    crate::db::current_session().scoped::<EarlyDeletes, _>()
+}
+
+/// Keep a delete whose message isn't here yet (a take-back racing the resend it cancels, a
+/// newer page read before an older one). Only the message's author settles who may delete
+/// it, so the judgment waits for the message.
+fn park_early_delete(target: &[u8; 32], by: PublicKey, tags: &nostr_sdk::prelude::Tags) {
+    let kept = early_deletes();
+    let Ok(mut set) = kept.lock() else { return };
+    if !set.by_target.contains_key(target) {
+        if set.order.len() >= EARLY_DELETES_KEPT {
+            if let Some(oldest) = set.order.pop_front() {
+                set.by_target.remove(&oldest);
+            }
+        }
+        set.order.push_back(*target);
+    }
+    let asked = set.by_target.entry(*target).or_default();
+    if !asked.iter().any(|(pk, _)| *pk == by) {
+        asked.push((by, tags.clone()));
+    }
+}
+
+/// Whether a delete that came ahead of `target` stands now that its author is known, and
+/// whether it was a moderator's. Asked once: the entry goes either way.
+fn early_delete_of(channel_id: &str, target: &[u8; 32], author: &PublicKey) -> Option<bool> {
+    let asked = {
+        let kept = early_deletes();
+        let mut set = kept.lock().ok()?;
+        let asked = set.by_target.remove(target)?;
+        set.order.retain(|t| t != target);
+        asked
+    };
+    if asked.iter().any(|(by, _)| by == author) {
+        return Some(false);
+    }
+    asked.iter().any(|(by, tags)| moderation_delete_authorized(channel_id, by, author, tags)).then_some(true)
+}
+
 fn moderation_delete_authorized(
     channel_id: &str,
     deleter: &PublicKey,
@@ -209,6 +261,10 @@ fn apply_chat_to_state_in(
         ChatEvent::Message { opened, reply_to, emoji } => {
             let msg = chat_message_to_message(opened, reply_to, emoji, my_pubkey);
             // Our own failed message, read back from a relay, landed after all.
+            if let Some(moderated) = early_delete_of(channel_id, opened.rumor_id.as_bytes(), &opened.author) {
+                let _ = state.remove_message(&msg.id);
+                return Some(ChatPersist::Removed { id: msg.id, moderated });
+            }
             if msg.mine && state.find_message(&msg.id).is_some_and(|(_, m)| m.failed) {
                 super::service::confirm_in(state, &msg.id);
             }
@@ -326,7 +382,12 @@ fn apply_chat_to_state_in(
                 Some(n) => Some(n),
                 None => crate::db::events::event_author(&target_id).ok().flatten(),
             };
-            let author = author_npub.as_deref().and_then(|n| PublicKey::parse(n).ok())?;
+            let Some(author) = author_npub.as_deref().and_then(|n| PublicKey::parse(n).ok()) else {
+                if !crate::state::was_message_deleted(&target_id) {
+                    park_early_delete(target, opened.author, &opened.rumor.tags);
+                }
+                return None;
+            };
             let authorized = author == opened.author
                 || moderation_delete_authorized(channel_id, &opened.author, &author, &opened.rumor.tags);
             if !authorized {
@@ -859,37 +920,38 @@ fn dispatch_guestbook(ev: guestbook::GuestbookEvent, community: &CommunityV2, ha
     // it, so every distinct join/leave inserts exactly once no matter how many
     // paths (live replay, reconnect, catch-up) deliver it.
     let event_id = crate::simd::hex::bytes_to_hex_32(&ev.rumor_id);
-    // Presence is announced against the community's SURFACED row (the primary
-    // channel — the one chat the list shows). A community with NO channels has no
-    // row to announce against, and `unwrap_or_default()` invented one: a blank
-    // conversation id, which a UNIQUE identifier then collapsed into a single
-    // unopenable chat shared by every such community. None = don't announce; the
-    // dispatch still reports the presence so the memberlist bookkeeping runs, and
-    // the guestbook re-folds the line once a channel exists.
-    let chat_id = community
-        .primary_channel()
-        .map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0));
+    // A community with NO channels has nowhere to keep the line: a blank conversation id
+    // would collapse every such community into one unopenable chat. The dispatch still
+    // reports the presence so the memberlist bookkeeping runs, and the guestbook re-folds the
+    // line once a channel exists.
+    let home = community.presence_home().map(|h| (crate::simd::hex::bytes_to_hex_32(&h.channel.id.0), h.shown));
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let tell = |npub: &str, joined: bool, at_ms: u64, invited_by: &Option<(String, String)>| {
+        let Some((channel_id, shown)) = home.as_ref().filter(|_| !suppressed) else { return };
+        if crate::news::first_telling(&ev.rumor_id) {
+            let (by, label) = invited_by.as_ref().map_or((None, None), |(c, l)| (Some(c.as_str()), Some(l.as_str())));
+            handler.on_community_presence(&crate::Presence {
+                community_id: &cid_hex,
+                channel_id,
+                shown: *shown,
+                npub,
+                joined,
+                event_id: &event_id,
+                created_at: at_ms / 1000,
+                invited_by: by,
+                invited_label: label,
+            });
+        }
+    };
     match &ev.entry {
         GuestbookEntry::Join { member, at_ms, invited_by } => {
             let npub = member.to_bech32().unwrap_or_default();
-            let (by, label) = match invited_by {
-                Some((c, l)) => (Some(c.as_str()), Some(l.as_str())),
-                None => (None, None),
-            };
-            if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
-                if crate::news::first_telling(&ev.rumor_id) {
-                    handler.on_community_presence(chat, &npub, true, &event_id, at_ms / 1000, by, label);
-                }
-            }
+            tell(&npub, true, *at_ms, invited_by);
             DispatchedV2::Presence { npub, joined: true, event: Box::new(ev) }
         }
         GuestbookEntry::Leave { member, at_ms } => {
             let npub = member.to_bech32().unwrap_or_default();
-            if let (false, Some(chat)) = (suppressed, chat_id.as_deref()) {
-                if crate::news::first_telling(&ev.rumor_id) {
-                    handler.on_community_presence(chat, &npub, false, &event_id, at_ms / 1000, None, None);
-                }
-            }
+            tell(&npub, false, *at_ms, &None);
             DispatchedV2::Presence { npub, joined: false, event: Box::new(ev) }
         }
         // A Kick shapes the memberlist, not the feed — so no presence line, but it
@@ -981,8 +1043,8 @@ mod tests {
         fn on_community_removed(&self, chat_id: &str, target: &str) {
             self.removed.lock().unwrap().push((chat_id.to_string(), target.to_string()));
         }
-        fn on_community_presence(&self, _c: &str, npub: &str, joined: bool, _e: &str, _a: u64, _b: Option<&str>, _l: Option<&str>) {
-            self.presence.lock().unwrap().push((npub.to_string(), joined));
+        fn on_community_presence(&self, p: &crate::Presence<'_>) {
+            self.presence.lock().unwrap().push((p.npub.to_string(), p.joined));
         }
         fn on_community_typing(&self, chat_id: &str, npub: &str, _until: u64) {
             self.typing.lock().unwrap().push((chat_id.to_string(), npub.to_string()));
@@ -1864,8 +1926,8 @@ mod tests {
         #[derive(Default)]
         struct Capture(StdMutex<Vec<(String, bool, String)>>);
         impl InboundEventHandler for Capture {
-            fn on_community_presence(&self, _chat_id: &str, npub: &str, joined: bool, event_id: &str, _at: u64, _by: Option<&str>, _label: Option<&str>) {
-                self.0.lock().unwrap().push((npub.into(), joined, event_id.into()));
+            fn on_community_presence(&self, p: &crate::Presence<'_>) {
+                self.0.lock().unwrap().push((p.npub.into(), p.joined, p.event_id.into()));
             }
         }
 
@@ -1887,6 +1949,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_join_line_goes_where_the_system_channel_says() {
+        use nostr_sdk::prelude::Timestamp;
+        use std::sync::Mutex as StdMutex;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Lines", vec!["wss://r".into()], None).await.unwrap();
+        let welcome = service::create_public_channel(&relay, &community, "welcome").await.unwrap();
+        let mut community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let general = crate::simd::hex::bytes_to_hex_32(&community.channels.iter().find(|c| c.name == "general").unwrap().id.0);
+
+        #[derive(Default)]
+        struct Capture(StdMutex<Vec<(String, String, bool)>>);
+        impl InboundEventHandler for Capture {
+            fn on_community_presence(&self, p: &crate::Presence<'_>) {
+                self.0.lock().unwrap().push((p.community_id.into(), p.channel_id.into(), p.shown));
+            }
+        }
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join = |at: u64| {
+            let member = Keys::generate();
+            let rumor = guestbook::build_join_rumor(member.public_key(), None, at);
+            super::super::guestbook::seal_guestbook_rumor(&rumor, &gb, &member, Timestamp::from_secs(at / 1000)).unwrap().0
+        };
+        let set = |c: &mut CommunityV2, ch: Option<&crate::community::ChannelId>| {
+            let mut meta = c.metadata();
+            super::super::community::set_system_channel_in(&mut meta, ch);
+            c.meta_custom = meta.custom;
+        };
+
+        let cap = Capture::default();
+        set(&mut community, Some(&welcome));
+        dispatch_wrap(&join(5_000), &community, &me.public_key(), &cap);
+        set(&mut community, None);
+        dispatch_wrap(&join(6_000), &community, &me.public_key(), &cap);
+        let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let seen = cap.0.lock().unwrap().clone();
+        assert_eq!(seen, vec![
+            (cid.clone(), crate::simd::hex::bytes_to_hex_32(&welcome.0), true),
+            (cid, general, false),
+        ], "the chosen channel shows it; off keeps it, unseen, in the default");
+    }
+
+    #[tokio::test]
     async fn a_guestbook_kick_dispatches_its_target_and_raises_no_presence_line() {
         // Routing regression: a Kick used to fall to `Ignored`, so realtime dropped it
         // and the target never left anyone's memberlist (nor their own community).
@@ -1899,7 +2004,7 @@ mod tests {
         #[derive(Default)]
         struct Capture(StdMutex<usize>);
         impl InboundEventHandler for Capture {
-            fn on_community_presence(&self, _c: &str, _n: &str, _j: bool, _e: &str, _a: u64, _b: Option<&str>, _l: Option<&str>) {
+            fn on_community_presence(&self, _p: &crate::Presence<'_>) {
                 *self.0.lock().unwrap() += 1;
             }
         }

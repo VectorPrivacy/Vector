@@ -2259,6 +2259,7 @@ html, body {
   background-color: #cfcfcf;
 }
 
+.ccm-note { margin: 12px 0 0; color: #8a8a8a; font-size: 12.5px; line-height: 1.4; }
 .ccm-error { margin: 12px 0 0; color: var(--danger-color); font-size: 12.5px; line-height: 1.4; }
 .ccm-error::first-letter { text-transform: uppercase; }
 .ccm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
@@ -12733,6 +12734,9 @@ input[type="checkbox"]:checked + .neon-toggle:before {
   left: 0;
   right: 0;
   z-index: 50;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px;
   border: 1px solid #2a2a2a;
   border-radius: 8px;
@@ -12747,6 +12751,15 @@ input[type="checkbox"]:checked + .neon-toggle:before {
   opacity: 1;
   transform: none;
   pointer-events: auto;
+}
+/* Closed, the list takes no room once it has faded, so it adds no blank space to scroll into
+   below its pane, and opening doesn't shift the pane under it. */
+.vselect:not(.open) .vselect-list {
+  max-height: 0 !important;
+  padding-block: 0;
+  border-width: 0;
+  transition: opacity 0.14s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    max-height 0s 0.18s, padding 0s 0.18s, border-width 0s 0.18s;
 }
 .vselect-item {
   display: flex;
@@ -14140,6 +14153,25 @@ body.mobile:not(.ws) .navbar-btn::before {
 .thumb-download.is-compact:hover .thumb-download-icon {
     background: rgba(24, 24, 24, 0.88);
     border-color: #4a4a4a;
+}
+
+/* Too narrow for the row but tall enough: a failure's words go under its icon and wrap. */
+.thumb-download.is-stacked {
+    flex-direction: column;
+    gap: 8px;
+    width: max-content;
+}
+
+.thumb-download.is-stacked .thumb-download-text {
+    padding-right: 0;
+    text-align: center;
+}
+
+.thumb-download.is-stacked .thumb-download-title,
+.thumb-download.is-stacked .thumb-download-sub {
+    white-space: normal;
+    overflow: visible;
+    text-wrap: balance;
 }
 
 .thumb-download-icon {
@@ -21024,7 +21056,9 @@ textarea.command-part-input {
   visibility: hidden;
 }
 /* A revealed blocked message dims what it says; the author reads as it did collapsed. */
-.dmsg--revealed .dmsg-body > :not(.dmsg-header) { opacity: 0.4; }
+.dmsg--revealed .dmsg-body > :not(.dmsg-header):not(.dmsg-hidden-toggle) { opacity: 0.4; }
+.dmsg-hidden-toggle { display: flex; align-items: center; gap: 5px; width: fit-content; color: rgba(255, 255, 255, 0.3); font-style: italic; cursor: pointer; }
+.dmsg-hidden-toggle .icon { position: relative; flex-shrink: 0; width: 14px; height: 14px; margin: 0; background-color: rgba(255, 255, 255, 0.3); }
 /* Last-child bottom clearance is unified on `.chat-messages > *:last-child`
  * (covers dmsg rows + system-event paragraphs alike) — see that rule. */
 /* Top clearance for the fixed chat-header is handled by `.chat-messages`'s
@@ -26152,6 +26186,12 @@ body.mobile .cs-close-key { display: none; }
 .ce-target-row.on { background-color: #171717; }
 .ce-target-row.on .cs-role-name { color: #fff; font-weight: 500; }
 .ce-target-row .cs-role-open .icon { background-color: var(--icon-color-primary); }
+/* A target whose rules come from above you: shown, never editable. */
+.ce-target-lock { position: relative; display: flex; flex-shrink: 0; margin-left: auto; width: 14px; height: 14px; }
+.cs-role-count + .ce-target-lock { margin-left: 8px; }
+.ce-target-row .ce-target-lock + .cs-role-open { margin-left: 0; }
+.ce-target-avatar { display: flex; align-items: center; justify-content: center; }
+.ce-target-lock .icon { position: relative; inset: auto; width: 14px; height: 14px; margin: 0; background-color: #6f6f6f; }
 .ce-target-row .cs-role-grip { cursor: pointer; color: #6f6f6f; }
 .ce-for { margin-left: 0.3em; color: #8a8a8a; font-weight: 400; }
 .ce-target-row .cs-role-count, .ce-target-row .cs-role-open { margin-left: auto; }

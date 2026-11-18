@@ -5,7 +5,9 @@ import { popOverlay } from './dialog-lifecycle.svelte.js';
 
 export const csOverlay = popOverlay({});
 
-const blank = () => ({ name: '', description: '', iconSrc: null, voiceRelays: [] });
+// systemChannel: the chat channel Join/Leave lines go to, null while they're off.
+// landingChannel: the channel new members open first, null for the default.
+const blank = () => ({ name: '', description: '', iconSrc: null, voiceRelays: [], systemChannel: null, landingChannel: null });
 // bannerPath: a picked file awaiting upload, with its displayable copy, the crop to make of it
 // on save (source pixels, null when it already fits) and its size for previewing that crop.
 // bannerRemoved: the saved banner goes on save.
@@ -17,8 +19,10 @@ const s = $state({
     saved: blank(),
     // iconPath: a picked file awaiting upload; iconPreview: its displayable copy; iconCrop: the part to upload;
     // iconRemoved: the saved icon goes on save.
-    draft: { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [], relays: [], ...noBanner() },
+    draft: { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [], relays: [], systemChannel: null, landingChannel: null, ...noBanner() },
     relays: [],
+    // The channels the pickers offer: { channel_id, name, private, view }.
+    pickChannels: [],
     canEdit: false,
     // Bans act at once, not through the save bar: the list IS the published state.
     canBan: false,
@@ -56,6 +60,16 @@ export function csVoiceRelaysDirty() {
     return s.draft.voiceRelays.join() !== s.saved.voiceRelays.join();
 }
 
+/** Whether the System Messages draft differs from the published choice. */
+export function csSystemChannelDirty() {
+    return s.draft.systemChannel !== s.saved.systemChannel;
+}
+
+/** Whether the Landing Channel draft differs from the published choice. */
+export function csLandingChannelDirty() {
+    return s.draft.landingChannel !== s.saved.landingChannel;
+}
+
 /** Whether the Hosting Relays draft differs from the published list. */
 export function csRelaysDirty() {
     return s.draft.relays.join() !== s.relays.join();
@@ -80,7 +94,7 @@ export function csRoleEditDirty() {
 
 /** Anything unsaved, anywhere: what the save bar and the close refusal answer to. */
 export function csDirty() {
-    return csOverviewDirty() || csVoiceRelaysDirty() || csRelaysDirty() || csRoleOrderDirty() || csRoleEditDirty();
+    return csOverviewDirty() || csVoiceRelaysDirty() || csSystemChannelDirty() || csLandingChannelDirty() || csRelaysDirty() || csRoleOrderDirty() || csRoleEditDirty();
 }
 
 export function csSetRolesView(view) { s.roles.view = view; }
@@ -106,8 +120,9 @@ export function csOpen(communityId) {
     s.communityId = communityId;
     s.loading = !!communityId;
     s.saved = blank();
-    s.draft = { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [], relays: [], ...noBanner() };
+    s.draft = { name: '', description: '', iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [], relays: [], systemChannel: null, landingChannel: null, ...noBanner() };
     s.relays = [];
+    s.pickChannels = [];
     s.canEdit = false;
     s.canBan = false;
     s.canRoles = false;
@@ -122,10 +137,11 @@ export function csOpen(communityId) {
     s.query = '';
 }
 
-export function csLoaded({ name, description, iconSrc, relays, voiceRelays, canEdit, canBan, canRoles, canAudit }) {
-    s.saved = { name, description, iconSrc, voiceRelays: voiceRelays || [] };
-    s.draft = { name, description, iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [...s.saved.voiceRelays], relays: [...(relays || [])], ...noBanner() };
+export function csLoaded({ name, description, iconSrc, relays, voiceRelays, systemChannel, landingChannel, pickChannels, canEdit, canBan, canRoles, canAudit }) {
+    s.saved = { name, description, iconSrc, voiceRelays: voiceRelays || [], systemChannel: systemChannel || null, landingChannel: landingChannel || null };
+    s.draft = { name, description, iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [...s.saved.voiceRelays], relays: [...(relays || [])], systemChannel: s.saved.systemChannel, landingChannel: s.saved.landingChannel, ...noBanner() };
     s.relays = relays || [];
+    s.pickChannels = pickChannels || [];
     s.canEdit = !!canEdit;
     s.canBan = !!canBan;
     s.canRoles = !!canRoles;
@@ -160,7 +176,7 @@ export function csRemoveBans(npubs) {
 export function csSetDraft(patch) { Object.assign(s.draft, patch); }
 
 export function csReset() {
-    s.draft = { name: s.saved.name, description: s.saved.description, iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [...s.saved.voiceRelays], relays: [...s.relays], ...noBanner() };
+    s.draft = { name: s.saved.name, description: s.saved.description, iconPath: null, iconPreview: null, iconCrop: null, iconRemoved: false, voiceRelays: [...s.saved.voiceRelays], relays: [...s.relays], systemChannel: s.saved.systemChannel, landingChannel: s.saved.landingChannel, ...noBanner() };
     s.roles.order = null;
     const e = s.roles.edit;
     // A role never created has nothing to fall back to: resetting discards it.
@@ -184,6 +200,14 @@ export function csCommitted(patch) {
     if ('voiceRelays' in patch) {
         s.saved.voiceRelays = patch.voiceRelays;
         s.draft.voiceRelays = [...patch.voiceRelays];
+    }
+    if ('systemChannel' in patch) {
+        s.saved.systemChannel = patch.systemChannel;
+        s.draft.systemChannel = patch.systemChannel;
+    }
+    if ('landingChannel' in patch) {
+        s.saved.landingChannel = patch.landingChannel;
+        s.draft.landingChannel = patch.landingChannel;
     }
     if ('relays' in patch) {
         s.relays = patch.relays;

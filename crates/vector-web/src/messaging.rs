@@ -158,6 +158,8 @@ pub fn get_system_events(conversation_id: &str) -> Result<Value, String> {
                     "event_type": tag("event-type").and_then(|v| v.parse::<u8>().ok()).unwrap_or(255),
                     "content": event.content,
                     "member_npub": tag("member").unwrap_or_default(),
+                    "invited_by": tag("invited-by").as_deref().and_then(vector_core::community::inviter_npub),
+                    "invited_label": tag("invited-label"),
                     "at": event.created_at * 1000,
                 })
             })

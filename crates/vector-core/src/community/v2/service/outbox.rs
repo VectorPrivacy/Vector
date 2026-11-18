@@ -40,6 +40,28 @@ pub(super) async fn on_relays<T: Transport + ?Sized>(transport: &T, plane: &Keys
     transport.fetch_plane(plane, &query, relays).await.is_ok_and(|f| f.events.iter().any(|e| e.id == wrap.id))
 }
 
+/// How soon a send must be refused to count as never having reached a socket.
+const REFUSED_AT_ONCE: Duration = Duration::from_secs(3);
+/// How long the pool gets to reconnect before such a send goes once more.
+const RECONNECT_GRACE: Duration = Duration::from_secs(4);
+
+/// A send refused at once found no socket to go out on (a phone back from the file picker,
+/// a laptop just woken): the pool is reconnecting, so it goes once more before it is called
+/// failed. One that waited its relays out is not held up a second time.
+pub(super) async fn again_once_reconnected<T: Transport + ?Sized>(
+    transport: &T,
+    plane: &Keys,
+    wrap: &Event,
+    relays: &[String],
+    began: web_time::Instant,
+) -> bool {
+    if began.elapsed() > REFUSED_AT_ONCE {
+        return false;
+    }
+    crate::rt::time::sleep(RECONNECT_GRACE).await;
+    transport.publish(wrap, relays).await.is_ok() || on_relays(transport, plane, wrap, relays).await
+}
+
 /// Resend a kept message in the background, backing off, until it lands or is given up on.
 pub(super) fn resend_later(message_id: String) {
     if crate::state::nostr_client().is_none() {
@@ -99,6 +121,26 @@ pub fn confirm_in(state: &mut ChatState, message_id: &str) -> bool {
     true
 }
 
+/// Mark the row shown for a send failed, under the id its message was signed with. The row
+/// on screen is then that message: a retry resends it as itself, a delete takes it back, and
+/// its landing later shows it as sent. Returns the row as it now stands.
+pub async fn mark_unsent(channel_hex: &str, shown_id: &str, unsent: &Unsent) -> Option<crate::types::Message> {
+    let mut state = crate::state::STATE.lock().await;
+    let id = match unsent.kept.as_deref() {
+        Some(signed) if signed != shown_id => {
+            state.finalize_pending_message(channel_hex, shown_id, signed);
+            signed
+        }
+        _ => shown_id,
+    };
+    state
+        .update_message(id, |m| {
+            m.set_failed(true);
+            m.set_pending(false);
+        })
+        .map(|(_, msg)| msg)
+}
+
 async fn set_mark(message_id: &str, failed: bool) {
     let row = crate::state::STATE.lock().await.update_message(message_id, |m| {
         m.set_failed(failed);
@@ -127,17 +169,28 @@ pub async fn retry_unconfirmed(message_id: &str) -> bool {
 }
 
 /// Give up on a failed message: stop resending it, and take back any copy that landed.
-pub async fn discard_unconfirmed(channel_hex: &str, message_id: &str) {
-    if kept(message_id).is_none() {
-        return;
+/// Returns whether nothing of it can still be read: no message was ever signed under this
+/// id, or its delete is on a relay. A failed mark is no proof it never landed, so a signed
+/// message is taken back whether or not it is still kept.
+pub async fn discard_unconfirmed(channel_hex: &str, message_id: &str) -> bool {
+    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    discard_unconfirmed_over(&transport, channel_hex, message_id).await
+}
+
+pub(super) async fn discard_unconfirmed_over<T: Transport + ?Sized>(transport: &T, channel_hex: &str, message_id: &str) -> bool {
+    if crate::simd::hex::hex_to_bytes_32_checked(message_id).is_none() {
+        return true;
     }
     release(message_id);
-    let Ok(Some(community_hex)) = crate::db::community::community_id_for_channel(channel_hex) else { return };
-    let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&community_hex).map(crate::community::CommunityId) else { return };
-    let Ok(Some(community)) = crate::db::community::load_community_v2(&cid) else { return };
-    let Some(ch) = crate::simd::hex::hex_to_bytes_32_checked(channel_hex).map(ChannelId) else { return };
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    if let Err(e) = delete_own(&transport, &community, &ch, message_id, crate::community::v2::kind::MESSAGE).await {
-        crate::log_net_fail!("[Send] couldn't take back an unconfirmed message: {e}");
+    let Ok(Some(community_hex)) = crate::db::community::community_id_for_channel(channel_hex) else { return false };
+    let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(&community_hex).map(crate::community::CommunityId) else { return false };
+    let Ok(Some(community)) = crate::db::community::load_community_v2(&cid) else { return false };
+    let Some(ch) = crate::simd::hex::hex_to_bytes_32_checked(channel_hex).map(ChannelId) else { return false };
+    match delete_own(transport, &community, &ch, message_id, crate::community::v2::kind::MESSAGE).await {
+        Ok(_) => true,
+        Err(e) => {
+            crate::log_net_fail!("[Send] couldn't take back an unconfirmed message: {e}");
+            false
+        }
     }
 }

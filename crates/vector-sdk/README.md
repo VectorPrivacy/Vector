@@ -109,6 +109,13 @@ let mods = community.create_role(
 let support = community.create_category("Support").await?;
 let tickets = community.create_channel_with("tickets", NewChannel::default().private().in_category(support.id())).await?;
 tickets.set_overwrite(Overwrite::role(&mods).allow(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)).await?;
+let billing = tickets.duplicate("billing").await?;   // same settings and rules, no messages
+
+// A public Channel made in a Category follows the Category's rules: set them there, or give
+// the Channel its own with `sync_permissions(None)`. A rule set on a synced Channel is an error.
+let news = community.create_channel_with("news", NewChannel::default().in_category(support.id())).await?;
+news.sync_permissions(None).await?;
+news.set_read_only(true).await?;
 
 member.add_role(&mods).await?;
 member.timeout(std::time::Duration::from_secs(600)).await?;
@@ -120,9 +127,11 @@ for entry in community.audit_log().await?.entries { println!("{:?} by {:?}", ent
 Also on `Community`: `roles()`, `role_named(..)`, `reorder_roles(..)`, `set_everyone_permissions(..)`,
 `categories()`, `channel_infos()`, `timeouts()`, `nicknames()`, `invite_links()` /
 `revoke_invite(..)`, `relays()` / `move_relays(..)`, `voice_relays()` / `set_voice_relays(..)`,
+`system_channel()` / `set_system_channel(..)` (where join and leave messages go, or off),
+`landing_channel()` / `set_landing_channel(..)` (the Channel new members open first),
 `icon()` / `set_icon(bytes)` / `banner()` / `set_banner(bytes)` (images are stripped of metadata
 first), and `refound(..)` / `repair_roster()` for recovery. On a Channel: `info()`, `rename`,
-`set_topic`, `set_view("forum")`, `set_read_only(true)` (an announcement channel), `move_to(..)`, `overwrites()`, `sync_permissions(..)`,
+`set_topic`, `set_view("forum")`, `set_read_only(true)` (an announcement channel), `move_to(..)`, `overwrites()`, `synced_to()`, `sync_permissions(..)`,
 `permissions_of(npub)`, `pins()`. Create and join with `bot.create_community(name, NewCommunity::default())`,
 `bot.join(link)` and `bot.preview_link(link)`.
 

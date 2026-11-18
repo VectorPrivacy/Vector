@@ -35,6 +35,76 @@ pub struct ChannelV2 {
     pub sealed: Option<SealedMeta>,
 }
 
+/// The `custom` key a Community's system-message settings live under (CORD-02 §6).
+pub const SYSTEM_MESSAGES: &str = "system_messages";
+
+/// The `custom` key naming the channel new members open first: `{ "channel": "<64-hex>" }`.
+pub const LANDING: &str = "landing";
+
+/// What `custom.system_messages.channel` says: absent, or naming no channel, is the default;
+/// `""` turns Join/Leave lines off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemChannel {
+    Default,
+    Off,
+    Named(ChannelId),
+}
+
+/// Where an account keeps a Community's Join/Leave lines (see [`CommunityV2::presence_home`]).
+#[derive(Debug, Clone, Copy)]
+pub struct PresenceHome<'a> {
+    pub channel: &'a ChannelV2,
+    pub shown: bool,
+}
+
+/// Point `meta`'s Join/Leave lines at `channel`, or turn them off with `None`. Every other
+/// `system_messages` field, and the rest of `custom`, stays as it was.
+pub fn set_system_channel_in(meta: &mut super::control::CommunityMetadata, channel: Option<&ChannelId>) {
+    let named = channel.map_or_else(String::new, |c| crate::simd::hex::bytes_to_hex_32(&c.0));
+    set_custom_channel(meta, SYSTEM_MESSAGES, Some(named));
+}
+
+/// The channel new members open first, or `None` for the default. Every other `landing`
+/// field, and the rest of `custom`, stays as it was.
+pub fn set_landing_channel_in(meta: &mut super::control::CommunityMetadata, channel: Option<&ChannelId>) {
+    set_custom_channel(meta, LANDING, channel.map(|c| crate::simd::hex::bytes_to_hex_32(&c.0)));
+}
+
+/// Write `custom.<key>.channel`, or take it away with `None`, leaving the object's other fields.
+fn set_custom_channel(meta: &mut super::control::CommunityMetadata, key: &str, channel: Option<String>) {
+    let custom = meta.custom.get_or_insert_with(Default::default);
+    let entry = custom.entry(key).or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    if let Some(fields) = entry.as_object_mut() {
+        match channel {
+            Some(c) => {
+                fields.insert("channel".into(), serde_json::Value::String(c));
+            }
+            None => {
+                fields.remove("channel");
+            }
+        }
+        if fields.is_empty() {
+            custom.remove(key);
+        }
+    }
+    if custom.is_empty() {
+        meta.custom = None;
+    }
+}
+
+/// A public text or forum channel: somewhere a new member can open first.
+pub fn can_land_in(c: &ChannelV2) -> bool {
+    !c.private && c.view() != ChannelView::Voice
+}
+
+/// Chat channels take Join/Leave lines; a forum's timeline and a voice channel don't.
+pub fn takes_system_lines(c: &ChannelV2) -> bool {
+    c.view() == ChannelView::Chat
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SealedMeta {
     pub epoch: u64,
@@ -466,6 +536,69 @@ impl CommunityV2 {
             .or_else(|| self.channels.first())
     }
 
+    /// Where its managers asked for Join/Leave lines (`custom.system_messages.channel`).
+    pub fn system_channel(&self) -> SystemChannel {
+        match self.custom_channel(SYSTEM_MESSAGES) {
+            None => SystemChannel::Default,
+            Some("") => SystemChannel::Off,
+            Some(hex) => crate::simd::hex::hex_to_bytes_32_checked(hex).map_or(SystemChannel::Default, |id| SystemChannel::Named(ChannelId(id))),
+        }
+    }
+
+    /// `custom.<key>.channel`, as written.
+    fn custom_channel(&self, key: &str) -> Option<&str> {
+        self.meta_custom.as_ref().and_then(|c| c.get(key)).and_then(|s| s.get("channel")).and_then(|v| v.as_str())
+    }
+
+    /// The channel its managers chose for new members to open first, while it stands as a
+    /// public text or forum channel: a joiner holds no private channel's key on arrival.
+    /// `None` is the default, the first channel a member can read.
+    pub fn landing_channel(&self) -> Option<&ChannelV2> {
+        let id = self.custom_channel(LANDING).and_then(crate::simd::hex::hex_to_bytes_32_checked)?;
+        self.channel(&ChannelId(id)).filter(|c| can_land_in(c))
+    }
+
+    /// Where Join/Leave lines go when nobody chose: the primary channel's rule (one named
+    /// general, else the oldest), over public chat channels first, so staff who read a private
+    /// one land where everyone else does.
+    pub fn default_system_channel(&self) -> Option<&ChannelV2> {
+        let public = |c: &&ChannelV2| takes_system_lines(c) && !c.private;
+        let readable = |c: &&ChannelV2| takes_system_lines(c) && !(c.private && c.key.is_none());
+        self.channels
+            .iter()
+            .filter(public)
+            .find(|c| c.name.eq_ignore_ascii_case("general"))
+            .or_else(|| self.channels.iter().find(public))
+            .or_else(|| self.channels.iter().find(readable))
+    }
+
+    /// The channel Join/Leave lines go to, readable or not: the chosen one while it still
+    /// stands as a chat channel, else the default. `None` while they're off.
+    pub fn system_lines_target(&self) -> Option<&ChannelV2> {
+        match self.system_channel() {
+            SystemChannel::Off => None,
+            SystemChannel::Named(id) => self.channel(&id).filter(|c| takes_system_lines(c)).or_else(|| self.default_system_channel()),
+            SystemChannel::Default => self.default_system_channel(),
+        }
+    }
+
+    /// Where this account keeps the Join/Leave lines and whether it shows them. They're
+    /// always kept, since the member list reads them, so lines that are off or bound for a
+    /// channel this account can't read rest hidden in the default.
+    pub fn presence_home(&self) -> Option<PresenceHome<'_>> {
+        let readable = |c: &ChannelV2| !(c.private && c.key.is_none());
+        let keeper = || self.default_system_channel().or_else(|| self.primary_channel());
+        match self.system_lines_target() {
+            Some(channel) if readable(channel) => Some(PresenceHome { channel, shown: true }),
+            Some(_) => keeper().map(|channel| PresenceHome { channel, shown: false }),
+            // Off, or no chat channel to take them: with none, the primary shows them as before.
+            None => {
+                let on = self.system_channel() != SystemChannel::Off;
+                keeper().map(|channel| PresenceHome { channel, shown: on && readable(channel) })
+            }
+        }
+    }
+
     /// The encryption secret + epoch that address a channel's Chat Plane: the
     /// `community_root` at `root_epoch` for a Public channel, the channel's own
     /// key at its own epoch for a Private one (CORD-03 §1).
@@ -537,6 +670,143 @@ mod tests {
         assert_eq!(ch.key, None, "a public channel stores no key");
         // A public channel's secret is the community_root at the root epoch.
         assert_eq!(c.channel_secret(ch), (c.community_root, Epoch(0)));
+    }
+
+    fn lines_fixture() -> CommunityV2 {
+        let owner = Keys::generate();
+        let meta = super::super::control::CommunityMetadata { name: "T".into(), ..Default::default() };
+        let g = super::super::control::genesis(&owner, meta, 1_000).unwrap();
+        CommunityV2::from_genesis(&g, "T", None, vec!["wss://r".into()], 0)
+    }
+
+    fn chan(id: u8, name: &str, view: Option<&str>) -> ChannelV2 {
+        let mut meta_extra = serde_json::Map::new();
+        if let Some(v) = view {
+            meta_extra.insert("view".into(), serde_json::json!(v));
+        }
+        ChannelV2 { id: ChannelId([id; 32]), name: name.into(), private: false, key: None, epoch: Epoch(0), voice: None, meta_custom: None, meta_extra, writers: None, sealed: None }
+    }
+
+    fn lines_to(c: &mut CommunityV2, channel: Option<&ChannelId>) {
+        let mut meta = c.metadata();
+        set_system_channel_in(&mut meta, channel);
+        c.meta_custom = meta.custom;
+    }
+
+    #[test]
+    fn join_lines_default_to_general_then_the_oldest_public_chat_channel() {
+        let mut c = lines_fixture();
+        assert_eq!(c.system_channel(), SystemChannel::Default);
+        assert_eq!(c.system_lines_target().unwrap().name, "general");
+
+        // Stored oldest first. A renamed general stays the oldest; a private channel staff can
+        // read comes before it in the sidebar, but every member must land on the same one.
+        c.channels[0].name = "☕┊General".into();
+        let mut team = chan(4, "team", None);
+        team.private = true;
+        team.key = Some([1; 32]);
+        c.channels.insert(0, team);
+        c.channels.insert(1, chan(5, "alpha", Some("voice")));
+        c.channels.insert(2, chan(6, "beta", Some("forum")));
+        c.channels.push(chan(8, "chat", None));
+        assert_eq!(c.default_system_channel().unwrap().name, "☕┊General", "public before private, oldest first, chat only");
+
+        c.channels.push(chan(10, "General", None));
+        assert_eq!(c.default_system_channel().unwrap().name, "General", "a channel named general wins over the oldest");
+        let home = c.presence_home().unwrap();
+        assert!(home.shown && home.channel.name == "General");
+
+        // With no public chat channel, a readable private one takes them.
+        c.channels.retain(|ch| ch.private || ch.view() != ChannelView::Chat);
+        assert_eq!(c.default_system_channel().unwrap().name, "team");
+    }
+
+    #[test]
+    fn join_lines_follow_the_chosen_channel_while_it_takes_them() {
+        let mut c = lines_fixture();
+        c.channels.push(chan(5, "welcome", None));
+        c.channels.push(chan(6, "lounge", Some("voice")));
+        let welcome = ChannelId([5; 32]);
+
+        lines_to(&mut c, Some(&welcome));
+        assert_eq!(c.system_channel(), SystemChannel::Named(welcome));
+        let home = c.presence_home().unwrap();
+        assert!(home.shown && home.channel.name == "welcome");
+
+        lines_to(&mut c, Some(&ChannelId([6; 32])));
+        assert_eq!(c.system_lines_target().unwrap().name, "general", "a voice channel can't take them");
+        lines_to(&mut c, Some(&ChannelId([42; 32])));
+        assert_eq!(c.system_lines_target().unwrap().name, "general", "nor a channel that's gone");
+
+        lines_to(&mut c, None);
+        assert_eq!(c.system_channel(), SystemChannel::Off);
+        assert!(c.system_lines_target().is_none());
+        let home = c.presence_home().unwrap();
+        assert!(!home.shown && home.channel.name == "general", "off: kept, unseen, in the default");
+    }
+
+    #[test]
+    fn join_lines_bound_for_an_unreadable_channel_wait_hidden_in_the_default() {
+        let mut c = lines_fixture();
+        let mut staff = chan(5, "staff", None);
+        staff.private = true;
+        c.channels.push(staff);
+        lines_to(&mut c, Some(&ChannelId([5; 32])));
+        assert_eq!(c.system_lines_target().unwrap().name, "staff", "the setting names it for everyone");
+        let home = c.presence_home().unwrap();
+        assert!(!home.shown && home.channel.name == "general");
+
+        c.channels[1].key = Some([1; 32]);
+        let home = c.presence_home().unwrap();
+        assert!(home.shown && home.channel.name == "staff", "its key arrived");
+    }
+
+    #[test]
+    fn the_landing_channel_is_the_chosen_one_while_it_can_be_opened() {
+        let mut c = lines_fixture();
+        c.channels.push(chan(5, "rules", Some("forum")));
+        c.channels.push(chan(6, "lounge", Some("voice")));
+        let mut staff = chan(7, "staff", None);
+        staff.private = true;
+        staff.key = Some([1; 32]);
+        c.channels.push(staff);
+        let land = |c: &mut CommunityV2, ch: Option<&ChannelId>| {
+            let mut meta = c.metadata();
+            set_landing_channel_in(&mut meta, ch);
+            c.meta_custom = meta.custom;
+        };
+        assert!(c.landing_channel().is_none(), "unset: the default");
+        land(&mut c, Some(&ChannelId([5; 32])));
+        assert_eq!(c.landing_channel().unwrap().name, "rules", "a forum opens fine");
+        land(&mut c, Some(&ChannelId([6; 32])));
+        assert!(c.landing_channel().is_none(), "a voice channel isn't somewhere to land");
+        land(&mut c, Some(&ChannelId([7; 32])));
+        assert!(c.landing_channel().is_none(), "nor a private one, readable here or not");
+        land(&mut c, Some(&ChannelId([42; 32])));
+        assert!(c.landing_channel().is_none(), "nor a channel that's gone");
+        land(&mut c, None);
+        assert!(c.meta_custom.is_none(), "back to the default leaves nothing behind");
+    }
+
+    #[test]
+    fn clearing_the_landing_channel_keeps_what_else_custom_holds() {
+        let mut meta = super::super::control::CommunityMetadata { name: "T".into(), ..Default::default() };
+        meta.custom = serde_json::json!({ "rules": "be kind", "landing": { "channel": "aa", "note": "hi" } }).as_object().cloned();
+        set_landing_channel_in(&mut meta, None);
+        let custom = meta.custom.unwrap();
+        assert_eq!(custom["rules"], "be kind");
+        assert_eq!(custom["landing"], serde_json::json!({ "note": "hi" }), "only the channel goes");
+    }
+
+    #[test]
+    fn setting_the_system_channel_keeps_what_else_custom_holds() {
+        let mut meta = super::super::control::CommunityMetadata { name: "T".into(), ..Default::default() };
+        meta.custom = serde_json::json!({ "rules": "be kind", "system_messages": { "channel": "", "welcome": "hi" } }).as_object().cloned();
+        set_system_channel_in(&mut meta, Some(&ChannelId([5; 32])));
+        let custom = meta.custom.unwrap();
+        assert_eq!(custom["rules"], "be kind");
+        assert_eq!(custom["system_messages"]["welcome"], "hi", "a newer client's field survives");
+        assert_eq!(custom["system_messages"]["channel"], crate::simd::hex::bytes_to_hex_32(&[5; 32]));
     }
 
     #[test]

@@ -17,6 +17,29 @@ static CANCELLED_TRANSFERS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| 
 
 /// The error a cancelled transfer returns. Callers must not retry on it.
 pub const TRANSFER_CANCELLED: &str = "Download cancelled";
+/// A media server refused the request: asking it again won't change the answer.
+pub const SERVER_REFUSED: &str = "Media server returned an error status";
+/// A media server holds no such file (404, 410). When every source says so, the file is gone.
+pub const NOT_ON_SERVER: &str = "File not found on the media server";
+/// What a download reports once every source answered [`NOT_ON_SERVER`].
+pub const GONE_EVERYWHERE: &str = "No longer on any media server";
+
+/// Why a media server refused. The file is missing when the server says so itself, or when
+/// the privacy proxy passes that answer on from the source it asked.
+async fn refusal(res: vector_core::net::Resp) -> &'static str {
+    let status = res.status().as_u16();
+    if matches!(status, 404 | 410) {
+        return NOT_ON_SERVER;
+    }
+    if status == 502 && res.content_length().is_some_and(|n| n <= 4096) {
+        if let Ok(body) = res.json::<serde_json::Value>().await {
+            if matches!(body.get("source_status").and_then(|s| s.as_u64()), Some(404 | 410)) {
+                return NOT_ON_SERVER;
+            }
+        }
+    }
+    SERVER_REFUSED
+}
 
 /// Ask the transfer reporting under `id` to stop at its next chunk.
 pub fn cancel_transfer(id: &str) {
@@ -313,7 +336,7 @@ async fn download_into(
             }
             _ => {
                 vector_core::log_debug!("[AttachmentDownload] HTTP {} for {}", status, fetch_url);
-                return Err("Media server returned an error status");
+                return Err(refusal(res).await);
             }
         };
         let total = total.or_else(|| res.content_length().map(|n| n + start));
@@ -521,7 +544,7 @@ async fn download_with_streaming(
         // A 404/expired blob is a normal outcome (favicons, missing previews, GC'd
         // media) — debug, not a warning, so the default log isn't flooded.
         vector_core::log_debug!("[AttachmentDownload] HTTP {} for {}", res.status().as_u16(), url);
-        return Err("Media server returned an error status".into());
+        return Err(refusal(res).await.into());
     }
 
     let total_size = res.content_length().filter(|&n| n > 0);
