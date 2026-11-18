@@ -2085,7 +2085,8 @@ impl VectorApp {
             }
             MenuAct::ChannelRead(id) => {
                 if self.live {
-                    let rx = backend::run(messaging::mark_as_read(id, None));
+                    let theirs = self.store.borrow().chat(&id).and_then(|c| data::newest_theirs(&c.messages));
+                    let rx = backend::run(messaging::mark_as_read(id, theirs));
                     cx.spawn(async move |this, cx| {
                         let _ = rx.await;
                         this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
@@ -4204,7 +4205,9 @@ impl VectorApp {
         messaging::set_active_chat(Some(chat_id.clone()));
         let rx = backend::run(async move {
             let views = messaging::message_views(chat_id.clone(), 200, 0).await;
-            messaging::mark_as_read(chat_id, None).await;
+            // Newest first: the page's newest message from someone else.
+            let theirs = views.as_ref().ok().and_then(|v| v.iter().find(|m| !m.mine)).map(|m| m.id.clone());
+            messaging::mark_as_read(chat_id, theirs).await;
             views
         });
         cx.spawn(async move |this, cx| {
@@ -8437,6 +8440,7 @@ fn chat_list(
                         }
                     })
                     .size_full()
+                    .pb(px(if app.is_slim { 16. } else { 8. }))
                     .edge_fade(px(if app.is_slim { 0. } else { 24. })),
                 )
                 .child(kit::pump()),
@@ -9745,12 +9749,13 @@ impl VectorApp {
         let store = self.store.borrow();
         let unread = store.chat(&id).filter(|c| c.unread_from.is_empty()).map_or(0, crate::data::unread_count);
         let newest = store.chat(&id).and_then(|c| c.messages.last()).map(|m| m.id.clone());
+        let theirs = store.chat(&id).and_then(|c| crate::data::newest_theirs(&c.messages));
         drop(store);
         if unread == 0 || newest.is_none() || self.read_sent == newest {
             return;
         }
         self.read_sent = newest;
-        let rx = backend::run(messaging::mark_as_read(id.to_string(), None));
+        let rx = backend::run(messaging::mark_as_read(id.to_string(), theirs));
         cx.spawn(async move |this, cx| {
             let _ = rx.await;
             this.update(cx, |this, cx| this.refresh_unread(cx)).ok();

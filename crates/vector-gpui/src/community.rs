@@ -661,6 +661,7 @@ pub fn sidebar(
                 .min_h_0()
                 .overflow_y_scroll()
                 .edge_fade(px(if slim { 0. } else { 24. }))
+                .pb(px(if slim { 16. } else { 8. }))
                 .on_mouse_down(gpui::MouseButton::Right, {
                     let on = on.clone();
                     move |e, w, cx| on(Act::ChannelsMenu(e.position), w, cx)

@@ -1081,6 +1081,12 @@ pub fn last_activity(chat: &SerializableChat) -> u64 {
         .unwrap_or(chat.created_at * 1000)
 }
 
+/// `findLatestContactMessage`: what a read marks, since the backend's copy of a chat can hold
+/// only our own newest message and would then mark nothing.
+pub fn newest_theirs(messages: &[vector_core::Message]) -> Option<String> {
+    messages.iter().rev().find(|m| !m.mine).map(|m| m.id.clone())
+}
+
 /// Messages after `last_read` that someone else sent: `computeListRowUnreadCount`.
 pub fn unread_count(chat: &SerializableChat) -> usize {
     let Some(i) = chat.messages.iter().rposition(|m| m.id == chat.last_read) else {

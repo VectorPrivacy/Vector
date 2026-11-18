@@ -430,7 +430,8 @@ impl VectorApp {
         }
         cx.notify();
         if self.live {
-            let rx = backend::run(backend::messaging::mark_as_read(id, None));
+            let theirs = self.store.borrow().chat(&id).and_then(|c| crate::data::newest_theirs(&c.messages));
+            let rx = backend::run(backend::messaging::mark_as_read(id, theirs));
             cx.spawn(async move |this, cx| {
                 let _ = rx.await;
                 this.update(cx, |this, cx| this.refresh_unread(cx)).ok();
