@@ -449,6 +449,9 @@ pub fn system_lines(chat_id: &str) -> Vec<crate::data::SysLine> {
         .map(|e| crate::data::SysLine {
             kind: tag(&e, "event-type").and_then(|t| t.parse().ok()).unwrap_or(255),
             npub: tag(&e, "member").unwrap_or_default(),
+            via: tag(&e, "invited-label")
+                .filter(|l| !l.is_empty())
+                .zip(tag(&e, "invited-by").as_deref().and_then(vector_core::community::inviter_npub)),
             at: e.created_at * 1000,
             id: e.id,
         })

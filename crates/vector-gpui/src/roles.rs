@@ -1021,19 +1021,15 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                         .flatten()
                         .filter(|c| c["private"].as_bool().unwrap_or(false))
                         .filter_map(|c| {
-                            let id: &'static str =
-                                Box::leak(c["channel_id"].as_str()?.to_string().into_boxed_str());
-                            let label: &'static str = Box::leak(
-                                format!("#{} only", c["name"].as_str().unwrap_or(""))
-                                    .into_boxed_str(),
-                            );
+                            let id = crate::kit::interned(c["channel_id"].as_str()?);
+                            let label = crate::kit::interned(&format!("#{} only", c["name"].as_str().unwrap_or("")));
                             Some(crate::kit::Choice { value: id, label })
                         }),
                 )
                 .collect();
                 let (t, pk) = (on.clone(), on.clone());
                 display = display
-                    .child(div().mt(px(10.)).child(crate::kit::select("role-access", 400., &choices, e.draft.channel_id.as_deref().unwrap_or(""), r.access_open, move |w, cx| t(CsAct::Role(Act::AccessOpen), w, cx), move |v, w, cx| pk(CsAct::Role(Act::Access(v)), w, cx))))
+                    .child(div().mt(px(10.)).child(crate::kit::select_look("role-access", 400., 14., &choices, &[], e.draft.channel_id.as_deref().unwrap_or(""), r.access_open, crate::kit::SelectLook { priority: crate::commsettings::LIST_PRIORITY, ..Default::default() }, move |w, cx| t(CsAct::Role(Act::AccessOpen), w, cx), move |v, w, cx| pk(CsAct::Role(Act::Access(v)), w, cx))))
                     .child(hint("A role scoped to a private channel is that channel's access list: holding it is what lets someone read there. This can't be changed once the role exists.").mt(px(10.)));
             } else {
                 display = display.child(

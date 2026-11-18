@@ -450,6 +450,18 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
                 };
                 out.push(format!("{verb} the {f}"));
             }
+            "landing" => out.push(if new.and_then(|n| s(n, "kind")) == Some("channel") {
+                format!("New members start in {}", target_name(new, member))
+            } else {
+                "New members start in the default channel".into()
+            }),
+            "system_messages" => out.push(match new {
+                Some(Value::String(o)) if o == "off" => "Turned off join and leave messages".into(),
+                Some(n) if s(n, "kind") == Some("channel") => {
+                    format!("Join and leave messages go to {}", target_name(new, member))
+                }
+                _ => "Join and leave messages go to the default channel".into(),
+            }),
             f @ ("relays" | "voice_relays") => {
                 let kind = if f == "relays" {
                     "relay"

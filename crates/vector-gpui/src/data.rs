@@ -159,6 +159,10 @@ pub struct Community {
     pub members: Vec<String>,
     pub relays: Vec<String>,
     pub voice_relays: Vec<String>,
+    /// The chat channel Join/Leave lines go to; `None` while they're off.
+    pub system_channel: Option<String>,
+    /// The channel new members open first; `None` for the default.
+    pub landing_channel: Option<String>,
     /// Fixtures name local files; a live community's resolve into `Store::art`.
     pub icon: Option<String>,
     pub banner: Option<String>,
@@ -242,9 +246,11 @@ impl Community {
 
     /// The channel a Community opens on: its primary, else its first readable text channel.
     pub fn landing(&self) -> Option<&Channel> {
-        self.primary_channel
+        self.landing_channel
             .as_deref()
             .and_then(|id| self.channel(id))
+            .filter(|c| c.visible())
+            .or_else(|| self.primary_channel.as_deref().and_then(|id| self.channel(id)))
             .or_else(|| self.channels.iter().find(|c| !c.is_voice() && c.visible()))
     }
 }
@@ -292,6 +298,9 @@ pub struct Store {
     pub typing: HashMap<String, (Vec<String>, u64)>,
     /// Each chat's system lines (joins, leaves, wallpaper and Pins changes), oldest first.
     pub system: HashMap<String, Vec<SysLine>>,
+    /// Whether this account sees which invite link brought each member, by community: holding
+    /// Create Invites. Absent until asked.
+    pub invite_sight: HashMap<String, bool>,
     /// `fetch_emoji_pack_by_naddr`'s answers.
     pub fixture_packs: HashMap<String, vector_core::emoji_packs::EmojiPack>,
     pub fixture_market: Vec<vector_core::webxdc::MarketplaceApp>,
@@ -519,6 +528,7 @@ impl Store {
             fixture_embeds: f.embeds,
             typing: HashMap::new(),
             system: HashMap::new(),
+            invite_sight: HashMap::new(),
             fixture_packs: f.packs,
             fixture_market: f.marketplace,
             fixture_pivx: f.pivx,
@@ -585,6 +595,7 @@ impl Store {
             fixture_embeds: HashMap::new(),
             typing: HashMap::new(),
             system: HashMap::new(),
+            invite_sight: HashMap::new(),
             fixture_packs: HashMap::new(),
             fixture_market: Vec::new(),
             fixture_pivx: None,
@@ -1147,6 +1158,8 @@ pub struct SysLine {
     pub at: u64,
     pub kind: u8,
     pub npub: String,
+    /// The invite link that brought a joiner: its label, and its creator's npub.
+    pub via: Option<(String, String)>,
 }
 
 /// `systemEventSuffix`.

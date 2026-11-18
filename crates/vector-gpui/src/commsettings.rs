@@ -20,12 +20,26 @@ pub const DESCRIPTION_MAX: usize = 500;
 pub const RELAYS_MAX: usize = 5;
 pub const VOICE_RELAYS_MAX: usize = 8;
 pub const BANS_MAX: usize = 500;
+/// A dropdown's list draws over the card, which is itself deferred at 12.
+pub const LIST_PRIORITY: usize = 13;
 
 pub struct Saved {
     pub name: String,
     pub description: String,
     pub relays: Vec<String>,
     pub voice: Vec<String>,
+    /// The chat channel Join/Leave lines go to, `None` while they're off.
+    pub lines: Option<String>,
+    /// The channel new members open first, `None` for the default.
+    pub landing: Option<String>,
+}
+
+/// A channel the System Messages and Landing Channel pickers offer.
+pub struct PickChannel {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub private: bool,
+    pub chat: bool,
 }
 
 #[derive(Default)]
@@ -103,6 +117,11 @@ pub struct CommSettings {
     pub description: Entity<TextInput>,
     pub relays: Vec<String>,
     pub voice: Vec<String>,
+    pub lines: Option<String>,
+    pub landing: Option<String>,
+    pub pick: Vec<PickChannel>,
+    /// The picker open, by name.
+    pub open_select: Option<&'static str>,
     pub relay_input: Entity<TextInput>,
     pub voice_input: Entity<TextInput>,
     pub relay_edit: Option<(usize, Entity<TextInput>)>,
@@ -140,6 +159,8 @@ pub enum Act {
     Close,
     Section(&'static str),
     Anchor(&'static str, &'static str),
+    /// The wheel moved on from an anchor jumped to.
+    Scrolled,
     ClearSearch,
     AddRelay,
     RemoveRelay(usize),
@@ -148,6 +169,9 @@ pub enum Act {
     CancelEdit,
     AddVoice,
     RemoveVoice(usize),
+    Select(&'static str),
+    Lines(&'static str),
+    Landing(&'static str),
     Ban(String),
     BanAll,
     ClearBans,
@@ -188,6 +212,8 @@ impl CommSettings {
             || self.banner_pick.is_some()
             || self.icon_removed
             || self.banner_removed
+            || self.lines != self.saved.lines
+            || self.landing != self.saved.landing
     }
 
     pub fn roles_dirty(&self, cx: &App) -> bool {
@@ -234,6 +260,16 @@ impl CommSettings {
                         "description",
                         "Description",
                         "description about bio summary",
+                    ),
+                    anchor(
+                        "system-messages",
+                        "System Messages",
+                        "system messages join leave joined left welcome channel",
+                    ),
+                    anchor(
+                        "landing-channel",
+                        "Landing Channel",
+                        "landing channel first start new members rules welcome verify captcha onboarding",
                     ),
                 ],
             ),
@@ -380,12 +416,36 @@ pub(crate) fn hint(text: impl Into<SharedString>) -> gpui::Div {
         .child(text.into())
 }
 
+thread_local! {
+    /// While Community Settings builds, its scroll: each block notes where it sits in it.
+    static SCROLL: std::cell::RefCell<Option<ScrollHandle>> = const { std::cell::RefCell::new(None) };
+    /// Each block's top in the scrolled content, in order, as last laid out.
+    static TOPS: std::cell::RefCell<Vec<gpui::Pixels>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Where the `ix`th block of the open section starts in its scroll.
+pub fn block_top(ix: usize) -> Option<gpui::Pixels> {
+    TOPS.with(|t| t.borrow().get(ix).copied())
+}
+
 pub(crate) fn block(first: bool, body: impl IntoElement) -> impl IntoElement {
+    let mark = SCROLL.with(|s| s.borrow().clone()).map(|h| {
+        gpui::canvas(
+            move |b, _, _| TOPS.with(|t| t.borrow_mut().push(b.origin.y - h.bounds().top() - h.offset().y)),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_0()
+    });
     div()
+        .relative()
         .pt(px(30.))
         .pb(px(34.))
         .when(!first, |d| d.border_t_1().border_color(c(0x262626)))
         .child(body)
+        .children(mark)
 }
 
 pub(crate) fn field_head(
@@ -716,6 +776,83 @@ fn overview(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                         .child(m.description.clone()),
                 ),
         ))
+        .child(block(
+            false,
+            div().child(heading("System Messages")).child(channel_select(
+                m,
+                "cs-lines",
+                "Join and leave messages",
+                "In a private channel, only the members who can read it see them.",
+                on,
+            )),
+        ))
+        .child(block(
+            false,
+            div().child(heading("Landing Channel")).child(channel_select(
+                m,
+                "cs-landing",
+                "Where new members start",
+                "It opens first after joining, until they pick another channel.",
+                on,
+            )),
+        ))
+        .into_any_element()
+}
+
+/// The System Messages or Landing Channel picker: its label, the `.vselect-fill`, a hint.
+fn channel_select(m: &CommSettings, id: &'static str, label: &'static str, help: &'static str, on: &OnAct) -> AnyElement {
+    let editable = m.can("manage_metadata");
+    let lines = id == "cs-lines";
+    let mut choices = Vec::with_capacity(m.pick.len() + 1);
+    let mut marks: Vec<(&'static str, &'static str)> = Vec::with_capacity(m.pick.len() + 1);
+    if !lines {
+        choices.push(crate::kit::Choice { value: "", label: "First channel they can read" });
+        marks.push(("", "icons/list.svg"));
+    }
+    // A joiner holds no private channel's key on arrival.
+    for ch in m.pick.iter().filter(|ch| if lines { ch.chat } else { !ch.private }) {
+        choices.push(crate::kit::Choice { value: ch.id, label: ch.name });
+        marks.push((ch.id, if ch.private { "icons/locked.svg" } else { "icons/channel-hash.svg" }));
+    }
+    if lines {
+        choices.push(crate::kit::Choice { value: "", label: "Off" });
+        marks.push(("", "icons/eye-off.svg"));
+    }
+    let lead = move |v: &'static str| {
+        let icon: &'static str = marks.iter().find(|(id, _)| *id == v).map_or("icons/channel-hash.svg", |(_, i)| *i);
+        div()
+            .size(px(18.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(svg().path(icon).size(px(18.)).text_color(c(0xb2b2b2)))
+            .into_any_element()
+    };
+    let value = if lines { m.lines.as_deref() } else { m.landing.as_deref() }.unwrap_or("");
+    let (toggle, pick) = (on.clone(), on.clone());
+    let select = crate::kit::select_look(
+        id,
+        f32::INFINITY,
+        14.,
+        &choices,
+        &[],
+        value,
+        editable && m.open_select == Some(id),
+        crate::kit::SelectLook { lead: Some(Rc::new(lead)), priority: LIST_PRIORITY, ..Default::default() },
+        move |w, cx| {
+            if editable {
+                toggle(Act::Select(id), w, cx)
+            }
+        },
+        move |v, w, cx| pick(if lines { Act::Lines(v) } else { Act::Landing(v) }, w, cx),
+    );
+    div()
+        .flex()
+        .flex_col()
+        .child(div().font_weight(FontWeight::MEDIUM).text_size(px(13.)).line_height(px(15.4)).text_color(c(0xcfcfcf)).child(label))
+        .child(div().when(!editable, |d| d.opacity(0.45)).child(select))
+        .child(hint(help).mt(px(10.)))
         .into_any_element()
 }
 
@@ -1351,12 +1488,15 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             .when(a.compacted, |d| d.child(hint("Some history from before a key rotation this device didn't live through can't be read back.")))
             .into_any_element()
     };
-    let filter = crate::kit::select(
+    let filter = crate::kit::select_look(
         "audit-filter",
         170.,
+        14.,
         crate::audit::FAMILIES,
+        &[],
         a.action,
         a.filter_open,
+        crate::kit::SelectLook { priority: LIST_PRIORITY, ..Default::default() },
         move |w, cx| toggle(Act::AuditFilter, w, cx),
         move |v, w, cx| pick(Act::AuditPick(v), w, cx),
     );
@@ -1623,10 +1763,20 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
         .iter()
         .find(|s| s.id == m.section)
         .unwrap_or(&sections[0]);
-    let active = m
-        .anchor
-        .filter(|a| section.anchors.iter().any(|x| x.id == *a))
-        .unwrap_or(section.anchors[0].id);
+    // The anchor jumped to, until a wheel moves on; else the block crossing the middle, or
+    // the last once the bottom is reached.
+    let active = m.anchor.filter(|a| section.anchors.iter().any(|x| x.id == *a)).unwrap_or_else(|| {
+        let last = section.anchors.len().saturating_sub(1);
+        let h = &m.scroll;
+        let (view, y) = (h.bounds(), -h.offset().y);
+        let mid = y + view.size.height / 2.;
+        let mut at = (0..=last).take_while(|&i| block_top(i).is_some_and(|t| t <= mid)).last().unwrap_or(0);
+        let max = h.max_offset().y;
+        if max > px(0.) && y >= max - px(2.) {
+            at = last;
+        }
+        section.anchors[at].id
+    });
     let name = store
         .community(&m.community)
         .map(|c| c.name.clone())
@@ -1677,6 +1827,8 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
         cx,
     )
     };
+    TOPS.with(|t| t.borrow_mut().clear());
+    SCROLL.with(|s| *s.borrow_mut() = Some(m.scroll.clone()));
     let body = match section.id {
         "overview" => overview(m, store, compact, on, cx),
         "relays" => relays(m, on, cx),
@@ -1684,6 +1836,8 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
         "roles" => crate::roles::view(m, store, on, cx),
         _ => audit(m, store, on, cx),
     };
+    SCROLL.with(|s| *s.borrow_mut() = None);
+    let wheel = on.clone();
     let close = on.clone();
     let main = div()
         .flex_1()
@@ -1755,6 +1909,7 @@ pub fn view(m: &CommSettings, store: &Store, compact: bool, on: &OnAct, cx: &App
                 .min_h_0()
                 .overflow_y_scroll()
                 .track_scroll(&m.scroll)
+                .when(m.anchor.is_some(), |d| d.on_scroll(move |_, w, cx| wheel(Act::Scrolled, w, cx)))
                 .child(
                     div()
                         .w_full()

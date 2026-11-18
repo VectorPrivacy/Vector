@@ -170,6 +170,20 @@ pub struct Choice {
     pub label: &'static str,
 }
 
+/// Text made at runtime for a select's `&'static` choices, kept once per distinct string.
+pub fn interned(text: &str) -> &'static str {
+    thread_local!(static SEEN: std::cell::RefCell<std::collections::HashSet<&'static str>> = Default::default());
+    SEEN.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        if let Some(s) = seen.get(text) {
+            return *s;
+        }
+        let s: &'static str = Box::leak(text.into());
+        seen.insert(s);
+        s
+    })
+}
+
 /// The `.vselect` dropdown: a button showing the choice, and its list when `open`.
 pub fn select(
     id: impl Into<ElementId>,

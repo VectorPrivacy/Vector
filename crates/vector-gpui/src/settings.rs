@@ -3232,19 +3232,6 @@ impl VoiceView {
     }
 }
 
-/// A label made at runtime for a static-labelled select; the set of labels is small and fixed.
-fn interned(text: String) -> &'static str {
-    use std::sync::{Mutex, OnceLock};
-    static LABELS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let mut set = LABELS.get_or_init(Default::default).lock().unwrap();
-    if let Some(l) = set.get(text.as_str()) {
-        return l;
-    }
-    let l: &'static str = Box::leak(text.into_boxed_str());
-    set.insert(l);
-    l
-}
-
 fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
     let Some(v) = s.voice.as_ref() else {
         return div().into_any_element();
@@ -3297,7 +3284,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
         .iter()
         .map(|m| crate::kit::Choice {
             value: m.name,
-            label: interned(if v.memory_mb < m.ram as u64 {
+            label: crate::kit::interned(&if v.memory_mb < m.ram as u64 {
                 format!("{} (Insufficient RAM)", m.display)
             } else if m.name == recommended {
                 format!("{} [Recommended]", m.display)

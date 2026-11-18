@@ -65,6 +65,8 @@ pub fn summarize(c: &CommunityV2) -> Value {
         "dissolved": c.dissolved,
         "relays": c.relays,
         "voice_relays": c.voice_relays(),
+        "system_channel": c.system_lines_target().map(|ch| bytes_to_hex_32(&ch.id.0)),
+        "landing_channel": c.landing_channel().map(|ch| bytes_to_hex_32(&ch.id.0)),
     })
 }
 
@@ -902,6 +904,28 @@ pub async fn set_voice_relays(
     db::scoped(async move {
         VectorCore
             .set_voice_relays(&community_id, &relays)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Send a community's Join/Leave lines to a chat channel, or `None` to turn them off.
+pub async fn set_system_channel(community_id: String, channel_id: Option<String>) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .set_system_channel(&community_id, channel_id.as_deref())
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Choose the channel new members open first, or `None` for the default.
+pub async fn set_landing_channel(community_id: String, channel_id: Option<String>) -> Result<(), String> {
+    db::scoped(async move {
+        VectorCore
+            .set_landing_channel(&community_id, channel_id.as_deref())
             .await
             .map_err(|e| e.to_string())
     })

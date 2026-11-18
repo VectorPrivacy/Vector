@@ -222,6 +222,8 @@ async fn presence(
             "event_id": event_id,
             "event_type": et.as_u8(),
             "member_pubkey": npub,
+            "invited_by": invited_by.and_then(vector_core::community::inviter_npub),
+            "invited_label": invited_label,
             "created_at_ms": created_at.saturating_mul(1000),
         }),
     );

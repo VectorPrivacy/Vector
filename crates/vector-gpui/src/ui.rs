@@ -3318,8 +3318,18 @@ impl VectorApp {
                     at,
                     kind: payload.get("event_type").and_then(Value::as_u64).unwrap_or(255) as u8,
                     npub: payload.get("member_pubkey").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    via: payload
+                        .get("invited_label")
+                        .and_then(Value::as_str)
+                        .filter(|l| !l.is_empty())
+                        .zip(payload.get("invited_by").and_then(Value::as_str))
+                        .map(|(l, by)| (l.to_string(), by.to_string())),
                 };
+                let vias = line.via.is_some();
                 let added = self.store.borrow_mut().add_system(chat, line);
+                if vias {
+                    self.ensure_invite_sight(chat, cx);
+                }
                 if added && self.open.as_deref() == Some(chat) {
                     self.refresh_rows(true);
                 }
@@ -3369,10 +3379,30 @@ impl VectorApp {
                 if let Some(open) = id.clone().filter(|i| self.live && self.community.as_ref().is_some_and(|v| &v.id == i)) {
                     self.reload_roster(open, cx);
                 }
-                if name == "community_refreshed" && id.is_some() {
+                if name == "community_refreshed" && let Some(cid) = id.clone() {
+                    // Create Invites granted or revoked: the join lines show their links, or stop.
+                    if self.store.borrow().invite_sight.contains_key(&cid) {
+                        self.ask_invite_sight(cid, cx);
+                    }
                     self.resolve_art(id, cx);
                 }
                 self.reload_communities(cx);
+            }
+            // Its Join/Leave lines moved channel or turned on or off: every channel re-reads them.
+            "community_presence_lines" => {
+                let Some(cid) = payload.get("community_id").and_then(Value::as_str) else { return };
+                let open_here = {
+                    let mut store = self.store.borrow_mut();
+                    let channels: Vec<String> = store.community(cid).map(|c| c.channels.iter().map(|ch| ch.channel_id.clone()).collect()).unwrap_or_default();
+                    for ch in &channels {
+                        store.system.remove(ch);
+                    }
+                    self.open.as_deref().is_some_and(|o| channels.iter().any(|ch| ch == o))
+                };
+                if let Some(open) = self.open.clone().filter(|_| open_here && self.live) {
+                    self.load_system(open.to_string(), cx);
+                }
+                self.refresh_rows(true);
             }
             "community_timeouts" => {
                 if let Some(id) = payload.get("community_id").and_then(Value::as_str) {
@@ -10277,7 +10307,25 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
         return div().into_any_element();
     };
     let name = ctx.store.chat_name(&line.npub, &ctx.chat.id);
-    let suffix = format!("{}{}", data::system_suffix(line.kind), if count > 1 { format!(" {count} times") } else { String::new() });
+    // Which invite link brought them, for those who manage invites.
+    let via = line.via.as_ref().filter(|_| {
+        line.kind == 1
+            && ctx.store.community_of(&ctx.chat.id).is_some_and(|c| ctx.store.invite_sight.get(&c.community_id) == Some(&true))
+    });
+    let suffix = format!(
+        "{}{}{}",
+        data::system_suffix(line.kind),
+        via.map(|(label, _)| format!(" via {label}")).unwrap_or_default(),
+        if count > 1 { format!(" {count} times") } else { String::new() }
+    );
+    let suffix = match via {
+        Some((_, by)) => div()
+            .id(SharedString::from(format!("system-via-{}", line.id)))
+            .tip(format!("{}'s invite link", ctx.store.chat_name(by, &ctx.chat.id)))
+            .child(suffix)
+            .into_any_element(),
+        None => suffix.into_any_element(),
+    };
     let open = {
         let (act, id, npub) = (ctx.on_act.clone(), line.id.clone(), line.npub.clone());
         move |_: &gpui::ClickEvent, w: &mut Window, cx: &mut gpui::App| {
@@ -11266,6 +11314,39 @@ impl VectorApp {
         .detach();
     }
 
+    /// Learn whether this account sees which invite link brought each member of `chat`'s
+    /// community, once.
+    fn ensure_invite_sight(&mut self, chat: &str, cx: &mut Context<Self>) {
+        let cid = {
+            let store = self.store.borrow();
+            match store.community_of(chat) {
+                Some(c) if !store.invite_sight.contains_key(&c.community_id) => c.community_id.clone(),
+                _ => return,
+            }
+        };
+        self.ask_invite_sight(cid, cx);
+    }
+
+    fn ask_invite_sight(&mut self, cid: String, cx: &mut Context<Self>) {
+        self.store.borrow_mut().invite_sight.entry(cid.clone()).or_insert(false);
+        if !self.live {
+            return;
+        }
+        let id = cid.clone();
+        let rx = backend::run(async move { backend::community::capabilities(&id).contains("create_invite") });
+        cx.spawn(async move |this, cx| {
+            let Ok(on) = rx.await else { return };
+            this.update(cx, |this, _| {
+                let was = this.store.borrow_mut().invite_sight.insert(cid, on);
+                if was != Some(on) {
+                    this.refresh_rows(false);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// A chat's saved system lines, from the database.
     fn load_system(&mut self, chat: String, cx: &mut Context<Self>) {
         let id = chat.clone();
@@ -11273,10 +11354,14 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             let Ok(lines) = rx.await else { return };
             this.update(cx, |this, cx| {
+                let vias = lines.iter().any(|l| l.via.is_some());
                 let added = {
                     let mut store = this.store.borrow_mut();
                     lines.into_iter().fold(false, |any, l| store.add_system(&chat, l) || any)
                 };
+                if vias {
+                    this.ensure_invite_sight(&chat, cx);
+                }
                 if added && this.open.as_deref() == Some(chat.as_str()) {
                     this.refresh_rows(true);
                     cx.notify();
@@ -12404,16 +12489,31 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (name, description, relays, voice) = {
+        let (name, description, relays, voice, lines, landing, pick) = {
             let store = self.store.borrow();
             let Some(com) = store.community(&community) else {
                 return;
             };
+            // A private channel this account can't read isn't offered, unless it's the one chosen.
+            let pick = com
+                .channels
+                .iter()
+                .filter(|ch| !ch.is_voice() && (ch.readable || com.system_channel.as_ref() == Some(&ch.channel_id)))
+                .map(|ch| crate::commsettings::PickChannel {
+                    id: kit::interned(&ch.channel_id),
+                    name: kit::interned(if ch.name.is_empty() { "private channel" } else { &ch.name }),
+                    private: ch.private,
+                    chat: ch.view.is_empty() || ch.view == "chat",
+                })
+                .collect::<Vec<_>>();
             (
                 com.name.clone(),
                 com.description.clone(),
                 com.relays.clone(),
                 com.voice_relays.clone(),
+                com.system_channel.clone(),
+                com.landing_channel.clone(),
+                pick,
             )
         };
         let caps: HashSet<String> = if self.live {
@@ -12564,11 +12664,17 @@ impl VectorApp {
                 description,
                 relays: relays.clone(),
                 voice: voice.clone(),
+                lines: lines.clone(),
+                landing: landing.clone(),
             },
             name: name_in,
             description: description_in,
             relays,
             voice,
+            lines,
+            landing,
+            pick,
+            open_select: None,
             relay_input: relay_in,
             voice_input: voice_in,
             relay_edit: None,
@@ -13277,9 +13383,11 @@ impl VectorApp {
                 }
             }
             Act::Anchor(section, anchor) => {
-                if m.section != section {
+                let switched = m.section != section;
+                if switched {
                     m.section = section;
                     m.ban_sel.clear();
+                    m.scroll.set_offset(gpui::point(px(0.), px(0.)));
                 }
                 m.anchor = Some(anchor);
                 let ix = m
@@ -13288,12 +13396,30 @@ impl VectorApp {
                     .find(|s| s.id == section)
                     .and_then(|s| s.anchors.iter().position(|a| a.id == anchor))
                     .unwrap_or(0);
-                if ix == 0 {
-                    m.scroll.set_offset(gpui::point(px(0.), px(0.)));
-                } else {
-                    m.scroll.scroll_to_item(0);
+                let jump = move |m: &crate::commsettings::CommSettings| {
+                    let top = if ix == 0 { Some(px(0.)) } else { crate::commsettings::block_top(ix) };
+                    if let Some(top) = top {
+                        m.scroll.set_offset(gpui::point(px(0.), -top.min(m.scroll.max_offset().y).max(px(0.))));
+                    }
+                };
+                if !switched {
+                    jump(m);
+                } else if ix > 0 {
+                    // The section's blocks have no places until it has laid out once.
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(48)).await;
+                        this.update(cx, |this, cx| {
+                            if let Some(m) = this.comm_settings.as_ref().filter(|m| m.section == section && m.anchor == Some(anchor)) {
+                                jump(m);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             }
+            Act::Scrolled => m.anchor = None,
             Act::ClearSearch => m.search.update(cx, |t, cx| t.set_text("", cx)),
             Act::AddRelay => {
                 let raw = m.relay_input.read(cx).text().to_string();
@@ -13385,6 +13511,15 @@ impl VectorApp {
                     m.voice.remove(i);
                 }
             }
+            Act::Select(id) => m.open_select = if m.open_select == Some(id) { None } else { Some(id) },
+            Act::Lines(v) => {
+                m.lines = (!v.is_empty()).then(|| v.to_string());
+                m.open_select = None;
+            }
+            Act::Landing(v) => {
+                m.landing = (!v.is_empty()).then(|| v.to_string());
+                m.open_select = None;
+            }
             Act::Ban(npub) => {
                 if !m.ban_sel.remove(&npub) {
                     m.ban_sel.insert(npub);
@@ -13446,6 +13581,9 @@ impl VectorApp {
                     .update(cx, |t, cx| t.set_text(&description, cx));
                 m.relays = m.saved.relays.clone();
                 m.voice = m.saved.voice.clone();
+                m.lines = m.saved.lines.clone();
+                m.landing = m.saved.landing.clone();
+                m.open_select = None;
                 m.relay_edit = None;
                 m.roles.order = None;
                 if let Some(e) = m.roles.edit.as_mut() {
@@ -13537,6 +13675,8 @@ impl VectorApp {
         let description_change = (description != m.saved.description).then(|| description.clone());
         let voice = (m.voice != m.saved.voice).then(|| m.voice.clone());
         let relays = (m.relays != m.saved.relays).then(|| m.relays.clone());
+        let lines = (m.lines != m.saved.lines).then(|| m.lines.clone());
+        let landing = (m.landing != m.saved.landing).then(|| m.landing.clone());
         let id = m.community.clone();
         m.warn_until = None;
         let icon = m
@@ -13554,6 +13694,8 @@ impl VectorApp {
                 description,
                 relays: m.relays.clone(),
                 voice: m.voice.clone(),
+                lines: m.lines.clone(),
+                landing: m.landing.clone(),
             };
             m.icon_pick = None;
             m.banner_pick = None;
@@ -13592,6 +13734,12 @@ impl VectorApp {
                     Some(v) => Some(backend::community::set_voice_relays(id.clone(), v).await?),
                     None => None,
                 };
+                if let Some(ch) = lines {
+                    backend::community::set_system_channel(id.clone(), ch).await?;
+                }
+                if let Some(ch) = landing {
+                    backend::community::set_landing_channel(id.clone(), ch).await?;
+                }
                 Ok::<_, String>(voice)
             }
         });
@@ -13639,6 +13787,8 @@ impl VectorApp {
                                 description: m.description.read(cx).text().trim().to_string(),
                                 relays: m.saved.relays.clone(),
                                 voice: m.voice.clone(),
+                                lines: m.lines.clone(),
+                                landing: m.landing.clone(),
                             };
                         }
                         this.reload_communities(cx);
