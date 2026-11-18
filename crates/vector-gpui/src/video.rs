@@ -765,16 +765,20 @@ fn respeed(c: &mut Clip, input: Option<AudioInputSpec>) {
     });
 }
 
-/// The track at `speed` in the engine. A web video's is made as the engine reads it; another's
-/// is read once (then kept), stretched and loaded.
+/// Past this, a clip's track is stretched as the engine reads it rather than whole first.
+const STRETCH_WHOLE_MAX_MS: u64 = 30_000;
+
+/// The track at `speed` in the engine. A web video's, or a long one's, is made as the engine
+/// reads it; a short one's is read once (then kept), stretched and loaded.
 fn stretched(track: &Track, input: Option<&AudioInputSpec>, speed: f32, duration: u64) -> Result<u32, String> {
-    if let Some(net @ AudioInputSpec::Stream(_)) = input
+    let net = matches!(input, Some(AudioInputSpec::Stream(_)));
+    if let Some(spec) = input.filter(|_| net || duration > STRETCH_WHOLE_MAX_MS)
         && duration > 0
     {
         if (speed - 1.).abs() < 1e-3 {
-            return net.open().and_then(|i| load_audio(&i));
+            return spec.open().and_then(|i| load_audio(&i));
         }
-        let wav = stretched::open(net.open()?, speed, duration)?;
+        let wav = stretched::open(spec.open()?, speed, duration)?;
         return crate::audio::engine()?.load_from_file(&AudioInput::Held(wav)).map(|r| r.id);
     }
     let kept = track.lock().ok().and_then(|t| t.clone());
