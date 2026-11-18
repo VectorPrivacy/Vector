@@ -44,7 +44,7 @@ pub(crate) fn list_w() -> f32 {
 }
 /// `wsClampListWidth`: a width restored from a bigger monitor can't crush the conversation.
 fn clamp_list_w(want: f32, vw: f32, rail: f32) -> f32 {
-    want.min(240.).min((vw - rail - 380.).max(200.)).max(200.).round()
+    want.min(300.).min((vw - rail - 380.).max(200.)).max(200.).round()
 }
 const ROW_PITCH: f32 = 54.;
 
