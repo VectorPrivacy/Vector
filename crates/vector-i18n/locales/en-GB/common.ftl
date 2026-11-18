@@ -11,6 +11,14 @@ dialog-close = Close
 
 backend-stopped = Backend stopped
 
+## Shown where an action was dropped before it finished
+
+cancelled = Cancelled
+
+## The placeholder in a search field
+
+search = Search
+
 ## Copying an id, in Advanced mode: the menu row, and .done is the toast once it's copied
 
 copy-id-message = Copy Message ID

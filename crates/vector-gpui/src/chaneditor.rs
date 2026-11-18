@@ -24,33 +24,33 @@ const DEFAULT_TINT: u32 = 0x99aab5;
 
 pub struct Perm {
     pub bit: u32,
-    pub name: &'static str,
-    pub desc: &'static str,
+    pub name: Label,
+    pub desc: Label,
 }
 
-const fn perm(bit: u32, name: &'static str, desc: &'static str) -> Perm {
+const fn perm(bit: u32, name: Label, desc: Label) -> Perm {
     Perm { bit, name, desc }
 }
 
 pub const CHANNEL: &[Perm] = &[
-    perm(13, "View Channel", "See the channel and read it. A private channel's key follows this."),
-    perm(14, "Send Messages", "Post here. Without it for @everyone, only those you allow can post."),
-    perm(15, "Send in Threads", "Reply inside a thread."),
-    perm(16, "Attach Files", "Share images, videos and files."),
-    perm(17, "Add Reactions", "React to messages."),
-    perm(18, "Read Message History", "Read what was said before they could see the channel."),
-    perm(5, "Manage Messages", "Hide messages from members beneath them here."),
+    perm(13, t::channel_editor_perm_view, t::channel_editor_perm_view_desc),
+    perm(14, t::channel_editor_perm_send, t::channel_editor_perm_send_desc),
+    perm(15, t::channel_editor_perm_threads, t::channel_editor_perm_threads_desc),
+    perm(16, t::channel_editor_perm_attach, t::channel_editor_perm_attach_desc),
+    perm(17, t::channel_editor_perm_react, t::channel_editor_perm_react_desc),
+    perm(18, t::channel_editor_perm_history, t::channel_editor_perm_history_desc),
+    perm(5, t::channel_editor_perm_manage, t::channel_editor_perm_manage_desc),
 ];
 
 pub const VOICE: &[Perm] = &[
-    perm(19, "Connect", "Join the channel's call."),
-    perm(20, "Speak", "Be heard in the call."),
-    perm(21, "Video", "Share a camera or a screen."),
-    perm(22, "Priority Speaker", "Lower others while speaking."),
-    perm(23, "Mute Members", "Mute others in the call."),
-    perm(24, "Deafen Members", "Stop others hearing the call."),
-    perm(25, "Move Members", "Move others between calls."),
-    perm(26, "Timeout Members", "Time out members beneath them here."),
+    perm(19, t::channel_editor_perm_connect, t::channel_editor_perm_connect_desc),
+    perm(20, t::channel_editor_perm_speak, t::channel_editor_perm_speak_desc),
+    perm(21, t::channel_editor_perm_video, t::channel_editor_perm_video_desc),
+    perm(22, t::channel_editor_perm_priority, t::channel_editor_perm_priority_desc),
+    perm(23, t::channel_editor_perm_mute, t::channel_editor_perm_mute_desc),
+    perm(24, t::channel_editor_perm_deafen, t::channel_editor_perm_deafen_desc),
+    perm(25, t::channel_editor_perm_move, t::channel_editor_perm_move_desc),
+    perm(26, t::channel_editor_perm_timeout, t::channel_editor_perm_timeout_desc),
 ];
 
 const GROUPS: [(&str, Label, Label, &[Perm]); 2] = [
@@ -58,13 +58,10 @@ const GROUPS: [(&str, Label, Label, &[Perm]); 2] = [
     ("perm-voice", t::channel_editor_section_perm_voice, t::channel_editor_section_perm_voice_keys, VOICE),
 ];
 
-const VIEWS: [(&str, &str, &str); 2] = [
-    ("chat", "Text", "Messages first."),
-    ("voice", "Voice", "Opens its call, with the chat beside it."),
+const VIEWS: [(&str, Label, Label); 2] = [
+    ("chat", t::channel_editor_view_chat, t::channel_editor_view_chat_desc),
+    ("voice", t::channel_editor_view_voice, t::channel_editor_view_voice_desc),
 ];
-
-const SYNCED: &str = "This channel follows its category's permissions. Edit them from the category, or stop syncing to set its own.";
-const OWN: &str = "This channel sets its own permissions.";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tri {
@@ -383,21 +380,21 @@ impl ChannelEditor {
     }
 
     /// Why the open target can't be changed, when it can't.
-    pub fn read_only_why(&self) -> Option<&'static str> {
+    pub fn read_only_why(&self) -> Option<SharedString> {
         let p = self.perms.as_ref()?;
         if self.target.is_empty() || p.editable(&self.target) {
             return None;
         }
         Some(if p.support(&self.target).is_some() {
-            "Its rules here include permissions your roles don't give you, so only someone above you can change them."
+            t::channel_editor_why_support()
         } else if self.target == "everyone" {
-            "Changing @everyone here needs Manage Roles from one of your roles."
+            t::channel_editor_why_everyone()
         } else if self.target.strip_prefix("member:") == Some(p.me.as_str()) {
-            "These are your own rules here, so only someone above you can change them."
+            t::channel_editor_why_self()
         } else if self.target.starts_with("member:") {
-            "This member holds a role at or above yours, so you can see their rules here but not change them."
+            t::channel_editor_why_member()
         } else {
-            "This role sits at or above your own, so you can see its rules here but not change them."
+            t::channel_editor_why_role()
         })
     }
 
@@ -430,7 +427,7 @@ impl ChannelEditor {
                         role.map_or(1e9, |r| r.position as f64),
                         Target {
                             key: key.into(),
-                            label: role.map_or("Deleted role".into(), |r| r.name.clone()),
+                            label: role.map_or_else(|| t::channel_editor_deleted_role().to_string(), |r| r.name.clone()),
                             color: Some(role.map_or(0, |r| r.color)),
                             member: None,
                             set,
@@ -496,6 +493,7 @@ impl ChannelEditor {
             .filter_map(|(id, npub)| {
                 let named = store.profiles.get(npub.as_str()).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty());
                 let name = if named { store.name(npub) } else { String::new() };
+                // i18n-exempt: a search haystack, never shown
                 (q.is_empty() || format!("{name} {npub}").to_lowercase().contains(&q)).then(|| (id.clone(), npub.clone(), name))
             })
             .collect();
@@ -526,8 +524,11 @@ fn overview(m: &ChannelEditor, narrow: bool, on: &OnAct, cx: &App) -> Vec<AnyEle
     let mut out = vec![block(
         true,
         div()
-            .child(heading("Name"))
-            .child(field_head(if m.is_category { "Category Name" } else { "Channel Name" }, Some((name_len, NAME_MAX, name_warn))))
+            .child(heading(t::channel_editor_section_name()))
+            .child(field_head(
+                if m.is_category { t::channel_editor_category_name() } else { t::channel_editor_channel_name() },
+                Some((name_len, NAME_MAX, name_warn)),
+            ))
             .child(input_box(&m.name, 42., editable)),
     )
     .into_any_element()];
@@ -539,8 +540,8 @@ fn overview(m: &ChannelEditor, narrow: bool, on: &OnAct, cx: &App) -> Vec<AnyEle
         block(
             false,
             div()
-                .child(heading("Topic"))
-                .child(field_head("What this channel is for", Some((topic_len, TOPIC_MAX, topic_len > TOPIC_MAX))))
+                .child(heading(t::channel_editor_section_topic()))
+                .child(field_head(t::channel_editor_topic_hint(), Some((topic_len, TOPIC_MAX, topic_len > TOPIC_MAX))))
                 .child(
                     div()
                         .h(px(114.))
@@ -576,17 +577,20 @@ fn overview(m: &ChannelEditor, narrow: bool, on: &OnAct, cx: &App) -> Vec<AnyEle
             .when(!on_, |d| d.border_color(c(0x262626)).bg(c(0x0c0c0c)).hover(|d| d.bg(c(0x131313))))
             .when(!editable, |d| d.opacity(0.6))
             .when(editable, |d| d.cursor_pointer().on_click(click(on, move || Act::View(id))))
-            .child(div().text_size(px(14.5)).line_height(px(18.)).text_color(c(0xe8e8e8)).child(name))
-            .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child(desc))
+            .child(div().text_size(px(14.5)).line_height(px(18.)).text_color(c(0xe8e8e8)).child(name()))
+            .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child(desc()))
     }));
-    out.push(block(false, div().child(heading("Opens As")).child(lede("How a member's client opens the channel. It changes nothing about who can do what.")).child(views)).into_any_element());
+    out.push(
+        block(false, div().child(heading(t::channel_editor_section_view())).child(lede(t::channel_editor_opens_as_lede())).child(views))
+            .into_any_element(),
+    );
     if m.perms.as_ref().is_some_and(|p| p.activated) {
         let private = m.private;
         let toggle_on = on.clone();
         out.push(
             block(
                 false,
-                div().child(heading("Privacy")).child(
+                div().child(heading(t::channel_editor_section_private())).child(
                     div()
                         .py(px(12.))
                         .flex()
@@ -598,12 +602,8 @@ fn overview(m: &ChannelEditor, narrow: bool, on: &OnAct, cx: &App) -> Vec<AnyEle
                                 .items_center()
                                 .gap(px(6.))
                                 .child(svg().path("icons/locked.svg").size(px(13.)).text_color(c(0xe8e8e8)))
-                                .child("Private Channel"),
-                            if m.saved.view == "voice" {
-                                "Only members and roles you let in can join it."
-                            } else {
-                                "Only members and roles you let in can see it."
-                            },
+                                .child(t::channel_editor_private()),
+                            if m.saved.view == "voice" { t::channel_editor_private_voice() } else { t::channel_editor_private_text() },
                         ))
                         .child(div().flex_shrink_0().when(m.busy, |d| d.opacity(0.4)).child(crate::settings::toggle(
                             "ce-private",
@@ -671,7 +671,7 @@ fn dot(color: u32) -> impl IntoElement {
 
 fn add_picker(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     let (roles, members) = m.addable(store, cx);
-    let label = |text: &'static str| {
+    let label = |text: SharedString| {
         div()
             .px(px(8.))
             .pt(px(10.))
@@ -713,7 +713,7 @@ fn add_picker(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> AnyElem
     let mut list = div().id("ce-add-list").flex_1().min_h_0().overflow_y_scroll().px(px(6.)).pt(px(4.)).pb(px(8.));
     let empty = roles.is_empty() && members.is_empty();
     if !roles.is_empty() {
-        list = list.child(label("Roles"));
+        list = list.child(label(t::channel_editor_roles()));
         for r in roles {
             list = list.child(row(
                 SharedString::from(format!("ce-add-role-{}", r.id)),
@@ -725,7 +725,7 @@ fn add_picker(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> AnyElem
         }
     }
     if !members.is_empty() {
-        list = list.child(label("Members"));
+        list = list.child(label(t::channel_editor_members()));
         let more = members.len().saturating_sub(PICK_MAX);
         for (id, npub, name) in members.into_iter().take(PICK_MAX) {
             let veiled = store.stream_hidden(&npub);
@@ -740,12 +740,12 @@ fn add_picker(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> AnyElem
             ));
         }
         if more > 0 {
-            list = list.child(div().px(px(8.)).py(px(14.)).text_center().text_size(px(13.)).text_color(c(0x7a7a7a)).child(format!("Search to find the other {more}.")));
+            list = list.child(div().px(px(8.)).py(px(14.)).text_center().text_size(px(13.)).text_color(c(0x7a7a7a)).child(t::channel_editor_search_more(more)));
         }
     }
     if empty {
         let q = m.add_query.read(cx).text().trim().to_string();
-        list = list.child(div().px(px(8.)).py(px(14.)).text_center().text_size(px(13.)).text_color(c(0x7a7a7a)).child(format!("Nobody matches \"{q}\".")));
+        list = list.child(div().px(px(8.)).py(px(14.)).text_center().text_size(px(13.)).text_color(c(0x7a7a7a)).child(t::channel_editor_no_match(q)));
     }
     let close = on.clone();
     gpui::deferred(
@@ -798,15 +798,15 @@ fn add_picker(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> AnyElem
 
 fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<AnyElement> {
     let Some(p) = m.perms.as_ref() else {
-        return vec![block(true, div().child(heading("Roles & Members")).child(hint("Loading..."))).into_any_element()];
+        return vec![block(true, div().child(heading(t::channel_editor_section_targets())).child(hint(t::channel_editor_loading()))).into_any_element()];
     };
     if !p.open() {
         return vec![block(
             true,
-            div().child(heading("Roles & Members")).child(lede(if p.activated {
-                "Changing who can do what here needs Manage Roles."
+            div().child(heading(t::channel_editor_section_targets())).child(lede(if p.activated {
+                t::channel_editor_needs_manage_roles()
             } else {
-                "Channel permissions come with the new roles. Switch to them in Community Settings, under Roles."
+                t::channel_editor_not_activated()
             })),
         )
         .into_any_element()];
@@ -817,7 +817,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
         out.push(
             block(
                 true,
-                div().child(heading("Category Sync")).child(
+                div().child(heading(t::channel_editor_section_sync())).child(
                     div()
                         .mb(px(12.))
                         .flex()
@@ -826,10 +826,10 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                         .gap(px(12.))
                         .child(
                             div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(match (synced, p.can_sync) {
-                                (true, true) => SYNCED.to_string(),
-                                (true, false) => format!("{SYNCED} Stopping would change rules set above your roles, so only someone above you can."),
-                                (false, true) => OWN.to_string(),
-                                (false, false) => format!("{OWN} Syncing would replace rules set above your roles, so only someone above you can."),
+                                (true, true) => t::channel_editor_synced(),
+                                (true, false) => t::channel_editor_synced_held(),
+                                (false, true) => t::channel_editor_own(),
+                                (false, false) => t::channel_editor_own_held(),
                             }),
                         )
                         .child(
@@ -846,7 +846,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                                 .text_color(c(PRIMARY))
                                 .when(m.busy || !p.can_sync, |d| d.opacity(0.45))
                                 .when(!m.busy && p.can_sync, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Sync(!synced))))
-                                .child(if synced { "Stop syncing" } else { "Sync with its category" }),
+                                .child(if synced { t::channel_editor_stop_sync() } else { t::channel_editor_sync() }),
                         ),
                 ),
             )
@@ -861,7 +861,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
     out.push(
         block(
             out.is_empty(),
-            div().child(heading("Lockdown")).child(
+            div().child(heading(t::channel_editor_section_lock())).child(
                 div()
                     .mb(px(12.))
                     .flex()
@@ -869,9 +869,9 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                     .justify_between()
                     .gap(px(12.))
                     .child(div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(if locked {
-                        "Locked. Only the roles and members you allow can post, react or join calls here."
+                        t::channel_editor_locked()
                     } else {
-                        "Only the roles and members you allow can post, react or join calls, and nothing anyone else sends reaches its readers."
+                        t::channel_editor_lock_note()
                     }))
                     .child(
                         div()
@@ -887,7 +887,13 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                             .text_color(c(PRIMARY))
                             .when(!can_lock, |d| d.opacity(0.45))
                             .when(can_lock, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Lock(!locked))))
-                            .child(if locked { "Unlock".to_string() } else { format!("Lock {}", if m.is_category { "Category" } else { "Channel" }) }),
+                            .child(if locked {
+                                t::channel_editor_unlock()
+                            } else if m.is_category {
+                                t::channel_editor_lock_category()
+                            } else {
+                                t::channel_editor_lock_channel()
+                            }),
                     ),
             ),
         )
@@ -907,7 +913,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
         .items_center()
         .justify_between()
         .gap(px(12.))
-        .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child("Roles & Members"))
+        .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child(t::channel_editor_section_targets()))
         .when(can_add, |d| {
             d.child(
                 div()
@@ -925,7 +931,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                     .when(m.busy, |d| d.opacity(0.45))
                     .when(!m.busy, |d| d.cursor_pointer().hover(|d| d.opacity(0.92)).on_click(click(on, || Act::ToggleAdd)))
                     .child(svg().path("icons/plus.svg").size(px(12.)).text_color(c(0x000000)))
-                    .child("Add"),
+                    .child(t::channel_editor_add()),
             )
         })
         .when(m.adding, |d| d.child(add_picker(m, store, on, cx)));
@@ -972,13 +978,13 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                         .child(t.label.clone()),
                 )
                 .child(div().ml_auto().flex().items_center().gap(px(12.)).when(!t.set, |d| {
-                    d.child(div().flex_shrink_0().text_size(px(12.5)).line_height(px(24.)).text_color(c(0x6f6f6f)).child("no rules yet"))
+                    d.child(div().flex_shrink_0().text_size(px(12.5)).line_height(px(24.)).text_color(c(0x6f6f6f)).child(t::channel_editor_no_rules()))
                 }).when(!p.editable(&t.key), |d| {
                     // A target whose rules come from above you: shown, never editable.
                     d.child(
                         div()
                             .id(SharedString::from(format!("ce-lock-{}", t.key)))
-                            .tip("You can't change these rules")
+                            .tip(t::channel_editor_cant_change())
                             .size(px(14.))
                             .flex_shrink_0()
                             .child(svg().path("icons/locked.svg").size(px(14.)).text_color(c(0x6f6f6f))),
@@ -993,11 +999,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
             first,
             div()
                 .child(head)
-                .child(lede(if m.is_category {
-                    "Channels synced to this category follow these rules."
-                } else {
-                    "Pick who to set rules for. Anything left alone follows what they hold across the community."
-                }))
+                .child(lede(if m.is_category { t::channel_editor_category_targets() } else { t::channel_editor_targets() }))
                 .child(rows),
         )
         .into_any_element(),
@@ -1016,10 +1018,7 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                     .gap(px(12.))
                     .when(i > 0, |d| d.border_t_1().border_color(c(0x1a1a1a)))
                     .when(!m.can_touch(perm.bit) || closed, |d| d.opacity(0.5))
-                    .child(perm_text(
-                        perm.name,
-                        if closed { "A private channel opens only to the roles and members you allow." } else { perm.desc },
-                    ))
+                    .child(perm_text((perm.name)(), if closed { t::channel_editor_perm_closed() } else { (perm.desc)() }))
                     .child(tri(m, perm, live, on)),
             );
         }
@@ -1037,10 +1036,10 @@ fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<An
                             .text_color(c(0xffffff))
                             .child(title())
                             .children(open_label.clone().map(|l| {
-                                div().ml(px(7.)).font_weight(FontWeight::NORMAL).text_color(c(0x8a8a8a)).child(format!("for {l}"))
+                                div().ml(px(7.)).font_weight(FontWeight::NORMAL).text_color(c(0x8a8a8a)).child(t::channel_editor_for(l))
                             })),
                     )
-                    .children(why.filter(|_| gi == 0).map(lede))
+                    .children(why.clone().filter(|_| gi == 0).map(lede))
                     .child(list),
             )
             .into_any_element(),
@@ -1056,21 +1055,21 @@ fn save_bar(m: &ChannelEditor, on: &OnAct, cx: &App) -> Option<AnyElement> {
     }
     let warn = m.warn() && dirty;
     let open = m.perms.as_ref().map(|_| m.targets_label(cx)).flatten();
-    let (text, err): (String, bool) = if m.busy {
-        ("Saving...".into(), false)
+    let (text, err): (SharedString, bool) = if m.busy {
+        (t::channel_editor_saving(), false)
     } else if warn {
         (
-            if m.warn_switch {
-                format!("Save or reset the rules for {} first", open.unwrap_or_else(|| "this target".into()))
-            } else {
-                "Save or reset your changes before closing".into()
+            match (m.warn_switch, open) {
+                (true, Some(target)) => t::channel_editor_save_first(target),
+                (true, None) => t::channel_editor_save_first_unnamed(),
+                (false, _) => t::channel_editor_save_before_closing(),
             },
             true,
         )
     } else if let Some(e) = m.error.clone() {
-        (e, true)
+        (e.into(), true)
     } else {
-        ("You have unsaved changes".into(), false)
+        (t::channel_editor_unsaved(), false)
     };
     let live = !m.busy && dirty;
     Some(
@@ -1116,8 +1115,8 @@ fn save_bar(m: &ChannelEditor, on: &OnAct, cx: &App) -> Option<AnyElement> {
                         div()
                             .flex()
                             .gap(px(6.))
-                            .child(text_btn("ce-reset", "Reset", live, click(on, || Act::Reset)))
-                            .child(save_btn("ce-save", "Save Changes", live && m.valid(cx), click(on, || Act::Save))),
+                            .child(text_btn("ce-reset", t::channel_editor_reset(), live, click(on, || Act::Reset)))
+                            .child(save_btn("ce-save", t::channel_editor_save(), live && m.valid(cx), click(on, || Act::Save))),
                     ),
             )
             .into_any_element(),
@@ -1129,7 +1128,7 @@ impl ChannelEditor {
         let p = self.perms.as_ref()?;
         Some(match self.target.split_once(':') {
             None => "@everyone".into(),
-            Some(("role", id)) => p.roles.iter().find(|r| r.id == id).map_or("Deleted role".into(), |r| r.name.clone()),
+            Some(("role", id)) => p.roles.iter().find(|r| r.id == id).map_or_else(|| t::channel_editor_deleted_role().to_string(), |r| r.name.clone()),
             Some((_, id)) => p
                 .members
                 .iter()
@@ -1167,10 +1166,10 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
     } else {
         "icons/channel-hash.svg"
     };
-    let title = if m.saved.name.is_empty() {
-        if m.is_category { "Category".to_string() } else { "Channel".to_string() }
+    let title: SharedString = if m.saved.name.is_empty() {
+        if m.is_category { t::channel_editor_category() } else { t::channel_editor_channel() }
     } else {
-        m.saved.name.clone()
+        m.saved.name.clone().into()
     };
     let head = div()
         .mx(px(10.))
@@ -1185,7 +1184,7 @@ pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> 
         .child(div().min_w_0().truncate().font_weight(FontWeight::BOLD).text_size(px(14.)).line_height(px(17.)).text_color(c(0xffffff)).child(title))
         .into_any_element();
     let footer = (m.is_category || !m.primary).then(|| {
-        let what = if m.is_category { "Delete Category" } else { "Delete Channel" };
+        let what = if m.is_category { t::channel_editor_delete_category() } else { t::channel_editor_delete_channel() };
         div()
             .mt(px(12.))
             .pt(px(16.))

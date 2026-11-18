@@ -7,6 +7,7 @@ use crate::pic::img;
 
 use super::{VectorApp, backend};
 use crate::composer::{CancelInput, InputChanged, TextInput};
+use crate::t;
 use crate::theme::*;
 
 /// An app in the grid, as history keeps it.
@@ -59,7 +60,7 @@ impl VectorApp {
     /// `showAttachmentPanelMiniApps`.
     pub(super) fn show_miniapps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let search = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 family: INTER,
                 size: px(13.),
                 line_height: px(16.),

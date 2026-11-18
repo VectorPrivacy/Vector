@@ -10,6 +10,7 @@ use crate::backend;
 use crate::chaneditor::{Act, ChannelEditor, Perms, Saved, Tri};
 use crate::composer::{CancelInput, InputChanged, SendText, TextInput};
 use crate::kit;
+use crate::t;
 use crate::theme::*;
 
 impl VectorApp {
@@ -46,7 +47,7 @@ impl VectorApp {
             ..kit::field_look()
         };
         let search = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 placeholder: c(0xb2b2b2),
                 ..look(14., 17., FontWeight::NORMAL)
             })
@@ -57,7 +58,7 @@ impl VectorApp {
             t
         });
         let topic_in = cx.new(|cx| {
-            let mut t = TextInput::new("Shown at the top of the channel", cx)
+            let mut t = TextInput::new(t::channel_editor_topic_placeholder(), cx)
                 .with_look(crate::composer::Look {
                     placeholder: c(0x5c5c5c),
                     ..look(15., 22.5, FontWeight::NORMAL)
@@ -67,7 +68,7 @@ impl VectorApp {
             t
         });
         let add_query = cx.new(|cx| {
-            TextInput::new("Find a role or member", cx)
+            TextInput::new(t::channel_editor_find_target(), cx)
                 .with_look(look(14., 17., FontWeight::NORMAL))
                 .keep_on_submit()
         });
@@ -188,7 +189,7 @@ impl VectorApp {
                         then(m);
                     }
                     Ok(Err(e)) => m.error = Some(e),
-                    Err(_) => m.error = Some("Cancelled".into()),
+                    Err(_) => m.error = Some(t::cancelled().into()),
                 }
                 this.load_channel_perms(cx);
             })
@@ -417,20 +418,17 @@ impl VectorApp {
             let Some(com) = store.community(&community) else { return };
             if category {
                 let Some(k) = com.categories.iter().find(|k| k.category_id == channel) else { return };
-                format!("Delete <b>{}</b>? Its channels stay, uncategorized.", k.name)
+                t::channel_editor_delete_category_text(kit::escape(&k.name))
             } else {
                 let Some(ch) = com.channel(&channel) else { return };
-                format!(
-                    "Delete <b>{}{}</b>? It's deleted for everyone, with all its messages and files.",
-                    if ch.is_voice() { "" } else { "#" },
-                    ch.name
-                )
+                let name = kit::escape(&ch.name);
+                if ch.is_voice() { t::channel_editor_delete_voice_channel_text(name) } else { t::channel_editor_delete_text_channel_text(name) }
             }
         };
-        let mut popup = kit::Popup::notice(if category { "Delete category" } else { "Delete channel" });
-        popup.text = Some(text.into());
-        popup.confirm = "Confirm".into();
-        popup.cancel = Some("Cancel".into());
+        let mut popup = kit::Popup::notice(if category { t::channel_editor_delete_category_title() } else { t::channel_editor_delete_channel_title() });
+        popup.text = Some(text);
+        popup.confirm = t::dialog_confirm();
+        popup.cancel = Some(t::dialog_cancel());
         self.popup = Some((popup, PopupAct::DeleteChannel { community, channel, category }));
         cx.notify();
     }
@@ -473,7 +471,7 @@ impl VectorApp {
                 match res {
                     Ok(Ok(())) => gone(this),
                     Ok(Err(e)) => this.notice(
-                        if category { "Couldn't delete the category" } else { "Couldn't delete the channel" },
+                        &if category { t::channel_editor_delete_category_failed() } else { t::channel_editor_delete_channel_failed() },
                         e,
                         cx,
                     ),

@@ -343,24 +343,24 @@ pub fn voice_address(raw: &str, list: &[String]) -> Result<String, String> {
     Ok(normal)
 }
 
-pub(crate) fn heading(text: &'static str) -> impl IntoElement {
+pub(crate) fn heading(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .mb(px(20.))
         .text_size(px(24.))
         .line_height(px(28.))
         .font_weight(FontWeight::BOLD)
         .text_color(c(0xffffff))
-        .child(text)
+        .child(text.into())
 }
 
-pub(crate) fn lede(text: &'static str) -> impl IntoElement {
+pub(crate) fn lede(text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .mt(px(-8.))
         .mb(px(18.))
         .text_size(px(14.))
         .line_height(px(21.))
         .text_color(c(0x9a9a9a))
-        .child(text)
+        .child(text.into())
 }
 
 pub(crate) fn hint(text: impl Into<SharedString>) -> gpui::Div {
@@ -404,7 +404,7 @@ pub(crate) fn block(first: bool, body: impl IntoElement) -> impl IntoElement {
 }
 
 pub(crate) fn field_head(
-    label: &'static str,
+    label: impl Into<SharedString>,
     count: Option<(usize, usize, bool)>,
 ) -> impl IntoElement {
     div()
@@ -418,7 +418,7 @@ pub(crate) fn field_head(
                 .text_size(px(13.))
                 .line_height(px(24.))
                 .text_color(c(0xcfcfcf))
-                .child(label),
+                .child(label.into()),
         )
         .children(count.map(|(n, max, warn)| {
             div()
@@ -1687,7 +1687,7 @@ fn shake(t: f32) -> f32 {
 
 pub(crate) fn text_btn(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     live: bool,
     on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -1707,7 +1707,7 @@ pub(crate) fn text_btn(
                 .hover(|d| d.bg(white_a(0.06)).text_color(c(0xffffff)))
                 .on_click(on)
         })
-        .child(label)
+        .child(label.into())
         .into_any_element()
 }
 

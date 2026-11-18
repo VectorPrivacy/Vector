@@ -1898,7 +1898,7 @@ impl VectorApp {
             return;
         }
         let search = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(15.),
                 line_height: px(18.),
                 weight: FontWeight::NORMAL,
@@ -12239,7 +12239,7 @@ impl VectorApp {
             excluded.extend(v.admins.iter().cloned());
         }
         let filter = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 weight: FontWeight::MEDIUM,
                 placeholder: white_a(0.35),
                 ..kit::field_look()
@@ -12547,7 +12547,7 @@ impl VectorApp {
             })
         };
         let search = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(14.),
                 line_height: px(17.),
                 weight: FontWeight::NORMAL,
@@ -12589,7 +12589,7 @@ impl VectorApp {
                 .keep_on_submit()
         });
         let audit_query = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(16.),
                 line_height: px(19.),
                 weight: FontWeight::MEDIUM,
@@ -12598,7 +12598,7 @@ impl VectorApp {
             })
         });
         let ban_query = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(16.),
                 line_height: px(19.),
                 weight: FontWeight::MEDIUM,
@@ -12608,7 +12608,7 @@ impl VectorApp {
         });
         let role_name = field("new role", "", crate::roles::NAME_MAX, cx);
         let role_query = cx.new(|cx| {
-            TextInput::new("Search", cx).with_look(crate::composer::Look {
+            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(16.),
                 line_height: px(19.),
                 weight: FontWeight::MEDIUM,
@@ -16408,7 +16408,7 @@ impl VectorApp {
     fn open_settings(&mut self, cat: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::{Home, Settings};
         let slim = self.is_slim;
-        let search = cx.new(|cx| TextInput::new("Search", cx).with_look(settings_search_look(slim)));
+        let search = cx.new(|cx| TextInput::new(t::search(), cx).with_look(settings_search_look(slim)));
         cx.subscribe_in(
             &search,
             window,

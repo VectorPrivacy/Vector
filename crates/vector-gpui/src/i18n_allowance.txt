@@ -1,4 +1,4 @@
-# Hard-coded English left per file (3125 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (3010 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -44,7 +44,6 @@ badgecard.rs 17
 callvideo/camera.rs 5
 callvideo/screen.rs 13
 callvideo/vp8.rs 4
-chaneditor.rs 95
 commands.rs 36
 commsettings.rs 93
 community.rs 29
@@ -103,10 +102,9 @@ theme.rs 5
 timeline.rs 31
 transcript.rs 7
 transfer.rs 50
-ui.rs 569
+ui.rs 562
 ui_art.rs 10
-ui_chaneditor.rs 12
-ui_miniapps.rs 20
+ui_miniapps.rs 19
 ui_miniprofile.rs 3
 ui_moderation.rs 47
 ui_nexus.rs 32
