@@ -81,7 +81,7 @@
             box: node,
             clip: list,
             radius: '4px',
-            holes: () => chat ? chat.querySelectorAll('.pins-drawer, .scroll-return-btn') : [],
+            holes: () => chat ? chat.querySelectorAll('.pins-drawer, .scroll-return-bar') : [],
         });
         return {
             destroy() {

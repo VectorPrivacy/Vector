@@ -183,7 +183,7 @@ export {
     composerMode,
     setAttachmentOpen,
     setEmojiIcon,
-    setScrollBadge, setScrollReturnVisible,
+    setScrollBadge, setScrollReturnVisible, dropScrollReturn,
     setComposerHandlers,
     composerEls,
 } from './lib/composer.svelte.js';

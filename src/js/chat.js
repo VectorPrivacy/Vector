@@ -1277,6 +1277,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // prior chat — re-entering a chat counts as "I've read up to here".
     chatPinnedToBottom = true;
     _userScrolledAway = false;   // fresh open lands at the live tail; release any prior latch
+    VectorSvelte.dropScrollReturn();
     clearUnreadBelow();
     clearUnreadDivider();
     syncBackendActiveChat();
