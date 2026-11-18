@@ -370,8 +370,8 @@ struct Placed {
     /// Box padding before and after the glyphs (a chip's first and last piece).
     lead: f32,
     tail: f32,
-    /// Width of the trailing spaces within `width`.
-    hang: f32,
+    /// Brackets in a right-to-left run with no letter to tell the shaper so: drawn mirrored.
+    mirror: bool,
 }
 
 struct Line {
@@ -717,8 +717,10 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
     {
         lines.pop();
     }
-    for line in &mut lines {
-        reorder_rtl(line, atoms);
+    if let Some(b) = bidi(atoms) {
+        for line in &mut lines {
+            reorder(line, atoms, &b, window);
+        }
     }
 
     // Vertical: every line holds the block's strut, then each box by its own line-height.
@@ -843,7 +845,7 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid 
                     width: w,
                     lead,
                     tail: 0.,
-                    hang: 0.,
+                    mirror: false,
                 });
                 cut_at = Some((x + lead + w, p.atom));
                 break;
@@ -877,7 +879,7 @@ fn place(lines: &mut [Vec<Placed>], x: &mut f32, s: &Seg, atoms: &[Atom]) {
         width: s.width,
         lead: s.lead,
         tail: s.tail,
-        hang: s.hang,
+        mirror: false,
     });
     *x += s.lead + s.width + s.tail;
 }
@@ -1246,7 +1248,13 @@ impl Element for Inline {
                 let lh = look.line_height;
                 let top = line.baseline - m.ascent - (lh - (m.ascent + m.descent)) / 2. - look.rise;
                 let origin = bounds.origin + point(px(p.x + p.lead), px(top));
-                let piece = &text[p.range.clone()];
+                let mirrored: String;
+                let piece = if p.mirror {
+                    mirrored = text[p.range.clone()].chars().map(|c| unicode_bidi_mirroring::get_mirrored(c).unwrap_or(c)).collect();
+                    mirrored.as_str()
+                } else {
+                    &text[p.range.clone()]
+                };
                 match kind {
                     Kind::Spoiler {
                         revealed: false, ..
@@ -1460,63 +1468,146 @@ fn sheen() -> std::sync::Arc<gpui::RenderImage> {
     SHEEN.with(|s| s.clone())
 }
 
-/// Right-to-left words in a left-to-right line, as a page shows them (UAX #9 at paragraph
-/// level 0): each run of them reads right to left, its spaces before its words. A line with
-/// none is left as it is.
-fn reorder_rtl(items: &mut [Placed], atoms: &[Atom]) {
-    use unicode_bidi::{BidiClass, bidi_class};
-    let strong = |p: &Placed| match &atoms[p.atom] {
-        Atom::Text { text, .. } => text.get(p.range.clone()).and_then(|t| {
-            t.chars().find_map(|c| match bidi_class(c) {
-                BidiClass::R | BidiClass::AL => Some(true),
-                BidiClass::L => Some(false),
-                _ => None,
-            })
-        }),
-        _ => None,
-    };
-    let dirs: Vec<Option<bool>> = items.iter().map(strong).collect();
-    if !dirs.contains(&Some(true)) {
-        return;
+/// Bidi embedding levels for every byte of a paragraph, resolved at paragraph level 0 as a
+/// page without `dir` lays it out. Boxes (emoji, pills) stand in as U+FFFC.
+struct Bidi {
+    starts: Vec<usize>,
+    levels: Vec<u8>,
+}
+
+/// `None` when nothing in the paragraph runs right to left, which leaves its lines as laid.
+fn bidi(atoms: &[Atom]) -> Option<Bidi> {
+    let mut text = String::new();
+    let mut starts = Vec::with_capacity(atoms.len());
+    for a in atoms {
+        starts.push(text.len());
+        match a {
+            Atom::Text { text: t, .. } => text.push_str(t),
+            Atom::Break => text.push('\n'),
+            Atom::Gap(_) => {}
+            _ => text.push('\u{FFFC}'),
+        }
     }
-    // Neutrals (spaces, digits, punctuation) between two right-to-left words join their run.
-    let n = items.len();
-    let rtl: Vec<bool> = (0..n)
-        .map(|i| {
-            dirs[i].unwrap_or_else(|| {
-                dirs[..i].iter().rev().find_map(|d| *d) == Some(true) && dirs[i + 1..].iter().find_map(|d| *d) == Some(true)
-            })
-        })
-        .collect();
-    let start = items.first().map_or(0., |p| p.x);
-    let mut i = 0;
-    while i < n {
-        if !rtl[i] {
-            i += 1;
+    if !has_rtl(&text) {
+        return None;
+    }
+    let info = unicode_bidi::BidiInfo::new(&text, Some(unicode_bidi::Level::ltr()));
+    Some(Bidi { starts, levels: info.levels.iter().map(|l| l.number()).collect() })
+}
+
+/// A line's pieces cut where their level changes, and spaces apart from words, so each cut
+/// shapes in one direction. Returns (index into `line`, byte range, level) in logical order,
+/// or `None` when the whole line sits at level 0.
+fn bidi_cuts(line: &[Placed], atoms: &[Atom], b: &Bidi) -> Option<Vec<(usize, Range<usize>, u8)>> {
+    let level = |atom: usize, at: usize| b.levels.get(b.starts[atom] + at).copied().unwrap_or(0);
+    let mut out = Vec::with_capacity(line.len());
+    let mut any = false;
+    for (i, p) in line.iter().enumerate() {
+        let Atom::Text { text, .. } = &atoms[p.atom] else {
+            let l = level(p.atom, 0);
+            any |= l > 0;
+            out.push((i, p.range.clone(), l));
+            continue;
+        };
+        let piece = &text[p.range.clone()];
+        if piece.char_indices().all(|(k, _)| level(p.atom, p.range.start + k) == 0) {
+            out.push((i, p.range.clone(), 0));
             continue;
         }
-        let mut j = i;
-        while j + 1 < n && rtl[j + 1] {
-            j += 1;
+        any = true;
+        let mut last: Option<(u8, bool)> = None;
+        for (k, ch) in piece.char_indices() {
+            let at = p.range.start + k;
+            let key = (level(p.atom, at), ch.is_whitespace());
+            match out.last_mut() {
+                Some((j, r, _)) if *j == i && last == Some(key) => r.end = at + ch.len_utf8(),
+                _ => out.push((i, at..at + ch.len_utf8(), key.0)),
+            }
+            last = Some(key);
         }
-        // Reversed, each space still sits between the same two words, and the run's last space
-        // stays after it: it parts the run from what follows (UAX #9 N1/N2 at level 0).
-        let hangs: Vec<f32> = items[i..=j].iter().map(|p| if p.hang < p.width { p.hang } else { 0. }).collect();
-        items[i..=j].reverse();
-        let len = hangs.len();
-        for (t, p) in items[i..=j].iter_mut().enumerate() {
-            let own = hangs[len - 1 - t];
-            let after = if t + 1 < len { hangs[len - 2 - t] } else { hangs[len - 1] };
-            p.width += after - own;
-            p.hang = after;
-        }
-        i = j + 1;
     }
+    if !any {
+        return None;
+    }
+    // L1: spaces ending the line take the paragraph's level.
+    for (i, r, l) in out.iter_mut().rev() {
+        match &atoms[line[*i].atom] {
+            Atom::Text { text, .. } if text[r.clone()].chars().all(char::is_whitespace) => *l = 0,
+            _ => break,
+        }
+    }
+    Some(out)
+}
+
+/// L2: from the highest level down to the lowest odd one, each run at that level or above
+/// reverses.
+fn visual_order(levels: &[u8]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..levels.len()).collect();
+    let (Some(&max), Some(&min)) = (levels.iter().max(), levels.iter().min()) else {
+        return order;
+    };
+    let lowest_odd = if min % 2 == 1 { min } else { min + 1 };
+    for lvl in (lowest_odd..=max).rev() {
+        let mut i = 0;
+        while i < order.len() {
+            if levels[order[i]] < lvl {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j < order.len() && levels[order[j]] >= lvl {
+                j += 1;
+            }
+            order[i..j].reverse();
+            i = j;
+        }
+    }
+    order
+}
+
+/// A line in visual order: pieces cut by level, measured, reversed run by run, then laid
+/// from the line's start.
+fn reorder(line: &mut Vec<Placed>, atoms: &[Atom], b: &Bidi, window: &Window) {
+    let Some(cuts) = bidi_cuts(line, atoms, b) else {
+        return;
+    };
+    let start = line.first().map_or(0., |p| p.x);
+    let levels: Vec<u8> = cuts.iter().map(|c| c.2).collect();
+    let mut units: Vec<Placed> = Vec::with_capacity(cuts.len());
+    for (k, (i, range, level)) in cuts.iter().enumerate() {
+        let p = &line[*i];
+        let first = k == 0 || cuts[k - 1].0 != *i;
+        let last = k + 1 == cuts.len() || cuts[k + 1].0 != *i;
+        let (width, mirror) = match &atoms[p.atom] {
+            Atom::Text { text, look, .. } => {
+                let piece = &text[range.clone()];
+                let mirror = level % 2 == 1 && !has_rtl(piece) && piece.chars().any(unicode_bidi_mirroring::is_mirroring);
+                let width = if first && last { p.width } else { f32::from(shape(piece, look, look.color, window).width) };
+                (width, mirror)
+            }
+            _ => (p.width, false),
+        };
+        units.push(Placed {
+            atom: p.atom,
+            range: range.clone(),
+            x: 0.,
+            width,
+            lead: if first { p.lead } else { 0. },
+            tail: if last { p.tail } else { 0. },
+            mirror,
+        });
+    }
+    let mut slots: Vec<Option<Placed>> = units.into_iter().map(Some).collect();
     let mut x = start;
-    for p in items.iter_mut() {
-        p.x = x;
-        x += p.lead + p.width + p.tail;
-    }
+    *line = visual_order(&levels)
+        .into_iter()
+        .filter_map(|k| slots[k].take())
+        .map(|mut p| {
+            p.x = x;
+            x += p.lead + p.width + p.tail;
+            p
+        })
+        .collect();
 }
 
 /// How much of the paragraph's plain text an atom stands for.
@@ -1636,51 +1727,61 @@ fn rects(atoms: &[Atom], laid: &Laid, picked: Range<usize>, window: &Window) -> 
 mod rtl_tests {
     use super::*;
 
-    fn word(atom: usize, range: Range<usize>, x: f32, width: f32) -> Placed {
-        Placed { atom, range, x, width, lead: 0., tail: 0., hang: 0. }
-    }
-
-    fn order(text: &str, cuts: &[usize]) -> Vec<String> {
+    /// The pieces of one line of `text`, cut after each space as the line breaker does, in
+    /// the order they are drawn left to right.
+    fn order(text: &str) -> Vec<String> {
         let atoms = vec![Atom::Text { text: text.to_string().into(), look: Look::new("Rubik", 15., 21., gpui::white()), kind: Kind::Plain }]; // i18n-exempt: font name
-        let mut x = 0.;
-        let mut items: Vec<Placed> = cuts
-            .windows(2)
-            .map(|w| {
-                let p = word(0, w[0]..w[1], x, 10.);
-                x += 10.;
-                p
-            })
-            .collect();
-        reorder_rtl(&mut items, &atoms);
-        items.sort_by(|a, b| a.x.total_cmp(&b.x));
-        items.iter().map(|p| text[p.range.clone()].trim().to_string()).collect()
-    }
-
-    fn cuts(text: &str) -> Vec<usize> {
-        let mut c = vec![0];
-        c.extend(text.match_indices(' ').map(|(i, _)| i + 1));
-        c.push(text.len());
-        c.dedup();
-        c
+        let mut cuts = vec![0];
+        cuts.extend(text.match_indices(' ').map(|(i, _)| i + 1));
+        cuts.push(text.len());
+        cuts.dedup();
+        let line: Vec<Placed> =
+            cuts.windows(2).map(|w| Placed { atom: 0, range: w[0]..w[1], x: 0., width: 10., lead: 0., tail: 0., mirror: false }).collect();
+        let Some(b) = bidi(&atoms) else {
+            return line.iter().map(|p| text[p.range.clone()].to_string()).collect();
+        };
+        let Some(cuts) = bidi_cuts(&line, &atoms, &b) else {
+            return line.iter().map(|p| text[p.range.clone()].to_string()).collect();
+        };
+        let levels: Vec<u8> = cuts.iter().map(|c| c.2).collect();
+        visual_order(&levels).into_iter().map(|k| text[cuts[k].1.clone()].to_string()).collect()
     }
 
     #[test]
     fn a_right_to_left_line_reads_right_to_left() {
-        let t = "שלום עולם יפה";
-        assert_eq!(order(t, &cuts(t)), vec!["יפה", "עולם", "שלום"]);
+        assert_eq!(order("שלום עולם יפה").concat(), "יפה עולם שלום");
     }
 
     #[test]
     fn mixed_lines_reverse_only_the_right_to_left_run() {
-        let t = "hi שלום עולם there"; // i18n-exempt: fixture
-        assert_eq!(order(t, &cuts(t)), vec!["hi", "עולם", "שלום", "there"]);
-        let plain = "just english words"; // i18n-exempt: fixture
-        assert_eq!(order(plain, &cuts(plain)), vec!["just", "english", "words"]);
+        assert_eq!(order("hi שלום עולם there").concat(), "hi עולם שלום there"); // i18n-exempt: fixture
+        assert_eq!(order("just english words").concat(), "just english words"); // i18n-exempt: fixture
     }
 
     #[test]
     fn numbers_between_right_to_left_words_stay_in_the_run() {
-        let t = "שלום 42 עולם";
-        assert_eq!(order(t, &cuts(t)), vec!["עולם", "42", "שלום"]);
+        assert_eq!(order("שלום 42 עולם").concat(), "עולם 42 שלום");
+    }
+
+    #[test]
+    fn punctuation_before_english_stays_after_the_hebrew() {
+        // UAX #9 N1/N2: "!" between Hebrew and English takes the paragraph's direction.
+        assert_eq!(order("שלום עולם! Hello world.").concat(), "עולם שלום! Hello world."); // i18n-exempt: fixture
+        assert_eq!(order("Meet at בית הספר at 5pm.").concat(), "Meet at הספר בית at 5pm."); // i18n-exempt: fixture
+    }
+
+    #[test]
+    fn a_wrapped_lines_end_space_takes_the_paragraph_level() {
+        let atoms = vec![Atom::Text { text: "שלום עולם".into(), look: Look::new("Rubik", 15., 21., gpui::white()), kind: Kind::Plain }]; // i18n-exempt: font name
+        let b = bidi(&atoms).unwrap();
+        let line = vec![Placed { atom: 0, range: 0..9, x: 0., width: 10., lead: 0., tail: 0., mirror: false }];
+        let cuts = bidi_cuts(&line, &atoms, &b).unwrap();
+        assert_eq!(cuts.iter().map(|c| c.2).collect::<Vec<_>>(), vec![1, 0]);
+    }
+
+    #[test]
+    fn levels_reverse_from_the_highest_down() {
+        assert_eq!(visual_order(&[0, 1, 2, 2, 1, 0]), vec![0, 4, 2, 3, 1, 5]);
+        assert_eq!(visual_order(&[1, 1, 1]), vec![2, 1, 0]);
     }
 }

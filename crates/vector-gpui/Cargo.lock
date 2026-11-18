@@ -13504,6 +13504,7 @@ dependencies = [
  "tobj",
  "tokio",
  "unicode-bidi",
+ "unicode-bidi-mirroring",
  "unicode-linebreak",
  "unicode-properties",
  "unicode-segmentation",
