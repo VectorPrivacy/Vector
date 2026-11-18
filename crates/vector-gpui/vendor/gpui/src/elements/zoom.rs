@@ -6,7 +6,7 @@ use crate::{
 /// Draws `child` scaled about a point of its box, as CSS `transform: scale()` does: layout and
 /// hit testing keep the unscaled box.
 pub fn zoom(child: impl IntoElement) -> Zoom {
-    Zoom { child: child.into_any_element(), scale: 1., origin: point(0.5, 0.5), opacity: None, shift: Point::default() }
+    Zoom { child: child.into_any_element(), scale: 1., origin: point(0.5, 0.5), opacity: None, shift: Point::default(), shift_rel: point(0., 0.) }
 }
 
 /// See [`zoom`].
@@ -16,6 +16,7 @@ pub struct Zoom {
     origin: Point<f32>,
     opacity: Option<f32>,
     shift: Point<Pixels>,
+    shift_rel: Point<f32>,
 }
 
 impl Zoom {
@@ -37,10 +38,23 @@ impl Zoom {
         self
     }
 
+    /// Moves the drawn subtree by these shares of its own box (`translate` in %).
+    pub fn shift_rel(mut self, x: f32, y: f32) -> Self {
+        self.shift_rel = point(x, y);
+        self
+    }
+
     /// Fades the whole subtree, as `opacity` would on a wrapping div.
     pub fn opacity(mut self, opacity: f32) -> Self {
         self.opacity = Some(opacity);
         self
+    }
+
+    fn offset(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
+        point(
+            self.shift.x + bounds.size.width * self.shift_rel.x,
+            self.shift.y + bounds.size.height * self.shift_rel.y,
+        )
     }
 
     fn pivot(&self, bounds: Bounds<Pixels>) -> Point<Pixels> {
@@ -84,7 +98,7 @@ impl Element for Zoom {
     ) {
         let pivot = self.pivot(bounds);
         let opacity = self.opacity;
-        window.with_element_transform(pivot, self.scale, self.shift, |window| {
+        window.with_element_transform(pivot, self.scale, self.offset(bounds), |window| {
             window.with_element_opacity(opacity, |window| self.child.prepaint(window, cx))
         });
     }
@@ -101,7 +115,7 @@ impl Element for Zoom {
     ) {
         let pivot = self.pivot(bounds);
         let opacity = self.opacity;
-        window.with_element_transform(pivot, self.scale, self.shift, |window| {
+        window.with_element_transform(pivot, self.scale, self.offset(bounds), |window| {
             window.with_element_opacity(opacity, |window| self.child.paint(window, cx))
         });
     }

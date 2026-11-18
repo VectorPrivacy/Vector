@@ -152,6 +152,9 @@ pub struct VectorApp {
     /// The picker serves the status dialog's field.
     picker_status: bool,
     picker_closed: std::time::Instant,
+    /// The composer's picker: when it last opened, and since when it has been sliding away.
+    picker_in: std::time::Instant,
+    picker_out: Option<std::time::Instant>,
     /// Bumped by each hover, so a stale leave doesn't hide the toolbar.
     hover_gen: u64,
     /// How many of the hovered message's hitboxes (row, toolbar) hold the pointer.
@@ -1043,6 +1046,8 @@ impl VectorApp {
             picker_open: false,
             picker_status: false,
             picker_closed: std::time::Instant::now(),
+            picker_in: std::time::Instant::now(),
+            picker_out: None,
             hover_gen: 0,
             hover_in: 0,
             viewer: None,
@@ -4998,6 +5003,8 @@ impl VectorApp {
             return;
         }
         self.picker_open = true;
+        self.picker_in = std::time::Instant::now();
+        self.picker_out = None;
         self.picker = target.clone();
         let picker = self.emoji_picker.clone();
         let reaction = target.is_some();
@@ -5041,11 +5048,36 @@ impl VectorApp {
         });
     }
 
+    /// `.emoji-picker` over the composer, sliding up from its own height as it fades in, and
+    /// back down as it goes (`transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease`).
+    /// With whether it lights the composer's emoji button, and whether it centres.
+    fn composer_picker(&self, window: &mut Window) -> Option<(AnyElement, bool, bool)> {
+        let open = self.picker_open && !self.picker_status;
+        let leaving = self.picker_out.map(|t| t.elapsed().as_secs_f32() / 0.3).filter(|k| *k < 1.);
+        let (slide, fade) = match (open, leaving) {
+            (true, _) => {
+                let k = (self.picker_in.elapsed().as_secs_f32() / 0.3).min(1.);
+                (kit::bezier(0.4, 0., 0.2, 1.)(k), kit::bezier(0.25, 0.1, 0.25, 1.)(k))
+            }
+            (false, Some(k)) => (1. - kit::bezier(0.4, 0., 0.2, 1.)(k), 1. - kit::bezier(0.25, 0.1, 0.25, 1.)(k)),
+            (false, None) => return None,
+        };
+        if fade < 1. {
+            window.request_animation_frame();
+        }
+        let el = gpui::zoom(self.emoji_picker.clone()).shift_rel(0., 1. - slide).opacity(fade);
+        let el = if open { el.into_any_element() } else { div().relative().child(el).child(kit::inert()).into_any_element() };
+        Some((el, open && self.picker.is_none(), f32::from(window.viewport_size().width) < 700.))
+    }
+
     fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.picker_open {
             return;
         }
         self.picker_open = false;
+        if !self.picker_status {
+            self.picker_out = Some(std::time::Instant::now());
+        }
         self.picker = None;
         self.picker_closed = std::time::Instant::now();
         self.emoji_picker.update(cx, |p, cx| p.leave_creator(cx));
@@ -8599,18 +8631,18 @@ fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) 
                 .flex()
                 .items_center()
                 .pl(px(12.))
-                .when(active, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left(px(-1.))
-                            .top(px(5.))
-                            .w(px(3.))
-                            .h(px(40.))
-                            .rounded_r(px(3.))
-                            .bg(c(PRIMARY)),
-                    )
-                })
+                .child(
+                    kit::StateBar {
+                        key: SharedString::from(format!("row-bar-{}", chat.id)),
+                        left: -1.,
+                        width: 3.,
+                        edge: true,
+                        radius: 3.,
+                        tick: kit::Tick::Frac(0.35),
+                        full: kit::Full::Inset(5.),
+                    }
+                    .view(active, active, c(PRIMARY)),
+                )
                 .child(avatar(store, &chat.id, 40.))
                 .child(
                     div()
@@ -9847,8 +9879,7 @@ impl VectorApp {
             .child(composer(
                 self.input.clone(),
                 &self.mode,
-                (self.picker_open && !self.picker_status)
-                    .then(|| (self.emoji_picker.clone(), self.picker.is_none(), f32::from(window.viewport_size().width) < 700.)),
+                self.composer_picker(window),
                 self.attach.map(|o| (o, self.pivx_wallet_view(cx).or_else(|| self.miniapps_view(cx)))),
                 {
                     let (was, at) = self.attach_turn.get();
@@ -10241,7 +10272,7 @@ fn divider(label: impl IntoElement, line: gpui::Hsla, opacity: f32) -> AnyElemen
 fn composer(
     input: Entity<TextInput>,
     mode: &Mode,
-    picker: Option<(Entity<crate::picker::EmojiPicker>, bool, bool)>,
+    picker: Option<(AnyElement, bool, bool)>,
     attach: Option<(std::time::Instant, Option<AnyElement>)>,
     attach_turned: Option<std::time::Instant>,
     popup: Option<AnyElement>,
@@ -10805,7 +10836,9 @@ impl VectorApp {
         self.attach = match self.attach {
             Some(_) => None,
             None => {
-                self.picker_open = false;
+                if std::mem::take(&mut self.picker_open) && !self.picker_status {
+                    self.picker_out = Some(std::time::Instant::now());
+                }
                 Some(std::time::Instant::now())
             }
         };

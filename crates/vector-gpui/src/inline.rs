@@ -1251,42 +1251,17 @@ impl Element for Inline {
                     Kind::Spoiler {
                         revealed: false, ..
                     } => {
-                        // No blur in GPUI: offset copies at low alpha read as one. The light the
-                        // CSS gradient sweeps across them is the sheen drawn over the box.
-                        let color = mix(c(ACCENT), c(0x04110d), 0.55);
-                        for (dx, dy) in [
-                            (-1.5f32, -1.),
-                            (1.5, -1.),
-                            (-1.5, 1.),
-                            (1.5, 1.),
-                            (0., 0.),
-                            (-3., 0.),
-                            (3., 0.),
-                            (0., -2.),
-                            (0., 2.),
-                        ] {
-                            let line = shape(piece, look, color.opacity(0.22), window);
-                            let _ = line.paint(
-                                origin + point(px(dx), px(dy)),
-                                px(lh),
-                                TextAlign::Left,
-                                None,
-                                window,
-                                cx,
-                            );
-                        }
+                        let line = shape(piece, look, look.color, window);
+                        spoiler_cover(&line, piece, look, origin, m, 1., window);
                     }
                     Kind::Spoiler { id, revealed: true } if let Some(t) = self.select.as_ref().and_then(|k| revealing(k.msg, *id)) => {
-                        // `spoilerReveal`: the blur's copies thin out as the text comes back from the accent.
+                        // `spoilerReveal`: the cover thins out as the text comes back from the accent.
                         window.request_animation_frame();
                         let e = crate::kit::bezier(0., 0., 0.58, 1.)(t);
                         let accent = mix(c(ACCENT), c(0x04110d), 0.3);
-                        for (dx, dy) in [(-1.5f32, -1.), (1.5, -1.), (-1.5, 1.), (1.5, 1.), (-3., 0.), (3., 0.), (0., -2.), (0., 2.)] {
-                            let line = shape(piece, look, accent.opacity(0.22 * (1. - e)), window);
-                            let _ = line.paint(origin + point(px(dx * (1. - e)), px(dy * (1. - e))), px(lh), TextAlign::Left, None, window, cx);
-                        }
-                        let color = mix(accent, look.color, e).opacity(0.7 + 0.3 * e);
+                        let color = mix(accent, look.color, e).opacity(e);
                         let line = shape(piece, look, color, window);
+                        spoiler_cover(&line, piece, look, origin, m, 1. - e, window);
                         let _ = line.paint(origin, px(lh), TextAlign::Left, None, window, cx);
                     }
                     Kind::Action(_) if action_hot => {
@@ -1419,6 +1394,42 @@ pub fn emoji_line(text: &str, look: Look, emoji: f32, drop: f32) -> Inline {
         });
     }
     inline(atoms, look).single_line()
+}
+
+/// A hidden spoiler's text as `filter: blur(4px)` leaves it: no glyph drawn, each letter a
+/// soft accent smudge as tall as its kind of letter, so words keep their shape and lose their
+/// letters, under the `text-shadow` glow.
+fn spoiler_cover(line: &ShapedLine, piece: &str, look: &Look, origin: gpui::Point<Pixels>, m: Metrics, alpha: f32, window: &mut Window) {
+    if alpha <= 0. {
+        return;
+    }
+    let fs = look.size;
+    let baseline = f32::from(origin.y) + (look.line_height - (m.ascent + m.descent)) / 2. + m.ascent;
+    let blur = px(fs * 0.24);
+    let shadow = |color: Hsla| gpui::BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: blur, spread_radius: px(0.), inset: false };
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for (i, ch) in piece.char_indices() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        let x0 = f32::from(origin.x + line.x_for_index(i));
+        let x1 = f32::from(origin.x + line.x_for_index(i + ch.len_utf8()));
+        if x1 <= x0 {
+            continue;
+        }
+        (lo, hi) = (lo.min(x0), hi.max(x1));
+        let tall = !ch.is_ascii_lowercase() || "bdfhiklt".contains(ch);
+        let low = "gjpqy".contains(ch);
+        let top = baseline - fs * if tall { 0.7 } else { 0.5 };
+        let bottom = baseline + if low { fs * 0.2 } else { 0. };
+        let pad = (x1 - x0) * 0.1;
+        let b = Bounds::new(point(px(x0 + pad), px(top)), size(px(x1 - x0 - 2. * pad), px(bottom - top)));
+        window.paint_drop_shadows(b, Corners::all(px(fs * 0.1)), &[shadow(mix(c(ACCENT), c(0x04110d), 0.2).opacity(0.7 * alpha))]);
+    }
+    if lo < hi {
+        let b = Bounds::new(point(px(lo), px(baseline - fs * 0.6)), size(px(hi - lo), px(fs * 0.7)));
+        window.paint_drop_shadows(b, Corners::all(px(fs * 0.3)), &[gpui::BoxShadow { blur_radius: px(14.), ..shadow(c(ACCENT).opacity(0.22 * alpha)) }]);
+    }
 }
 
 /// The light that sweeps across a hidden spoiler every four seconds, as frames: drawn

@@ -306,32 +306,19 @@ pub fn render(
 
 /// The open bar, or the grey unread one, at the rail's edge.
 /// Shut with something new, a short bar: grey for unread, the accent for a ping.
-fn bars(d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread: bool, ping: bool) -> gpui::Stateful<gpui::Div> {
-    d.motion_host().when(open, |d| {
-        d.child(
-            div()
-                .absolute()
-                .left(px(-left))
-                .top(px(inset))
-                .bottom(px(inset))
-                .w(px(4.))
-                .rounded_r(px(4.))
-                .bg(c(PRIMARY)),
-        )
-    })
-    .when(!open && (unread || ping), |d| {
-        d.child(
-            div()
-                .absolute()
-                .left(px(-left))
-                .top(gpui::relative(0.5))
-                .mt(px(-5.))
-                .w(px(4.))
-                .h(px(10.))
-                .rounded_r(px(4.))
-                .bg(c(if ping { PRIMARY } else { ICON_MUTED })),
-        )
-    })
+fn bars(mut d: gpui::Stateful<gpui::Div>, left: f32, inset: f32, open: bool, unread: bool, ping: bool) -> gpui::Stateful<gpui::Div> {
+    let key = d.interactivity().element_id.as_ref().map_or_else(|| SharedString::from("rail-bar"), |id| SharedString::from(format!("bar:{id}")));
+    let bar = crate::kit::StateBar {
+        key,
+        left: -left,
+        width: 4.,
+        edge: true,
+        radius: 4.,
+        tick: crate::kit::Tick::Px(10.),
+        full: crate::kit::Full::Inset(inset),
+    };
+    let color = if open || ping { c(PRIMARY) } else { c(ICON_MUTED) };
+    d.motion_host().child(bar.view(open || unread || ping, open, color))
 }
 
 fn pinged(store: &Store, com: &Community) -> bool {

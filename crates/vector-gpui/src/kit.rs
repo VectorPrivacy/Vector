@@ -633,6 +633,102 @@ pub fn rise(
         .into_any_element()
 }
 
+/// A list item's marker (`::before` under `transition: opacity, height, background-color 130ms
+/// ease-out`): a short tick at the item's middle, or the long bar of the open item, eased between.
+pub struct StateBar {
+    pub key: SharedString,
+    /// From the item's left edge (negative: outside it), and the bar's width.
+    pub left: f32,
+    pub width: f32,
+    /// Rounded on the right only, as a bar on an edge is.
+    pub edge: bool,
+    pub radius: f32,
+    pub tick: Tick,
+    /// The long bar: a fixed height, or the item's less this much at each end.
+    pub full: Full,
+}
+
+pub enum Tick {
+    Px(f32),
+    /// `scaleY`: this share of the long bar.
+    Frac(f32),
+}
+
+pub enum Full {
+    Px(f32),
+    Inset(f32),
+}
+
+impl StateBar {
+    /// `shown`: drawn at all; `long`: the open item's bar.
+    pub fn view(self, shown: bool, long: bool, color: Hsla) -> impl IntoElement {
+        let rgba = color.to_rgb();
+        let target = [shown as u8 as f32, long as u8 as f32, rgba.r, rgba.g, rgba.b, rgba.a];
+        let key = self.key.clone();
+        gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+            let ([o, l, r, g, b, a], moving) = tween(&key, target, 0.13);
+            if moving {
+                window.request_animation_frame();
+            }
+            if o <= 0. {
+                return;
+            }
+            let height = f32::from(bounds.size.height);
+            let full = match self.full {
+                Full::Px(h) => h,
+                Full::Inset(i) => (height - 2. * i).max(0.),
+            };
+            let tick = match self.tick {
+                Tick::Px(h) => h,
+                Tick::Frac(f) => full * f,
+            };
+            let h = tick + (full - tick) * l;
+            let top = bounds.origin.y + px((height - h) / 2.);
+            let bar = gpui::Bounds::new(gpui::point(bounds.origin.x, top), gpui::size(px(self.width), px(h)));
+            let r_px = px(self.radius.min(h / 2.));
+            let corners = if self.edge {
+                gpui::Corners { top_left: px(0.), bottom_left: px(0.), top_right: r_px, bottom_right: r_px }
+            } else {
+                gpui::Corners::all(r_px)
+            };
+            let fill = gpui::Hsla::from(gpui::Rgba { r, g, b, a: a * o });
+            window.paint_quad(gpui::fill(bar, fill).corner_radii(corners));
+        })
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(self.left))
+        .w(px(self.width))
+    }
+}
+
+thread_local!(static TWEENS: std::cell::RefCell<std::collections::HashMap<SharedString, Tween>> = Default::default());
+
+struct Tween {
+    from: [f32; 6],
+    to: [f32; 6],
+    since: std::time::Instant,
+}
+
+/// `key`'s values eased toward `to` over `secs` with CSS ease-out from wherever they stood when
+/// `to` last changed; the first sight takes `to` as is. Also whether they are still moving.
+fn tween(key: &SharedString, to: [f32; 6], secs: f32) -> ([f32; 6], bool) {
+    TWEENS.with_borrow_mut(|all| {
+        let now = std::time::Instant::now();
+        let at = |t: &Tween| -> [f32; 6] {
+            let k = bezier(0., 0., 0.58, 1.)(((now - t.since).as_secs_f32() / secs).min(1.));
+            std::array::from_fn(|i| t.from[i] + (t.to[i] - t.from[i]) * k)
+        };
+        let t = all.entry(key.clone()).or_insert(Tween { from: to, to, since: now });
+        if t.to != to {
+            let from = at(t);
+            *t = Tween { from, to, since: now };
+        }
+        let moving = (now - t.since).as_secs_f32() < secs;
+        (if moving { at(t) } else { to }, moving)
+    })
+}
+
 thread_local!(static CLOSING: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) });
 
 /// Builds a closing modal: the card its view pops in with [`pop`] pops out instead.
