@@ -3258,9 +3258,7 @@ fn slider(key: &'static str, value: f32, s: &Settings, on: &OnAct) -> AnyElement
     let value = value.clamp(0., 1.);
     let bounds = s.sliders.clone();
     let dragging = s.dragging.clone();
-    let at = |b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels| {
-        ((x - b.origin.x - px(10.)) / (b.size.width - px(20.)).max(px(1.))).clamp(0., 1.)
-    };
+    let at = |b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels| crate::kit::track_frac(b, x, px(10.));
     let down = {
         let (on, bounds, dragging) = (on.clone(), bounds.clone(), dragging.clone());
         move |e: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| {

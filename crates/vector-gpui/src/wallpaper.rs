@@ -317,23 +317,29 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
                         let mid = f32::from(b.origin.y) + f32::from(b.size.height) / 2.;
                         let track = Bounds::new(point(px(x), px(mid - 5.)), size(px(w), px(10.)));
                         window.paint_quad(fill(track, white_a(0.08)).corner_radii(Corners::all(px(5.))));
+                        // Mirrored, the track fills from its right end.
+                        let rtl = gpui::layout_rtl();
                         if pct > 0. {
-                            let lit = Bounds::new(track.origin, size(px(w * pct), px(10.)));
+                            let lit_x = if rtl { x + w * (1. - pct) } else { x };
+                            let lit = Bounds::new(point(px(lit_x), track.origin.y), size(px(w * pct), px(10.)));
+                            let (start, end) = (px(5.), px(if pct >= 1. { 5. } else { 0. }));
+                            let (left, right) = if rtl { (end, start) } else { (start, end) };
                             window.paint_quad(fill(lit, c(PRIMARY)).corner_radii(Corners {
-                                top_left: px(5.),
-                                bottom_left: px(5.),
-                                top_right: px(if pct >= 1. { 5. } else { 0. }),
-                                bottom_right: px(if pct >= 1. { 5. } else { 0. }),
+                                top_left: left,
+                                bottom_left: left,
+                                top_right: right,
+                                bottom_right: right,
                             }));
                         }
-                        let cx_ = x + 7. + pct * (w - 14.);
+                        let along = if rtl { 1. - pct } else { pct };
+                        let cx_ = x + 7. + along * (w - 14.);
                         let shadow = Bounds::new(point(px(cx_ - 8.), px(mid - 6.)), size(px(16.), px(16.)));
                         window.paint_quad(fill(shadow, gpui::black().opacity(0.12)).corner_radii(Corners::all(px(8.))));
                         let thumb = Bounds::new(point(px(cx_ - 7.), px(mid - 7.)), size(px(14.), px(14.)));
                         window.paint_quad(fill(thumb, gpui::white()).corner_radii(Corners::all(px(7.))));
                         window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
                         let value_at = move |px_x: Pixels| {
-                            let t = ((f32::from(px_x) - x - 7.) / (w - 14.).max(1.)).clamp(0., 1.);
+                            let t = crate::kit::track_frac(b, px_x, px(7.));
                             (lo as f32 + t * (hi - lo) as f32).round() as u8
                         };
                         {

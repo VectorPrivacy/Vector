@@ -1224,7 +1224,7 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
         .as_slider(label, value, frac)
         .when(live, |d| {
             let on = on.clone();
-            d.slider_keys(frac, 0.05, move |f, w, cx| on(act(f, true), w, cx))
+            d.seek_keys(frac, 0.05, move |f, w, cx| on(act(f, true), w, cx))
         })
         .size_full()
         .on_click(|_, _, cx| cx.stop_propagation())

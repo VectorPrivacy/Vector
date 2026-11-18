@@ -169,6 +169,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Keeps the element's children laid out left to right while layout is mirrored for a
+    /// right-to-left language.
+    fn keep_ltr(mut self) -> Self {
+        self.style().keep_ltr = Some(true);
+        self
+    }
+
     /// Sets the flex direction of the element to `row-reverse`.
     /// [Docs](https://tailwindcss.com/docs/flex-direction#row-reverse)
     fn flex_row_reverse(mut self) -> Self {

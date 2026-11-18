@@ -1294,7 +1294,7 @@ fn waveform(
         .as_slider(t::audio_seek(), spoken, progress)
         .when(seekable, |d| {
             let on = on_seek.clone();
-            d.slider_keys(progress, 0.05, move |f, w, cx| on(f, true, w, cx))
+            d.seek_keys(progress, 0.05, move |f, w, cx| on(f, true, w, cx))
         })
         .group("audio-waveform")
         .flex_1()

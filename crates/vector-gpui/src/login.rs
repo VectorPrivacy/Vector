@@ -1284,6 +1284,7 @@ impl LoginView {
                     .id("lg-pins")
                     .track_focus(&self.pin_focus)
                     .on_key_down(cx.listener(Self::pin_key))
+                    .keep_ltr()
                     .flex()
                     .gap(px(11.7));
                 for i in 0..6 {

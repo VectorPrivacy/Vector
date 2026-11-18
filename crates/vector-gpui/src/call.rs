@@ -799,7 +799,7 @@ fn meter(level: f32, active: bool) -> impl IntoElement {
 fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
     let pct = (call.volume / 2.).clamp(0., 1.);
     let at = |b: Bounds<Pixels>, x: Pixels| {
-        let v = ((x - b.origin.x) / b.size.width.max(px(1.))).clamp(0., 1.) * 200.;
+        let v = crate::kit::track_frac(b, x, px(0.)) * 200.;
         (v / 5.).round() * 5. / 100.
     };
     let bounds = call.slider.clone();

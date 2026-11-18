@@ -7,6 +7,7 @@ use crate::{
     },
 };
 use collections::{FxHashMap, FxHashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt::Debug, ops::Range};
 use taffy::{
     TaffyTree, TraversePartialTree as _,
@@ -18,6 +19,20 @@ use taffy::{
 
 #[cfg(feature = "stacker")]
 type StackSafe<T> = stacksafe::StackSafe<T>;
+
+static LAYOUT_RTL: AtomicBool = AtomicBool::new(false);
+
+/// Lays every element out mirrored, for right-to-left languages: each box sits as far from its
+/// parent's right edge as it would from the left, and borders, corners, shadows and text
+/// alignment swap sides with it.
+pub fn set_layout_rtl(on: bool) {
+    LAYOUT_RTL.store(on, Ordering::Relaxed);
+}
+
+/// Whether layout is mirrored for a right-to-left language.
+pub fn layout_rtl() -> bool {
+    LAYOUT_RTL.load(Ordering::Relaxed)
+}
 #[cfg(not(feature = "stacker"))]
 type StackSafe<T> = T;
 
@@ -35,6 +50,8 @@ pub struct TaffyLayoutEngine {
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
+    /// Nodes whose children stay left to right under a mirrored layout, and their descendants.
+    keep_ltr: FxHashSet<LayoutId>,
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -49,6 +66,7 @@ impl TaffyLayoutEngine {
             absolute_outer_origins: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
+            keep_ltr: FxHashSet::default(),
         }
     }
 
@@ -57,6 +75,7 @@ impl TaffyLayoutEngine {
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
         self.computed_layouts.clear();
+        self.keep_ltr.clear();
     }
 
     pub fn request_layout(
@@ -68,7 +87,7 @@ impl TaffyLayoutEngine {
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
 
-        if children.is_empty() {
+        let id: LayoutId = if children.is_empty() {
             self.taffy
                 .new_leaf(taffy_style)
                 .expect(EXPECT_MESSAGE)
@@ -79,7 +98,11 @@ impl TaffyLayoutEngine {
                 .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
                 .expect(EXPECT_MESSAGE)
                 .into()
+        };
+        if style.keep_ltr {
+            self.keep_ltr.insert(id);
         }
+        id
     }
 
     pub fn request_measured_layout(
@@ -353,13 +376,17 @@ impl TaffyLayoutEngine {
     // snapped independently, but the raw content-box origin can carry a
     // 1dp residual into descendants.
 
+    pub(crate) fn keeps_ltr(&self, id: LayoutId) -> bool {
+        self.keep_ltr.contains(&id)
+    }
+
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {
         if let Some(layout) = self.absolute_layout_bounds.get(&id).cloned() {
             return layout;
         }
 
         let layout = self.taffy.layout(id.into()).expect(EXPECT_MESSAGE);
-        let layout_location = layout.location;
+        let mut layout_location = layout.location;
         let layout_size = layout.size;
         let parent = self.taffy.parent(id.0);
 
@@ -367,6 +394,12 @@ impl TaffyLayoutEngine {
             Some(parent_id) => {
                 let parent_id = LayoutId::from(parent_id);
                 self.layout_bounds(parent_id, scale_factor);
+                if self.keep_ltr.contains(&parent_id) {
+                    self.keep_ltr.insert(id);
+                } else if layout_rtl() {
+                    let parent_width = self.taffy.layout(parent_id.into()).expect(EXPECT_MESSAGE).size.width;
+                    layout_location.x = parent_width - layout_location.x - layout_size.width;
+                }
                 let parent_origin = *self
                     .absolute_outer_origins
                     .get(&parent_id)

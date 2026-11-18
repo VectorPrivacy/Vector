@@ -192,6 +192,9 @@ pub struct Style {
     pub scrollbar_width: AbsoluteLength,
     /// Whether both x and y axis should be scrollable at the same time.
     pub allow_concurrent_scroll: bool,
+    /// Lays the element and its children out left to right even while layout is mirrored:
+    /// code, digit entry, a picture panned under the pointer.
+    pub keep_ltr: bool,
     /// Whether scrolling should be restricted to the input gesture's axis.
     ///
     /// Pixel-based scroll gestures are locked to their initially dominant axis. The lock may be
@@ -703,14 +706,35 @@ impl Style {
         }
 
         let rem_size = window.rem_size();
-        let corner_radii = self
+        let rtl = window.mirrored();
+        let mut corner_radii = self
             .corner_radii
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
+        let mirrored_shadows: Vec<BoxShadow>;
+        let box_shadow = if rtl {
+            corner_radii = Corners {
+                top_left: corner_radii.top_right,
+                top_right: corner_radii.top_left,
+                bottom_right: corner_radii.bottom_left,
+                bottom_left: corner_radii.bottom_right,
+            };
+            mirrored_shadows = self
+                .box_shadow
+                .iter()
+                .map(|s| BoxShadow { offset: point(-s.offset.x, s.offset.y), ..s.clone() })
+                .collect();
+            &mirrored_shadows[..]
+        } else {
+            &self.box_shadow[..]
+        };
 
-        window.paint_box_shadows(bounds, corner_radii, &self.box_shadow);
+        window.paint_box_shadows(bounds, corner_radii, box_shadow);
 
-        let background_color = self.background.as_ref().and_then(Fill::color);
+        let mut background_color = self.background.as_ref().and_then(Fill::color);
+        if rtl && let Some(bg) = background_color.as_mut().filter(|b| b.tag == BackgroundTag::LinearGradient) {
+            bg.gradient_angle_or_pattern_height = (360. - bg.gradient_angle_or_pattern_height).rem_euclid(360.);
+        }
         if background_color.is_some_and(|color| !color.is_transparent()) {
             let mut border_color = match background_color {
                 Some(color) => match color.tag {
@@ -737,12 +761,15 @@ impl Style {
             ));
         }
 
-        window.paint_inset_shadows(bounds, corner_radii, &self.box_shadow);
+        window.paint_inset_shadows(bounds, corner_radii, box_shadow);
 
         continuation(window, cx);
 
         if self.is_border_visible() {
-            let border_widths = self.border_widths.to_pixels(rem_size);
+            let mut border_widths = self.border_widths.to_pixels(rem_size);
+            if rtl {
+                std::mem::swap(&mut border_widths.left, &mut border_widths.right);
+            }
             let mut background = self.border_color.unwrap_or_default();
             background.a = 0.;
             window.paint_quad(quad(
@@ -778,6 +805,7 @@ impl Default for Style {
                 y: Overflow::Visible,
             },
             allow_concurrent_scroll: false,
+            keep_ltr: false,
             restrict_scroll_to_axis: false,
             scrollbar_width: AbsoluteLength::default(),
             position: Position::Relative,

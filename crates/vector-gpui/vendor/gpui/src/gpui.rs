@@ -144,7 +144,7 @@ pub use style::*;
 pub use styled::*;
 pub use subscription::*;
 pub use svg_renderer::*;
-pub use taffy::{AvailableSpace, LayoutId};
+pub use taffy::{AvailableSpace, LayoutId, layout_rtl, set_layout_rtl};
 pub use text_system::*;
 pub use util::{FutureExt, Timeout};
 pub use view::*;

@@ -934,6 +934,7 @@ impl SecurityFlow {
                 body = body.child(
                     div()
                         .my(px(2.))
+                        .keep_ltr()
                         .flex()
                         .justify_center()
                         .gap(px(14.))

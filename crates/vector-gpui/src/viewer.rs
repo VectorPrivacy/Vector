@@ -484,6 +484,7 @@ impl Render for Viewer {
                     .absolute()
                     .inset_0()
                     .overflow_hidden()
+                    .keep_ltr()
                     .child(measure)
                     .child(picture),
             )

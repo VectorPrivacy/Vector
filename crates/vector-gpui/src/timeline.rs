@@ -815,8 +815,8 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             })),
         }
     }
+    let mut col = dir_auto(div().flex().flex_col(), &blocks);
     let pieces = linked_pictures(ctx, &m.id, blocks);
-    let mut col = div().flex().flex_col();
     let mut prev_bottom: Option<f32> = None;
     let mut prev_para = false;
     let count = pieces.len();
@@ -1094,8 +1094,34 @@ pub(crate) fn block(b: &Block, key: &str, click: &OnClick, clock: f32) -> AnyEle
 }
 
 /// Blocks inside a quote or list item, spaced as at the top level.
+/// The direction `dir="auto"` gives `blocks`: their first strong letter's, if any. Code has none.
+fn starts_rtl(blocks: &[Block]) -> Option<bool> {
+    fn para(p: &Para) -> Option<bool> {
+        p.atoms.iter().find_map(|a| match a {
+            Atom::Text { text, .. } => text.chars().find_map(|ch| match unicode_bidi::bidi_class(ch) {
+                unicode_bidi::BidiClass::L => Some(false),
+                unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL => Some(true),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+    blocks.iter().find_map(|b| match b {
+        Block::Para(p) => para(p),
+        Block::Quote(inner) => starts_rtl(inner),
+        Block::List { items, .. } => items.iter().find_map(|i| starts_rtl(i)),
+        Block::Table { head, rows, .. } => head.iter().chain(rows.iter().flatten()).find_map(para),
+        Block::Code { .. } | Block::Rule => None,
+    })
+}
+
+/// Left-to-right text keeps its bullets and quote bars on its own side in a mirrored UI.
+fn dir_auto(col: gpui::Div, blocks: &[Block]) -> gpui::Div {
+    col.when(gpui::layout_rtl() && starts_rtl(blocks) == Some(false), |d| d.keep_ltr())
+}
+
 pub fn stack(blocks: &[Block], key: &str, click: &OnClick, clock: f32, lh: f32) -> AnyElement {
-    let mut col = div().flex().flex_col();
+    let mut col = dir_auto(div().flex().flex_col(), blocks);
     let mut prev: Option<(f32, bool)> = None;
     for (i, b) in blocks.iter().enumerate() {
         let (top, bottom) = margins(b, i == 0, i + 1 == blocks.len());
@@ -1245,7 +1271,7 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
             .map(|(piece, color)| Atom::Text { text: piece.into(), look: Look::new(MONO, 13., 19.5, color), kind: Kind::Plain })
             .collect();
         let line_key = format!("{key}-{n}");
-        let el = inline(atoms, Look::new(MONO, 13., 19.5, plain)).nowrap();
+        let el = inline(atoms, Look::new(MONO, 13., 19.5, plain)).nowrap().ltr();
         let el = match crate::select::key_for(&line_key) {
             Some(k) => el.selectable(k),
             None => el,
@@ -1257,6 +1283,7 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
     let scroll = code_scroll(key);
     div()
         .relative()
+        .keep_ltr()
         .max_w(px(470.))
         .w_full()
         .rounded(px(6.))

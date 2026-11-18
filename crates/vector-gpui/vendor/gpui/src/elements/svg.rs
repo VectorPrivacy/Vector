@@ -2,7 +2,7 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::Path,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use crate::{
@@ -138,13 +138,19 @@ impl Element for Svg {
             window,
             cx,
             |style, window, cx| {
-                let transformation = self
-                    .transformation
-                    .as_ref()
-                    .map(|transformation| {
-                        transformation.into_matrix(bounds.center(), window.scale_factor())
-                    })
-                    .unwrap_or_default();
+                let mirrored = window.mirrored()
+                    && self.path.as_ref().is_some_and(|p| {
+                        MIRRORED_ICONS.get().is_some_and(|set| set.contains(&p.as_ref()))
+                    });
+                let transformation = match (self.transformation.as_ref(), mirrored) {
+                    (Some(t), false) => t.into_matrix(bounds.center(), window.scale_factor()),
+                    (t, true) => {
+                        let mut t = t.copied().unwrap_or_default();
+                        t.scale.width = -t.scale.width;
+                        t.into_matrix(bounds.center(), window.scale_factor())
+                    }
+                    (None, false) => TransformationMatrix::default(),
+                };
 
                 if let Some((data, path)) = self.data.as_ref().zip(self.data_path.as_ref()) {
                     if let Some(color) = style.text.color {
@@ -199,6 +205,14 @@ impl InteractiveElement for Svg {
     fn interactivity(&mut self) -> &mut Interactivity {
         &mut self.interactivity
     }
+}
+
+static MIRRORED_ICONS: OnceLock<&'static [&'static str]> = OnceLock::new();
+
+/// Icons that point along the reading direction (back, forward, reply, send): drawn flipped
+/// while layout is mirrored for a right-to-left language. Set once, by asset path.
+pub fn set_mirrored_icons(paths: &'static [&'static str]) {
+    let _ = MIRRORED_ICONS.set(paths);
 }
 
 /// A transformation to apply to an SVG element.

@@ -56,7 +56,7 @@ fn glyph(emoji: &str, custom: Option<ImageSource>, size: f32) -> AnyElement {
     }
 }
 
-/// Above the anchor by `gap`, else below; centred or left-aligned, clamped to the pane.
+/// Above the anchor by `gap`, else below; centred or start-aligned, clamped to the pane.
 fn place(pop: &Pop, anchor: Bounds<Pixels>, pane: Bounds<Pixels>, gap: f32, centred: bool) -> (f32, f32) {
     let Some(sz) = pop.size.get() else { return (0., 0.) };
     let (w, h) = (f32::from(sz.width), f32::from(sz.height));
@@ -64,7 +64,13 @@ fn place(pop: &Pop, anchor: Bounds<Pixels>, pane: Bounds<Pixels>, gap: f32, cent
     if top < 10. {
         top = f32::from(anchor.bottom()) + gap;
     }
-    let left = if centred { f32::from(anchor.center().x) - w / 2. } else { f32::from(anchor.left()) };
+    let left = if centred {
+        f32::from(anchor.center().x) - w / 2.
+    } else if gpui::layout_rtl() {
+        f32::from(anchor.right()) - w
+    } else {
+        f32::from(anchor.left())
+    };
     let min = f32::from(pane.left()) + 10.;
     let max = f32::from(pane.right()) - w - 10.;
     (left.min(max).max(min), top)

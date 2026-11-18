@@ -2701,7 +2701,9 @@ impl VectorApp {
                                     }
                                     return;
                                 };
-                                let want = w0 + f32::from(e.position.x) - x0;
+                                // Mirrored, the list sits right of its handle: dragging left widens it.
+                                let dx = f32::from(e.position.x) - x0;
+                                let want = if gpui::layout_rtl() { w0 - dx } else { w0 + dx };
                                 app.update(cx, |app, cx| {
                                     app.list_pref = want;
                                     cx.notify();
@@ -9137,7 +9139,7 @@ impl VectorApp {
         }
         let (chat, blur, dim) = (p.chat.clone(), p.blur, p.dim);
         self.wallpaper.busy = true;
-        self.wallpaper.label = "Uploading\u{2026}".into();
+        self.wallpaper.label = t::wallpaper_uploading().into();
         let rx = if self.live {
             backend::run(vector_core::db::scoped(async move {
                 vector_core::wallpaper::publish_wallpaper(&chat, blur, dim).await
@@ -10267,19 +10269,19 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
                 .flex()
                 .text_size(px(12.))
                 .text_color(c(TEXT))
-                .children(crate::kit::run_divs(&t::day_divider(label.as_str(), time.as_str()), |d| d.font_weight(FontWeight::BOLD))),
+                .child(crate::kit::run_text(
+                    &t::day_divider(label.as_str(), time.as_str()),
+                    gpui::HighlightStyle { font_weight: Some(FontWeight::BOLD), ..Default::default() },
+                )),
             white_a(0.1),
             0.7,
         ),
         Row::Unread => divider(
             // letter-spacing: 0.08em, which GPUI text has no property for.
-            div()
-                .flex()
-                .gap(px(0.88))
+            crate::kit::gapped(&t::chat_unread_divider().to_uppercase(), 0.88)
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(11.))
-                .text_color(c(ACCENT))
-                .children(t::chat_unread_divider().to_uppercase().chars().map(|ch| div().child(ch.to_string()))),
+                .text_color(c(ACCENT)),
             ca(89, 252, 179, 0.6),
             1.,
         ),
@@ -10507,9 +10509,10 @@ fn composer(
                         .whitespace_nowrap()
                         .text_size(px(13.5))
                         .text_color(white_a(0.85))
-                        .children(crate::kit::run_divs(&t::composer_replying_to(kit::escape(&name)), |d| {
-                            d.font_weight(FontWeight::SEMIBOLD).text_color(c(ACCENT))
-                        })),
+                        .child(crate::kit::run_text(
+                            &t::composer_replying_to(kit::escape(&name)),
+                            gpui::HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), color: Some(c(ACCENT)), ..Default::default() },
+                        )),
                 )
                 .child(
                     div()

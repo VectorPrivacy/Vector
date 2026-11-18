@@ -293,6 +293,8 @@ pub struct Inline {
     select: Option<crate::select::Key>,
     /// Never wraps, however narrow its box (`white-space: pre`).
     nowrap: bool,
+    /// Paragraphs start left to right even in a right-to-left UI.
+    ltr: bool,
     /// Its pictures hold their first frame until their row is hovered (`data-motion="hover"`).
     held: bool,
 }
@@ -308,6 +310,7 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         clipped: None,
         select: None,
         nowrap: false,
+        ltr: false,
         held: false,
     }
 }
@@ -337,6 +340,12 @@ impl Inline {
     /// One line however wide: a code line, clipped by its box rather than wrapped.
     pub fn nowrap(mut self) -> Self {
         self.nowrap = true;
+        self
+    }
+
+    /// Code: its lines run left to right whatever the UI's direction.
+    pub fn ltr(mut self) -> Self {
+        self.ltr = true;
         self
     }
 
@@ -381,12 +390,16 @@ struct Line {
     /// How far the glyphs' own baseline sits above `baseline`: GPUI reports descent negative.
     sink: f32,
     items: Vec<Placed>,
+    /// Set against the right edge: a line of a right-to-left paragraph.
+    right: bool,
 }
 
 #[derive(Default)]
 pub struct Laid {
     width: Option<f32>,
     lines: Vec<Line>,
+    /// The width the right-set lines currently end at.
+    flush: f32,
     /// Where a cut line's `…` goes, in which atom's look.
     ellipsis: Option<(f32, usize)>,
     size: Size<Pixels>,
@@ -620,12 +633,12 @@ fn piece_width(atoms: &[Atom], atom: usize, range: Range<usize>, window: &Window
     f32::from(line.x_for_index(range.end) - line.x_for_index(range.start))
 }
 
-fn has_rtl(text: &str) -> bool {
+pub fn has_rtl(text: &str) -> bool {
     use unicode_bidi::{BidiClass, bidi_class};
     text.chars().any(|c| matches!(bidi_class(c), BidiClass::R | BidiClass::AL))
 }
 
-fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
+fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -> Laid {
     let mut segs = segments(atoms, window);
     let mut lines: Vec<Vec<Placed>> = vec![Vec::new()];
     let mut x = 0f32;
@@ -717,9 +730,12 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
     {
         lines.pop();
     }
-    if let Some(b) = bidi(atoms) {
-        for line in &mut lines {
-            reorder(line, atoms, &b, window);
+    let bidi = bidi(atoms, ltr || !gpui::layout_rtl());
+    let mut flush_right = vec![false; lines.len()];
+    if let Some(b) = &bidi {
+        for (line, right) in lines.iter_mut().zip(&mut flush_right) {
+            *right = line.first().is_some_and(|p| b.para_level(b.starts[p.atom] + p.range.start) == 1);
+            reorder(line, atoms, b, window);
         }
     }
 
@@ -771,20 +787,48 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
             baseline: top + above,
             sink,
             items,
+            right: false,
         });
         top += height;
+    }
+    // A right-to-left paragraph's lines sit against the block's right edge.
+    let block = widest.min(width).ceil();
+    for (line, right) in out.iter_mut().zip(flush_right) {
+        line.right = right;
+        if right {
+            let end = line.items.iter().map(|p| p.x + p.lead + p.width + p.tail).fold(0., f32::max);
+            for p in &mut line.items {
+                p.x += block - end;
+            }
+        }
     }
     Laid {
         width: Some(width),
         lines: out,
+        flush: block,
         ellipsis: None,
-        size: size(px(widest.min(width).ceil()), px(top)),
+        size: size(px(block), px(top)),
     }
 }
 
+/// Moves the right-set lines to the edge of the box the paragraph was given, which a stretched
+/// layout makes wider than its text.
+fn flush_to(laid: &mut Laid, edge: f32) {
+    let shift = edge - laid.flush;
+    if shift.abs() < 0.5 || !laid.lines.iter().any(|l| l.right) {
+        return;
+    }
+    for line in laid.lines.iter_mut().filter(|l| l.right) {
+        for p in &mut line.items {
+            p.x += shift;
+        }
+    }
+    laid.flush = edge;
+}
+
 /// One line at most `width` wide, cut at a grapheme with `…` after.
-fn layout_cut(atoms: &[Atom], base: &Look, width: f32, window: &Window) -> Laid {
-    let mut laid = layout(atoms, base, f32::INFINITY, window);
+fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -> Laid {
+    let mut laid = layout(atoms, base, f32::INFINITY, ltr, window);
     laid.lines.truncate(1);
     let Some(line) = laid.lines.first_mut() else {
         return laid;
@@ -932,12 +976,13 @@ impl Element for Inline {
         _: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let laid: Rc<RefCell<Laid>> = Rc::default();
-        let (atoms, base, state, cut, nowrap) = (
+        let (atoms, base, state, cut, nowrap, ltr) = (
             self.atoms.clone(),
             self.base.clone(),
             laid.clone(),
             self.ellipsis,
             self.nowrap,
+            self.ltr,
         );
         let id =
             window.request_measured_layout(Style::default(), move |known, available, window, _| {
@@ -953,9 +998,9 @@ impl Element for Inline {
                 let mut s = state.borrow_mut();
                 if s.width != Some(width) {
                     *s = if cut {
-                        layout_cut(&atoms, &base, width, window)
+                        layout_cut(&atoms, &base, width, ltr, window)
                     } else {
-                        layout(&atoms, &base, width, window)
+                        layout(&atoms, &base, width, ltr, window)
                     };
                 }
                 s.size
@@ -979,11 +1024,12 @@ impl Element for Inline {
                 (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)
             }) {
                 *s = if self.ellipsis {
-                    layout_cut(&self.atoms, &self.base, w, window)
+                    layout_cut(&self.atoms, &self.base, w, self.ltr, window)
                 } else {
-                    layout(&self.atoms, &self.base, w, window)
+                    layout(&self.atoms, &self.base, w, self.ltr, window)
                 };
             }
+            flush_to(&mut s, w);
         }
         if let Some(key) = &self.select {
             crate::select::place(key, &self.atoms, laid, bounds);
@@ -1468,15 +1514,24 @@ fn sheen() -> std::sync::Arc<gpui::RenderImage> {
     SHEEN.with(|s| s.clone())
 }
 
-/// Bidi embedding levels for every byte of a paragraph, resolved at paragraph level 0 as a
-/// page without `dir` lays it out. Boxes (emoji, pills) stand in as U+FFFC.
+/// Bidi embedding levels for every byte of a block, each paragraph resolved at level 0 as a
+/// page without `dir` lays it out, or, while the UI reads right to left, at the level its first
+/// letter sets (`dir="auto"`). Boxes (emoji, pills) stand in as U+FFFC.
 struct Bidi {
     starts: Vec<usize>,
     levels: Vec<u8>,
+    /// Byte ranges of the paragraphs that read right to left.
+    rtl: Vec<Range<usize>>,
+}
+
+impl Bidi {
+    fn para_level(&self, at: usize) -> u8 {
+        self.rtl.iter().any(|r| r.contains(&at)) as u8
+    }
 }
 
 /// `None` when nothing in the paragraph runs right to left, which leaves its lines as laid.
-fn bidi(atoms: &[Atom]) -> Option<Bidi> {
+fn bidi(atoms: &[Atom], ltr: bool) -> Option<Bidi> {
     let mut text = String::new();
     let mut starts = Vec::with_capacity(atoms.len());
     for a in atoms {
@@ -1491,8 +1546,10 @@ fn bidi(atoms: &[Atom]) -> Option<Bidi> {
     if !has_rtl(&text) {
         return None;
     }
-    let info = unicode_bidi::BidiInfo::new(&text, Some(unicode_bidi::Level::ltr()));
-    Some(Bidi { starts, levels: info.levels.iter().map(|l| l.number()).collect() })
+    let base = ltr.then(unicode_bidi::Level::ltr);
+    let info = unicode_bidi::BidiInfo::new(&text, base);
+    let rtl = info.paragraphs.iter().filter(|p| p.level.is_rtl()).map(|p| p.range.clone()).collect();
+    Some(Bidi { starts, levels: info.levels.iter().map(|l| l.number()).collect(), rtl })
 }
 
 /// A line's pieces cut where their level changes, and spaces apart from words, so each cut
@@ -1530,9 +1587,10 @@ fn bidi_cuts(line: &[Placed], atoms: &[Atom], b: &Bidi) -> Option<Vec<(usize, Ra
         return None;
     }
     // L1: spaces ending the line take the paragraph's level.
+    let para = line.first().map_or(0, |p| b.para_level(b.starts[p.atom] + p.range.start));
     for (i, r, l) in out.iter_mut().rev() {
         match &atoms[line[*i].atom] {
-            Atom::Text { text, .. } if text[r.clone()].chars().all(char::is_whitespace) => *l = 0,
+            Atom::Text { text, .. } if text[r.clone()].chars().all(char::is_whitespace) => *l = para,
             _ => break,
         }
     }
@@ -1737,7 +1795,7 @@ mod rtl_tests {
         cuts.dedup();
         let line: Vec<Placed> =
             cuts.windows(2).map(|w| Placed { atom: 0, range: w[0]..w[1], x: 0., width: 10., lead: 0., tail: 0., mirror: false }).collect();
-        let Some(b) = bidi(&atoms) else {
+        let Some(b) = bidi(&atoms, true) else {
             return line.iter().map(|p| text[p.range.clone()].to_string()).collect();
         };
         let Some(cuts) = bidi_cuts(&line, &atoms, &b) else {
@@ -1773,7 +1831,7 @@ mod rtl_tests {
     #[test]
     fn a_wrapped_lines_end_space_takes_the_paragraph_level() {
         let atoms = vec![Atom::Text { text: "שלום עולם".into(), look: Look::new("Rubik", 15., 21., gpui::white()), kind: Kind::Plain }]; // i18n-exempt: font name
-        let b = bidi(&atoms).unwrap();
+        let b = bidi(&atoms, true).unwrap();
         let line = vec![Placed { atom: 0, range: 0..9, x: 0., width: 10., lead: 0., tail: 0., mirror: false }];
         let cuts = bidi_cuts(&line, &atoms, &b).unwrap();
         assert_eq!(cuts.iter().map(|c| c.2).collect::<Vec<_>>(), vec![1, 0]);

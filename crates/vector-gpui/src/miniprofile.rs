@@ -134,13 +134,12 @@ fn click(on: &OnAct, act: Act) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut A
 fn place(at: Bounds<Pixels>, window: Size<Pixels>) -> Point<Pixels> {
     let w = f32::from(window.width);
     let (left, right) = (f32::from(at.left()), f32::from(at.right()));
-    let mut x = right + MARGIN;
-    if x + WIDTH + MARGIN > w {
-        x = left - WIDTH - MARGIN;
-        if x < MARGIN {
-            x = (left + f32::from(at.size.width) / 2. - WIDTH / 2.).min(w - WIDTH - MARGIN).max(MARGIN);
-        }
-    }
+    let (after, before) = (right + MARGIN, left - WIDTH - MARGIN);
+    let fits = |x: f32| x >= MARGIN && x + WIDTH + MARGIN <= w;
+    let order = if gpui::layout_rtl() { [before, after] } else { [after, before] };
+    let x = order.into_iter().find(|&x| fits(x)).unwrap_or_else(|| {
+        (left + f32::from(at.size.width) / 2. - WIDTH / 2.).min(w - WIDTH - MARGIN).max(MARGIN)
+    });
     point(px(x), at.top().max(px(MARGIN)))
 }
 

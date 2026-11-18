@@ -98,7 +98,11 @@ fn pseudo_locales_mark_every_message() {
     assert_eq!(&*t::typing_strip(1, "Ann", "", ""), "[<b>Ann</b> īş ŧẏƥīƞɠ·······]");
     set_language(PSEUDO_IDS);
     assert_eq!(&*t::typing_dm(), "typing-dm");
+    set_language(PSEUDO_MIRRORED);
+    assert!(is_rtl());
+    assert_eq!(&*t::day_today(), "Today");
     set_language(BUILT_IN);
+    assert!(!is_rtl());
     assert_eq!(&*t::day_today(), "Today");
 }
 

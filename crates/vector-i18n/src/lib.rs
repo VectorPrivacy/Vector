@@ -38,6 +38,8 @@ pub const BUILT_IN: &str = "en-GB";
 pub const PSEUDO_ACCENTED: &str = "en-XA";
 /// Message ids in place of text, for translator screenshots.
 pub const PSEUDO_IDS: &str = "en-XI";
+/// English laid out right to left, for checking mirrored screens before a real RTL language.
+pub const PSEUDO_MIRRORED: &str = "ar-XB";
 
 /// A language added at run time.
 #[derive(Clone, Debug)]
@@ -144,6 +146,7 @@ enum Pseudo {
     None,
     Accented,
     Ids,
+    Mirrored,
 }
 
 struct Active {
@@ -271,6 +274,7 @@ pub fn set_language(tag: &str) -> bool {
     let (chain, rtl, pseudo, found) = match tag {
         PSEUDO_ACCENTED => (vec![Arc::new(Lang::new(tag, EN_GB, LocaleData::default(), true))], false, Pseudo::Accented, true),
         PSEUDO_IDS => (vec![EN_GB_LANG.clone()], false, Pseudo::Ids, true),
+        PSEUDO_MIRRORED => (vec![EN_GB_LANG.clone()], true, Pseudo::Mirrored, true),
         _ => {
             let mut r = REGISTRY.write().unwrap();
             let mut chain = vec![];

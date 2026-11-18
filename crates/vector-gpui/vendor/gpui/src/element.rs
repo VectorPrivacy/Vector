@@ -355,6 +355,7 @@ enum ElementDrawPhase<RequestLayoutState, PrepaintState> {
         global_id: Option<GlobalElementId>,
         inspector_id: Option<InspectorElementId>,
         bounds: Bounds<Pixels>,
+        keep_ltr: bool,
         request_layout: RequestLayoutState,
         prepaint: PrepaintState,
     },
@@ -438,6 +439,8 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let bounds = window.layout_bounds(layout_id);
+                let keep_ltr = window.keep_ltr || window.keeps_ltr(layout_id);
+                let outer_ltr = mem::replace(&mut window.keep_ltr, keep_ltr);
                 let mut pushed_a11y_node = false;
                 if window.a11y.is_active() {
                     if let Some(global_id) = global_id.as_ref() {
@@ -519,12 +522,14 @@ impl<E: Element> Drawable<E> {
                 if global_id.is_some() {
                     window.element_id_stack.pop();
                 }
+                window.keep_ltr = outer_ltr;
 
                 self.phase = ElementDrawPhase::Prepaint {
                     node_id,
                     global_id,
                     inspector_id,
                     bounds,
+                    keep_ltr,
                     request_layout,
                     prepaint,
                 };
@@ -544,10 +549,12 @@ impl<E: Element> Drawable<E> {
                 global_id,
                 inspector_id,
                 bounds,
+                keep_ltr,
                 mut request_layout,
                 mut prepaint,
                 ..
             } => {
+                let outer_ltr = mem::replace(&mut window.keep_ltr, keep_ltr);
                 if let Some(element_id) = self.element.id() {
                     window.element_id_stack.push(element_id);
                     debug_assert_eq!(&**global_id.as_ref().unwrap(), &*window.element_id_stack);
@@ -567,6 +574,7 @@ impl<E: Element> Drawable<E> {
                 if global_id.is_some() {
                     window.element_id_stack.pop();
                 }
+                window.keep_ltr = outer_ltr;
 
                 self.phase = ElementDrawPhase::Painted;
                 (request_layout, prepaint)

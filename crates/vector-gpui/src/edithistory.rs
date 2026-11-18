@@ -288,7 +288,8 @@ pub fn render(
     // Placed by the room either side of the row, so it grows from its anchored edge.
     let (above, below) = (f32::from(h.anchor.top()) - 44., vh - f32::from(h.anchor.bottom()) - 16.);
     let up = above >= cap.min(320.) || above >= below;
-    let left = f32::from(h.anchor.left()).min(vw - width - 10.).max(10.);
+    let start = if gpui::layout_rtl() { f32::from(h.anchor.right()) - width } else { f32::from(h.anchor.left()) };
+    let left = start.min(vw - width - 10.).max(10.);
     let (pos, corner, max_h) = if sheet {
         (point(px(0.), px(vh)), gpui::Anchor::BottomLeft, vh * 0.75)
     } else if above.max(below) < 260. {

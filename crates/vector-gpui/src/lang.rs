@@ -5,6 +5,18 @@ use std::path::{Path, PathBuf};
 use crate::backend::device;
 
 const KEY: &str = "ui_language";
+
+/// Icons that point along the reading direction, flipped when it runs right to left. Media
+/// controls keep their direction: time runs left to right in every language.
+const MIRRORED_ICONS: &[&str] = &[
+    "icons/chevron-left.svg",
+    "icons/chevron-right.svg",
+    "icons/chevron-double-left.svg",
+    "icons/reply.svg",
+    "icons/send.svg",
+    "icons/share.svg",
+    "ui/notice-go.svg",
+];
 const PACK_EXT: &str = "vpack";
 
 /// Where downloaded packs live, beside the device settings.
@@ -26,6 +38,7 @@ pub fn init(packs: Option<PathBuf>) {
         Err(_) => (sys_locale::get_locale().unwrap_or_default(), system_hour12()),
     };
     vector_i18n::set_system_locale(&locale, hour12);
+    gpui::set_mirrored_icons(MIRRORED_ICONS);
     for e in packs.and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
         if e.path().extension().is_some_and(|x| x == PACK_EXT)
             && let Some(p) = std::fs::read(e.path()).ok().and_then(|b| vector_i18n::Pack::from_bytes(&b).ok())
@@ -44,11 +57,13 @@ pub fn init(packs: Option<PathBuf>) {
     if let Some(tag) = std::env::var("VECTOR_LANG").ok().or_else(|| device::get(KEY)) {
         vector_i18n::set_language(&tag);
     }
+    gpui::set_layout_rtl(vector_i18n::is_rtl());
 }
 
 /// Switches every window to `tag` at once and keeps it for next launch.
 pub fn set(tag: &str, cx: &mut gpui::App) {
     vector_i18n::set_language(tag);
+    gpui::set_layout_rtl(vector_i18n::is_rtl());
     device::set(KEY, vector_i18n::language());
     cx.refresh_windows();
 }

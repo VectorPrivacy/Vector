@@ -1160,6 +1160,7 @@ impl SecurityFlow {
                     .id("cred-pins")
                     .track_focus(&self.pin_focus)
                     .on_key_down(cx.listener(Self::pin_key))
+                    .keep_ltr()
                     .flex()
                     .justify_center()
                     .gap(px(if small { 6. } else { 8. }));

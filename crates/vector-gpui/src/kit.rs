@@ -9,16 +9,37 @@ use crate::theme::*;
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
 /// with the spacing after it as CSS adds it (trailing included).
 pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
-    let mut row = div().flex().flex_row().flex_shrink_0().spoken(SharedString::from(text.as_ref().to_string()));
-    for g in text.as_ref().graphemes(true) {
+    let text = text.as_ref();
+    // Joined scripts take no letter spacing, as CSS leaves them.
+    if crate::inline::has_rtl(text) {
+        return div().flex().flex_shrink_0().child(SharedString::from(text.to_string()));
+    }
+    let mut row = letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())));
+    for g in text.graphemes(true) {
         let g = if g == " " { "\u{00a0}" } else { g };
-        row = row.child(
-            div()
-                .mr(px(spacing))
-                .child(SharedString::from(g.to_string())),
-        );
+        row = row.child(trailing(div(), spacing).child(SharedString::from(g.to_string())));
     }
     row
+}
+
+/// Letters `gap` apart, with no space after the last.
+pub fn gapped(text: &str, gap: f32) -> gpui::Div {
+    if crate::inline::has_rtl(text) {
+        return div().flex().child(SharedString::from(text.to_string()));
+    }
+    letters(div().flex().gap(px(gap)).spoken(SharedString::from(text.to_string())))
+        .children(text.graphemes(true).map(|g| div().child(SharedString::from(g.to_string()))))
+}
+
+/// A row of letters laid one by one: reversed under a mirrored layout, so they still read left
+/// to right.
+fn letters(row: gpui::Div) -> gpui::Div {
+    if gpui::layout_rtl() { row.flex_row_reverse() } else { row.flex_row() }
+}
+
+/// The space CSS adds after a letter, on its right whichever way the row runs.
+fn trailing(letter: gpui::Div, spacing: f32) -> gpui::Div {
+    if gpui::layout_rtl() { letter.ml(px(spacing)) } else { letter.mr(px(spacing)) }
 }
 
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
@@ -43,21 +64,23 @@ pub fn gradient_text_in(text: &str, spacing: f32, phase: f32, from: gpui::Hsla, 
     let count = text.graphemes(true).count().max(1) as f32;
     // background-position swings 0% → 100% → 0%: the visible half of the 200% strip slides.
     let swing = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
-    let mut row = div().flex().flex_row().flex_shrink_0().spoken(SharedString::from(text.to_string()));
+    let mut row = letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())));
     for (i, g) in text.graphemes(true).enumerate() {
         let x = (i as f32 + 0.5) / count;
         // Position on the 200%-wide strip: the element shows [swing*0.5, swing*0.5 + 0.5].
         let p = swing * 0.5 + x * 0.5;
         let t = ((p - 0.1387) / (0.60 - 0.1387)).clamp(0., 1.);
         let g = if g == " " { "\u{00a0}" } else { g };
-        row = row.child(
-            div()
-                .mr(px(spacing))
-                .text_color(mix(from, to, t))
-                .child(SharedString::from(g.to_string())),
-        );
+        row = row.child(trailing(div(), spacing).text_color(mix(from, to, t)).child(SharedString::from(g.to_string())));
     }
     row
+}
+
+/// How far along a slider's track `x` sits, 0 to 1, with `inset` held back at each end for the
+/// thumb. Under a mirrored layout the track fills from its right edge.
+pub fn track_frac(b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels, inset: gpui::Pixels) -> f32 {
+    let from = if gpui::layout_rtl() { b.right() - inset - x } else { x - b.origin.x - inset };
+    (from / (b.size.width - inset * 2.).max(px(1.))).clamp(0., 1.)
 }
 
 /// The choice `value` names, or the first.
@@ -1235,7 +1258,17 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
     }
 
     /// A slider's keys once focused: arrows by `step`, Page Up/Down by a tenth, Home and End.
+    /// Under a mirrored layout the track fills from the right, so ← raises it.
     fn slider_keys(self, frac: f32, step: f32, set: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static) -> Self {
+        self.track_keys(frac, step, gpui::layout_rtl(), set)
+    }
+
+    /// [`slider_keys`](Tipped::slider_keys) for a timeline drawn left to right in every language.
+    fn seek_keys(self, frac: f32, step: f32, set: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static) -> Self {
+        self.track_keys(frac, step, false, set)
+    }
+
+    fn track_keys(self, frac: f32, step: f32, mirrored: bool, set: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static) -> Self {
         use gpui::accesskit::{Action, ActionData};
         let set = std::rc::Rc::new(set);
         let (up, down, to) = (set.clone(), set.clone(), set.clone());
@@ -1247,7 +1280,12 @@ pub trait Tipped: gpui::StatefulInteractiveElement + Sized {
                 }
             })
             .on_key_down(move |e: &gpui::KeyDownEvent, w, cx| {
-            let to = match e.keystroke.key.as_str() {
+            let key = match e.keystroke.key.as_str() {
+                "left" if mirrored => "right",
+                "right" if mirrored => "left",
+                k => k,
+            };
+            let to = match key {
                 "left" | "down" => frac - step,
                 "right" | "up" => frac + step,
                 "pagedown" => frac - 0.1,
@@ -1454,16 +1492,11 @@ pub fn runs(html: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// [`runs`] as inline divs for a flex row, `<b>` ones styled by `strong`. Spaces at the joins
-/// become no-break spaces, which line layout can't trim.
-pub fn run_divs(html: &str, strong: impl Fn(gpui::Div) -> gpui::Div) -> Vec<gpui::Div> {
-    runs(html)
-        .into_iter()
-        .map(|(t, b)| {
-            let d = gpui::div().child(t.replace(' ', "\u{a0}"));
-            if b { strong(d) } else { d }
-        })
-        .collect()
+/// [`rich`] markup as one line, `<b>` runs styled by `strong`: shaped whole, so a right-to-left
+/// language orders its runs and punctuation as one sentence.
+pub fn run_text(html: &str, strong: gpui::HighlightStyle) -> gpui::StyledText {
+    let (text, bold) = untag(html);
+    gpui::StyledText::new(text).with_highlights(bold.into_iter().map(|r| (r, strong)))
 }
 
 /// Text safe inside a popup's `<b>`/`<br>` markup.
@@ -1593,9 +1626,7 @@ fn menu_slider(
     sliding: std::rc::Rc<std::cell::Cell<Option<usize>>>,
 ) -> AnyElement {
     let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<gpui::Pixels>::default()));
-    let at = |b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels| {
-        ((x - b.origin.x - px(10.)) / (b.size.width - px(20.)).max(px(1.))).clamp(0., 1.)
-    };
+    let at = |b: gpui::Bounds<gpui::Pixels>, x: gpui::Pixels| track_frac(b, x, px(10.));
     let down = {
         let (on, bounds, sliding) = (on.clone(), bounds.clone(), sliding.clone());
         move |e: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| {
@@ -1902,6 +1933,7 @@ pub fn context_menu(
             .on_mouse_down(gpui::MouseButton::Right, move |_, w, cx| c2(w, cx))
             .child(
                 gpui::anchored()
+                    .anchor(if gpui::layout_rtl() { gpui::Anchor::TopRight } else { gpui::Anchor::TopLeft })
                     .position(at)
                     .snap_to_window_with_margin(px(8.))
                     // `.context-menu.is-visible`: down from 4px above, fading in over 0.12 s.

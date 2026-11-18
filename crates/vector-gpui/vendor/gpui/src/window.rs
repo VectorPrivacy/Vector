@@ -1274,6 +1274,7 @@ pub struct Window {
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
     layout_engine: Option<TaffyLayoutEngine>,
+    pub(crate) keep_ltr: bool,
     pub(crate) root: Option<AnyView>,
     pub(crate) element_id_stack: ElementIdStack,
     pub(crate) text_style_stack: Vec<TextStyleRefinement>,
@@ -2419,6 +2420,7 @@ impl Window {
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
             layout_engine: Some(TaffyLayoutEngine::new()),
+            keep_ltr: false,
             root: None,
             element_id_stack: ElementIdStack::default(),
             text_style_stack: Vec::new(),
@@ -4146,8 +4148,11 @@ impl Window {
                 size: self.viewport_size(),
             };
 
-            if tooltip_bounds.right() > window_bounds.right() {
-                let new_x = mouse_position.x - tooltip_bounds.size.width - px(1.);
+            let before = mouse_position.x - tooltip_bounds.size.width - px(1.);
+            if crate::layout_rtl() && before >= Pixels::ZERO {
+                tooltip_bounds.origin.x = before;
+            } else if tooltip_bounds.right() > window_bounds.right() {
+                let new_x = before;
                 if new_x >= Pixels::ZERO {
                     tooltip_bounds.origin.x = new_x;
                 } else {
@@ -5893,6 +5898,16 @@ impl Window {
         let mut layout_engine = self.layout_engine.take().unwrap();
         layout_engine.compute_layout(layout_id, available_space, self, cx);
         self.layout_engine = Some(layout_engine);
+    }
+
+    /// Whether the element being drawn is laid out right to left: the window is mirrored
+    /// and no ancestor opted out with [`crate::Styled::keep_ltr`].
+    pub fn mirrored(&self) -> bool {
+        crate::layout_rtl() && !self.keep_ltr
+    }
+
+    pub(crate) fn keeps_ltr(&self, layout_id: LayoutId) -> bool {
+        self.layout_engine.as_ref().is_some_and(|e| e.keeps_ltr(layout_id))
     }
 
     /// Obtain the bounds computed for the given LayoutId relative to the window. This method will usually be invoked by

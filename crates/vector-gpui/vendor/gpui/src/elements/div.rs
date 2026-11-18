@@ -2676,7 +2676,12 @@ impl Interactivity {
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();
 
-            scroll_offset.x = scroll_offset.x.clamp(-scroll_max.x, px(0.));
+            // Mirrored content overflows to the left, so it scrolls into view rightward.
+            scroll_offset.x = if window.mirrored() {
+                scroll_offset.x.clamp(px(0.), scroll_max.x)
+            } else {
+                scroll_offset.x.clamp(-scroll_max.x, px(0.))
+            };
             if scroll_to_bottom {
                 scroll_offset.y = -scroll_max.y;
             } else {
@@ -3616,6 +3621,7 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let mirrored = window.mirrored();
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
@@ -3636,7 +3642,7 @@ impl Interactivity {
                         Overflow::Scroll
                             if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
                         {
-                            delta.y
+                            if mirrored { -delta.y } else { delta.y }
                         }
                         _ => Pixels::ZERO,
                     };
