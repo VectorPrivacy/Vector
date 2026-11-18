@@ -1,40 +1,26 @@
 //! The Audit Log in words (`lib/audit-text.js`): each entry as a sentence of plain and bold
 //! parts, the details it expands to, and the family the filter groups it under.
 
+use gpui::SharedString;
 use serde_json::Value;
 
-use crate::kit::Choice;
+use crate::kit::{self, Choice};
+use crate::t;
 
-pub const FAMILIES: &[Choice] = &[
-    Choice {
-        value: "all",
-        label: "All Actions",
-    },
-    Choice {
-        value: "community",
-        label: "Community",
-    },
-    Choice {
-        value: "roles",
-        label: "Roles",
-    },
-    Choice {
-        value: "members",
-        label: "Members",
-    },
-    Choice {
-        value: "channels",
-        label: "Channels",
-    },
-    Choice {
-        value: "messages",
-        label: "Messages",
-    },
-    Choice {
-        value: "voice",
-        label: "Voice",
-    },
-];
+pub fn families() -> &'static [Choice] {
+    let c = |value: &'static str, label: SharedString| Choice { value, label: kit::interned(&label) };
+    kit::choices("audit-families", || {
+        vec![
+            c("all", t::audit_family_all()),
+            c("community", t::audit_family_community()),
+            c("roles", t::audit_family_roles()),
+            c("members", t::audit_family_members()),
+            c("channels", t::audit_family_channels()),
+            c("messages", t::audit_family_messages()),
+            c("voice", t::audit_family_voice()),
+        ]
+    })
+}
 
 pub fn family_of(action: &str) -> &'static str {
     if action.starts_with("voice_") {
@@ -87,41 +73,12 @@ pub fn tone_of(action: &str) -> Tone {
     }
 }
 
-const PERMS: &[(u32, &str)] = &[
-    (0, "Manage Roles"),
-    (1, "Manage Channels"),
-    (2, "Manage Community"),
-    (3, "Kick Members"),
-    (4, "Ban Members"),
-    (5, "Manage Messages"),
-    (6, "Create Invites"),
-    (8, "View Audit Log"),
-    (9, "Mention @everyone"),
-    (11, "Pin Messages"),
-    (13, "View Channels"),
-    (14, "Send Messages"),
-    (15, "Send in Threads"),
-    (16, "Attach Files"),
-    (17, "Add Reactions"),
-    (18, "Read Message History"),
-    (19, "Connect"),
-    (20, "Speak"),
-    (21, "Video"),
-    (22, "Priority Speaker"),
-    (23, "Mute Members"),
-    (24, "Deafen Members"),
-    (25, "Move Members"),
-    (26, "Timeout Members"),
-    (28, "Manage Nicknames"),
-    (29, "Change Nickname"),
-];
-
 pub fn permission_name(bit: u64) -> String {
-    PERMS
-        .iter()
-        .find(|(b, _)| u64::from(*b) == bit)
-        .map(|(_, n)| n.to_string())
-        .unwrap_or_else(|| format!("Permission {bit}"))
+    crate::roles::groups(true)
+        .into_iter()
+        .flat_map(|(_, list)| list.iter())
+        .find(|p| u64::from(p.bit) == bit)
+        .map_or_else(|| t::audit_permission_unknown(bit).to_string(), |p| (p.name)().to_string())
 }
 
 fn perms(list: &Value) -> String {
@@ -162,229 +119,134 @@ fn target_name(t: Option<&Value>, member: &dyn Fn(Option<&str>) -> String) -> St
         "everyone" => "@everyone".into(),
         "role" => name
             .map(|n| format!("@{n}"))
-            .unwrap_or_else(|| "a deleted role".into()),
+            .unwrap_or_else(|| t::audit_deleted_role().into()),
         "member" => member(s(t, "npub")),
         "channel" => match name {
             Some(n) if s(t, "view") == Some("voice") => n.into(),
             Some(n) => format!("#{n}"),
-            None => "a private channel".into(),
+            None => t::audit_private_channel().into(),
         },
-        "category" => name.unwrap_or("a category").into(),
+        "category" => name.map_or_else(|| t::audit_unknown_category().into(), str::to_string),
         _ => String::new(),
     }
 }
 
-fn plural(n: u64, one: &str, many: &str) -> String {
-    if n == 1 {
-        one.into()
-    } else {
-        format!("{n} {many}")
+/// Message markup as `(text, bold)` runs.
+fn runs(html: &str) -> Vec<(String, bool)> {
+    let (text, bold) = kit::untag(html);
+    let mut out = Vec::with_capacity(bold.len() * 2 + 1);
+    let mut at = 0;
+    for r in bold {
+        if r.start > at {
+            out.push((text[at..r.start].to_string(), false));
+        }
+        out.push((text[r.clone()].to_string(), true));
+        at = r.end;
     }
+    if at < text.len() {
+        out.push((text[at..].to_string(), false));
+    }
+    out
 }
 
 /// `entry` as `(text, bold)` parts; `member` names an npub (or none) as the log shows them.
 pub fn sentence(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<(String, bool)> {
-    let actor = match s(entry, "actor") {
+    let bold = |text: String| format!("<b>{}</b>", kit::escape(&text));
+    let actor = bold(match s(entry, "actor") {
         Some(a) => member(Some(a)),
-        None => "Someone".into(),
-    };
-    let t = entry.get("target");
-    let name = |x: Option<&Value>| (target_name(x, member), true);
-    let plain = |x: &str| (x.to_string(), false);
+        None => t::audit_someone().into(),
+    });
+    let actor = actor.as_str();
+    let t_ = entry.get("target");
+    let name = |x: Option<&Value>| bold(target_name(x, member));
     let new_of = |f: &str| field(entry, f).and_then(|c| c.get("new"));
-    let sub = |key: &str| t.and_then(|t| t.get(key));
-    let author = || (member(sub("author").and_then(Value::as_str)), true);
-    let count = || {
-        new_of("count")
-            .and_then(Value::as_u64)
-            .filter(|n| *n > 0)
-            .unwrap_or(1)
-    };
-    let action = s(entry, "action").unwrap_or("");
-    let rest: Vec<(String, bool)> = match action {
-        "community_create" => vec![plain(" created the community")],
-        "community_update" => vec![plain(" updated the community")],
-        "roles_activate" => vec![plain(" switched the community to its new roles")],
-        "everyone_update" => vec![plain(" changed what "), name(t), plain(" can do")],
-        "role_create" => vec![plain(" created the role "), name(t)],
-        "role_update" => vec![plain(" updated the role "), name(t)],
-        "role_delete" => vec![plain(" deleted the role "), name(t)],
+    let sub = |key: &str| t_.and_then(|t| t.get(key));
+    let author = || bold(member(sub("author").and_then(Value::as_str)));
+    let count = || new_of("count").and_then(Value::as_u64).filter(|n| *n > 0).unwrap_or(1);
+    let target = || name(t_);
+    let html = match s(entry, "action").unwrap_or("") {
+        "community_create" => t::audit_community_create(actor),
+        "community_update" => t::audit_community_update(actor),
+        "roles_activate" => t::audit_roles_activate(actor),
+        "everyone_update" => t::audit_everyone_update(actor, target()),
+        "role_create" => t::audit_role_create(actor, target()),
+        "role_update" => t::audit_role_update(actor, target()),
+        "role_delete" => t::audit_role_delete(actor, target()),
         "member_roles_update" => {
             let c = field(entry, "roles");
             let added = c.map(|c| arr(c, "added")).unwrap_or(&[]);
             let removed = c.map(|c| arr(c, "removed")).unwrap_or(&[]);
             if added.len() == 1 && removed.is_empty() {
-                vec![
-                    plain(" gave "),
-                    name(t),
-                    plain(" the role "),
-                    name(added.first()),
-                ]
+                t::audit_member_role_give(actor, target(), name(added.first()))
             } else if removed.len() == 1 && added.is_empty() {
-                vec![
-                    plain(" took "),
-                    name(removed.first()),
-                    plain(" from "),
-                    name(t),
-                ]
+                t::audit_member_role_take(actor, name(removed.first()), target())
             } else {
-                vec![plain(" changed the roles of "), name(t)]
+                t::audit_member_roles_update(actor, target())
             }
         }
-        "member_ban" => vec![plain(" banned "), name(t)],
-        "member_unban" => vec![plain(" unbanned "), name(t)],
-        "banlist_update" => vec![plain(" updated the ban list")],
-        "member_kick" => vec![plain(" kicked "), name(t)],
-        "member_timeout" => {
-            let until = new_of("until")
-                .and_then(Value::as_u64)
-                .map(|ms| format!(" until {}", when_full(ms)))
-                .unwrap_or_default();
-            vec![plain(" timed out "), name(t), plain(&until)]
-        }
-        "member_timeout_remove" => vec![plain(" lifted the timeout on "), name(t)],
+        "member_ban" => t::audit_member_ban(actor, target()),
+        "member_unban" => t::audit_member_unban(actor, target()),
+        "banlist_update" => t::audit_banlist_update(actor),
+        "member_kick" => t::audit_member_kick(actor, target()),
+        "member_timeout" => match new_of("until").and_then(Value::as_u64) {
+            Some(ms) => t::audit_member_timeout_until(actor, target(), kit::escape(&when_full(ms))),
+            None => t::audit_member_timeout(actor, target()),
+        },
+        "member_timeout_remove" => t::audit_member_timeout_remove(actor, target()),
         "member_nick_update" => {
-            let nick = new_of("nick")
-                .and_then(Value::as_str)
-                .filter(|n| !n.is_empty());
-            let own = t
-                .and_then(|t| s(t, "npub"))
-                .is_some_and(|n| Some(n) == s(entry, "actor"));
-            let mut whose = if own {
-                vec![plain(" their nickname")]
-            } else {
-                vec![plain(" the nickname of "), name(t)]
-            };
-            match nick {
-                Some(n) => {
-                    let mut v = vec![plain(" set")];
-                    v.append(&mut whose);
-                    v.extend([plain(" to "), (n.to_string(), true)]);
-                    v
-                }
-                None => {
-                    let mut v = vec![plain(" removed")];
-                    v.append(&mut whose);
-                    v
-                }
+            let nick = new_of("nick").and_then(Value::as_str).filter(|n| !n.is_empty());
+            let own = t_.and_then(|t| s(t, "npub")).is_some_and(|n| Some(n) == s(entry, "actor"));
+            match (nick, own) {
+                (Some(n), true) => t::audit_nick_set_own(actor, bold(n.to_string())),
+                (Some(n), false) => t::audit_nick_set(actor, target(), bold(n.to_string())),
+                (None, true) => t::audit_nick_remove_own(actor),
+                (None, false) => t::audit_nick_remove(actor, target()),
             }
         }
         "channel_create" => {
             let voice = new_of("view").and_then(Value::as_str) == Some("voice");
             let private = new_of("private").and_then(Value::as_bool).unwrap_or(false);
-            vec![
-                plain(&format!(
-                    " created the {}{}channel ",
-                    if private { "private " } else { "" },
-                    if voice { "voice " } else { "" }
-                )),
-                name(t),
-            ]
+            match (private, voice) {
+                (false, false) => t::audit_channel_create(actor, target()),
+                (true, false) => t::audit_channel_create_private(actor, target()),
+                (false, true) => t::audit_channel_create_voice(actor, target()),
+                (true, true) => t::audit_channel_create_private_voice(actor, target()),
+            }
         }
-        "channel_update" => vec![plain(" updated "), name(t)],
-        "channel_delete" => vec![plain(" deleted the channel "), name(t)],
-        "category_create" => vec![plain(" created the category "), name(t)],
-        "category_update" => vec![plain(" updated the category "), name(t)],
-        "category_delete" => vec![plain(" deleted the category "), name(t)],
-        "overwrite_create" => vec![
-            plain(" set permissions for "),
-            name(sub("for")),
-            plain(" in "),
-            name(sub("in")),
-        ],
-        "overwrite_update" => vec![
-            plain(" changed permissions for "),
-            name(sub("for")),
-            plain(" in "),
-            name(sub("in")),
-        ],
-        "overwrite_delete" => vec![
-            plain(" cleared the permissions for "),
-            name(sub("for")),
-            plain(" in "),
-            name(sub("in")),
-        ],
-        "channel_sync" => vec![
-            plain(" synced "),
-            name(t),
-            plain(" to "),
-            name(new_of("category")),
-        ],
-        "channel_unsync" => vec![plain(" unsynced "), name(t), plain(" from its category")],
-        "message_pin" => vec![
-            plain(" pinned a message by "),
-            author(),
-            plain(" in "),
-            name(sub("channel")),
-        ],
-        "message_unpin" => vec![
-            plain(" unpinned a message by "),
-            author(),
-            plain(" in "),
-            name(sub("channel")),
-        ],
-        "pins_update" => vec![plain(" changed the pins in "), name(t)],
-        "message_delete" => vec![
-            plain(" deleted a message by "),
-            author(),
-            plain(" in "),
-            name(sub("channel")),
-        ],
-        "invite_create" => vec![plain(&format!(
-            " created {}",
-            plural(count(), "an invite link", "invite links")
-        ))],
-        "invite_delete" => vec![plain(&format!(
-            " revoked {}",
-            plural(count(), "an invite link", "invite links")
-        ))],
-        "keys_rotate" if field(entry, "severed").is_some() => {
-            vec![plain(" locked the community down and rotated its keys")]
-        }
-        "keys_rotate" => vec![plain(" rotated the community's keys")],
-        "voice_mute" => vec![
-            plain(" muted "),
-            name(t),
-            plain(" in "),
-            name(new_of("channel")),
-        ],
-        "voice_unmute" => vec![
-            plain(" unmuted "),
-            name(t),
-            plain(" in "),
-            name(new_of("channel")),
-        ],
-        "voice_deafen" => vec![
-            plain(" deafened "),
-            name(t),
-            plain(" in "),
-            name(new_of("channel")),
-        ],
-        "voice_undeafen" => vec![
-            plain(" undeafened "),
-            name(t),
-            plain(" in "),
-            name(new_of("channel")),
-        ],
-        "voice_move" => vec![plain(" moved "), name(t), plain(" to "), name(new_of("to"))],
-        "voice_disconnect" => vec![
-            plain(" disconnected "),
-            name(t),
-            plain(" from "),
-            name(new_of("channel")),
-        ],
-        _ => vec![plain(" made a change")],
+        "channel_update" => t::audit_channel_update(actor, target()),
+        "channel_delete" => t::audit_channel_delete(actor, target()),
+        "category_create" => t::audit_category_create(actor, target()),
+        "category_update" => t::audit_category_update(actor, target()),
+        "category_delete" => t::audit_category_delete(actor, target()),
+        "overwrite_create" => t::audit_overwrite_create(actor, name(sub("for")), name(sub("in"))),
+        "overwrite_update" => t::audit_overwrite_update(actor, name(sub("for")), name(sub("in"))),
+        "overwrite_delete" => t::audit_overwrite_delete(actor, name(sub("for")), name(sub("in"))),
+        "channel_sync" => t::audit_channel_sync(actor, target(), name(new_of("category"))),
+        "channel_unsync" => t::audit_channel_unsync(actor, target()),
+        "message_pin" => t::audit_message_pin(actor, author(), name(sub("channel"))),
+        "message_unpin" => t::audit_message_unpin(actor, author(), name(sub("channel"))),
+        "pins_update" => t::audit_pins_update(actor, target()),
+        "message_delete" => t::audit_message_delete(actor, author(), name(sub("channel"))),
+        "invite_create" => t::audit_invite_create(actor, count()),
+        "invite_delete" => t::audit_invite_delete(actor, count()),
+        "keys_rotate" if field(entry, "severed").is_some() => t::audit_keys_lockdown(actor),
+        "keys_rotate" => t::audit_keys_rotate(actor),
+        "voice_mute" => t::audit_voice_mute(actor, target(), name(new_of("channel"))),
+        "voice_unmute" => t::audit_voice_unmute(actor, target(), name(new_of("channel"))),
+        "voice_deafen" => t::audit_voice_deafen(actor, target(), name(new_of("channel"))),
+        "voice_undeafen" => t::audit_voice_undeafen(actor, target(), name(new_of("channel"))),
+        "voice_move" => t::audit_voice_move(actor, target(), name(new_of("to"))),
+        "voice_disconnect" => t::audit_voice_disconnect(actor, target(), name(new_of("channel"))),
+        _ => t::audit_unknown(actor),
     };
-    let mut out = vec![(actor, true)];
-    out.extend(rest);
-    out
+    runs(&html)
 }
 
 fn view_name(v: &Value) -> String {
     match v.as_str() {
-        Some("chat") => "Text".into(),
-        Some("voice") => "Voice".into(),
-        Some("forum") => "Forum".into(),
+        Some("chat") => t::audit_view_chat().into(),
+        Some("voice") => t::audit_view_voice().into(),
+        Some("forum") => t::audit_view_forum().into(),
         Some(o) => o.into(),
         None => String::new(),
     }
@@ -393,7 +255,7 @@ fn view_name(v: &Value) -> String {
 fn hex_color(v: &Value) -> String {
     match v.as_u64().filter(|c| *c != 0) {
         Some(c) => format!("#{c:06x}"),
-        None => "none".into(),
+        None => t::audit_colour_none().into(),
     }
 }
 
@@ -427,138 +289,97 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
                 if !creating || action == "community_create" {
                     let new = new.map(shown).unwrap_or_default();
                     out.push(match old {
-                        Some(o) => format!("Name: {} → {new}", shown(o)),
-                        None => format!("Name: {new}"),
+                        Some(o) => t::audit_detail_rename(shown(o), new),
+                        None => t::audit_detail_name(new),
                     });
                 }
             }
-            "description" => out.push(if truthy(new) {
-                "Changed the description".into()
-            } else {
-                "Removed the description".into()
-            }),
+            "description" => out.push(if truthy(new) { t::audit_detail_description() } else { t::audit_detail_description_removed() }),
             "topic" => out.push(if truthy(new) {
-                format!("Topic: {}", new.map(shown).unwrap_or_default())
+                t::audit_detail_topic(new.map(shown).unwrap_or_default())
             } else {
-                "Removed the topic".into()
+                t::audit_detail_topic_removed()
             }),
-            f @ ("icon" | "banner") => {
-                let verb = match new.and_then(Value::as_str) {
-                    Some("removed") => "Removed",
-                    Some("added") => "Added",
-                    _ => "Changed",
-                };
-                out.push(format!("{verb} the {f}"));
-            }
+            f @ ("icon" | "banner") => out.push(match (f, new.and_then(Value::as_str)) {
+                ("icon", Some("removed")) => t::audit_detail_icon_removed(),
+                ("icon", Some("added")) => t::audit_detail_icon_added(),
+                ("icon", _) => t::audit_detail_icon_changed(),
+                (_, Some("removed")) => t::audit_detail_banner_removed(),
+                (_, Some("added")) => t::audit_detail_banner_added(),
+                _ => t::audit_detail_banner_changed(),
+            }),
             "landing" => out.push(if new.and_then(|n| s(n, "kind")) == Some("channel") {
-                format!("New members start in {}", target_name(new, member))
+                t::audit_detail_landing(target_name(new, member))
             } else {
-                "New members start in the default channel".into()
+                t::audit_detail_landing_default()
             }),
             "system_messages" => out.push(match new {
-                Some(Value::String(o)) if o == "off" => "Turned off join and leave messages".into(),
-                Some(n) if s(n, "kind") == Some("channel") => {
-                    format!("Join and leave messages go to {}", target_name(new, member))
-                }
-                _ => "Join and leave messages go to the default channel".into(),
+                Some(Value::String(o)) if o == "off" => t::audit_detail_system_off(),
+                Some(n) if s(n, "kind") == Some("channel") => t::audit_detail_system(target_name(new, member)),
+                _ => t::audit_detail_system_default(),
             }),
             f @ ("relays" | "voice_relays") => {
-                let kind = if f == "relays" {
-                    "relay"
-                } else {
-                    "voice relay"
-                };
-                out.extend(
-                    added
-                        .iter()
-                        .map(|r| format!("Added the {kind} {}", shown(r))),
-                );
-                out.extend(
-                    removed
-                        .iter()
-                        .map(|r| format!("Removed the {kind} {}", shown(r))),
-                );
+                let voice = f == "voice_relays";
+                out.extend(added.iter().map(|r| {
+                    if voice { t::audit_detail_voice_relay_added(shown(r)) } else { t::audit_detail_relay_added(shown(r)) }
+                }));
+                out.extend(removed.iter().map(|r| {
+                    if voice { t::audit_detail_voice_relay_removed(shown(r)) } else { t::audit_detail_relay_removed(shown(r)) }
+                }));
             }
-            "color" => out.push(match old {
-                Some(o) => format!(
-                    "Colour: {} → {}",
-                    hex_color(o),
-                    hex_color(new.unwrap_or(&Value::Null))
-                ),
-                None => format!("Colour: {}", hex_color(new.unwrap_or(&Value::Null))),
-            }),
+            "color" => {
+                let now = hex_color(new.unwrap_or(&Value::Null));
+                out.push(match old {
+                    Some(o) => t::audit_detail_recolour(hex_color(o), now),
+                    None => t::audit_detail_colour(now),
+                })
+            }
             "permissions" => {
                 if !added.is_empty() {
-                    out.push(format!(
-                        "{}: {}",
-                        if creating { "Permissions" } else { "Granted" },
-                        perms(&c["added"])
-                    ));
+                    let list = perms(&c["added"]);
+                    out.push(if creating { t::audit_detail_permissions(list) } else { t::audit_detail_granted(list) });
                 }
                 if !removed.is_empty() {
-                    out.push(format!("Revoked: {}", perms(&c["removed"])));
+                    out.push(t::audit_detail_revoked(perms(&c["removed"])));
                 }
             }
             "allow" => {
                 if !added.is_empty() {
-                    out.push(format!("Allowed: {}", perms(&c["added"])));
+                    out.push(t::audit_detail_allowed(perms(&c["added"])));
                 }
                 if !removed.is_empty() {
-                    out.push(format!("No longer allowed: {}", perms(&c["removed"])));
+                    out.push(t::audit_detail_unallowed(perms(&c["removed"])));
                 }
             }
             "deny" => {
                 if !added.is_empty() {
-                    out.push(format!("Denied: {}", perms(&c["added"])));
+                    out.push(t::audit_detail_denied(perms(&c["added"])));
                 }
                 if !removed.is_empty() {
-                    out.push(format!("No longer denied: {}", perms(&c["removed"])));
+                    out.push(t::audit_detail_undenied(perms(&c["removed"])));
                 }
             }
-            "position" => out.push("Moved it in the list".into()),
-            "display" => out.push(if truthy(new) {
-                "Shown on its own in the member list".into()
-            } else {
-                "No longer shown on its own in the member list".into()
-            }),
-            "mentionable" => out.push(if truthy(new) {
-                "Anyone can mention it".into()
-            } else {
-                "No longer mentionable by everyone".into()
-            }),
-            "view" if !creating => out.push(format!(
-                "Type: {} → {}",
+            "position" => out.push(t::audit_detail_position()),
+            "display" => out.push(if truthy(new) { t::audit_detail_display() } else { t::audit_detail_display_off() }),
+            "mentionable" => out.push(if truthy(new) { t::audit_detail_mentionable() } else { t::audit_detail_mentionable_off() }),
+            "view" if !creating => out.push(t::audit_detail_view(
                 old.map(view_name).unwrap_or_default(),
-                new.map(view_name).unwrap_or_default()
+                new.map(view_name).unwrap_or_default(),
             )),
-            "private" if !creating => out.push("Made it private".into()),
+            "private" if !creating => out.push(t::audit_detail_private()),
             "category" if action == "channel_update" => out.push(if truthy(new) {
-                format!("Moved to {}", target_name(new, member))
+                t::audit_detail_moved(target_name(new, member))
             } else {
-                "Moved out of its category".into()
+                t::audit_detail_uncategorised()
             }),
             "roles" => {
-                out.extend(
-                    added
-                        .iter()
-                        .map(|r| format!("Added {}", target_name(Some(r), member))),
-                );
-                out.extend(
-                    removed
-                        .iter()
-                        .map(|r| format!("Removed {}", target_name(Some(r), member))),
-                );
+                out.extend(added.iter().map(|r| t::audit_detail_role_added(target_name(Some(r), member))));
+                out.extend(removed.iter().map(|r| t::audit_detail_role_removed(target_name(Some(r), member))));
                 if let Some(held) = c.get("held").and_then(Value::as_array) {
                     out.push(if held.is_empty() {
-                        "Holds no roles".into()
+                        t::audit_detail_no_roles()
                     } else {
-                        format!(
-                            "Holds {}",
-                            held.iter()
-                                .map(|r| target_name(Some(r), member))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
+                        t::audit_detail_roles(held.iter().map(|r| target_name(Some(r), member)).collect::<Vec<_>>().join(", "))
                     });
                 }
             }
@@ -566,36 +387,26 @@ pub fn details(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Vec<St
                 old.and_then(Value::as_str).filter(|s| !s.is_empty()),
                 new.and_then(Value::as_str).filter(|s| !s.is_empty()),
             ) {
-                (Some(o), Some(n)) => out.push(format!("Nickname: {o} → {n}")),
-                (Some(o), None) => out.push(format!("Was {o}")),
+                (Some(o), Some(n)) => out.push(t::audit_detail_renick(o, n)),
+                (Some(o), None) => out.push(t::audit_detail_nick_removed(o)),
                 _ => {}
             },
             "banned" => {
                 if let Some(held) = c.get("held").and_then(Value::as_array) {
                     out.push(if held.is_empty() {
-                        "Nobody is banned".into()
+                        t::audit_detail_no_bans()
                     } else {
-                        format!(
-                            "Banned: {}",
-                            held.iter()
-                                .map(|m| target_name(Some(m), member))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
+                        t::audit_detail_bans(held.iter().map(|m| target_name(Some(m), member)).collect::<Vec<_>>().join(", "))
                     });
                 }
             }
             _ => {}
         }
     }
-    if entry
-        .get("partial")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        out.push("What came before this was compacted when the community's keys were rotated, so what it changed isn't known.".into());
+    if entry.get("partial").and_then(Value::as_bool).unwrap_or(false) {
+        out.push(t::audit_detail_partial());
     }
-    out
+    out.into_iter().map(String::from).collect()
 }
 
 pub fn plain_text(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> String {
@@ -609,17 +420,17 @@ pub fn plain_text(entry: &Value, member: &dyn Fn(Option<&str>) -> String) -> Str
 pub fn when(ms: u64, now: u64) -> String {
     let diff = now.saturating_sub(ms);
     if diff < 60_000 {
-        return "Just now".into();
+        return t::audit_just_now().into();
     }
     if diff < 3_600_000 {
-        return plural(diff / 60_000, "A minute ago", "minutes ago");
+        return t::audit_minutes_ago(diff / 60_000).into();
     }
     let d = crate::data::local(ms);
     let today = crate::data::local(now);
     let days = (today.date_naive() - d.date_naive()).num_days();
     match days {
-        0 => format!("Today at {}", crate::data::clock(ms)),
-        1 => format!("Yesterday at {}", crate::data::clock(ms)),
+        0 => t::audit_today_at(crate::data::clock(ms)).into(),
+        1 => t::audit_yesterday_at(crate::data::clock(ms)).into(),
         _ if chrono::Datelike::year(&d) == chrono::Datelike::year(&today) => {
             d.format("%b %-d").to_string()
         }

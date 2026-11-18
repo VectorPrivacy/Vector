@@ -1435,7 +1435,7 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
         "audit-filter",
         170.,
         14.,
-        crate::audit::FAMILIES,
+        crate::audit::families(),
         &[],
         a.action,
         a.filter_open,
