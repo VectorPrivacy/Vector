@@ -269,6 +269,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             }
         }
         "lang" => crate::lang::set(rest, cx),
+        "pivx" => app.dev_pivx(rest, cx),
         "idle" => gpui::set_animation_idle(std::time::Duration::from_secs(rest.parse().unwrap_or(300))),
         "dump" => answer(app.dev_dump(rest)),
         "caches" => answer(app.dev_caches()),

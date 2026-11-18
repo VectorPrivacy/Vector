@@ -97,8 +97,20 @@ fn fiat_text(value: f64, currency: &str) -> String {
     }
     match symbol {
         Some(s) => format!("{prefix}{s}{grouped}.{frac}"),
-        None => format!("{currency} {grouped}.{frac}"),
+        None => format!("{currency} {grouped}.{frac}"), // i18n-exempt: a currency code and digits
     }
+}
+
+/// A sentence as flex items with gaps between: its `<b>` runs styled by `strong`.
+fn runs(html: SharedString, strong: impl Fn(gpui::Div) -> gpui::Div) -> Vec<gpui::Div> {
+    crate::kit::runs(&html)
+        .into_iter()
+        .filter(|(t, _)| !t.trim().is_empty())
+        .map(|(t, b)| {
+            let d = div().child(t.trim().to_string());
+            if b { strong(d) } else { d }
+        })
+        .collect()
 }
 
 fn valid_address(a: &str) -> bool {
@@ -121,6 +133,19 @@ impl VectorApp {
         });
         cx.subscribe(&input, |_, _, _: &InputChanged, cx| cx.notify()).detach();
         input
+    }
+
+    /// Dev control: the wallet, or one of its dialogs over it.
+    pub(crate) fn dev_pivx(&mut self, what: &str, cx: &mut Context<Self>) {
+        self.attach = Some(Instant::now());
+        self.show_pivx_wallet(cx);
+        match what {
+            "send" => self.pivx_send(cx),
+            "deposit" => self.pivx_deposit(cx),
+            "withdraw" => self.pivx_withdraw(cx),
+            "settings" => self.pivx_settings(cx),
+            _ => {}
+        }
     }
 
     /// `showPivxWalletPanel`: the card takes the Mini Apps view's place.
@@ -197,8 +222,8 @@ impl VectorApp {
     fn pivx_deposit(&mut self, cx: &mut Context<Self>) {
         let balance = self.pivx_wallet.as_ref().and_then(|w| w.balance).unwrap_or(0.);
         if balance >= MAX_BALANCE {
-            let mut p = crate::kit::Popup::notice("Balance Too High");
-            p.text = Some(format!("Your wallet balance is <b>{balance:.2} PIV</b>, which exceeds the recommended limit of {MAX_BALANCE} PIV.<br><br>Vector is not intended to replace a proper cryptocurrency wallet. Please <b>withdraw your funds</b> to a secure wallet before depositing more.").into());
+            let mut p = crate::kit::Popup::notice(t::pivx_balance_high_title());
+            p.text = Some(t::pivx_balance_high_text(balance, MAX_BALANCE));
             self.popup = Some((p, super::PopupAct::Notice));
             return cx.notify();
         }
@@ -225,7 +250,7 @@ impl VectorApp {
                         let poll = this.pivx_poll_deposit(promo.address.clone(), cx);
                         this.pivx_dialog = Some(Dialog::Deposit { address: promo.address, received: 0., poll: Some(poll) });
                     }
-                    Err(_) => this.show_toast("Failed to create deposit address", cx),
+                    Err(_) => this.show_toast(&t::pivx_deposit_failed(), cx),
                 }
                 cx.notify();
             })
@@ -256,7 +281,7 @@ impl VectorApp {
                             return false;
                         }
                         *received = got;
-                        this.show_toast(&format!("Received {got:.8} PIV!"), cx);
+                        this.show_toast(&t::pivx_received(got), cx);
                         cx.notify();
                         true
                     })
@@ -278,13 +303,13 @@ impl VectorApp {
     /// `showPivxSendDialog`: quick send lists funded promos; custom takes an amount.
     fn pivx_send(&mut self, cx: &mut Context<Self>) {
         let Some(chat) = self.open.as_ref().map(|c| c.to_string()) else {
-            return self.show_toast("Open a chat first to send PIVX", cx);
+            return self.show_toast(&t::pivx_open_chat_first(), cx);
         };
         let recipient = self.store.borrow().name(&chat);
         let amount = self.pivx_input("0.00", 24., cx);
         self.pivx_dialog = Some(Dialog::Send {
             chat,
-            recipient: if recipient.is_empty() { "this chat".into() } else { recipient },
+            recipient: if recipient.is_empty() { t::pivx_this_chat().into() } else { recipient },
             quick: true,
             loading: true,
             opened: Instant::now(),
@@ -309,7 +334,7 @@ impl VectorApp {
                     *available = funded.iter().map(|p| p.balance_piv).sum();
                     *promos = funded;
                 }
-                Err(_) => *error = "Failed to load wallet.".into(),
+                Err(_) => *error = t::pivx_load_failed().into(),
             }
         };
         if !self.live {
@@ -343,17 +368,17 @@ impl VectorApp {
         let chat = chat.clone();
         let (fut, sent): (std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>, f64) = if *quick {
             let Some(p) = promos.iter().find(|p| p.gift_code == *selected) else {
-                return self.show_toast("Select an amount to send", cx);
+                return self.show_toast(&t::pivx_pick_amount_first(), cx);
             };
             (Box::pin(backend::pivx::send_promo(chat, p.gift_code.clone())), p.balance_piv)
         } else {
             let value: f64 = amount.read(cx).text().trim().parse().unwrap_or(0.);
             if value <= 0. {
-                return self.show_toast("Enter a valid amount", cx);
+                return self.show_toast(&t::pivx_enter_amount(), cx);
             }
             if value > *available {
                 let max = *available;
-                return self.show_toast(&format!("Insufficient funds (max: {max:.2} PIV)"), cx);
+                return self.show_toast(&t::pivx_insufficient_max(max), cx);
             }
             (Box::pin(backend::pivx::send_amount(chat, value)), value)
         };
@@ -369,14 +394,14 @@ impl VectorApp {
                 match res {
                     Ok(_) => {
                         this.pivx_dialog = None;
-                        this.show_toast(&format!("Sent {sent:.2} PIV"), cx);
+                        this.show_toast(&t::pivx_sent(sent), cx);
                         this.refresh_pivx_wallet(cx);
                     }
                     Err(e) => {
                         if let Some(Dialog::Send { busy, .. }) = this.pivx_dialog.as_mut() {
                             *busy = false;
                         }
-                        this.show_toast(&format!("Failed to send: {e}"), cx);
+                        this.show_toast(&t::pivx_send_failed(e), cx);
                     }
                 }
                 cx.notify();
@@ -418,13 +443,13 @@ impl VectorApp {
         let to = address.read(cx).text().trim().to_string();
         let value: f64 = amount.read(cx).text().trim().parse().unwrap_or(0.);
         if !valid_address(&to) {
-            return self.show_toast("Invalid PIVX address", cx);
+            return self.show_toast(&t::pivx_invalid_address(), cx);
         }
         if value <= 0. {
-            return self.show_toast("Enter a valid amount", cx);
+            return self.show_toast(&t::pivx_enter_amount(), cx);
         }
         if value > *available {
-            return self.show_toast("Insufficient balance", cx);
+            return self.show_toast(&t::pivx_insufficient(), cx);
         }
         *busy = true;
         cx.notify();
@@ -438,14 +463,14 @@ impl VectorApp {
                 match res {
                     Ok(_) => {
                         this.pivx_dialog = None;
-                        this.show_toast(&format!("Withdrawn {value:.2} PIV"), cx);
+                        this.show_toast(&t::pivx_withdrawn(value), cx);
                         this.refresh_pivx_wallet(cx);
                     }
                     Err(e) => {
                         if let Some(Dialog::Withdraw { busy, .. }) = this.pivx_dialog.as_mut() {
                             *busy = false;
                         }
-                        this.show_toast(&format!("Withdrawal failed: {e}"), cx);
+                        this.show_toast(&t::pivx_withdraw_failed(e), cx);
                     }
                 }
                 cx.notify();
@@ -512,20 +537,20 @@ impl VectorApp {
         let address = address.read(cx).text().trim().to_string();
         let currency = currency.clone();
         if !address.is_empty() && !valid_address(&address) {
-            return self.show_toast("Invalid PIVX address format", cx);
+            return self.show_toast(&t::pivx_invalid_address_format(), cx);
         }
         if self.live {
             let saved = backend::pivx::set_wallet_address(address)
                 .and_then(|_| if currency.is_empty() { Ok(()) } else { backend::pivx::set_currency(currency.clone()) });
             if saved.is_err() {
-                return self.show_toast("Failed to save settings", cx);
+                return self.show_toast(&t::pivx_settings_failed(), cx);
             }
         } else if !currency.is_empty() {
             let price = self.store.borrow().pivx_price.as_ref().map_or(0., |p| p.0);
             self.store.borrow_mut().pivx_price = Some((price, currency));
         }
         self.pivx_dialog = None;
-        self.show_toast("Wallet settings saved", cx);
+        self.show_toast(&t::pivx_settings_saved(), cx);
         if self.live {
             self.refresh_pivx_wallet(cx);
         }
@@ -658,8 +683,8 @@ impl VectorApp {
                 match res {
                     Ok(v) => {
                         this.store.borrow_mut().pivx_bubbles.insert(code, (PivxPhase::Claimed, t::pivx_bubble_claimed_now().into()));
-                        let amount = v.get("amount_piv").and_then(Value::as_f64).map(|a| format!("{a:.2}")).unwrap_or_default();
-                        this.show_toast(&format!("Claimed {amount} PIV"), cx);
+                        let amount = v.get("amount_piv").and_then(Value::as_f64).unwrap_or(0.);
+                        this.show_toast(&t::pivx_claimed(amount), cx);
                         this.refresh_pivx_wallet(cx);
                     }
                     Err(e) => {
@@ -667,7 +692,7 @@ impl VectorApp {
                             .borrow_mut()
                             .pivx_bubbles
                             .insert(code, (PivxPhase::Failed, t::pivx_bubble_failed().into()));
-                        this.show_toast(&format!("Failed to claim: {e}"), cx);
+                        this.show_toast(&t::pivx_claim_failed(e), cx);
                     }
                 }
                 cx.notify();
@@ -759,7 +784,7 @@ impl VectorApp {
                     }),
             );
         let deposit_off = w.balance.unwrap_or(0.) >= MAX_BALANCE;
-        let dock_btn = |i: usize, id: &'static str, glyph: &'static str, label: &'static str, primary: bool, off: bool, loading: bool| {
+        let dock_btn = |i: usize, id: &'static str, glyph: &'static str, label: SharedString, primary: bool, off: bool, loading: bool| {
             let t = ease((since - (i as f32 + 1.) * 0.06) / 0.25);
             let group = SharedString::from(id);
             div()
@@ -809,20 +834,20 @@ impl VectorApp {
             .justify_center()
             .py(px(8.))
             .child(
-                dock_btn(0, "pivx-send-btn", "send", "Send", true, false, false)
+                dock_btn(0, "pivx-send-btn", "send", t::pivx_send(), true, false, false)
                     .on_click(cx.listener(|app, _, _, cx| app.pivx_send(cx))),
             )
             .child({
-                let b = dock_btn(1, "pivx-deposit-btn", "plus-circle", "Deposit", false, deposit_off, w.deposit_loading)
-                    .when(deposit_off, |b| b.tip("Balance too high - please withdraw first"));
+                let b = dock_btn(1, "pivx-deposit-btn", "plus-circle", t::pivx_deposit(), false, deposit_off, w.deposit_loading)
+                    .when(deposit_off, |b| b.tip(t::pivx_deposit_off()));
                 if w.deposit_loading { b } else { b.on_click(cx.listener(|app, _, _, cx| app.pivx_deposit(cx))) }
             })
             .child(
-                dock_btn(2, "pivx-withdraw-btn", "arrow-up", "Withdraw", false, false, false)
+                dock_btn(2, "pivx-withdraw-btn", "arrow-up", t::pivx_withdraw(), false, false, false)
                     .on_click(cx.listener(|app, _, _, cx| app.pivx_withdraw(cx))),
             )
             .child(
-                dock_btn(3, "pivx-settings-btn", "settings", "Settings", false, false, false)
+                dock_btn(3, "pivx-settings-btn", "settings", t::pivx_settings(), false, false, false)
                     .on_click(cx.listener(|app, _, _, cx| app.pivx_settings(cx))),
             );
         let close = div()
@@ -867,10 +892,10 @@ impl VectorApp {
     pub(super) fn pivx_dialog_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let d = self.pivx_dialog.as_ref()?;
         let title = match d {
-            Dialog::Deposit { .. } => "Deposit PIVX",
-            Dialog::Send { .. } => "Send PIVX",
-            Dialog::Withdraw { .. } => "Withdraw PIVX",
-            Dialog::Settings { .. } => "PIVX Wallet Settings",
+            Dialog::Deposit { .. } => t::pivx_deposit_title(),
+            Dialog::Send { .. } => t::pivx_send_title(),
+            Dialog::Withdraw { .. } => t::pivx_withdraw_title(),
+            Dialog::Settings { .. } => t::pivx_settings_title(),
         };
         let spinner = || crate::attachments::spinner(28., 3., 1., 0.25, white_a(0.2), c(VIOLET));
         let big_btn = |id: &'static str, label: SharedString, enabled: bool| {
@@ -900,8 +925,8 @@ impl VectorApp {
                 .border_color(white_a(0.1))
                 .child(child)
         };
-        let label = |t: &'static str| div().text_size(px(14.)).line_height(px(24.)).font_weight(FontWeight::MEDIUM).text_color(c(0xffffff)).child(t);
-        let hint = |t: &'static str| div().text_size(px(12.)).line_height(px(15.6)).text_color(white_a(0.5)).child(t);
+        let label = |t: SharedString| div().text_size(px(14.)).line_height(px(24.)).font_weight(FontWeight::MEDIUM).text_color(c(0xffffff)).child(t);
+        let hint = |t: SharedString| div().text_size(px(12.)).line_height(px(15.6)).text_color(white_a(0.5)).child(t);
         let max_btn = |id: &'static str| {
             div()
                 .id(id)
@@ -914,7 +939,7 @@ impl VectorApp {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c(VIOLET))
                 .cursor_pointer()
-                .child("MAX")
+                .child(t::pivx_max().to_uppercase())
         };
         let amount_box = |input: &Entity<TextInput>| {
             div()
@@ -946,7 +971,7 @@ impl VectorApp {
         match d {
             Dialog::Deposit { address, received, .. } => {
                 body = body
-                    .child(div().text_size(px(14.)).line_height(px(24.)).text_color(white_a(0.7)).child("Send PIVX to this address to deposit:"))
+                    .child(div().text_size(px(14.)).line_height(px(24.)).text_color(white_a(0.7)).child(t::pivx_deposit_lede()))
                     .child(well(
                         div()
                             .text_center()
@@ -957,11 +982,11 @@ impl VectorApp {
                             .into_any_element(),
                     ))
                     .child(
-                        big_btn("pivx-copy", "Copy Address".into(), true)
+                        big_btn("pivx-copy", t::pivx_copy_address(), true)
                             .on_click(cx.listener(|app, _, _, cx| {
                                 if let Some(Dialog::Deposit { address, .. }) = app.pivx_dialog.as_ref() {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(address.clone()));
-                                    app.show_toast("Address copied!", cx);
+                                    app.show_toast(&t::pivx_address_copied(), cx);
                                 }
                             })),
                     )
@@ -982,7 +1007,7 @@ impl VectorApp {
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(c(ACCENT))
                                     .child(svg().path("icons/check.svg").size(px(20.)).text_color(c(ACCENT)))
-                                    .child(format!("Received {received:.8} PIV!"))
+                                    .child(t::pivx_received(*received))
                             } else {
                                 div()
                                     .flex()
@@ -994,14 +1019,14 @@ impl VectorApp {
                                     .text_size(px(14.))
                                     .text_color(white_a(0.7))
                                     .child(spinner())
-                                    .child("Awaiting Deposit...")
+                                    .child(t::pivx_awaiting_deposit())
                             }),
                     );
             }
             Dialog::Send { recipient, quick, loading, opened, promos, error, selected, amount, available, busy, .. } => {
                 if *quick {
                     let mut list = div().id("pivx-promos").flex().flex_col().gap(px(8.)).max_h(px(180.)).overflow_y_scroll().pr(px(8.));
-                    let empty = |t: &'static str| div().p(px(20.)).text_center().text_size(px(13.)).text_color(white_a(0.4)).child(t);
+                    let empty = |t: SharedString| div().p(px(20.)).text_center().text_size(px(13.)).text_color(white_a(0.4)).child(t);
                     if *loading {
                         list = list.child(
                             div()
@@ -1013,12 +1038,12 @@ impl VectorApp {
                                 .text_size(px(13.))
                                 .text_color(white_a(0.5))
                                 .child(spinner())
-                                .child("Loading..."),
+                                .child(t::pivx_loading()),
                         );
                     } else if !error.is_empty() {
                         list = list.child(div().p(px(20.)).text_center().text_size(px(13.)).text_color(white_a(0.4)).child(error.clone()));
                     } else if promos.is_empty() {
-                        list = list.child(empty("No funds available to send.")).child(empty("Deposit PIVX first.").pt_0().mt(px(-20.)));
+                        list = list.child(empty(t::pivx_no_funds())).child(empty(t::pivx_no_funds_hint()).pt_0().mt(px(-20.)));
                     }
                     let step = if promos.len() > 1 { (0.3 / (promos.len() - 1) as f32).min(0.06) } else { 0. };
                     let since = opened.elapsed().as_secs_f32();
@@ -1061,7 +1086,7 @@ impl VectorApp {
                                         .line_height(px(24.))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(c(0xffffff))
-                                        .child(format!("{:.2} PIV", p.balance_piv)),
+                                        .child(t::pivx_amount(p.balance_piv)),
                                 )
                                 .child(div().text_size(px(11.)).text_color(white_a(0.4)).child(p.gift_code.clone())),
                         );
@@ -1071,7 +1096,7 @@ impl VectorApp {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            .child(div().text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.6)).child("Select amount to send:"))
+                            .child(div().text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.6)).child(t::pivx_pick_amount()))
                             .child(list)
                             .child(
                                 div()
@@ -1092,7 +1117,7 @@ impl VectorApp {
                                         }
                                         cx.notify();
                                     }))
-                                    .child("Send Custom Amount"),
+                                    .child(t::pivx_custom_amount()),
                             ),
                     );
                 } else {
@@ -1113,7 +1138,7 @@ impl VectorApp {
                                     .text_size(px(12.))
                                     .text_color(c(0xb2b2b2))
                                     .child(svg().path("icons/info.svg").size(px(28.)).mr(px(4.)).flex_shrink_0().text_color(c(0xffffff)))
-                                    .child("Custom amounts require on-chain confirmation and may take longer to send."),
+                                    .child(t::pivx_custom_note()),
                             )
                             .child(amount_box(amount))
                             .child(
@@ -1140,9 +1165,7 @@ impl VectorApp {
                                         div()
                                             .flex()
                                             .gap(px(4.))
-                                            .child("Available:")
-                                            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{available:.2}")))
-                                            .child("PIV"),
+                                            .children(runs(t::pivx_available(*available), |d| d.font_weight(FontWeight::SEMIBOLD))),
                                     )
                                     .child(max_btn("pivx-send-max-btn")),
                             )
@@ -1164,7 +1187,7 @@ impl VectorApp {
                                         }
                                         cx.notify();
                                     }))
-                                    .child("Back to Quick Send"),
+                                    .child(t::pivx_quick_send()),
                             ),
                     );
                 }
@@ -1178,25 +1201,24 @@ impl VectorApp {
                             .text_size(px(12.))
                             .line_height(px(24.))
                             .text_color(white_a(0.6))
-                            .child("Sending to:")
-                            .child(div().font_weight(FontWeight::MEDIUM).text_color(c(VIOLET)).child(recipient.clone())),
+                            .children(runs(t::pivx_sending_to(crate::kit::escape(recipient)), |d| d.font_weight(FontWeight::MEDIUM).text_color(c(VIOLET)))),
                     )
                     .child({
-                        let b = big_btn("pivx-send-go", if *busy { "Sending..." } else { "Send to Chat" }.into(), !*busy)
+                        let b = big_btn("pivx-send-go", if *busy { t::pivx_sending() } else { t::pivx_send_to_chat() }, !*busy)
                             .when(*loading, |d| d.opacity(0.5));
                         if *busy || *loading { b } else { b.on_click(cx.listener(|app, _, _, cx| app.pivx_send_confirm(cx))) }
                     });
             }
             Dialog::Withdraw { address, amount, available, busy } => {
                 body = body
-                    .child(div().flex().flex_col().gap(px(8.)).mb(px(16.)).child(label("Destination Address")).child(text_box(address)))
+                    .child(div().flex().flex_col().gap(px(8.)).mb(px(16.)).child(label(t::pivx_destination())).child(text_box(address)))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(8.))
                             .mb(px(16.))
-                            .child(label("Amount"))
+                            .child(label(t::pivx_amount_label()))
                             .child(amount_box(amount))
                             .child(
                                 div()
@@ -1211,9 +1233,7 @@ impl VectorApp {
                                         div()
                                             .flex()
                                             .gap(px(4.))
-                                            .child("Available:")
-                                            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("{available:.2}")))
-                                            .child("PIV"),
+                                            .children(runs(t::pivx_available(*available), |d| d.font_weight(FontWeight::SEMIBOLD))),
                                     )
                                     .child(max_btn("pivx-withdraw-max").on_click(cx.listener(|app, _, _, cx| {
                                         if let Some(Dialog::Withdraw { amount, available, .. }) = app.pivx_dialog.as_ref()
@@ -1225,9 +1245,9 @@ impl VectorApp {
                                     }))),
                             ),
                     )
-                    .child(div().mb(px(-6.)).text_center().text_size(px(12.)).text_color(white_a(0.4)).child("Network fee: ~0.0001 PIV"))
+                    .child(div().mb(px(-6.)).text_center().text_size(px(12.)).text_color(white_a(0.4)).child(t::pivx_fee()))
                     .child({
-                        let b = big_btn("pivx-withdraw-go", if *busy { "Withdrawing..." } else { "Withdraw" }.into(), !*busy);
+                        let b = big_btn("pivx-withdraw-go", if *busy { t::pivx_withdrawing() } else { t::pivx_withdraw() }, !*busy);
                         if *busy { b } else { b.on_click(cx.listener(|app, _, _, cx| app.pivx_withdraw_confirm(cx))) }
                     });
             }
@@ -1254,7 +1274,7 @@ impl VectorApp {
                             cx.notify();
                         }))
                     })
-                    .child(if *loading { "Loading...".to_string() } else { currency.clone() })
+                    .child(if *loading { t::pivx_loading() } else { currency.clone().into() })
                     .child(
                         svg()
                             .path("icons/chevron-down.svg")
@@ -1306,16 +1326,16 @@ impl VectorApp {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child(label("Auto Withdraw Address"))
+                            .child(label(t::pivx_auto_withdraw()))
                             .child(text_box(address))
-                            .child(hint("If set, claimed PIVX will be sent directly to this address. Leave empty to keep funds in your Vector wallet.")),
+                            .child(hint(t::pivx_auto_withdraw_hint())),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child(label("Display Currency"))
+                            .child(label(t::pivx_currency()))
                             .child(
                                 div()
                                     .relative()
@@ -1324,10 +1344,10 @@ impl VectorApp {
                                     .child(select)
                                     .when(*picking, |d| d.child(gpui::deferred(options).with_priority(12))),
                             )
-                            .child(hint("Choose your preferred fiat currency for balance display.")),
+                            .child(hint(t::pivx_currency_hint())),
                     )
                     .child(
-                        big_btn("pivx-settings-save", "Save Settings".into(), true)
+                        big_btn("pivx-settings-save", t::pivx_save_settings(), true)
                             .on_click(cx.listener(|app, _, _, cx| app.pivx_settings_save(cx))),
                     );
             }
