@@ -150,7 +150,8 @@ pub fn offenders(src: &Path) -> BTreeMap<String, Vec<(usize, String)>> {
             {
                 continue;
             }
-            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            // A Windows checkout has CRLF endings, which would hide where the test module starts.
+            let text = std::fs::read_to_string(&p).unwrap_or_default().replace("\r\n", "\n");
             let lines: Vec<&str> = text.lines().collect();
             let hits: Vec<(usize, String)> = literals(&text)
                 .into_iter()
@@ -241,6 +242,16 @@ mod tests {
         }
         let unused: Vec<&str> = vector_i18n::ids().iter().copied().filter(|id| !all.contains(&format!("t::{}(", vector_i18n::function_name(id)))).collect();
         assert!(unused.is_empty(), "en-GB messages nothing calls: {unused:?}");
+    }
+
+    #[test]
+    fn i18n_audit_skips_test_modules_in_crlf_files() {
+        let dir = std::env::temp_dir().join(format!("i18n-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "fn f() { x(\"Save\"); }\r\n\r\n#[cfg(test)]\r\nmod tests {\r\n    const A: &str = \"Hello there\";\r\n}\r\n").unwrap();
+        let found = offenders(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(found.get("a.rs").map(|v| v.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>()), Some(vec!["Save"]));
     }
 
     #[test]
