@@ -1,4 +1,4 @@
-# Hard-coded English left per file (4312 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (4262 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -64,7 +64,7 @@ filepreview.rs 27
 golinks.rs 22
 inline.rs 7
 invite.rs 20
-kit.rs 3
+kit.rs 2
 linkcard.rs 3
 login.rs 69
 loginnet.rs 28
@@ -119,15 +119,14 @@ theme.rs 5
 timeline.rs 31
 transcript.rs 7
 transfer.rs 50
-ui.rs 591
+ui.rs 584
 ui_art.rs 10
 ui_chaneditor.rs 12
-ui_chatlist.rs 15
-ui_members.rs 28
+ui_chatlist.rs 13
+ui_members.rs 26
 ui_miniapps.rs 25
 ui_miniprofile.rs 3
 ui_moderation.rs 47
-ui_msgmenu.rs 38
 ui_nexus.rs 32
 ui_pins.rs 2
 ui_pivx.rs 65

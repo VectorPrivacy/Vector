@@ -411,7 +411,7 @@ impl VectorApp {
             rows.extend(self.start_pin_row(format!("dm/{id}")));
         }
         if self.advanced() && !self.store.borrow().stream_hidden(&id) {
-            rows.push((kit::MenuItem::new("Copy User ID", "channel-hash"), MenuAct::CopyId(id.clone(), "User")));
+            rows.push((kit::MenuItem::new(crate::t::copy_id_user(), "channel-hash"), MenuAct::CopyId(id.clone(), crate::t::copy_id_user_done())));
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
         rows.push((kit::MenuItem::new("Block", "x-user").danger(), MenuAct::ChatBlock(id)));

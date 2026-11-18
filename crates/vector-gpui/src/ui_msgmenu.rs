@@ -6,7 +6,7 @@ use gpui::{Context, Pixels, Point, Window};
 use crate::scan::{lead, lit, matches_from, next, replace_from};
 
 use super::{MenuAct, PopupAct, VectorApp};
-use crate::{backend, kit, timeline};
+use crate::{backend, kit, t, timeline};
 
 #[derive(Clone)]
 pub(super) enum MsgAct {
@@ -29,8 +29,8 @@ impl VectorApp {
             return self.show_menu(
                 at,
                 vec![
-                    (kit::MenuItem::new("Retry send", "refresh"), act(MsgAct::Act(timeline::Act::Retry))),
-                    (kit::MenuItem::new("Delete", "trash").danger(), act(MsgAct::Act(timeline::Act::Delete))),
+                    (kit::MenuItem::new(t::msg_retry(), "refresh"), act(MsgAct::Act(timeline::Act::Retry))),
+                    (kit::MenuItem::new(t::msg_delete(), "trash").danger(), act(MsgAct::Act(timeline::Act::Delete))),
                 ],
                 cx,
             );
@@ -38,7 +38,7 @@ impl VectorApp {
         if m.pending {
             if !m.attachments.is_empty() {
                 let cancel = MsgAct::Act(timeline::Act::CancelUpload(id.clone()));
-                self.show_menu(at, vec![(kit::MenuItem::new("Cancel upload", "x").danger(), act(cancel))], cx);
+                self.show_menu(at, vec![(kit::MenuItem::new(t::msg_cancel_upload(), "x").danger(), act(cancel))], cx);
             }
             return;
         }
@@ -51,32 +51,32 @@ impl VectorApp {
         if !dissolved {
             let unique: std::collections::HashSet<&str> = m.reactions.iter().map(|r| r.emoji.as_str()).collect();
             if unique.len() < 8 && self.store.borrow().can_react(&chat) {
-                rows.push((kit::MenuItem::new("React", "smile-face"), act(MsgAct::Act(timeline::Act::React))));
+                rows.push((kit::MenuItem::new(t::msg_react(), "smile-face"), act(MsgAct::Act(timeline::Act::React))));
             }
-            rows.push((kit::MenuItem::new("Reply", "reply"), act(MsgAct::Act(timeline::Act::Reply))));
+            rows.push((kit::MenuItem::new(t::msg_reply(), "reply"), act(MsgAct::Act(timeline::Act::Reply))));
             if self.pins.channel == chat.as_ref() && self.pins.can_pin && !self.pins.sealed {
                 rows.push(if self.pins.pinned(&id) {
-                    (kit::MenuItem::new("Unpin", "x"), act(MsgAct::Pin(false)))
+                    (kit::MenuItem::new(t::msg_unpin(), "x"), act(MsgAct::Pin(false)))
                 } else {
-                    (kit::MenuItem::new("Pin", "pin"), act(MsgAct::Pin(true)))
+                    (kit::MenuItem::new(t::msg_pin(), "pin"), act(MsgAct::Pin(true)))
                 });
             }
             let commands = self.command_names();
             if m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(&m, commands.as_deref()).is_none() {
-                rows.push((kit::MenuItem::new("Edit", "edit"), act(MsgAct::Act(timeline::Act::Edit))));
+                rows.push((kit::MenuItem::new(t::msg_edit(), "edit"), act(MsgAct::Act(timeline::Act::Edit))));
             }
         }
         let file = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty()));
         // Beside a file, a bare "Copy" would not say which of the two it takes.
         let (copy_file, copy_text) = match (file.is_some(), m.content.is_empty()) {
-            (true, false) => ("Copy File", "Copy Text"),
-            _ => ("Copy", "Copy"),
+            (true, false) => (t::msg_copy_file(), t::msg_copy_text()),
+            _ => (t::msg_copy(), t::msg_copy()),
         };
         if let Some(a) = file {
             rows.push(if a.resident {
-                (kit::MenuItem::new("Save", "download"), act(MsgAct::File(a.id.clone())))
+                (kit::MenuItem::new(t::msg_save(), "download"), act(MsgAct::File(a.id.clone())))
             } else {
-                (kit::MenuItem::new("Reveal in folder", "file-search"), act(MsgAct::File(a.id.clone())))
+                (kit::MenuItem::new(t::msg_reveal(), "file-search"), act(MsgAct::File(a.id.clone())))
             });
             rows.push((kit::MenuItem::new(copy_file, "copy"), act(MsgAct::CopyFile(a.id.clone()))));
         }
@@ -85,9 +85,9 @@ impl VectorApp {
             if plain == m.content.trim() {
                 rows.push((kit::MenuItem::new(copy_text, "copy"), act(MsgAct::Copy(m.content.clone()))));
             } else {
-                rows.push((kit::MenuItem::new(copy_text, "copy"), act(MsgAct::Copy(plain))));
+                rows.push((kit::MenuItem::new(copy_text.clone(), "copy"), act(MsgAct::Copy(plain))));
                 rows.push((
-                    kit::MenuItem::new(copy_text, "file-code").hint(Some("(markdown)".into())),
+                    kit::MenuItem::new(copy_text, "file-code").hint(Some(t::msg_copy_markdown().to_string())),
                     act(MsgAct::Copy(m.content.clone())),
                 ));
             }
@@ -102,16 +102,16 @@ impl VectorApp {
             })
         };
         if later_from_them {
-            rows.push((kit::MenuItem::new("Mark as Unread", "eye-off"), act(MsgAct::Unread)));
+            rows.push((kit::MenuItem::new(t::msg_mark_unread(), "eye-off"), act(MsgAct::Unread)));
         }
-        rows.push((kit::MenuItem::new("Copy Link", "share"), act(MsgAct::Link)));
+        rows.push((kit::MenuItem::new(t::msg_copy_link(), "share"), act(MsgAct::Link)));
         if self.advanced() && !self.store.borrow().stream_hidden(&id) {
-            rows.push((kit::MenuItem::new("Copy Message ID", "channel-hash"), MenuAct::CopyId(id.clone(), "Message")));
+            rows.push((kit::MenuItem::new(t::copy_id_message(), "channel-hash"), MenuAct::CopyId(id.clone(), t::copy_id_message_done())));
         }
         if !self.live {
             if m.mine || community.is_none() {
                 rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
-                rows.push((kit::MenuItem::new("Delete", "trash").danger(), act(MsgAct::Delete { limited: false, attachments: false })));
+                rows.push((kit::MenuItem::new(t::msg_delete(), "trash").danger(), act(MsgAct::Delete { limited: false, attachments: false })));
             }
             return self.show_menu(at, rows, cx);
         }
@@ -124,12 +124,12 @@ impl VectorApp {
                 }
                 let act = |a: MsgAct| MenuAct::Msg(id.clone(), a);
                 let delete = if opts.mine {
-                    let label = if opts.limited { "Delete (limited)" } else { "Delete" };
+                    let label = if opts.limited { t::msg_delete_limited() } else { t::msg_delete() };
                     Some((label, act(MsgAct::Delete { limited: opts.limited, attachments: opts.attachments })))
                 } else if community.is_none() {
-                    Some(("Delete", act(MsgAct::Delete { limited: false, attachments: false })))
+                    Some((t::msg_delete(), act(MsgAct::Delete { limited: false, attachments: false })))
                 } else if opts.hide && !dissolved {
-                    Some(("Hide", act(MsgAct::Hide)))
+                    Some((t::msg_hide(), act(MsgAct::Hide)))
                 } else {
                     None
                 };
@@ -178,31 +178,28 @@ impl VectorApp {
                     None => format!("https://vectorapp.io/go#m/{id}"),
                 };
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
-                self.show_toast("Copied Message Link", cx);
+                self.show_toast(&t::msg_link_copied(), cx);
             }
             MsgAct::File(att) => self.reveal_attachment(id, att, cx),
             MsgAct::CopyFile(att) => self.copy_attachment(id, att, cx),
             MsgAct::Delete { limited, attachments } => {
-                let mut p = kit::Popup::notice(if limited { "Limited Delete" } else { "Delete this message?" });
+                let mut p = kit::Popup::notice(if limited { t::msg_delete_limited_title() } else { t::msg_delete_title() });
                 p.icon = Some("icons/vector_warning.svg");
-                p.text = Some(
-                    match (limited, attachments) {
-                        (false, _) => "Are you sure you want to delete this message?",
-                        (true, true) => "This message can't be fully removed from relays because the signing key isn't on this device (sent from another device, or predates deletion support).<br><br>We can still:<br><b>Delete the attached file</b> from the storage server.<br><b>Notify other Vector users</b> to drop the message.<br><br>Continue?",
-                        (true, false) => "This message can't be fully removed from relays because the signing key isn't on this device (sent from another device, or predates deletion support).<br><br>We can still <b>notify other Vector users</b> to drop the message from their copy.<br><br>Continue?",
-                    }
-                    .into(),
-                );
-                p.confirm = "Confirm".into();
-                p.cancel = Some("Cancel".into());
+                p.text = Some(match (limited, attachments) {
+                    (false, _) => t::msg_delete_text(),
+                    (true, true) => t::msg_delete_limited_file(),
+                    (true, false) => t::msg_delete_limited_text(),
+                });
+                p.confirm = t::dialog_confirm();
+                p.cancel = Some(t::dialog_cancel());
                 self.popup = Some((p, PopupAct::Delete { id, failed: false }));
             }
             MsgAct::Hide => {
-                let mut p = kit::Popup::notice("Hide this message?");
+                let mut p = kit::Popup::notice(t::msg_hide_title());
                 p.icon = Some("icons/vector_warning.svg");
-                p.text = Some("Permanently hide this message for everyone in the community. This can't be undone.".into());
-                p.confirm = "Confirm".into();
-                p.cancel = Some("Cancel".into());
+                p.text = Some(t::msg_hide_text());
+                p.confirm = t::dialog_confirm();
+                p.cancel = Some(t::dialog_cancel());
                 self.popup = Some((p, PopupAct::Hide(id)));
             }
         }
@@ -215,7 +212,7 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             if let Ok(Err(e)) = rx.await {
                 this.update(cx, |this, cx| {
-                    let mut p = kit::Popup::notice("Hide Failed");
+                    let mut p = kit::Popup::notice(t::msg_hide_failed());
                     p.icon = Some("icons/vector_warning.svg");
                     p.text = Some(kit::escape(&e).into());
                     this.popup = Some((p, PopupAct::Notice));
@@ -269,7 +266,7 @@ impl VectorApp {
         };
         if !path.is_empty() && !vector_core::vcache::is_sealed(std::path::Path::new(&path)) {
             match crate::fileclip::write(vec![path.into()], cx) {
-                Ok(()) => self.show_toast("Copied file to clipboard", cx),
+                Ok(()) => self.show_toast(&t::msg_file_copied(), cx),
                 Err(e) => self.show_toast(&e, cx),
             }
             return;
@@ -280,7 +277,7 @@ impl VectorApp {
             let Ok(got) = rx.await else { return };
             this.update(cx, |this, cx| {
                 match got.and_then(|p| crate::fileclip::write(vec![p], cx)) {
-                    Ok(()) => this.show_toast("Copied file to clipboard", cx),
+                    Ok(()) => this.show_toast(&t::msg_file_copied(), cx),
                     Err(e) => this.show_toast(&e, cx),
                 }
             })

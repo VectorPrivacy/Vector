@@ -84,7 +84,7 @@ impl VectorApp {
             rows.extend(moderation);
         }
         if self.advanced() && !self.store.borrow().stream_hidden(npub) {
-            let mut lead = vec![(kit::MenuItem::new("Copy User ID", "channel-hash"), MenuAct::CopyId(npub.to_string(), "User"))];
+            let mut lead = vec![(kit::MenuItem::new(crate::t::copy_id_user(), "channel-hash"), MenuAct::CopyId(npub.to_string(), crate::t::copy_id_user_done()))];
             if !rows.is_empty() {
                 lead.push((kit::MenuItem::divider(), MenuAct::Nothing));
             }

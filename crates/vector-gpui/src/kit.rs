@@ -516,7 +516,7 @@ impl Popup {
             title: title.into(),
             text: None,
             icon: Some("icons/vector_warning.svg"),
-            confirm: "Okay".into(),
+            confirm: crate::t::dialog_okay(),
             cancel: None,
             input: None,
             fine: None,

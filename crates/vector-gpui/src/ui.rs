@@ -25,6 +25,7 @@ use crate::data::{self, Row, Store};
 use crate::inline::Target;
 use crate::kit;
 use crate::login::{LoggedIn, LoginView, ReauthClosed};
+use crate::t;
 use crate::theme::*;
 use crate::timeline;
 use chrono::TimeZone;
@@ -503,7 +504,8 @@ enum MenuAct {
         channel: String,
         category: bool,
     },
-    CopyId(String, &'static str),
+    /// The id, and the toast once it is copied.
+    CopyId(String, SharedString),
     NexusLink(String),
     /// A rail folder's communities read at once.
     RailRead(Vec<String>),
@@ -2136,9 +2138,9 @@ impl VectorApp {
             MenuAct::DeleteChannel { community, channel, category } => {
                 self.ask_delete_channel(community, channel, category, cx)
             }
-            MenuAct::CopyId(id, what) => {
+            MenuAct::CopyId(id, done) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(id));
-                self.toast = Some((format!("Copied {what} ID").into(), std::time::Instant::now()));
+                self.toast = Some((done, std::time::Instant::now()));
             }
             MenuAct::NexusLink(id) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!("https://vectorapp.io/go#nexus/{id}")));
@@ -11568,7 +11570,7 @@ impl VectorApp {
             // The Admin / Members fallbacks are not roles: nothing to copy.
             Act::SectionMenu(key, at) => {
                 if let Some(role) = key.strip_prefix("sec-role:").filter(|_| self.advanced()) {
-                    let rows = vec![(kit::MenuItem::new("Copy Role ID", "channel-hash"), MenuAct::CopyId(role.to_string(), "Role"))];
+                    let rows = vec![(kit::MenuItem::new(t::copy_id_role(), "channel-hash"), MenuAct::CopyId(role.to_string(), t::copy_id_role_done()))];
                     self.show_menu(at, rows, cx);
                 }
             }
@@ -11846,8 +11848,8 @@ impl VectorApp {
         ));
         if self.advanced() && !self.store.borrow().stream_hidden(&id) {
             rows.push((
-                kit::MenuItem::new("Copy Community ID", "channel-hash"),
-                MenuAct::CopyId(id.clone(), "Community"),
+                kit::MenuItem::new(t::copy_id_community(), "channel-hash"),
+                MenuAct::CopyId(id.clone(), t::copy_id_community_done()),
             ));
         }
         rows.push((kit::MenuItem::divider(), MenuAct::Nothing));
@@ -11915,8 +11917,8 @@ impl VectorApp {
         ));
         if self.advanced() && !self.store.borrow().stream_hidden(&channel) {
             rows.push((
-                kit::MenuItem::new("Copy Channel ID", "channel-hash"),
-                MenuAct::CopyId(channel.clone(), "Channel"),
+                kit::MenuItem::new(t::copy_id_channel(), "channel-hash"),
+                MenuAct::CopyId(channel.clone(), t::copy_id_channel_done()),
             ));
         }
         let primary = self
