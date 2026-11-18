@@ -2565,15 +2565,16 @@ impl Interactivity {
                 }
 
                 window.with_text_style(style.text_style().cloned(), |window| {
+                    // Outside its own clip: a border is part of the element, and the clip
+                    // narrows with the border's colour, so hover would flicker at the edge.
+                    let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                        Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                    } else {
+                        None
+                    };
                     window.with_content_mask(
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
-                            } else {
-                                None
-                            };
-
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
                             if let Some(id) = window.reveal_focus

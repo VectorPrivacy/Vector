@@ -232,6 +232,13 @@ where
         rt.spawn(async move {
             let _ = tx.send(fut.await);
         });
+    } else if cfg!(feature = "devctl") && std::env::var_os("VECTOR_GIF_DIR").is_some() {
+        // Fixtures have no runtime; the offline GIF source still needs its futures run.
+        std::thread::spawn(move || {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let _ = tx.send(rt.block_on(fut));
+            }
+        });
     }
     rx
 }

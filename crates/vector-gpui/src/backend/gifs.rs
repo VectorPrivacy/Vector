@@ -39,8 +39,27 @@ async fn fetch(url: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(body))
 }
 
+/// Dev builds: `VECTOR_GIF_DIR` serves the picker from local `.gif` files, offline.
+#[cfg(feature = "devctl")]
+fn local_dir() -> Option<PathBuf> {
+    std::env::var_os("VECTOR_GIF_DIR").map(PathBuf::from)
+}
+
 /// One page of `trending` or `search`; the path is fixed here, the caller picks only the query.
 pub async fn listing(query: String) -> Result<Vec<Gif>, String> {
+    #[cfg(feature = "devctl")]
+    if let Some(dir) = local_dir() {
+        let first = query.contains("offset=0");
+        let mut ids: Vec<String> = std::fs::read_dir(dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|n| n.strip_suffix(".gif").map(str::to_string))
+            .filter(|_| first)
+            .collect();
+        ids.sort();
+        return Ok(ids.into_iter().map(|id| Gif { title: id.clone(), id, thumbhash: None }).collect());
+    }
     let body = fetch(&format!("{SERVICE}/api/v1/{query}"), LISTING_MAX)
         .await
         .map_err(|e| format!("gif service: {e}"))?
@@ -109,6 +128,10 @@ fn preview_dir() -> Option<PathBuf> {
 
 /// A GIF's animated preview, kept sealed in the cache.
 pub async fn preview(id: String) -> Option<Vec<u8>> {
+    #[cfg(feature = "devctl")]
+    if let Some(dir) = local_dir() {
+        return std::fs::read(dir.join(format!("{id}.gif"))).ok();
+    }
     let url = original_url(&encode(&id));
     let dir = preview_dir()?;
     let path = dir.join(format!(
