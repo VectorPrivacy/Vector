@@ -1,4 +1,4 @@
-# Hard-coded English left per file (3540 in all). Only ever lowered; see i18n_audit.rs.
+# Hard-coded English left per file (3419 in all). Only ever lowered; see i18n_audit.rs.
 applog.rs 2
 attachments.rs 27
 audio.rs 31
@@ -96,7 +96,6 @@ recorder.rs 5
 rekey.rs 2
 roles.rs 109
 routes.rs 30
-routing.rs 121
 screenpick.rs 7
 scrollbar.rs 4
 secretguard.rs 16

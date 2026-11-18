@@ -12,6 +12,7 @@ use crate::pic::img;
 use serde_json::Value;
 
 use crate::composer::TextInput;
+use crate::t;
 use crate::markdown::MONO;
 use crate::netglyph::{self, Net, State};
 use crate::settings::{Act, OnAct, info, toggle, toggle_row};
@@ -162,12 +163,12 @@ impl Default for Routing {
 
 pub const MAX_OUTPROXIES: usize = 8;
 
-pub fn label(kind: &str) -> &str {
+pub fn label(kind: &str) -> SharedString {
     match kind {
-        "clearnet" => "Standard",
-        "tor" => "Tor",
-        "i2p" => "I2P",
-        k => k,
+        "clearnet" => t::routing_standard(),
+        "tor" => "Tor".into(), // i18n-exempt: a name
+        "i2p" => "I2P".into(), // i18n-exempt: a name
+        k => k.to_string().into(),
     }
 }
 
@@ -284,48 +285,48 @@ fn steps(v: &Value) -> Vec<Value> {
 }
 
 /// `formatTransportStatus`: the card's status line for the network in use.
-pub fn status_text(v: &Value) -> String {
+pub fn status_text(v: &Value) -> SharedString {
     let kind = s(v, "kind");
     if kind == "unknown" {
-        return "Choose how Vector connects.".into();
+        return t::routing_choose();
     }
     if s(v, "phase") == "unsupported" {
         return match reason_text(v) {
-            "" => format!("This build doesn't include {}.", label(kind)),
-            t => t.into(),
+            "" => t::routing_missing(&label(kind)),
+            why => why.to_string().into(),
         };
     }
     if kind == "clearnet" {
-        return "Connects straight to relays and servers.".into();
+        return t::routing_direct_note();
     }
     let ready = b(v, "ready");
     if kind == "tor" {
         if ready {
-            return "Connected.".into();
+            return t::routing_connected();
         }
         let d = v.get("detail").cloned().unwrap_or(Value::Null);
         if s(&d, "status") == "bootstrapping" {
             return match d.get("bootstrap_progress").and_then(Value::as_u64) {
-                Some(p) => format!("Bootstrapping {p}%…"),
-                None => "Bootstrapping…".into(),
+                Some(p) => t::routing_bootstrapping_at(p),
+                None => t::routing_bootstrapping(),
             };
         }
-        return if s(v, "phase") == "failed" { "Failed to start." } else { "Starting…" }.into();
+        return if s(v, "phase") == "failed" { t::routing_failed() } else { t::routing_starting() };
     }
     if ready {
         let exit_failing = steps(v).iter().any(|st| s(st, "id") == "exit" && s(st, "state") == "fail");
-        return if exit_failing { "Connected inside I2P only." } else { "Connected." }.into();
+        return if exit_failing { t::routing_connected_inside() } else { t::routing_connected() };
     }
     if s(v, "phase") == "starting" {
         let router = steps(v).into_iter().find(|st| s(st, "id") == "router");
         return match router {
-            Some(r) if kind == "i2p" => if s(&r, "state") != "ok" { "Looking for your router…" } else { "Building tunnels…" }.into(),
-            _ => "Starting…".into(),
+            Some(r) if kind == "i2p" => if s(&r, "state") != "ok" { t::routing_finding_router() } else { t::routing_building_tunnels() },
+            _ => t::routing_starting(),
         };
     }
     match reason_text(v) {
-        "" => "Starting…".into(),
-        t => t.into(),
+        "" => t::routing_starting(),
+        why => why.to_string().into(),
     }
 }
 
@@ -413,9 +414,9 @@ fn picker(r: &Routing, viewed: &str, on: &OnAct) -> AnyElement {
                 move || NetAct::View(k.clone())
             }));
         if k == in_use {
-            pill = pill.child(div().id("net-dot-in-use").flex_shrink_0().tip("In use").child(net_dot(&k, dot_kind)));
+            pill = pill.child(div().id("net-dot-in-use").flex_shrink_0().tip(t::routing_in_use()).child(net_dot(&k, dot_kind)));
         }
-        pills = pills.child(pill.child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(label(&k).to_string())));
+        pills = pills.child(pill.child(div().whitespace_nowrap().overflow_hidden().text_ellipsis().child(label(&k))));
     }
     div()
         .mb(px(12.))
@@ -471,32 +472,32 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
     let status = if using {
         status_text(v)
     } else if missing {
-        format!("This build doesn't include {}.", label(viewed))
+        t::routing_missing(&label(viewed))
     } else if s(v, "kind") == "unknown" {
-        "Choose how Vector connects.".into()
+        t::routing_choose()
     } else {
-        "Not in use.".into()
+        t::routing_not_in_use()
     };
     let tor_starting = r.tor_starting();
     let in_call = r.call_active();
     let held = r.locked || tor_starting;
     let hold_why = if in_call {
-        Some("End the call to change networks.")
+        Some(t::routing_held_call())
     } else if tor_starting {
-        Some("Wait for Tor to finish connecting.")
+        Some(t::routing_held_tor())
     } else {
         None
     };
-    let sub: Option<(String, Option<&'static str>)> = if !using && !missing && hold_why.is_some() {
-        hold_why.map(|t| (t.to_string(), None))
+    let sub: Option<(SharedString, Option<SharedString>)> = if !using && !missing && hold_why.is_some() {
+        hold_why.clone().map(|why| (why, None))
     } else if !using || b(v, "ready") {
         None
     } else if s(v, "phase") == "waiting" {
-        Some((r.retry_in().map(|n| format!("Retrying in {n}s.")).unwrap_or_default(), Some("Retry now")))
+        Some((r.retry_in().map(t::routing_retrying_in).unwrap_or_default(), Some(t::routing_retry_now())))
     } else if s(v, "phase") == "failed" {
-        Some((reason_text(v).to_string(), Some("Retry")))
+        Some((reason_text(v).to_string().into(), Some(t::routing_retry())))
     } else if r.stuck() {
-        Some((String::new(), Some("Retry")))
+        Some((SharedString::default(), Some(t::routing_retry())))
     } else {
         None
     };
@@ -528,18 +529,18 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         _ => "transport",
     };
     let title: AnyElement = if s(v, "kind") == "unknown" {
-        div().child("Choose a Network").into_any_element()
+        div().child(t::routing_choose_title()).into_any_element()
     } else if viewed == "tor" {
         div()
             .flex()
             .items_start()
-            .child(div().pt(px(4.)).child("Route traffic through Tor"))
+            .child(div().pt(px(4.)).child(t::routing_tor_title()))
             .child(div().pt(px(5.)).ml(px(1.)).text_size(px(8.25)).line_height(px(10.)).opacity(0.6).child("™"))
             .into_any_element()
     } else if viewed == "clearnet" {
-        div().child("Direct Connection").into_any_element()
+        div().child(t::routing_direct_title()).into_any_element()
     } else {
-        div().child(format!("Route traffic through {}", label(viewed))).into_any_element()
+        div().child(t::routing_route_through(&label(viewed))).into_any_element()
     };
     let mut body = div()
         .flex_1()
@@ -563,16 +564,16 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         )
         .child(div().min_h(px(16.)).text_size(px(12.)).line_height(px(16.8)).text_color(status_color).text_center().child(status));
     // Read out once per phase: the bootstrap's percentages would crowd out other speech.
-    let phase_word = if !using {
-        String::new()
+    let phase_word: SharedString = if !using {
+        SharedString::default()
     } else if b(v, "ready") {
-        format!("{} connected.", label(viewed))
+        t::routing_spoken_connected(&label(viewed))
     } else {
         match s(v, "phase") {
-            "failed" => format!("{} failed to start.", label(viewed)),
-            "starting" => format!("{} connecting.", label(viewed)),
-            "waiting" => reason_text(v).to_string(),
-            _ => String::new(),
+            "failed" => t::routing_spoken_failed(&label(viewed)),
+            "starting" => t::routing_spoken_connecting(&label(viewed)),
+            "waiting" => reason_text(v).to_string().into(),
+            _ => SharedString::default(),
         }
     };
     if !phase_word.is_empty() {
@@ -608,7 +609,7 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         body = body.child(
             div()
                 .id("tor-attribution")
-                .tip("Visit torproject.org")
+                .tip(t::routing_visit_tor())
                 .mt(px(6.))
                 .h(px(23.))
                 .opacity(0.85)
@@ -644,7 +645,7 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
                     .active(|d| d.opacity(0.85))
                     .on_click(act(on, move || NetAct::Use(k.clone())))
             })
-            .child(format!("Use {}", label(viewed)))
+            .child(t::routing_use(&label(viewed)))
     });
     div()
         .mb(px(18.))
@@ -662,7 +663,7 @@ fn card(r: &Routing, viewed: &str, phone: bool, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
-fn line_label(text: &'static str, help: &'static str, on: &OnAct) -> impl IntoElement {
+fn line_label(text: SharedString, help: &'static str, on: &OnAct) -> impl IntoElement {
     div()
         .flex_1()
         .flex()
@@ -676,7 +677,7 @@ fn line_label(text: &'static str, help: &'static str, on: &OnAct) -> impl IntoEl
 }
 
 /// `.st-line`: a label with its explainer, controls flush right.
-fn st_line(text: &'static str, help: &'static str, right: impl IntoElement, on: &OnAct) -> AnyElement {
+fn st_line(text: SharedString, help: &'static str, right: impl IntoElement, on: &OnAct) -> AnyElement {
     div()
         .min_h(px(36.))
         .mb(px(10.))
@@ -688,7 +689,7 @@ fn st_line(text: &'static str, help: &'static str, right: impl IntoElement, on: 
         .into_any_element()
 }
 
-fn btn(id: &'static str, text: &'static str, enabled: bool, primary: bool, on: &OnAct, a: impl Fn() -> NetAct + 'static) -> AnyElement {
+fn btn(id: &'static str, text: SharedString, enabled: bool, primary: bool, on: &OnAct, a: impl Fn() -> NetAct + 'static) -> AnyElement {
     div()
         .id(id)
         .h(px(32.))
@@ -729,7 +730,7 @@ fn note(text: &str, tone: Option<bool>) -> AnyElement {
         .into_any_element()
 }
 
-fn link(id: &'static str, text: &'static str, color: Hsla, enabled: bool, on: &OnAct, a: impl Fn() -> NetAct + 'static) -> AnyElement {
+fn link(id: &'static str, text: SharedString, color: Hsla, enabled: bool, on: &OnAct, a: impl Fn() -> NetAct + 'static) -> AnyElement {
     div()
         .id(id)
         .text_size(px(13.))
@@ -747,7 +748,7 @@ fn switch(id: &'static str, on_now: bool, enabled: bool, on: &OnAct, a: impl Fn(
     if enabled { t } else { div().opacity(0.5).child(t).into_any_element() }
 }
 
-fn toggle_line(id: &'static str, text: &'static str, help: &'static str, value: bool, enabled: bool, on: &OnAct, a: impl Fn() -> NetAct + 'static) -> AnyElement {
+fn toggle_line(id: &'static str, text: SharedString, help: &'static str, value: bool, enabled: bool, on: &OnAct, a: impl Fn() -> NetAct + 'static) -> AnyElement {
     let on2 = on.clone();
     toggle_row(
         id,
@@ -787,7 +788,7 @@ fn tor_options(r: &Routing, on: &OnAct) -> AnyElement {
     let e = &r.engine;
     let mut col = div().flex().flex_col();
     let ext = e.external;
-    col = col.child(toggle_line("tor-external", "Use Running Tor", "torExternal", ext, !e.busy && !r.locked, on, move || NetAct::TorEngine(!ext)));
+    col = col.child(toggle_line("tor-external", t::routing_tor_external(), "torExternal", ext, !e.busy && !r.locked, on, move || NetAct::TorEngine(!ext)));
     if ext {
         let right = loopback(
             div()
@@ -795,27 +796,27 @@ fn tor_options(r: &Routing, on: &OnAct) -> AnyElement {
                 .gap(px(6.))
                 .children(r.tor_port.as_ref().map(|i| field(i, Some(64.), true)))
                 .child(if r.tor_port_dirty {
-                    btn("tor-port-save", "Save", !e.busy, true, on, || NetAct::SaveTorPort)
+                    btn("tor-port-save", t::routing_save(), !e.busy, true, on, || NetAct::SaveTorPort)
                 } else {
-                    btn("tor-find", "Find", !e.busy, false, on, || NetAct::FindTor)
+                    btn("tor-find", t::routing_find(), !e.busy, false, on, || NetAct::FindTor)
                 })
                 .into_any_element(),
         );
-        col = col.child(st_line("Port", "torExternal", right, on));
+        col = col.child(st_line(t::routing_port(), "torExternal", right, on));
         col = col.child(match e.found {
-            Some(p) => note(&format!("Found {} on port {p}.", if p == 9150 { "Tor Browser" } else { "Tor" }), Some(true)),
-            None => note("No Tor found. Open Tor Browser or start tor.", Some(false)),
+            Some(p) => note(&if p == 9150 { t::routing_found_tor_browser(p) } else { t::routing_found_tor(p) }, Some(true)),
+            None => note(&t::routing_no_tor(), Some(false)),
         });
     } else {
         let br = &r.bridges;
         let enabled = br.enabled;
-        col = col.child(toggle_line("tor-bridges", "Use Bridges", "torBridges", enabled, !br.busy, on, move || NetAct::TorBridges(!enabled)));
+        col = col.child(toggle_line("tor-bridges", t::routing_bridges(), "torBridges", enabled, !br.busy, on, move || NetAct::TorBridges(!enabled)));
         if enabled || br.status.as_ref().is_some_and(|s| s.1) {
             col = col.child(bridges_body(r, connected, on));
         }
     }
     let multi = r.multi;
-    col = col.child(toggle_line("tor-multi", "Multi-Circuit", "torMultiCircuit", multi, !r.locked, on, move || NetAct::TorMulti(!multi)));
+    col = col.child(toggle_line("tor-multi", t::routing_multi_circuit(), "torMultiCircuit", multi, !r.locked, on, move || NetAct::TorMulti(!multi)));
     if connected {
         col = col.child(circuits(r, on));
     }
@@ -827,7 +828,7 @@ fn bridges_body(r: &Routing, connected: bool, on: &OnAct) -> AnyElement {
     let lines = r.bridge_lines.as_ref();
     let count = br.saved.lines().filter(|l| !l.trim().is_empty()).count();
     let (status, error) = br.status.clone().unwrap_or_else(|| {
-        (if count == 0 { "No bridges configured.".into() } else { format!("{count} bridge{} configured", if count == 1 { "" } else { "s" }) }, false)
+        (if count == 0 { t::routing_bridges_none().to_string() } else { t::routing_bridges_count(count).to_string() }, false)
     });
     div()
         .flex()
@@ -859,7 +860,7 @@ fn bridges_body(r: &Routing, connected: bool, on: &OnAct) -> AnyElement {
                     .text_size(px(12.5))
                     .text_color(c(0xffd27a))
                     .child("⚠")
-                    .child("obfs4 bridges need obfs4proxy installed. Saving will fail until it's available."),
+                    .child(t::routing_obfs4_missing()),
             )
         })
         .child(
@@ -867,14 +868,14 @@ fn bridges_body(r: &Routing, connected: bool, on: &OnAct) -> AnyElement {
                 .text_size(px(12.))
                 .line_height(px(17.))
                 .text_color(white_a(0.5))
-                .child("One bridge per line. obfs4 recommended (bypasses DPI). Vanilla IP:port fingerprint also works for private bridges.")
+                .child(t::routing_bridges_hint())
                 .child(
                     div()
                         .id("tor-bridges-link")
                         .text_color(c(ACCENT))
                         .cursor_pointer()
                         .on_click(act(on, || NetAct::Link("bridges")))
-                        .child("Get bridges at bridges.torproject.org."),
+                        .child(t::routing_bridges_get()),
                 ),
         )
         .child(
@@ -885,7 +886,7 @@ fn bridges_body(r: &Routing, connected: bool, on: &OnAct) -> AnyElement {
                 .child(div().text_size(px(12.)).text_color(if error { c(0xff8c75) } else { white_a(0.55) }).child(status))
                 .child(btn(
                     "tor-bridges-apply",
-                    if connected { "Apply & Reconnect" } else { "Save" },
+                    if connected { t::routing_apply_reconnect() } else { t::routing_save() },
                     r.bridges_dirty && !br.busy,
                     false,
                     on,
@@ -899,7 +900,7 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
     let loading = r.circuits.phase == Load::Loading;
     let refresh = div()
         .id("tor-circuits-refresh")
-        .tip("Build a new circuit")
+        .tip(t::routing_circuit_new_tip())
         .flex()
         .items_center()
         .gap(px(6.))
@@ -931,17 +932,17 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
         } else {
             svg().path("ui/circuit-new.svg").size(px(10.)).text_color(c(0xc9a4ff)).into_any_element()
         })
-        .child(crate::kit::spaced("NEW".to_string(), 1.2));
+        .child(crate::kit::spaced(t::routing_circuit_new().to_uppercase(), 1.2));
     let head = div()
         .h(px(28.))
         .pb(px(6.))
         .flex()
         .items_center()
         .justify_between()
-        .child(div().text_size(px(14.)).line_height(px(17.)).text_color(c(CHROME_HELP)).child(if r.multi { "Circuits" } else { "Active Circuit" }))
+        .child(div().text_size(px(14.)).line_height(px(17.)).text_color(c(CHROME_HELP)).child(if r.multi { t::routing_circuits() } else { t::routing_circuit_active() }))
         .child(refresh);
     let body: AnyElement = if r.engine.external {
-        div().text_size(px(12.)).line_height(px(15.)).text_color(c(CHROME_HELP)).child("That Tor builds the circuits. New gives every server a fresh one.").into_any_element()
+        div().text_size(px(12.)).line_height(px(15.)).text_color(c(CHROME_HELP)).child(t::routing_circuits_external()).into_any_element()
     } else if r.multi && r.circuits.phase == Load::Ok {
         let n = r.circuits.count;
         let hosts = r.circuits.hosts;
@@ -960,22 +961,32 @@ fn circuits(r: &Routing, on: &OnAct) -> AnyElement {
                     .text_size(px(14.))
                     .line_height(px(17.))
                     .text_color(white_a(0.8))
-                    .child(format!("active circuit{}", if n == 1 { "" } else { "s" }))
-                    .child(div().text_size(px(12.)).line_height(px(15.)).text_color(c(CHROME_HELP)).child(format!(
-                        "across {hosts} {}. Each one's circuit is in its info.",
-                        if hosts == 1 { "host" } else { "relays and servers" }
-                    ))),
+                    .child(t::routing_circuits_active(n))
+                    .child(div().text_size(px(12.)).line_height(px(15.)).text_color(c(CHROME_HELP)).child(t::routing_circuits_across(hosts))),
             )
             .into_any_element()
     } else {
         match &r.circuits.phase {
-            Load::Loading | Load::Idle => empty("Building circuit…", false),
-            Load::Error(e) => empty(&format!("Failed: {e}"), true),
-            Load::Ok if r.circuits.hops.is_empty() => empty("No active circuit.", false),
+            Load::Loading | Load::Idle => empty(&t::routing_circuit_building(), false),
+            Load::Error(e) => empty(&t::routing_circuit_failed(e), true),
+            Load::Ok if r.circuits.hops.is_empty() => empty(&t::routing_circuit_none(), false),
             Load::Ok => hops(&r.circuits.hops),
         }
     };
     div().mt(px(4.)).flex().flex_col().child(head).child(body).into_any_element()
+}
+
+/// A hop's place in its circuit, in words; core's own word for one this doesn't know.
+fn hop_name(pos: &str, bridge: bool) -> SharedString {
+    let name = match pos {
+        "Guard" => t::routing_hop_guard(), // i18n-exempt: core's hop name
+        "Middle" => t::routing_hop_middle(), // i18n-exempt: core's hop name
+        "Exit" => t::routing_hop_exit(), // i18n-exempt: core's hop name
+        "Onion" => t::routing_hop_onion(), // i18n-exempt: core's hop name
+        "Rendezvous" => t::routing_hop_rendezvous(), // i18n-exempt: core's hop name
+        p => p.to_string().into(),
+    };
+    if bridge { t::routing_hop_bridge(&name) } else { name }
 }
 
 fn empty(text: &str, error: bool) -> AnyElement {
@@ -1031,8 +1042,8 @@ pub fn hops(hops: &[Value]) -> AnyElement {
     }
     for h in hops {
         let pos = s(h, "position");
-        let last = matches!(pos, "Exit" | "Onion");
-        let mid = matches!(pos, "Middle" | "Rendezvous");
+        let last = matches!(pos, "Exit" | "Onion"); // i18n-exempt: core's hop names
+        let mid = matches!(pos, "Middle" | "Rendezvous"); // i18n-exempt: core's hop names
         let fp = s(h, "fingerprint");
         list = list.child(
             div()
@@ -1056,7 +1067,7 @@ pub fn hops(hops: &[Value]) -> AnyElement {
                         .text_size(px(9.5))
                         .font_weight(FontWeight::BOLD)
                         .text_color(if last { c(0xd9b3ff) } else { white_a(0.72) })
-                        .child(crate::kit::spaced(format!("{}{}", pos.to_uppercase(), if b(h, "is_bridge") { " · BRIDGE" } else { "" }), 1.7)),
+                        .child(crate::kit::spaced(hop_name(pos, b(h, "is_bridge")).to_uppercase(), 1.7)),
                 )
                 .child(div().flex_1().min_w_0().font_family(MONO).text_size(px(12.)).text_color(white_a(0.92)).child(match s(h, "address") {
                     "" => "—".to_string(),
@@ -1167,7 +1178,7 @@ fn steps_list(v: &Value, extra: Option<AnyElement>) -> Option<AnyElement> {
             .mb(px(12.))
             .flex()
             .flex_col()
-            .child(div().h(px(23.)).pb(px(6.)).text_size(px(14.)).line_height(px(17.)).text_color(c(CHROME_HELP)).child("Connection"))
+            .child(div().h(px(23.)).pb(px(6.)).text_size(px(14.)).line_height(px(17.)).text_color(c(CHROME_HELP)).child(t::routing_connection()))
             .child(list.children(extra))
             .into_any_element(),
     )
@@ -1186,11 +1197,11 @@ fn i2p_options(r: &Routing, on: &OnAct) -> AnyElement {
             .flex()
             .gap(px(6.))
             .children(r.port.as_ref().map(|i| field(i, Some(64.), true)))
-            .child(btn("i2p-test", "Test", !r.testing, false, on, || NetAct::TestRouter))
-            .when(r.port_dirty, |d| d.child(btn("i2p-port-save", "Save", !r.saving, true, on, || NetAct::SaveRouter)))
+            .child(btn("i2p-test", t::routing_test(), !r.testing, false, on, || NetAct::TestRouter))
+            .when(r.port_dirty, |d| d.child(btn("i2p-port-save", t::routing_save(), !r.saving, true, on, || NetAct::SaveRouter)))
             .into_any_element(),
     );
-    col = col.child(st_line("Router", "i2pRouter", right, on));
+    col = col.child(st_line(t::routing_router(), "i2pRouter", right, on));
     if let Some((text, ok)) = &r.note {
         col = col.child(note(text, Some(*ok)));
     }
@@ -1200,13 +1211,13 @@ fn i2p_options(r: &Routing, on: &OnAct) -> AnyElement {
             .flex()
             .items_center()
             .gap(px(10.))
-            .child(div().text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(format!("Signs in as {}.", s(&cfg, "sam_user"))))
-            .child(link("i2p-auth-remove", "Remove", cyan, !r.auth_busy, on, || NetAct::AuthRemove))
+            .child(div().text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(t::routing_signs_in_as(s(&cfg, "sam_user"))))
+            .child(link("i2p-auth-remove", t::routing_remove(), cyan, !r.auth_busy, on, || NetAct::AuthRemove))
             .into_any_element()
     } else if let Some((user, pass)) = &r.auth {
         form(
-            Some(("SAM Password", "i2pAuth")),
-            vec![("Username", user, None, false), ("Password", pass, None, false)],
+            Some((t::routing_sam_password(), "i2pAuth")),
+            vec![(t::routing_username(), user, None, false), (t::routing_password(), pass, None, false)],
             !r.auth_busy,
             on,
             || NetAct::AuthCancel,
@@ -1217,7 +1228,7 @@ fn i2p_options(r: &Routing, on: &OnAct) -> AnyElement {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(link("i2p-auth-add", "Add SAM Password", cyan, true, on, || NetAct::AuthOpen))
+            .child(link("i2p-auth-add", t::routing_add_sam_password(), cyan, true, on, || NetAct::AuthOpen))
             .child(info("i2p-auth-info", act(on, || NetAct::Help("i2pAuth"))))
             .into_any_element()
     };
@@ -1225,18 +1236,18 @@ fn i2p_options(r: &Routing, on: &OnAct) -> AnyElement {
         d.child(div().id("i2p-auth-error").alert().text_size(px(12.5)).text_color(c(0xff8c75)).child(r.auth_error.clone()))
     }));
     if in_use {
-        let addresses: Vec<(String, &'static str)> = [("account", "your relays"), ("shared", "other servers")]
+        let addresses: Vec<(String, &'static str)> = ["account", "shared"]
             .into_iter()
-            .filter_map(|(k, who)| v.get("detail")?.get("addresses")?.get(k)?.as_str().map(|a| (a.to_string(), who)))
+            .filter_map(|k| v.get("detail")?.get("addresses")?.get(k)?.as_str().map(|a| (a.to_string(), k)))
             .collect();
         let extra = (!addresses.is_empty()).then(|| address_row(&addresses, on));
         if let Some(list) = steps_list(&v, extra) {
             col = col.child(list);
         }
         let ready = b(&v, "ready");
-        col = col.child(st_line("New Address", "i2pIdentity", btn("i2p-renew", "Renew", !r.renewing && ready && !r.locked, false, on, || NetAct::Renew), on));
+        col = col.child(st_line(t::routing_new_address(), "i2pIdentity", btn("i2p-renew", t::routing_renew(), !r.renewing && ready && !r.locked, false, on, || NetAct::Renew), on));
     }
-    col = col.child(toggle_line("i2p-only", "I2P-Only", "i2pOnly", i2p_only, !r.locked, on, move || NetAct::I2pOnly(!i2p_only)));
+    col = col.child(toggle_line("i2p-only", t::routing_i2p_only(), "i2pOnly", i2p_only, !r.locked, on, move || NetAct::I2pOnly(!i2p_only)));
     if !r.exit_error.is_empty() {
         col = col.child(note(&r.exit_error, Some(false)));
     }
@@ -1272,9 +1283,9 @@ fn only_line(warn: bool, on: &OnAct) -> AnyElement {
         .flex_wrap()
         .gap_x(px(4.))
         .when(warn, |d| {
-            d.child("None of your relays are on I2P.").child(link("i2p-open-network", "Open Network", ink, true, on, || NetAct::OpenNetwork))
+            d.child(t::routing_stranded()).child(link("i2p-open-network", t::routing_open_network(), ink, true, on, || NetAct::OpenNetwork))
         })
-        .when(!warn, |d| d.child("Only I2P servers and I2P addresses you added."))
+        .when(!warn, |d| d.child(t::routing_only_note()))
         .into_any_element()
 }
 
@@ -1293,7 +1304,11 @@ fn address_row(addresses: &[(String, &'static str)], on: &OnAct) -> AnyElement {
                 .cursor_pointer()
                 .on_click(act(on, move || NetAct::CopyAddress(copy.clone())))
                 .child(div().font_family(MONO).text_size(px(12.)).text_color(white_a(0.92)).hover(|d| d.text_color(c(0xb3ecf7))).child(short(b32)))
-                .child(div().text_size(px(11.5)).text_color(white_a(0.45)).child(*who)),
+                .child(div().text_size(px(11.5)).text_color(white_a(0.45)).child(if *who == "account" {
+                    t::routing_address_account()
+                } else {
+                    t::routing_address_shared()
+                })),
         );
     }
     div()
@@ -1306,15 +1321,15 @@ fn address_row(addresses: &[(String, &'static str)], on: &OnAct) -> AnyElement {
                 div().size(px(10.)).rounded_full().border(px(1.5)).bg(ca(64, 200, 228, 1.)).border_color(c(0xb3ecf7)),
             ),
         )
-        .child(div().w(px(84.)).text_size(px(9.5)).line_height(px(18.)).font_weight(FontWeight::BOLD).text_color(white_a(0.72)).child(crate::kit::spaced("ADDRESS", 1.71)))
+        .child(div().w(px(84.)).text_size(px(9.5)).line_height(px(18.)).font_weight(FontWeight::BOLD).text_color(white_a(0.72)).child(crate::kit::spaced(t::routing_address().to_uppercase(), 1.71)))
         .child(list)
         .into_any_element()
 }
 
 /// `.i2p-form`: labelled fields over Cancel and Save.
 fn form(
-    head: Option<(&'static str, &'static str)>,
-    fields: Vec<(&'static str, &Entity<TextInput>, Option<f32>, bool)>,
+    head: Option<(SharedString, &'static str)>,
+    fields: Vec<(SharedString, &Entity<TextInput>, Option<f32>, bool)>,
     enabled: bool,
     on: &OnAct,
     cancel: impl Fn() -> NetAct + 'static,
@@ -1381,27 +1396,27 @@ fn form(
                 .flex()
                 .justify_end()
                 .gap(px(8.))
-                .child(btn("form-cancel", "Cancel", true, false, on, cancel))
-                .child(btn("form-save", "Save", enabled, true, on, save)),
+                .child(btn("form-cancel", t::dialog_cancel(), true, false, on, cancel))
+                .child(btn("form-save", t::routing_save(), enabled, true, on, save)),
         )
         .into_any_element()
 }
 
-fn health_of(h: Option<&Value>) -> (&'static str, String, Option<String>) {
-    let Some(h) = h else { return ("unknown", "Not tried".into(), None) };
+fn health_of(h: Option<&Value>) -> (&'static str, SharedString, Option<String>) {
+    let Some(h) = h else { return ("unknown", t::routing_health_untried(), None) };
     let why = h.get("last_error").and_then(Value::as_str).map(str::to_string);
     let ports: Vec<String> = h.get("refused_ports").and_then(Value::as_array).into_iter().flatten().map(|p| p.to_string()).collect();
     match s(h, "state") {
         "cooling" => {
             let secs = h.get("cooling_for").and_then(Value::as_f64).unwrap_or(60.);
-            ("cooling", format!("Resting {}m", (secs / 60.).ceil().max(1.)), why)
+            ("cooling", t::routing_health_resting((secs / 60.).ceil().max(1.) as u64), why)
         }
-        "failing" => ("failing", "Failing".into(), why),
-        "ok" if ports.is_empty() => ("ok", "OK".into(), None),
-        "ok" => ("ok", format!("OK, not port {}", ports.join(", ")), None),
-        _ if !ports.is_empty() => ("refusing", format!("Refuses port {}", ports.join(", ")), None),
-        _ if why.is_some() => ("unknown", "Not reached yet".into(), why),
-        _ => ("unknown", "Not tried".into(), None),
+        "failing" => ("failing", t::routing_health_failing(), why),
+        "ok" if ports.is_empty() => ("ok", t::routing_health_ok(), None),
+        "ok" => ("ok", t::routing_health_ok_except(ports.join(", ")), None),
+        _ if !ports.is_empty() => ("refusing", t::routing_health_refuses(ports.join(", ")), None),
+        _ if why.is_some() => ("unknown", t::routing_health_unreached(), why),
+        _ => ("unknown", t::routing_health_untried(), None),
     }
 }
 
@@ -1424,10 +1439,10 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                 .text_size(px(16.))
                 .line_height(px(24.))
                 .text_color(c(0xffffff))
-                .child("Outproxies")
+                .child(t::routing_outproxies())
                 .child(info("i2p-ops-info", act(on, || NetAct::Help("i2pOutproxy")))),
         )
-        .when(b(cfg, "customized"), |d| d.child(link("i2p-ops-reset", "Reset", c(0x7adef0), !busy, on, || NetAct::OpReset)));
+        .when(b(cfg, "customized"), |d| d.child(link("i2p-ops-reset", t::routing_reset(), c(0x7adef0), !busy, on, || NetAct::OpReset)));
     let n = list.len();
     let mut rows = div()
         .flex()
@@ -1458,7 +1473,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
         let mv = |dir: isize, path: &'static str, can: bool| {
             div()
                 .id(SharedString::from(format!("op-move-{i}-{dir}")))
-                .tip(if dir < 0 { "Move up" } else { "Move down" })
+                .tip(if dir < 0 { t::routing_move_up() } else { t::routing_move_down() })
                 .w(px(22.))
                 .h(px(17.))
                 .flex()
@@ -1512,7 +1527,8 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                     .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(MONO).text_size(px(11.5)).line_height(px(14.4)).text_color(white_a(0.42)).child(format!("{short}:{}", o.get("port").and_then(Value::as_u64).unwrap_or(0)))),
             )
             .when(health.is_some(), |d| {
-                let tip = [why.as_deref(), stale.then_some("Last known. I2P isn't connected.")].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                let stale_tip = t::routing_stale();
+                let tip = [why.as_deref(), stale.then_some(&*stale_tip)].into_iter().flatten().collect::<Vec<_>>().join(" ");
                 d.child(
                     div()
                         .id(SharedString::from(format!("op-health-{i}")))
@@ -1533,7 +1549,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                 d.child(
                     div()
                         .id(SharedString::from(format!("op-remove-{i}")))
-                        .tip("Remove")
+                        .tip(t::routing_remove())
                         .size(px(24.))
                         .flex_shrink_0()
                         .flex()
@@ -1548,7 +1564,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
             .child(
                 div()
                     .id(SharedString::from(format!("op-toggle-tip-{i}")))
-                    .tip(if enabled { "On" } else { "Off" })
+                    .tip(if enabled { t::routing_on() } else { t::routing_off() })
                     .child(switch("op-toggle", enabled, !busy, on, move || NetAct::OpToggle(i, !enabled))),
             );
         rows = rows.child(row);
@@ -1557,7 +1573,7 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
     if let Some([name, addr, port]) = &r.adding {
         col = col.child(div().mb(px(10.)).child(form(
             None,
-            vec![("Name", name, None, false), ("Address", addr, None, true), ("Port", port, Some(76.), true)],
+            vec![(t::routing_name(), name, None, false), (t::routing_address(), addr, None, true), (t::routing_port(), port, Some(76.), true)],
             !busy,
             on,
             || NetAct::OpCancel,
@@ -1581,11 +1597,11 @@ fn outproxies(r: &Routing, cfg: &Value, v: &Value, on: &OnAct) -> AnyElement {
                     .text_color(c(0xffffff))
                     .when(!busy, |d| d.cursor_pointer().hover(|d| d.bg(c(0x333333))).on_click(act(on, || NetAct::OpAdd)))
                     .child(svg().path("ui/op-add.svg").size(px(11.)).text_color(c(0xffffff)))
-                    .child("Add Outproxy"),
+                    .child(t::routing_add_outproxy()),
             ),
         );
     } else {
-        col = col.child(note(&format!("You can add up to {MAX_OUTPROXIES} outproxies."), None));
+        col = col.child(note(&t::routing_outproxies_max(MAX_OUTPROXIES), None));
     }
     if !r.ops_error.is_empty() {
         col = col.child(div().mt(px(4.)).child(note(&r.ops_error, Some(false))));
@@ -1600,7 +1616,7 @@ fn foot() -> AnyElement {
         .text_size(px(12.))
         .line_height(px(16.8))
         .text_color(white_a(0.4))
-        .child("Works with i2pd or Java I2P with SAM turned on.")
+        .child(t::routing_foot())
         .into_any_element()
 }
 
@@ -1634,19 +1650,19 @@ pub fn notice(v: &Value, stranded: bool) -> Option<Notice> {
         }
         let code = s(r, "code");
         let short = match code {
-            "router_unreachable" => "I2P router not answering.",
-            "sam_refused" => "That port isn't an I2P router.",
-            "sam_too_old" => "I2P router too old for Vector.",
-            "sam_auth_required" => "I2P router asks for a password.",
-            "sam_auth_failed" => "I2P router refused the password.",
-            "session_failed" => "I2P router couldn't open a session.",
-            "session_lost" => "Reconnecting to I2P.",
-            "tor_failed" => "Tor couldn't connect.",
-            _ => full,
+            "router_unreachable" => t::routing_notice_router_unreachable(),
+            "sam_refused" => t::routing_notice_sam_refused(),
+            "sam_too_old" => t::routing_notice_sam_too_old(),
+            "sam_auth_required" => t::routing_notice_sam_auth_required(),
+            "sam_auth_failed" => t::routing_notice_sam_auth_failed(),
+            "session_failed" => t::routing_notice_session_failed(),
+            "session_lost" => t::routing_notice_session_lost(),
+            "tor_failed" => t::routing_notice_tor_failed(),
+            _ => full.to_string().into(),
         };
-        Some(Notice { text: short.to_string().into(), title: full.to_string().into(), warn: code == "session_lost" })
+        Some(Notice { text: short, title: full.to_string().into(), warn: code == "session_lost" })
     };
-    let plain = |text: &str, warn| Some(Notice { text: text.to_string().into(), title: text.to_string().into(), warn });
+    let plain = |text: SharedString, warn| Some(Notice { text: text.clone(), title: text, warn });
     match s(v, "kind") {
         "clearnet" | "" => None,
         "unknown" => line(v),
@@ -1655,15 +1671,11 @@ pub fn notice(v: &Value, stranded: bool) -> Option<Notice> {
                 return None;
             }
             let label = s(v, "label");
-            plain(&format!("{} isn't starting.", if label.is_empty() { "The network" } else { label }), true)
+            plain(if label.is_empty() { t::routing_notice_unnamed_not_starting() } else { t::routing_notice_not_starting(label) }, true)
         }
         _ if !b(v, "ready") => line(v),
-        _ if stranded => Some(Notice {
-            text: "None of your relays are on I2P.".into(),
-            title: "I2P-Only is on and none of your relays are on I2P.".into(),
-            warn: false,
-        }),
-        _ if steps(v).iter().any(|st| s(st, "id") == "exit" && s(st, "state") == "fail") => plain("No outproxy is reachable right now.", true),
+        _ if stranded => Some(Notice { text: t::routing_stranded(), title: t::routing_notice_stranded(), warn: false }),
+        _ if steps(v).iter().any(|st| s(st, "id") == "exit" && s(st, "state") == "fail") => plain(t::routing_notice_no_outproxy(), true),
         _ => None,
     }
 }
