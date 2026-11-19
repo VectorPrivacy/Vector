@@ -1151,6 +1151,85 @@ struct CodeScroll {
     latched: Rc<std::cell::Cell<Option<std::time::Instant>>>,
     /// The thumb held: where the press began and the offset then.
     drag: Rc<std::cell::Cell<Option<(gpui::Pixels, gpui::Pixels)>>>,
+    /// The lines a long block builds: what was on screen at the last paint, and a margin.
+    window: Rc<std::cell::Cell<(usize, usize)>>,
+}
+
+/// A code block's highlighted lines, kept while it is on screen: highlighting reads the whole
+/// block, and a long one would be read again every frame.
+struct Colored {
+    hash: u64,
+    lines: Vec<Vec<(SharedString, gpui::Hsla)>>,
+    /// The widest line, once measured: a long block's lines are not all built to say so.
+    widest: std::cell::Cell<Option<f32>>,
+}
+
+fn colored_cached(text: &str, lang: &str) -> Rc<Colored> {
+    use std::hash::{Hash, Hasher};
+    thread_local!(static CACHE: std::cell::RefCell<Vec<Rc<Colored>>> = const { std::cell::RefCell::new(Vec::new()) });
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (lang, text).hash(&mut h);
+    let hash = h.finish();
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(i) = cache.iter().position(|c| c.hash == hash) {
+            let hit = cache.remove(i);
+            cache.push(hit.clone());
+            return hit;
+        }
+        let lines = crate::highlight::colored(text, lang)
+            .into_iter()
+            .map(|pieces| pieces.into_iter().map(|(t, color)| (SharedString::from(t), color)).collect())
+            .collect();
+        let fresh = Rc::new(Colored { hash, lines, widest: std::cell::Cell::new(None) });
+        if cache.len() >= 16 {
+            cache.remove(0);
+        }
+        cache.push(fresh.clone());
+        fresh
+    })
+}
+
+/// Finds which lines of a long code block the screen shows, after layout, and asks for another
+/// frame when they are not the ones built; measures the widest line once.
+fn code_window_probe(colored: Rc<Colored>, built: std::ops::Range<usize>, window_cell: Rc<std::cell::Cell<(usize, usize)>>) -> AnyElement {
+    gpui::canvas(
+        move |bounds, window, _| {
+            let count = colored.lines.len();
+            let mask = window.content_mask().bounds;
+            let top = f32::from(mask.top().max(bounds.top()) - bounds.top());
+            let bottom = f32::from(mask.bottom().min(bounds.bottom()) - bounds.top());
+            let first = (top / CODE_LH).floor().max(0.) as usize;
+            let last = ((bottom / CODE_LH).ceil().max(0.) as usize).min(count);
+            let mut again = false;
+            if bottom > top && (first < built.start || last > built.end) {
+                window_cell.set((first.saturating_sub(CODE_OVERSCAN), (last + CODE_OVERSCAN).min(count)));
+                again = true;
+            }
+            if colored.widest.get().is_none() {
+                let look = Look::new(MONO, 13., CODE_LH, gpui::white());
+                let widest = colored
+                    .lines
+                    .iter()
+                    .map(|pieces| {
+                        let line: String = pieces.iter().map(|(t, _)| t.as_ref()).collect();
+                        crate::inline::text_width(&line, &look, window)
+                    })
+                    .fold(0., f32::max);
+                colored.widest.set(Some(widest.ceil()));
+                again = true;
+            }
+            if again {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .into_any_element()
 }
 
 fn code_scroll(key: &str) -> CodeScroll {
@@ -1262,26 +1341,54 @@ fn code_scrollbar(scroll: CodeScroll) -> AnyElement {
 }
 
 /// `.code-block-wrapper` + `pre code.hljs` (GitHub Dark).
+/// A code block longer than this builds only the lines on screen and a screenful either side.
+const CODE_WINDOW_FROM: usize = 300;
+/// Lines built past each edge of the screen, so a scroll rarely outruns them.
+const CODE_OVERSCAN: usize = 80;
+const CODE_LH: f32 = 19.5;
+
 fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> AnyElement {
     let mut lines = div().flex().flex_col();
     let plain = c(crate::highlight::PLAIN);
-    for (n, pieces) in crate::highlight::colored(text, lang).into_iter().enumerate() {
+    let scroll = code_scroll(key);
+    let colored = colored_cached(text, lang);
+    let count = colored.lines.len();
+    let built = if count < CODE_WINDOW_FROM {
+        0..count
+    } else {
+        let (a, b) = scroll.window.get();
+        a.min(count)..b.min(count).max(a.min(count))
+    };
+    let built = if count >= CODE_WINDOW_FROM && built.is_empty() { 0..count.min(2 * CODE_OVERSCAN) } else { built };
+    if built.start > 0 {
+        lines = lines.child(div().flex_none().h(px(built.start as f32 * CODE_LH)));
+    }
+    for (n, pieces) in colored.lines[built.clone()].iter().enumerate() {
+        let n = built.start + n;
         // Each line its own paragraph, coloured run by run, so a drag selects code like prose.
         let atoms: Vec<Atom> = pieces
-            .into_iter()
-            .map(|(piece, color)| Atom::Text { text: piece.into(), look: Look::new(MONO, 13., 19.5, color), kind: Kind::Plain })
+            .iter()
+            .map(|(piece, color)| Atom::Text { text: piece.clone(), look: Look::new(MONO, 13., CODE_LH, *color), kind: Kind::Plain })
             .collect();
         let line_key = format!("{key}-{n}");
-        let el = inline(atoms, Look::new(MONO, 13., 19.5, plain)).nowrap().ltr();
+        let el = inline(atoms, Look::new(MONO, 13., CODE_LH, plain)).nowrap().ltr();
         let el = match crate::select::key_for(&line_key) {
             Some(k) => el.selectable(k),
             None => el,
         };
-        lines = lines.child(div().h(px(19.5)).flex().child(div().flex_none().child(el.id(SharedString::from(line_key)))));
+        lines = lines.child(div().h(px(CODE_LH)).flex().child(div().flex_none().child(el.id(SharedString::from(line_key)))));
+    }
+    if count >= CODE_WINDOW_FROM {
+        if built.end < count {
+            lines = lines.child(div().flex_none().h(px((count - built.end) as f32 * CODE_LH)));
+        }
+        lines = lines
+            .relative()
+            .when_some(colored.widest.get(), |d, w| d.min_w(px(w)))
+            .child(code_window_probe(colored.clone(), built, scroll.window.clone()));
     }
     let copy = click.clone();
-    let code: SharedString = crate::highlight::shown(text, lang).into();
-    let scroll = code_scroll(key);
+    let (text, lang) = (text.clone(), lang.to_string());
     div()
         .relative()
         .keep_ltr()
@@ -1333,7 +1440,7 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                 .flex()
                 .items_center()
                 .justify_center()
-                .on_click(move |_, w, cx| copy(Target::Code(code.clone()), w, cx))
+                .on_click(move |_, w, cx| copy(Target::Code(crate::highlight::shown(&text, &lang).into()), w, cx))
                 .child(
                     svg()
                         .path("icons/copy.svg")
@@ -2031,4 +2138,21 @@ fn pivx_bubble(ctx: &Ctx, m: &Message, pay: &crate::data::PivxPay) -> AnyElement
                 ),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_code_block_is_highlighted_once_while_it_stays() {
+        let code = "fn main() {\n    println!(\"x\");\n}\n".repeat(400);
+        let a = colored_cached(&code, "rust");
+        let b = colored_cached(&code.clone(), "rust");
+        assert!(Rc::ptr_eq(&a, &b));
+        assert_eq!(a.lines.len(), code.split('\n').count());
+        assert!(!Rc::ptr_eq(&a, &colored_cached(&code, "")));
+        let joined: Vec<String> = a.lines.iter().map(|l| l.iter().map(|(t, _)| t.as_ref()).collect()).collect();
+        assert_eq!(joined.join("\n"), code);
+    }
 }

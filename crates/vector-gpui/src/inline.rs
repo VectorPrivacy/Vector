@@ -477,6 +477,11 @@ fn shape(text: &str, look: &Look, color: Hsla, window: &Window) -> ShapedLine {
     )
 }
 
+/// How wide `text` runs on one line in `look`.
+pub(crate) fn text_width(text: &str, look: &Look, window: &Window) -> f32 {
+    f32::from(shape(text, look, look.color, window).width)
+}
+
 /// [`ShapedLine::x_for_index`] for indices asked in rising order, in one pass over the glyphs:
 /// asked afresh, each lookup rescans from the line's start, quadratic over a long message.
 struct Xs<'a> {
@@ -1246,6 +1251,11 @@ impl Element for Inline {
         {
             window.request_animation_frame();
         }
+        let mask = window.content_mask().bounds;
+        let shown = |line: &Line| {
+            let top = bounds.origin.y + px(line.top);
+            top + px(line.height) >= mask.top() && top <= mask.bottom()
+        };
         let mut hits = Vec::new();
         let mut images = Vec::new();
         let mut under = Vec::new();
@@ -1261,7 +1271,11 @@ impl Element for Inline {
             }
             h.finish()
         };
-        for line in &s.lines {
+        for (li, line) in s.lines.iter().enumerate() {
+            // A line off screen gets no hit areas or boxes: a long message lays out many.
+            if !shown(line) {
+                continue;
+            }
             // A box run (a chip) is one hit area per line.
             let mut k = 0;
             while k < line.items.len() {
@@ -1289,7 +1303,7 @@ impl Element for Inline {
                             let mut el = gpui::StyledImage::object_fit(img(gpui::ImageSource::Render(sheen())), gpui::ObjectFit::Fill)
                                 .size_full()
                                 .rounded(px(3.))
-                                .id(ElementId::Name(format!("inline-{salt}-sheen-{}", images.len()).into()))
+                                .id(ElementId::Name(format!("inline-{salt}-sheen-{li}-{k}").into()))
                                 .into_any_element();
                             el.prepaint_as_root(rect.origin, rect.size.map(Into::into), window, cx);
                             images.push(el);
@@ -1305,7 +1319,7 @@ impl Element for Inline {
                         if lift || hint.is_some() {
                             let sz = size(rect.size.width, rect.size.height - px(2.));
                             let mut el = div()
-                                .id(ElementId::Name(format!("inline-{salt}-{}", under.len()).into()))
+                                .id(ElementId::Name(format!("inline-{salt}-{li}-{k}").into()))
                                 .w(sz.width)
                                 .h(sz.height)
                                 .rounded(px(4.))
@@ -1338,7 +1352,7 @@ impl Element for Inline {
                         let pic = gpui::StyledImage::object_fit(pic.size(px(*sz)).aspect_ratio(1.), gpui::ObjectFit::Contain);
                         let mut el = match tip.clone() {
                             Some(tip) => div()
-                                .id(ElementId::Name(format!("inline-{salt}-tip-{}", images.len()).into()))
+                                .id(ElementId::Name(format!("inline-{salt}-tip-{li}-{k}").into()))
                                 .size(px(*sz))
                                 .opacity(0.4)
                                 .hover(|s| s.opacity(1.))
@@ -1387,7 +1401,7 @@ impl Element for Inline {
                             pill.target.clone(),
                         ));
                         let mut el = pill.element(
-                            ElementId::Name(format!("inline-{salt}-pill-{}", images.len()).into()),
+                            ElementId::Name(format!("inline-{salt}-pill-{li}-{k}").into()),
                             h,
                         );
                         el.prepaint_as_root(origin, sz.map(Into::into), window, cx);
@@ -1412,6 +1426,11 @@ impl Element for Inline {
         cx: &mut App,
     ) {
         let s = laid.borrow();
+        let mask = window.content_mask().bounds;
+        let shown = |line: &Line| {
+            let top = bounds.origin.y + px(line.top);
+            top + px(line.height) >= mask.top() && top <= mask.bottom()
+        };
         for el in &mut pre.under {
             el.paint(window, cx);
         }
@@ -1423,7 +1442,7 @@ impl Element for Inline {
                 window.paint_quad(fill(Bounds::new(bounds.origin + r.origin, r.size), ca(89, 252, 179, 0.28)));
             }
         }
-        for line in &s.lines {
+        for line in s.lines.iter().filter(|l| shown(l)) {
             // Boxes first, so text paints over them.
             let mut k = 0;
             while k < line.items.len() {
@@ -1583,9 +1602,10 @@ impl Element for Inline {
             if !phase.bubble() || e.button != MouseButton::Left {
                 return;
             }
-            let Some(i) = pressed.take() else { return };
-            if hits[i].0.is_hovered(window) {
-                on_click(hits[i].1.clone(), window, cx);
+            // The press may have landed in an earlier frame, whose hit areas this one need not have.
+            let Some((hitbox, target)) = pressed.take().and_then(|i| hits.get(i)) else { return };
+            if hitbox.is_hovered(window) {
+                on_click(target.clone(), window, cx);
             }
         });
     }
