@@ -886,10 +886,10 @@ pub fn resize_premultiplied_from(pre: &mut image::RgbaImage, w: u32, h: u32) -> 
     out
 }
 
-/// A JPEG decoded at the smallest DCT scale (1/8, 1/4 or 1/2) that still covers what `need`
-/// asks of its upright size, with its orientation applied: a picture shown small never builds
-/// its full-size buffer. Comes back with the picture's full upright size. None where only a
-/// full decode would do, or for a JPEG that isn't 8-bit RGB or grey.
+/// A JPEG decoded at the smallest DCT scale (1/8, 1/4, 1/2 or whole) that still covers what
+/// `need` asks of its upright size, with its orientation applied: a picture shown small never
+/// builds its full-size buffer. Comes back with the picture's full upright size. None for a
+/// JPEG that isn't 8-bit RGB or grey.
 pub fn decode_jpeg_scaled(
     bytes: &[u8],
     need: impl FnOnce(u32, u32) -> (u32, u32),
@@ -911,7 +911,7 @@ pub fn jpeg_scaled(
 
 /// [`jpeg_scaled`] where `need` also names the size the cut ends at, reached with `filter` as
 /// the rows decode (as [`resample`](super::resample) would, after the upright cut): no
-/// scaled picture is held at all. `need` saying None means no scaled decode would help.
+/// scaled picture is held at all. `need` saying None leaves the file to the image crate.
 pub fn jpeg_into(
     bytes: &[u8],
     need: impl FnOnce(u32, u32) -> Option<((u32, u32), Option<(u32, u32)>)>,
@@ -946,7 +946,7 @@ pub fn jpeg_into(
     let ((nw, nh), size) = need(uw, uh)?;
     let (rw, rh) = if turned { (nh, nw) } else { (nw, nh) };
     let scaled = |len: u32, s: u32| (len * s - 1) / 8 + 1;
-    let s = [1u32, 2, 4].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
+    let s = [1u32, 2, 4, 8].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
     let (sw, sh) = dec.scale(scaled(w, s) as u16, scaled(h, s) as u16).ok()?;
     let (sw, sh) = (sw as u32, sh as u32);
     if sw < rw || sh < rh {
@@ -1075,7 +1075,7 @@ pub fn jpeg_fitted(bytes: &[u8], max: u32, square: bool) -> Option<image::Frame>
         |w, h| {
             let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
             if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
-                return None;
+                return Some(((w, h), None));
             }
             let scale = (max as f64 / cw.max(ch) as f64).min(1.);
             let (nw, nh) = (

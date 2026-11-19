@@ -13608,6 +13608,7 @@ dependencies = [
 name = "vector-jpeg"
 version = "0.3.2"
 dependencies = [
+ "image",
  "jpeg-decoder",
  "memchr",
 ]

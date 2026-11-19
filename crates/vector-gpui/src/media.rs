@@ -1142,7 +1142,7 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
     if ext != "svg" && image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
         let need = |w: u32, h: u32| {
             if w <= max.0 && h <= max.1 {
-                return None;
+                return Some(((w, h), None));
             }
             // As `DynamicImage::resize` sizes it, so the result matches the full decode's.
             let r = (max.0.max(1) as f64 / w as f64).min(max.1.max(1) as f64 / h as f64);
@@ -1735,7 +1735,7 @@ mod jpeg_tests {
         let (nw, nh) = need(uw, uh);
         let (rw, rh) = if turned { (nh, nw) } else { (nw, nh) };
         let scaled = |len: u32, s: u32| (len * s - 1) / 8 + 1;
-        let s = [1u32, 2, 4].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
+        let s = [1u32, 2, 4, 8].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
         let (sw, sh) = dec.scale(scaled(w, s) as u16, scaled(h, s) as u16).ok()?;
         let (sw, sh) = (sw as u32, sh as u32);
         if sw < rw || sh < rh {
@@ -1853,10 +1853,7 @@ mod jpeg_tests {
                         let (tw, th) = target.unwrap();
                         gpui::resample(&img, tw, th, FilterType::CatmullRom)
                     });
-                    // Past a half-scale decode the full decode takes over, as it did before.
-                    if want.is_some() {
-                        assert!(alike(got, want, o), "{w}x{h} orientation {o} into {max:?}");
-                    }
+                    assert!(alike(got, want, o), "{w}x{h} orientation {o} into {max:?}");
                 }
             }
         }
@@ -1899,8 +1896,9 @@ mod jpeg_tests {
         assert_eq!(f.buffer().dimensions(), (75, 100));
         let f = gpui::jpeg_fitted(&bytes, 64, true).unwrap();
         assert_eq!(f.buffer().dimensions(), (64, 64));
-        // Small enough already: the plain decode stands.
-        assert!(gpui::jpeg_fitted(&jpeg(80, 60, None), 100, false).is_none());
+        // Small enough already: decoded whole, as it is.
+        let f = gpui::jpeg_fitted(&jpeg(80, 60, None), 100, false).unwrap();
+        assert_eq!(f.buffer().dimensions(), (80, 60));
     }
 }
 

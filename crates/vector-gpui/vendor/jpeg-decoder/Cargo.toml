@@ -11,14 +11,19 @@ name = "jpeg_decoder"
 
 [features]
 platform_independent = []
-nightly_aarch64_neon = []
 
 [dependencies]
 memchr = "2"
 
 [dev-dependencies]
-stock = { package = "jpeg-decoder", version = "0.3", default-features = false }
+# Its NEON path too, which this crate takes on aarch64 without asking: the same pixels either way.
+stock = { package = "jpeg-decoder", version = "0.3", default-features = false, features = ["nightly_aarch64_neon"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [[bench]]
 name = "scaled"
+harness = false
+
+[[bench]]
+name = "whole"
 harness = false
