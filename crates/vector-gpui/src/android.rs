@@ -81,3 +81,14 @@ pub fn set_background(on: bool) {
     let method = if on { "startBackgroundService" } else { "stopBackgroundService" };
     battery_helper(method, "(Landroid/content/Context;)V", None);
 }
+
+/// Once per install, after sign-in: whether to offer Run in Background, which notifications need
+/// while the app is away.
+pub fn offer_background() -> bool {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) || battery_flag("getBackgroundServicePrompted") {
+        return false;
+    }
+    battery_helper("setBackgroundServicePrompted", "(Landroid/content/Context;)V", None);
+    true
+}

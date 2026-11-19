@@ -559,6 +559,9 @@ enum PopupAct {
     RailRename(String),
     NexusUninstall(String),
     Notice,
+    /// The offer of Run in Background after sign-in.
+    #[cfg(target_os = "android")]
+    Background,
     OpenWeb(String),
     DeleteChannel {
         community: String,
@@ -5944,11 +5947,24 @@ impl VectorApp {
             self.use_network(kind, Some(yes), true, cx);
             return;
         }
+        #[cfg(target_os = "android")]
+        if let PopupAct::Background = act {
+            crate::android::set_background(yes);
+            if yes {
+                crate::android::request_battery_exemption();
+            }
+            if let Some(s) = self.settings.as_mut() {
+                s.battery = crate::settings::Battery::read();
+            }
+            return;
+        }
         if !yes {
             return;
         }
         match act {
             PopupAct::Notice => {}
+            #[cfg(target_os = "android")]
+            PopupAct::Background => {}
             PopupAct::OpenMicSettings => {
                 if let Err(e) = vector_media::mic_access::open_settings() {
                     self.show_toast(&e, cx);
@@ -6715,6 +6731,14 @@ impl VectorApp {
             cx.defer_in(window, move |app, window, cx| {
                 app.open_deep_link(a, window, cx)
             });
+        }
+        #[cfg(target_os = "android")]
+        if matches!(self.screen, Screen::Main) && self.live && self.popup.is_none() && crate::android::offer_background() {
+            let mut p = kit::Popup::notice(t::settings_background_offer_title());
+            p.text = Some(t::settings_background_offer_text());
+            p.confirm = t::dialog_confirm();
+            p.cancel = Some(t::dialog_cancel());
+            self.popup = Some((p, PopupAct::Background));
         }
         self.scan_invites(cx);
         if window.focused(cx).is_none() {

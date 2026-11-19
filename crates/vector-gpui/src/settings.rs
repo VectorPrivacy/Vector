@@ -578,6 +578,7 @@ pub struct Battery {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub enum BatteryAsk {
     Enable,
     Warning,

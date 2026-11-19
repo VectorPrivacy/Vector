@@ -331,6 +331,9 @@ settings-toggle-background = Run in Background
 settings-battery-warning = Battery Optimization is active
 settings-battery-required-title = Battery Optimization
 settings-battery-required = Battery optimization must be disabled for reliable background notifications.
+settings-background-offer-title = Background Notifications
+# <b> is bold, <br> a line break.
+settings-background-offer-text = Vector can run in the background to deliver <b>instant notifications</b>.<br><br>This requires disabling battery optimization for Vector so Android doesn't kill the service.<br><br>You can change this later in Settings.
 
 ## Relays: adding, removing and disabling
 
