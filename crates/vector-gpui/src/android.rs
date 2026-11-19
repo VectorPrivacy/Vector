@@ -84,11 +84,44 @@ pub fn set_background(on: bool) {
 
 /// Once per install, after sign-in: whether to offer Run in Background, which notifications need
 /// while the app is away.
-pub fn offer_background() -> bool {
-    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) || battery_flag("getBackgroundServicePrompted") {
+fn offer_background() -> bool {
+    if battery_flag("getBackgroundServicePrompted") {
         return false;
     }
     battery_helper("setBackgroundServicePrompted", "(Landroid/content/Context;)V", None);
     true
+}
+
+pub enum Offer {
+    Push,
+    Background,
+}
+
+/// Once per account after sign-in: Notify When Closed, else, for a phone push can't reach, Run
+/// in Background.
+pub fn offer_notifications() -> Option<Offer> {
+    use crate::backend::push::{self, Push};
+    static ASKED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let npub = vector_core::db::get_current_account().ok()?;
+    {
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        if asked.as_deref() == Some(npub.as_str()) {
+            return None;
+        }
+        *asked = Some(npub);
+    }
+    match push::status() {
+        Some(Push::Off) => {
+            const PROMPTED: &str = "push_prompted";
+            let prompted = vector_core::db::get_sql_setting(PROMPTED.into()).ok().flatten().is_some();
+            // Running in the background already brings their notifications.
+            if prompted || background_enabled() {
+                return None;
+            }
+            let _ = vector_core::db::set_sql_setting(PROMPTED.into(), "true".into());
+            Some(Offer::Push)
+        }
+        None => offer_background().then_some(Offer::Background),
+        Some(_) => None,
+    }
 }

@@ -179,6 +179,39 @@ pub async fn direct(chat_id: &str, msg: &Message) {
     );
 }
 
+/// What a contact's push says, for a phone whose connection was down: their words when their
+/// app sealed some in, else that they wrote.
+#[cfg(target_os = "android")]
+pub async fn pushed(npub: &str, text: String) {
+    let (name, avatar) = known_as(npub).await;
+    let body = if text.is_empty() { crate::t::core_notify_sent_you_a_message().to_string() } else { text };
+    show(NotificationData::direct_message(name, body, avatar, npub.to_string()));
+}
+
+/// A push no contact here vouches for: that something arrived, and nothing it claims.
+#[cfg(target_os = "android")]
+pub fn pushed_unknown() {
+    crate::android::background_sync::post_notification_jni(
+        &crate::t::notify_new_message(),
+        &crate::t::notify_you_have_a_new_message(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+}
+
+/// The name and picture `npub` goes by here; a stranger by the start of their npub.
+#[cfg(target_os = "android")]
+pub async fn known_as(npub: &str) -> (String, Option<String>) {
+    let gate = notify::StreamGate::load();
+    let fallback = format!("{}…", &npub[..npub.len().min(14)]);
+    let state = STATE.lock().await;
+    let sender = notify::sender(&state, &gate, npub, &fallback);
+    (sender.name, sender.avatar)
+}
+
 /// A Community message rings by its channel's level: everything, or only a ping (an
 /// @mention, a reply to us, a standing Role mention, or an allowed @everyone). A blocked or
 /// DM-muted sender, or a post its readers collapse, never rings.

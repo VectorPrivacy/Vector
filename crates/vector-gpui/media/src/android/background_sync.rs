@@ -141,28 +141,34 @@ fn string(env: &mut JNIEnv, s: &JString) -> String {
     env.get_string(s).map(Into::into).unwrap_or_default()
 }
 
+/// The process's VM and application context, from any context: a service can start the
+/// process with no activity.
+pub fn hold_context(env: &mut JNIEnv, context: &JObject) {
+    if BG_JAVA_VM.get().is_none() {
+        if let Ok(vm) = env.get_java_vm() {
+            let _ = BG_JAVA_VM.set(vm);
+        }
+    }
+    if BG_APP_CONTEXT.get().is_none() {
+        let app = env.call_method(context, "getApplicationContext", "()Landroid/content/Context;", &[]).and_then(|v| v.l());
+        match app.and_then(|app| env.new_global_ref(app)) {
+            Ok(global) => {
+                let _ = BG_APP_CONTEXT.set(global);
+            }
+            Err(_) => {
+                let _ = env.exception_clear();
+            }
+        }
+    }
+}
+
 /// `MainActivity.onCreate`: the activity for calls that need one, and the process's VM and
 /// application context for the rest.
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeCreated(mut env: JNIEnv, activity: JObject) {
     super::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeCreated", || (), move || {
         super::utils::set_activity(&mut env, &activity);
-        if BG_JAVA_VM.get().is_none() {
-            if let Ok(vm) = env.get_java_vm() {
-                let _ = BG_JAVA_VM.set(vm);
-            }
-        }
-        if BG_APP_CONTEXT.get().is_none() {
-            let app = env.call_method(&activity, "getApplicationContext", "()Landroid/content/Context;", &[]).and_then(|v| v.l());
-            match app.and_then(|app| env.new_global_ref(app)) {
-                Ok(global) => {
-                    let _ = BG_APP_CONTEXT.set(global);
-                }
-                Err(_) => {
-                    let _ = env.exception_clear();
-                }
-            }
-        }
+        hold_context(&mut env, &activity);
     })
 }
 

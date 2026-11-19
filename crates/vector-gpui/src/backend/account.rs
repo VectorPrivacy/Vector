@@ -148,6 +148,31 @@ pub fn boot() -> BootInfo {
     }
 }
 
+/// A process a push started: the account the app last used, opened without a window, its
+/// profiles loaded so a notification can name its sender. The window's boot finds it open.
+#[cfg(target_os = "android")]
+pub async fn open_headless() -> bool {
+    if db::get_current_account().is_ok() {
+        return true;
+    }
+    let Some(npub) = db::read_active_account_file().ok().flatten().filter(|n| is_committed(n)) else {
+        return false;
+    };
+    // A database a newer build wrote stays shut until that build opens it.
+    if !matches!(db::inspect_downgrade(&npub), Ok(None)) || !opened(&npub, &mut None) {
+        return false;
+    }
+    state::init_encryption_enabled();
+    if let Ok(profiles) = db::profiles::get_all_profiles() {
+        let mut state = vector_core::STATE.lock().await;
+        for slim in profiles {
+            let npub = slim.id.clone();
+            state.insert_or_replace_profile(&npub, slim.to_profile());
+        }
+    }
+    true
+}
+
 /// Make `npub` the account in use and open its database; why not, kept for the user.
 fn opened(npub: &str, error: &mut Option<String>) -> bool {
     match db::set_current_account(npub.to_string()).and_then(|_| db::init_database(npub)) {

@@ -30,6 +30,7 @@ pub mod network;
 pub mod notify;
 pub mod packs;
 pub mod prefs;
+pub mod push;
 pub mod security;
 pub mod biometric;
 pub mod nip55;
@@ -112,39 +113,39 @@ pub fn default_data_dir() -> PathBuf {
         .join("io.vectorapp")
 }
 
-/// Start core: the runtime, the emitter, the profile processor and the remembered account.
-pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
-    let (tx, rx) = mpsc::unbounded();
-    let _ = SINK.set(tx);
-
-    // Every session starts blocked until its stored network is loaded, as on desktop.
-    vector_core::transport::strict_boot();
-    vector_core::net::set_app_version(env!("CARGO_PKG_VERSION"));
-    vector_core::db::set_app_version(env!("CARGO_PKG_VERSION").to_string());
-    #[cfg(not(target_os = "android"))]
-    if let Some(dl) = dirs::download_dir() {
-        vector_core::db::set_download_dir(dl.join("vector"));
-    }
-    // The Tauri client's folders: the app's media folder, and Download/Vector from Android 11.
-    #[cfg(target_os = "android")]
-    {
-        use vector_media::android::storage;
-        if let Some(dir) = storage::external_media_dir() {
-            vector_core::db::set_download_dir(dir.into());
+/// Core and its runtime, once per process: on Android a push can start the process, and open
+/// its account, before there is a window.
+pub(crate) fn core(data_dir: PathBuf) -> &'static tokio::runtime::Runtime {
+    static CORE: OnceLock<()> = OnceLock::new();
+    CORE.get_or_init(|| {
+        // Every session starts blocked until its stored network is loaded, as on desktop.
+        vector_core::transport::strict_boot();
+        vector_core::net::set_app_version(env!("CARGO_PKG_VERSION"));
+        vector_core::db::set_app_version(env!("CARGO_PKG_VERSION").to_string());
+        #[cfg(not(target_os = "android"))]
+        if let Some(dl) = dirs::download_dir() {
+            vector_core::db::set_download_dir(dl.join("vector"));
         }
-        if let Some(dir) = storage::public_dir() {
-            vector_core::db::set_public_dir(dir.into());
+        // The Tauri client's folders: the app's media folder, and Download/Vector from Android 11.
+        #[cfg(target_os = "android")]
+        {
+            use vector_media::android::storage;
+            if let Some(dir) = storage::external_media_dir() {
+                vector_core::db::set_download_dir(dir.into());
+            }
+            if let Some(dir) = storage::public_dir() {
+                vector_core::db::set_public_dir(dir.into());
+            }
         }
-    }
-    let _ = std::fs::create_dir_all(&data_dir);
-    device::init(Some(data_dir.clone()));
-    vector_core::VectorCore::init(vector_core::CoreConfig {
-        data_dir,
-        event_emitter: Some(Box::new(Emitter)),
-    })
-    .expect("vector-core init");
-    vector_core::requests::enable_shield();
-
+        let _ = std::fs::create_dir_all(&data_dir);
+        device::init(Some(data_dir.clone()));
+        vector_core::VectorCore::init(vector_core::CoreConfig {
+            data_dir,
+            event_emitter: Some(Box::new(Emitter)),
+        })
+        .expect("vector-core init");
+        vector_core::requests::enable_shield();
+    });
     let rt = RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .thread_name("vector-core")
@@ -153,6 +154,14 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
             .expect("tokio runtime")
     });
     tauri::async_runtime::set(rt.handle().clone());
+    rt
+}
+
+/// Start core: the runtime, the emitter, the profile processor and the remembered account.
+pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
+    let (tx, rx) = mpsc::unbounded();
+    let _ = SINK.set(tx);
+    let rt = core(data_dir);
     tauri::set_local_data_dir(models_home());
     if let Ok(dir) = vector_core::db::get_app_data_dir() {
         tauri::set_data_dir(dir.clone());

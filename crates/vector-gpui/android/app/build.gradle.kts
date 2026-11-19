@@ -24,6 +24,9 @@ fun versionCode(): Int {
     return (parts.getOrElse(0) { 0 } * 10000 + parts.getOrElse(1) { 0 } * 100 + parts.getOrElse(2) { 0 }) * 100 + slot
 }
 
+/** F-Droid's flavour carries nothing of Google's and no in-app updater (VECTOR_FDROID, as Tauri's). */
+val fdroid = providers.environmentVariable("VECTOR_FDROID").isPresent
+
 android {
     namespace = "io.vectorapp"
     compileSdk = 36
@@ -36,6 +39,10 @@ android {
         targetSdk = 34
         versionCode = versionCode()
         versionName = versionName()
+        buildConfigField("boolean", "EMBEDDED_FCM", (!fdroid).toString())
+    }
+    buildFeatures {
+        buildConfig = true
     }
     val keystore = rootProject.file("keystore.properties")
     signingConfigs {
@@ -144,7 +151,7 @@ abstract class CargoBuild @Inject constructor(private val exec: ExecOperations) 
 
 // `-PvectorAbis=arm64-v8a,armeabi-v7a,x86_64`; a phone is arm64 unless told otherwise.
 val wantedAbis = (findProperty("vectorAbis") as String? ?: "arm64-v8a").split(',').map { it.trim() }
-val wantedFeatures = findProperty("vectorFeatures") as String? ?: "tor,i2p"
+val wantedFeatures = (findProperty("vectorFeatures") as String? ?: "tor,i2p") + if (fdroid) ",fdroid" else ""
 
 androidComponents {
     onVariants { variant ->
@@ -165,4 +172,10 @@ androidComponents {
 dependencies {
     implementation("androidx.activity:activity:1.9.3")
     implementation("androidx.core:core:1.13.1")
+    // Push: UnifiedPush in every build; FCM's endpoint, through Play Services, for phones with
+    // no distributor app, everywhere but F-Droid. Neither needs a Firebase project.
+    implementation("org.unifiedpush.android:connector:3.0.10")
+    if (!fdroid) {
+        implementation("org.unifiedpush.android:embedded-fcm-distributor:3.1.0")
+    }
 }

@@ -310,6 +310,7 @@ pub fn help(key: &str) -> Option<(SharedString, String)> {
         "voiceTranslate" => (t::settings_help_voice_translate(), t::settings_help_voice_translate_text()),
         "voiceTranscribe" => (t::settings_help_voice_transcribe(), t::settings_help_voice_transcribe_text()),
         "battery" => (t::settings_help_battery(), t::settings_help_battery_text()),
+        "push" => (t::settings_help_push(), t::settings_help_push_text()),
         "logout" => (t::settings_help_logout(), t::settings_help_logout_text()),
         "webPreviews" => {
             // Off Clearnet every preview fetch rides the chosen network, or fails closed.
@@ -432,6 +433,8 @@ pub struct Settings {
     pub audio: Option<AudioView>,
     /// A phone's Run in Background, where there is one.
     pub battery: Option<Battery>,
+    /// Notify When Closed, where this phone can receive a push.
+    pub push: Option<crate::backend::push::Push>,
     /// Each slider's track, from its last paint, and the one being dragged.
     pub sliders: Rc<std::cell::RefCell<HashMap<&'static str, gpui::Bounds<gpui::Pixels>>>>,
     pub dragging: Rc<std::cell::Cell<Option<&'static str>>>,
@@ -561,6 +564,7 @@ pub enum Act {
     /// Run in Background, and the warning that the phone may still stop it.
     Background(bool),
     BatteryWarning,
+    Push(bool),
     MicTest,
     /// `input` or `output`; None is the system default.
     Device(&'static str, Option<String>),
@@ -1474,9 +1478,22 @@ fn notifications_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .size(px(18.))
                 .text_color(c(0xffffff)),
         );
+    let push = s.push.map(|state| {
+        use crate::backend::push::Push;
+        let enabled = state == Push::On;
+        let switch = toggle("tg-push", enabled, s.flipped.contains("push"), click(on, move || Act::Push(!enabled)));
+        toggle_row(
+            "push",
+            t::settings_toggle_push(),
+            Some(Box::new(click(on, || Act::Help("push")))),
+            div().when(state == Push::Busy, |d| d.opacity(0.5).block_mouse_except_scroll()).child(switch).into_any_element(),
+            false,
+        )
+    });
     let mut col = div()
         .flex()
         .flex_col()
+        .children(push)
         .children(NOTIFY.iter().map(|t| row(s, t.key, on, false)))
         .child(
             // `#notif-privacy-group` keeps the form group's 15px.

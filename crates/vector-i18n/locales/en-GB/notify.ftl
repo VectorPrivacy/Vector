@@ -4,6 +4,8 @@
 notify-new-message = New Message
 # A community poster whose name isn't known yet.
 notify-someone = Someone
+# The text of a push whose sender this account can't vouch for.
+notify-you-have-a-new-message = You have a new message
 
 ## The notification menu of a chat, channel or community
 

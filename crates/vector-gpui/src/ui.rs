@@ -562,6 +562,9 @@ enum PopupAct {
     /// The offer of Run in Background after sign-in.
     #[cfg(target_os = "android")]
     Background,
+    /// The offer of Notify When Closed after sign-in.
+    #[cfg(target_os = "android")]
+    Push,
     OpenWeb(String),
     DeleteChannel {
         community: String,
@@ -3360,6 +3363,34 @@ impl VectorApp {
         self.scoped = true;
     }
 
+    /// Notify When Closed on or off; an endpoint arrives later as `push_state`.
+    #[cfg(target_os = "android")]
+    fn set_push(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(s) = self.settings.as_mut() {
+            s.push = Some(backend::push::Push::Busy);
+        }
+        let rx = backend::run(async move {
+            if on { backend::push::enable() } else { backend::push::disable().await }
+        });
+        cx.spawn(async move |this, cx| {
+            let out = rx.await.unwrap_or(Ok(()));
+            this.update(cx, |this, cx| {
+                if let Err(e) = out {
+                    let mut p = kit::Popup::notice(t::settings_toggle_push());
+                    p.text = Some(e.into());
+                    this.popup = Some((p, PopupAct::Notice));
+                }
+                if let Some(s) = this.settings.as_mut() {
+                    s.push = backend::push::status();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn on_core_event(
         &mut self,
         name: &str,
@@ -3373,6 +3404,12 @@ impl VectorApp {
             .unwrap_or_default()
             .to_string();
         match name {
+            "push_state" => {
+                if let Some(s) = self.settings.as_mut() {
+                    s.push = backend::push::status();
+                }
+                cx.notify();
+            }
             "encryption_upgrading" => {
                 if let Screen::Login(view) = &self.screen {
                     let n = |k| payload.get(k).and_then(Value::as_u64).unwrap_or(0);
@@ -6041,6 +6078,8 @@ impl VectorApp {
             PopupAct::Notice => {}
             #[cfg(target_os = "android")]
             PopupAct::Background => {}
+            #[cfg(target_os = "android")]
+            PopupAct::Push => self.set_push(true, cx),
             PopupAct::OpenMicSettings => {
                 if let Err(e) = vector_media::mic_access::open_settings() {
                     self.show_toast(&e, cx);
@@ -6809,12 +6848,25 @@ impl VectorApp {
             });
         }
         #[cfg(target_os = "android")]
-        if matches!(self.screen, Screen::Main) && self.live && self.popup.is_none() && crate::android::offer_background() {
-            let mut p = kit::Popup::notice(t::settings_background_offer_title());
-            p.text = Some(t::settings_background_offer_text());
-            p.confirm = t::dialog_confirm();
-            p.cancel = Some(t::dialog_cancel());
-            self.popup = Some((p, PopupAct::Background));
+        if matches!(self.screen, Screen::Main) && self.live && self.popup.is_none() {
+            match crate::android::offer_notifications() {
+                Some(crate::android::Offer::Push) => {
+                    let mut p = kit::Popup::notice(t::settings_push_offer_title());
+                    p.text = Some(t::settings_push_offer_text());
+                    p.icon = Some("icons/vector_bell.svg");
+                    p.confirm = t::settings_push_allow();
+                    p.cancel = Some(t::settings_push_not_now());
+                    self.popup = Some((p, PopupAct::Push));
+                }
+                Some(crate::android::Offer::Background) => {
+                    let mut p = kit::Popup::notice(t::settings_background_offer_title());
+                    p.text = Some(t::settings_background_offer_text());
+                    p.confirm = t::dialog_confirm();
+                    p.cancel = Some(t::dialog_cancel());
+                    self.popup = Some((p, PopupAct::Background));
+                }
+                None => {}
+            }
         }
         self.scan_invites(cx);
         if window.focused(cx).is_none() {
@@ -16761,6 +16813,7 @@ impl VectorApp {
             updates: self.updates.clone(),
             audio: None,
             battery: crate::settings::Battery::read(),
+            push: if self.live { backend::push::status() } else { None },
             sliders: Default::default(),
             dragging: Default::default(),
             donut: Default::default(),
@@ -18803,6 +18856,14 @@ impl VectorApp {
                         crate::android::set_background(on);
                     }
                 }
+            }
+            Act::Push(on) => {
+                s.flipped.insert("push");
+                s.push = Some(backend::push::Push::Busy);
+                #[cfg(target_os = "android")]
+                self.set_push(on, cx);
+                #[cfg(not(target_os = "android"))]
+                let _ = on;
             }
             Act::BatteryWarning => {
                 if let Some(b) = s.battery.as_mut() {

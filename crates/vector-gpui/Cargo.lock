@@ -13538,6 +13538,7 @@ dependencies = [
  "vector-gpui-media",
  "vector-i18n",
  "vector-jpeg",
+ "vector-push",
  "vector-tauri-shim",
  "webkit2gtk",
  "wgpu",
