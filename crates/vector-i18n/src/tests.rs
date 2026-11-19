@@ -11,6 +11,7 @@ fn pack(tag: &str, src: &str) -> Pack {
         rtl: false,
         files: vec![("chat.ftl".into(), src.into())],
         data: LocaleData::default(),
+        emoji: String::new(),
         english: english_revision(),
         coverage: 0,
     }
@@ -307,4 +308,21 @@ fn japanese_and_chinese_seeds_write_their_own_dates() {
     assert_eq!(zh.date(&at, DateStyle::Medium), "2026年11月8日");
     assert_eq!(zh.date_time(&at, DateStyle::Weekday, Clock::SHORT), "周日 14:05");
     assert_eq!(zh.list(&["A", "B", "C"]), "A、B和C");
+}
+
+#[test]
+fn a_pack_carries_its_emoji_names_to_its_regional_variants() {
+    let _g = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+    let mut p = pack("xq", "chat-search = Busca\n");
+    p.emoji = "😀\tcara sonriente\tsonrisa|cara\n".into();
+    let p = Pack::from_bytes(&p.to_bytes()).unwrap();
+    assert_eq!(p.emoji, "😀\tcara sonriente\tsonrisa|cara\n");
+    install(p);
+    install(pack("xq-YY", "chat-search = Busca\n"));
+    assert!(set_language("xq-YY"));
+    let names = emoji_names().expect("the parent's names");
+    assert_eq!(names.name("😀"), Some("cara sonriente"));
+    assert_eq!(names.words("😀").len(), 3);
+    set_language(BUILT_IN);
+    assert!(emoji_names().is_none());
 }

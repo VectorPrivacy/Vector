@@ -135,6 +135,9 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
         index: usize,
     }
     let mut hits: Vec<Hit> = Vec::new();
+    let local = vector_i18n::emoji_names();
+    // A script without spaces (中文, 日本語) has no word starts: any part of a word may match.
+    let anywhere = qlen >= 2 || !q.is_ascii();
     for e in EMOJIS {
         let mut best: Option<(f64, &'static str, usize)> = None;
         let mut consider = |score: f64, word: &'static str, i: usize| {
@@ -142,6 +145,17 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
                 best = Some((score, word, i));
             }
         };
+        // The reader's language first: its name, then its search words.
+        for (i, w) in local.as_ref().map_or(&[][..], |n| n.words(e.emoji)).iter().enumerate() {
+            let pos = i as f64 * 0.02;
+            if **w == *q {
+                consider(if i == 0 { -1.0 } else { -0.8 + pos }, e.name, i);
+            } else if w.starts_with(q.as_str()) {
+                consider(0.1 + pos, e.name, i);
+            } else if anywhere && w.contains(q.as_str()) {
+                consider(0.4 + pos, e.name, i);
+            }
+        }
         let sc = e.shortcode;
         if !sc.is_empty() {
             if sc == q || sc.replace('_', " ") == q {
@@ -227,6 +241,18 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
             .then(a.word.cmp(b.word))
     });
     hits.into_iter().map(|h| (h.e, h.score)).collect()
+}
+
+/// What the reader calls `e`: its name in the active language, else the dataset's.
+pub fn name_of(e: &Emoji) -> gpui::SharedString {
+    vector_i18n::emoji_names()
+        .and_then(|n| n.name(e.emoji).map(|s| gpui::SharedString::from(s.to_string())))
+        .unwrap_or(gpui::SharedString::new_static(e.name))
+}
+
+/// Whether `q` (lowercased) is part of `e`'s name or words, in English or the reader's language.
+pub fn named(e: &Emoji, q: &str) -> bool {
+    e.name.to_lowercase().contains(q) || vector_i18n::emoji_names().is_some_and(|n| n.words(e.emoji).iter().any(|w| w.contains(q)))
 }
 
 /// The 24 most used, the dataset's order breaking ties (`getMostUsedEmojis`).
