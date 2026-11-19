@@ -30,15 +30,15 @@ pub fn is_cancel(e: &str) -> bool {
 
 /// Stop the download of `url` at its next chunk. False when none is running.
 pub fn cancel(url: &str) -> bool {
-    if !RUNNING.lock().unwrap().contains(url) {
+    if !RUNNING.lock().unwrap_or_else(|e| e.into_inner()).contains(url) {
         return false;
     }
-    STOP.lock().unwrap().insert(url.to_string());
+    STOP.lock().unwrap_or_else(|e| e.into_inner()).insert(url.to_string());
     true
 }
 
 fn stopped(url: &str) -> bool {
-    STOP.lock().unwrap().contains(url)
+    STOP.lock().unwrap_or_else(|e| e.into_inner()).contains(url)
 }
 
 fn progress(url: &str, pct: i64) {
@@ -157,10 +157,10 @@ pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallb
     if let Some(done) = ready(&dir) {
         return Ok(done);
     }
-    if !RUNNING.lock().unwrap().insert(url.clone()) {
+    if !RUNNING.lock().unwrap_or_else(|e| e.into_inner()).insert(url.clone()) {
         return Err(crate::t::embed_video_downloading().into());
     }
-    STOP.lock().unwrap().remove(&url);
+    STOP.lock().unwrap_or_else(|e| e.into_inner()).remove(&url);
     let result = async {
         let declared = match size.filter(|n| *n > 0) {
             Some(n) => Some(n),
@@ -202,8 +202,8 @@ pub async fn fetch(url: String, size: Option<u64>, sha256: Option<String>, fallb
         Err(last)
     }
     .await;
-    RUNNING.lock().unwrap().remove(&url);
-    STOP.lock().unwrap().remove(&url);
+    RUNNING.lock().unwrap_or_else(|e| e.into_inner()).remove(&url);
+    STOP.lock().unwrap_or_else(|e| e.into_inner()).remove(&url);
     if result.is_ok() {
         progress(&url, 100);
         tokio::task::spawn_blocking(move || prune(&dir));

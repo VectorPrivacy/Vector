@@ -86,7 +86,7 @@ pub async fn finish(add: Option<(Option<String>, Option<serde_json::Value>)>) ->
     }
     let imported = super::account::import(nsec).await?;
     if matches!(imported, super::account::Imported::Staged(_)) {
-        *vector_core::state::MNEMONIC_SEED.lock().unwrap() = seed.map(|s| s.to_string());
+        *vector_core::state::MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()) = seed.map(|s| s.to_string());
         super::account::connect().await;
     }
     service::forget_received();

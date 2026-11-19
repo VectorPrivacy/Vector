@@ -70,28 +70,28 @@ pub fn init(dir: Option<PathBuf>) {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| Index::parse(&s).ok())
         {
-            *INDEX.write().unwrap() = Some(Cached { index: Arc::new(index), at: 0 });
+            *INDEX.write().unwrap_or_else(|e| e.into_inner()) = Some(Cached { index: Arc::new(index), at: 0 });
         }
         return;
     };
     if let Some((index, at, _)) = std::fs::read_to_string(dir.join(INDEX_FILE)).ok().and_then(|raw| verify(&raw, &trusted()).ok()) {
-        *INDEX.write().unwrap() = Some(Cached { index: Arc::new(index), at });
+        *INDEX.write().unwrap_or_else(|e| e.into_inner()) = Some(Cached { index: Arc::new(index), at });
     }
     let _ = DIR.set(dir);
 }
 
 /// A pack read from disk or just downloaded.
 pub fn note_installed(tag: &str, bytes: &[u8]) {
-    INSTALLED.lock().unwrap().get_or_insert_with(HashMap::new).insert(tag.to_string(), sha256_hex(bytes));
+    INSTALLED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(tag.to_string(), sha256_hex(bytes));
 }
 
 fn any_installed() -> bool {
-    INSTALLED.lock().unwrap().as_ref().is_some_and(|m| !m.is_empty())
+    INSTALLED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| !m.is_empty())
 }
 
 /// The newest index this device holds.
 pub fn index() -> Option<Arc<Index>> {
-    INDEX.read().unwrap().as_ref().map(|c| c.index.clone())
+    INDEX.read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|c| c.index.clone())
 }
 
 /// Whether a background check is worth its network contact: a pack is installed and a day has
@@ -110,7 +110,7 @@ pub fn fresh(secs: u64) -> bool {
 /// The packs installed here that the index has a newer build of.
 pub fn updates() -> Vec<Entry> {
     let Some(index) = index() else { return vec![] };
-    let installed = INSTALLED.lock().unwrap();
+    let installed = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
     let Some(installed) = installed.as_ref() else { return vec![] };
     index.usable().filter(|e| installed.get(&e.tag).is_some_and(|sha| *sha != e.sha256)).cloned().collect()
 }
@@ -157,7 +157,7 @@ pub async fn refresh() -> Result<Arc<Index>, String> {
     };
     let ((index, at, signer), raw) = fetched;
     super::device::set(CHECKED_KEY, now().to_string());
-    let mut held = INDEX.write().unwrap();
+    let mut held = INDEX.write().unwrap_or_else(|e| e.into_inner());
     if let Some(c) = held.as_ref().filter(|c| c.at > at) {
         return Ok(c.index.clone());
     }

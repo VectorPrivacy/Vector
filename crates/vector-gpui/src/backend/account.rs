@@ -254,7 +254,7 @@ pub async fn import(mut key: String) -> Result<Imported, String> {
         Keys::from_mnemonic(phrase.trim(), Some(""))
             .map_err(|_| crate::t::login_invalid_seed().to_string())?
     };
-    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
     if is_committed(&npub) {
         db::write_active_account_file(&npub)?;
@@ -263,16 +263,16 @@ pub async fn import(mut key: String) -> Result<Imported, String> {
     if state::nostr_client().is_some() {
         return Err(crate::t::login_already_signed_in().into());
     }
-    *PENDING_NSEC.lock().unwrap() = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
-    if let Some(stale) = MNEMONIC_SEED.lock().unwrap().as_mut() {
+    *PENDING_NSEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
+    if let Some(stale) = MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         stale.zeroize();
     }
-    *MNEMONIC_SEED.lock().unwrap() = None;
+    *MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()) = None;
     store_identity(&keys);
     drop(keys);
     install_client();
     insert_own_profile(&npub).await;
-    *PENDING_ACCOUNT.lock().unwrap() = Some(npub.clone());
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub.clone());
     Ok(Imported::Staged(npub))
 }
 
@@ -281,15 +281,15 @@ pub async fn create() -> Result<String, String> {
     let mnemonic = bip39::Mnemonic::generate(12).map_err(|e| e.to_string())?;
     let phrase = mnemonic.to_string();
     let keys = Keys::from_mnemonic(phrase.as_str(), None).map_err(|e| e.to_string())?;
-    *PENDING_NSEC.lock().unwrap() = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
+    *PENDING_NSEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
     store_identity(&keys);
     let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
     drop(keys);
     install_client();
     insert_own_profile(&npub).await;
-    *MNEMONIC_SEED.lock().unwrap() = Some(phrase);
-    *PENDING_ACCOUNT.lock().unwrap() = Some(npub.clone());
-    *FRESH_ACCOUNT_NPUB.lock().unwrap() = Some(npub.clone());
+    *MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()) = Some(phrase);
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub.clone());
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub.clone());
     Ok(npub)
 }
 
@@ -308,7 +308,7 @@ pub async fn commit(
             .clone()
             .ok_or("No pending key")?, // i18n-exempt: developer error
     );
-    let seed = MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
+    let seed = MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()).clone().map(Zeroizing::new);
 
     // One derivation seals the key and the seed; the vault and the flag change only once the
     // commit has landed, so a failed commit leaves nothing behind for a retry.
@@ -329,7 +329,7 @@ pub async fn commit(
     let stored_seed = seed.as_deref().map(|s| seal(s)).transpose()?;
     let kdf_row = kdf.as_ref().and_then(|k| k.descriptor());
 
-    let pending = PENDING_ACCOUNT.lock().unwrap().take();
+    let pending = PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(npub) = pending {
         // The welcome screen's network carries on into the new account's first session.
         if !super::transport::running_prelogin() {
@@ -373,7 +373,7 @@ pub async fn commit(
         vector_core::ENCRYPTION_KEY.set(**k, &[&MY_SECRET_KEY]);
     }
     for slot in [&PENDING_NSEC, &MNEMONIC_SEED] {
-        let mut guard = slot.lock().unwrap();
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = guard.as_mut() {
             s.zeroize();
         }
@@ -389,7 +389,7 @@ pub async fn commit(
 /// Publish an empty kind-0 tagged `client: vector` for a keypair generated moments ago, so
 /// NIP-89 readers recognise it. Never for an imported or unlocked identity.
 fn stamp_fresh_account_profile() {
-    let armed = FRESH_ACCOUNT_NPUB.lock().unwrap().take();
+    let armed = FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(client) = state::nostr_client() else {
         return;
     };
@@ -411,23 +411,23 @@ fn stamp_fresh_account_profile() {
 
 /// The account staged for its security step, if any.
 pub(super) fn pending() -> Option<String> {
-    PENDING_ACCOUNT.lock().unwrap().clone()
+    PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 pub(super) fn set_pending(npub: String) {
-    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
-    *PENDING_ACCOUNT.lock().unwrap() = Some(npub);
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub);
 }
 
 /// Forget an account that was started but never committed.
 pub fn abandon_pending() {
-    *PENDING_ACCOUNT.lock().unwrap() = None;
-    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Unlock the stored account: its key opened under `password` when it is encrypted.
 pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, String> {
-    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
     state::init_encryption_enabled();
     if let Some(pk) = vector_core::my_public_key().filter(|_| state::nostr_client().is_some()) {
         return pk.to_bech32().map_err(|e| e.to_string());

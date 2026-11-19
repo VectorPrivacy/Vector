@@ -321,6 +321,34 @@ mod tests {
         }
     }
 
+    /// The scanner hands out `&str`s cut from bytes unchecked: every cut must land on a character.
+    #[test]
+    fn page_heads_of_any_shape_scan_to_whole_characters() {
+        use super::html_meta::{extract_first_p_inner_html, extract_html_meta};
+        const PARTS: &[&str] = &[
+            "<", ">", "/", "<meta", "<link", "<title>", "</title>", "</head>", "<p>", "</p>", "<!--", "-->", " ", "\n", "=", "\"", "'",
+            "property=", "name=", "content=", "rel=", "href=", "og:title", "og:image", "description", "icon", "apple-touch-icon",
+            "&amp;", "&#x1F600;", "&#128512;", "&#xD800;", "&#99999999;", "&#x;", "&", ";", "é", "日本語", "😀", "\u{301}", "a",
+        ];
+        let ok = |c: &Option<std::borrow::Cow<str>>| c.as_ref().is_none_or(|s| std::str::from_utf8(s.as_bytes()).is_ok());
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            let html: String = (0..next() % 48).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect();
+            let m = extract_html_meta(&html);
+            for f in [&m.og_title, &m.og_description, &m.og_image, &m.og_url, &m.og_type, &m.title, &m.description] {
+                assert!(ok(f), "{html:?}");
+            }
+            assert!(m.favicons.iter().all(|f| std::str::from_utf8(f.href.as_bytes()).is_ok() && std::str::from_utf8(f.rel.as_bytes()).is_ok()), "{html:?}");
+            assert!(ok(&extract_first_p_inner_html(&html)), "{html:?}");
+        }
+    }
+
     #[test]
     fn a_message_of_bare_schemes_reads_only_the_links_it_uses() {
         let text = "https://".repeat(20_000);

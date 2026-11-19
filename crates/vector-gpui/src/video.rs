@@ -1339,9 +1339,9 @@ mod tests {
         let frame = || Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(64, 36))]));
         v.clips.insert("a".into(), Clip { playing: true, ..Clip::default() });
         v.recycle(frame());
-        assert_eq!(BUFFERS.lock().unwrap().len(), 1);
+        assert_eq!(BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).len(), 1);
         v.clips.get_mut("a").unwrap().playing = false;
         v.recycle(frame());
-        assert!(BUFFERS.lock().unwrap().is_empty() && v.spent.is_empty());
+        assert!(BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).is_empty() && v.spent.is_empty());
     }
 }

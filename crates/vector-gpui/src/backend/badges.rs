@@ -32,7 +32,7 @@ fn own_checked() -> Arc<Mutex<bool>> {
 
 /// Every badge `npub` holds. Each lookup that fails reads as not held.
 pub async fn of(npub: String, mine: bool) -> Badges {
-    if !mine && let Some(b) = seen().lock().unwrap().get(&npub).copied() {
+    if !mine && let Some(b) = seen().lock().unwrap_or_else(|e| e.into_inner()).get(&npub).copied() {
         return b;
     }
     let Ok(pk) = PublicKey::from_bech32(&npub) else {
@@ -47,7 +47,7 @@ pub async fn of(npub: String, mine: bool) -> Badges {
         b.fawkes = badges::has_vector_badge();
         b.v2026 = badges::has_vector_2026_badge();
         b.bug = badges::bug_hunter_tier();
-        let first = !std::mem::replace(&mut *own_checked().lock().unwrap(), true);
+        let first = !std::mem::replace(&mut *own_checked().lock().unwrap_or_else(|e| e.into_inner()), true);
         if first {
             if !b.fawkes {
                 b.fawkes = badges::has_fawkes_badge(&pk).await.unwrap_or(false);
@@ -71,7 +71,7 @@ pub async fn of(npub: String, mine: bool) -> Badges {
         .await
         .map(|(t, _)| t)
         .unwrap_or(0);
-    seen().lock().unwrap().insert(npub, b);
+    seen().lock().unwrap_or_else(|e| e.into_inner()).insert(npub, b);
     b
 }
 

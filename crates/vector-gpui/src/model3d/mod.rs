@@ -380,7 +380,7 @@ mod tests {
             let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
             let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
             if msg.contains("with overflow") && at.contains("/.cargo/registry/") {
-                WRAPS.lock().unwrap().push(at);
+                WRAPS.lock().unwrap_or_else(|e| e.into_inner()).push(at);
             } else {
                 default_hook(info);
             }
@@ -405,7 +405,7 @@ mod tests {
                     }
                 }
             }
-            let wraps_before = WRAPS.lock().unwrap().len();
+            let wraps_before = WRAPS.lock().unwrap_or_else(|e| e.into_inner()).len();
             let t = std::time::Instant::now();
             let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let Ok(scene) = super::parse(&b, &ext) else { return };
@@ -418,7 +418,7 @@ mod tests {
                 let shot = super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose, morph };
                 let _ = g.render(&model, &target, &shot);
             }));
-            let wrapped = run.is_err() && WRAPS.lock().unwrap().len() > wraps_before;
+            let wrapped = run.is_err() && WRAPS.lock().unwrap_or_else(|e| e.into_inner()).len() > wraps_before;
             if (run.is_err() && !wrapped) || t.elapsed() > std::time::Duration::from_secs(5) {
                 eprintln!("case {i} ({ext}, {} bytes): {}", b.len(), if run.is_err() { "panicked" } else { "slow" });
                 failed.push((ext, b));
@@ -433,7 +433,7 @@ mod tests {
             }
         }
         let _ = std::panic::take_hook();
-        let mut wraps = WRAPS.lock().unwrap().clone();
+        let mut wraps = WRAPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
         wraps.sort();
         wraps.dedup();
         if !wraps.is_empty() {

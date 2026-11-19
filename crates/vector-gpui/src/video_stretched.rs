@@ -110,7 +110,7 @@ fn make(weak: Weak<Stretched>, mut reader: AudioReader, speed: f32) {
     loop {
         let Some(s) = weak.upgrade() else { return };
         {
-            let st = s.state.lock().unwrap();
+            let st = s.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.epoch != epoch {
                 epoch = st.epoch;
                 from = (st.start as f64 * speed as f64).round() as u64;
@@ -138,7 +138,7 @@ fn make(weak: Weak<Stretched>, mut reader: AudioReader, speed: f32) {
                 ended = true;
             }
         }
-        let mut st = s.state.lock().unwrap();
+        let mut st = s.state.lock().unwrap_or_else(|e| e.into_inner());
         if st.epoch != epoch {
             out.clear();
             continue;
@@ -183,7 +183,7 @@ impl vector_core::media::MediaSource for Stretched {
             buf[..done].copy_from_slice(&self.header[offset as usize..offset as usize + done]);
         }
         let secs = self.rate as u64;
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut waited = Duration::ZERO;
         while done < want {
             let byte = offset + done as u64 - HEADER;
@@ -216,7 +216,7 @@ impl vector_core::media::MediaSource for Stretched {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, crate::t::video_sound_stopped().to_string()));
             }
             let step = Duration::from_millis(250);
-            st = self.made.wait_timeout(st, step).unwrap().0;
+            st = self.made.wait_timeout(st, step).unwrap_or_else(|e| e.into_inner()).0;
             waited += step;
         }
         st.read = (offset + want as u64).saturating_sub(HEADER).div_ceil(2);

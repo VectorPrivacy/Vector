@@ -575,7 +575,7 @@ mod tests {
         for b in &sent {
             w.on_link(b);
         }
-        let p = pics.lock().unwrap();
+        let p = pics.lock().unwrap_or_else(|e| e.into_inner());
         let pic = p.peer[0].as_ref().expect("decoded");
         assert_eq!((pic.w, pic.h), (640, 360));
     }

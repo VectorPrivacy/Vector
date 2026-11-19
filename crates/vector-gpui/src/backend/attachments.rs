@@ -18,7 +18,7 @@ struct Active(String);
 impl Active {
     fn claim(id: &str) -> Option<Self> {
         let id = id.to_ascii_lowercase();
-        let mut active = ACTIVE.lock().unwrap();
+        let mut active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
         if active.contains_key(&id) {
             return None;
         }
@@ -38,13 +38,13 @@ impl Active {
 
 impl Drop for Active {
     fn drop(&mut self) {
-        ACTIVE.lock().unwrap().remove(&self.0);
+        ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
     }
 }
 
 /// Whether any download runs: one that read the old setting could still keep a file.
 pub fn any_running() -> bool {
-    !ACTIVE.lock().unwrap().is_empty()
+    !ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
 }
 
 /// Stop every running download: the account they belong to is leaving.

@@ -100,8 +100,8 @@ mod host {
             warn(&format!("GTK unavailable: {e}"));
             std::process::exit(2);
         }
-        *OUT.lock().unwrap() = Some(std::io::stdout());
-        *PENDING.lock().unwrap() = Some(HashMap::new());
+        *OUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::io::stdout());
+        *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(HashMap::new());
         let ctx = glib::MainContext::default();
         std::thread::Builder::new()
             .name("miniapp-pipe".into())

@@ -1036,7 +1036,7 @@ mod file_fuzz {
             let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
             let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
             if msg.contains("with overflow") && at.contains("/.cargo/registry/") {
-                WRAPS.lock().unwrap().push(at);
+                WRAPS.lock().unwrap_or_else(|e| e.into_inner()).push(at);
                 return;
             }
             PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1100,7 +1100,7 @@ mod file_fuzz {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
-        let mut wraps = WRAPS.lock().unwrap().clone();
+        let mut wraps = WRAPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
         wraps.sort();
         wraps.dedup();
         if !wraps.is_empty() {
