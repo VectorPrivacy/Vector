@@ -906,6 +906,19 @@ pub fn jpeg_scaled(
     crop: impl FnOnce(u32, u32, u32, u32) -> (u32, u32, u32, u32),
     bgra: bool,
 ) -> Option<(image::RgbaImage, u32, u32)> {
+    jpeg_into(bytes, |w, h| Some((need(w, h), None)), crop, image::imageops::FilterType::Triangle, bgra)
+}
+
+/// [`jpeg_scaled`] where `need` also names the size the cut ends at, reached with `filter` as
+/// the rows decode (as [`resample`](super::resample) would, after the upright cut): no
+/// scaled picture is held at all. `need` saying None means no scaled decode would help.
+pub fn jpeg_into(
+    bytes: &[u8],
+    need: impl FnOnce(u32, u32) -> Option<((u32, u32), Option<(u32, u32)>)>,
+    crop: impl FnOnce(u32, u32, u32, u32) -> (u32, u32, u32, u32),
+    filter: image::imageops::FilterType,
+    bgra: bool,
+) -> Option<(image::RgbaImage, u32, u32)> {
     use image::metadata::Orientation;
     let mut dec = jpeg_decoder::Decoder::new(bytes);
     dec.read_info().ok()?;
@@ -930,7 +943,7 @@ pub fn jpeg_scaled(
         Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
     );
     let (uw, uh) = if turned { (h, w) } else { (w, h) };
-    let (nw, nh) = need(uw, uh);
+    let ((nw, nh), size) = need(uw, uh)?;
     let (rw, rh) = if turned { (nh, nw) } else { (nw, nh) };
     let scaled = |len: u32, s: u32| (len * s - 1) / 8 + 1;
     let s = [1u32, 2, 4].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
@@ -944,11 +957,77 @@ pub fn jpeg_scaled(
     if cw == 0 || ch == 0 || x0 + cw > ow || y0 + ch > oh {
         return None;
     }
-    let mut out = vec![0u8; cw as usize * ch as usize * 4];
+    let (fw, fh) = size.unwrap_or((cw, ch));
+    if fw == 0 || fh == 0 {
+        return None;
+    }
+    let mut out = vec![0u8; fw as usize * fh as usize * 4];
     let (dw, dh) = (i64::from(sw), i64::from(sh));
     let (x0, y0, cw, ch) = (i64::from(x0), i64::from(y0), i64::from(cw), i64::from(ch));
-    // Where a decoded row lands upright: its first pixel, then the step from one pixel to the next.
-    let line = |y: i64| match orientation {
+    // The decoded columns whose upright coordinate `c0 + x * d` falls in `lo..lo + len`.
+    let span = |c0: i64, d: i64, lo: i64, len: i64| match d {
+        0 if (lo..lo + len).contains(&c0) => (0, dw),
+        0 => (0, 0),
+        1 => (lo - c0, lo + len - c0),
+        _ => (c0 - lo - len + 1, c0 - lo + 1),
+    };
+    // The part of decoded row `y` inside the cut, as decoded columns.
+    let cut = |y: i64| {
+        let (ux, uy, dx, dy) = upright(orientation, dw, dh, y);
+        let (ax, bx) = span(ux, dx, x0, cw);
+        let (ay, by) = span(uy, dy, y0, ch);
+        (ax.max(ay).max(0), bx.min(by).min(dw))
+    };
+    let (r, b) = if bgra { (2, 0) } else { (0, 2) };
+    if (fw, fh) == (cw as u32, ch as u32) {
+        dec.decode_rows(|y, row| {
+            let (from, to) = cut(y as i64);
+            if from >= to {
+                return;
+            }
+            let (ux, uy, dx, dy) = upright(orientation, dw, dh, y as i64);
+            let at = (((uy + from * dy - y0) * cw + (ux + from * dx - x0)) * 4) as isize;
+            put(&row[from as usize * channels..to as usize * channels], channels, &mut out, at, (dy * cw + dx) * 4, r, b);
+        })
+        .ok()?;
+    } else {
+        // Scaled in decoded order, then each finished row is written upright.
+        let first = (0..dh).find(|&y| { let (a, b) = cut(y); a < b })?;
+        let (from, to) = cut(first);
+        let rows = (first..dh).take_while(|&y| { let (a, b) = cut(y); a < b }).count() as u32;
+        let (tw, th) = if turned { (fh, fw) } else { (fw, fh) };
+        let (tdw, tdh) = (i64::from(tw), i64::from(th));
+        let fw = i64::from(fw);
+        let mut emit = |y: usize, row: &[u8], c: usize| {
+            let (ux, uy, dx, dy) = upright(orientation, tdw, tdh, y as i64);
+            put(row, c, &mut out, ((uy * fw + ux) * 4) as isize, (dy * fw + dx) * 4, r, b);
+        };
+        let (cols, first, to_u) = ((to - from) as u32, first as usize, to as usize);
+        let fed = if channels == 3 {
+            let mut z = super::Rows::<3>::new(cols, rows, tw, th, filter)?;
+            dec.decode_rows(|y, row| {
+                if y >= first && y < first + rows as usize {
+                    z.push(y - first, &row[from as usize * 3..to_u * 3], |i, o| emit(i, o, 3));
+                }
+            })
+        } else {
+            let mut z = super::Rows::<1>::new(cols, rows, tw, th, filter)?;
+            dec.decode_rows(|y, row| {
+                if y >= first && y < first + rows as usize {
+                    z.push(y - first, &row[from as usize..to_u], |i, o| emit(i, o, 1));
+                }
+            })
+        };
+        fed.ok()?;
+    }
+    Some((image::RgbaImage::from_raw(fw, fh, out)?, uw, uh))
+}
+
+/// Where row `y` of a `dw` x `dh` picture decoded in `orientation` lands upright: its first
+/// pixel, then the step from one pixel to the next.
+fn upright(orientation: image::metadata::Orientation, dw: i64, dh: i64, y: i64) -> (i64, i64, i64, i64) {
+    use image::metadata::Orientation;
+    match orientation {
         Orientation::NoTransforms => (0, y, 1, 0),
         Orientation::FlipHorizontal => (dw - 1, y, -1, 0),
         Orientation::Rotate180 => (dw - 1, dh - 1 - y, -1, 0),
@@ -957,48 +1036,23 @@ pub fn jpeg_scaled(
         Orientation::Rotate270 => (y, dw - 1, 0, -1),
         Orientation::Rotate90FlipH => (y, 0, 0, 1),
         Orientation::Rotate270FlipH => (dh - 1 - y, dw - 1, 0, -1),
-    };
-    // The decoded columns whose upright coordinate `c0 + x * d` falls in `lo..lo + len`.
-    let span = |c0: i64, d: i64, lo: i64, len: i64| match d {
-        0 if (lo..lo + len).contains(&c0) => (0, dw),
-        0 => (0, 0),
-        1 => (lo - c0, lo + len - c0),
-        _ => (c0 - lo - len + 1, c0 - lo + 1),
-    };
-    let (r, b) = if bgra { (2, 0) } else { (0, 2) };
-    dec.decode_rows(|y, row| {
-        let (ux, uy, dx, dy) = line(y as i64);
-        let (ax, bx) = span(ux, dx, x0, cw);
-        let (ay, by) = span(uy, dy, y0, ch);
-        let (from, to) = (ax.max(ay).max(0), bx.min(by).min(dw));
-        if from >= to {
-            return;
-        }
-        let at = |x: i64| (((uy + x * dy - y0) * cw + (ux + x * dx - x0)) * 4) as isize;
-        let step = (dy * cw + dx) * 4;
-        let mut o = at(from);
-        for p in row[from as usize * channels..to as usize * channels].chunks_exact(channels) {
-            let px = &mut out[o as usize..o as usize + 4];
-            if channels == 3 {
-                px[r] = p[0];
-                px[1] = p[1];
-                px[b] = p[2];
-            } else {
-                px[..3].fill(p[0]);
-            }
-            px[3] = 255;
-            o += step as isize;
-        }
-    })
-    .ok()?;
-    Some((image::RgbaImage::from_raw(cw as u32, ch as u32, out)?, uw, uh))
+    }
 }
 
-/// [`resize_premultiplied`] for a picture with no transparency, which premultiplying leaves as it is.
-pub fn resize_opaque(buf: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
-    let mut out = super::resample(buf, w, h, image::imageops::FilterType::Triangle);
-    unpremultiply(&mut out);
-    out
+/// Grey or RGB pixels written as opaque RGBA (or BGRA by `r`/`b`) from byte `at`, `step` apart.
+fn put(src: &[u8], channels: usize, out: &mut [u8], mut at: isize, step: i64, r: usize, b: usize) {
+    for p in src.chunks_exact(channels) {
+        let px = &mut out[at as usize..at as usize + 4];
+        if channels == 3 {
+            px[r] = p[0];
+            px[1] = p[1];
+            px[b] = p[2];
+        } else {
+            px[..3].fill(p[0]);
+        }
+        px[3] = 255;
+        at += step as isize;
+    }
 }
 
 fn unpremultiply(out: &mut image::RgbaImage) {
@@ -1016,24 +1070,23 @@ fn unpremultiply(out: &mut image::RgbaImage) {
 
 /// [`fit_frame`] for a JPEG, decoded no larger than the fit needs: the same size comes out.
 pub fn jpeg_fitted(bytes: &[u8], max: u32, square: bool) -> Option<image::Frame> {
-    let mut target = None;
-    let (cut, _, _) = jpeg_scaled(
+    let (buffer, _, _) = jpeg_into(
         bytes,
         |w, h| {
             let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
             if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
-                return (w, h);
+                return None;
             }
             let scale = (max as f64 / cw.max(ch) as f64).min(1.);
             let (nw, nh) = (
                 ((cw as f64 * scale).round() as u32).max(1),
                 ((ch as f64 * scale).round() as u32).max(1),
             );
-            target = Some((nw, nh));
-            (
+            let least = (
                 (w as f64 * nw as f64 / cw as f64).ceil() as u32,
                 (h as f64 * nh as f64 / ch as f64).ceil() as u32,
-            )
+            );
+            Some((least, Some((nw, nh))))
         },
         |w, h, sw, sh| {
             let k = sw as f64 / w as f64;
@@ -1041,10 +1094,9 @@ pub fn jpeg_fitted(bytes: &[u8], max: u32, square: bool) -> Option<image::Frame>
             let (cw, ch) = (((cw as f64 * k).round() as u32).clamp(1, sw), ((ch as f64 * k).round() as u32).clamp(1, sh));
             ((sw - cw) / 2, (sh - ch) / 2, cw, ch)
         },
+        image::imageops::FilterType::Triangle,
         true,
     )?;
-    let (nw, nh) = target?;
-    let buffer = if cut.dimensions() == (nw, nh) { cut } else { resize_opaque(&cut, nw, nh) };
     Some(image::Frame::new(buffer))
 }
 

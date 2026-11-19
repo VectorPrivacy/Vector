@@ -1140,20 +1140,16 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
         return Some((RenderImage::new(frames), w, h));
     }
     if ext != "svg" && image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
-        let mut target = None;
         let need = |w: u32, h: u32| {
             if w <= max.0 && h <= max.1 {
-                return (w, h);
+                return None;
             }
             // As `DynamicImage::resize` sizes it, so the result matches the full decode's.
             let r = (max.0.max(1) as f64 / w as f64).min(max.1.max(1) as f64 / h as f64);
             let t = (((w as f64 * r).round() as u32).max(1), ((h as f64 * r).round() as u32).max(1));
-            target = Some(t);
-            t
+            Some((t, Some(t)))
         };
-        let scaled = gpui::jpeg_scaled(bytes, need, |_, _, w, h| (0, 0, w, h), true);
-        if let (Some((img, w, h)), Some((tw, th))) = (scaled, target) {
-            let img = gpui::resample(&img, tw, th, FilterType::CatmullRom);
+        if let Some((img, w, h)) = gpui::jpeg_into(bytes, need, |_, _, w, h| (0, 0, w, h), FilterType::CatmullRom, true) {
             return Some((RenderImage::new(vec![Frame::new(img)]), w, h));
         }
     }
@@ -1810,13 +1806,84 @@ mod jpeg_tests {
                     for max in [(w.min(h) / 5).max(2), w.max(h) / 3] {
                         let f = gpui::jpeg_fitted(&bytes, max, square).map(|f| f.into_buffer());
                         let want = old_jpeg_fitted(&bytes, max, square).map(|f| f.into_buffer());
-                        assert!(f == want, "{w}x{h} orientation {o} square {square} max {max}");
+                        assert!(alike(f, want, o), "{w}x{h} orientation {o} square {square} max {max}");
                     }
                 }
                 let need = |w: u32, h: u32| (w / 3, h / 7);
                 let got = gpui::decode_jpeg_scaled(&bytes, need);
                 assert!(got == old_decode_jpeg_scaled(&bytes, need), "{w}x{h} orientation {o}");
                 assert!(got.is_some());
+            }
+        }
+    }
+
+    // Scaled upright in one pass, or as decoded and then turned: a flip or turn may round one
+    // level apart where the filter's sums run in another order.
+    fn alike(a: Option<image::RgbaImage>, b: Option<image::RgbaImage>, orientation: u8) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) if orientation != 1 => {
+                a.dimensions() == b.dimensions() && a.iter().zip(b.iter()).all(|(x, y)| x.abs_diff(*y) <= 1)
+            }
+            (a, b) => a == b,
+        }
+    }
+
+    #[test]
+    fn photos_scaled_as_they_decode_match_a_scale_after() {
+        for o in 1..=8u8 {
+            for (w, h, grey) in [(1600, 1200, false), (333, 999, false), (97, 65, false), (333, 999, true)] {
+                let bytes = encoded(w, h, Some(o), grey);
+                for max in [(w / 5, h / 5), (w / 3, h), (w * 2, h / 2), (17, 2000)] {
+                    let got = decode(&bytes, "jpg", max).map(|(img, ..)| {
+                        let s = img.size(0);
+                        let mut px = img.as_bytes(0).unwrap().to_vec();
+                        for p in px.chunks_exact_mut(4) {
+                            p.swap(0, 2);
+                        }
+                        image::RgbaImage::from_raw(s.width.0 as u32, s.height.0 as u32, px).unwrap()
+                    });
+                    let mut target = None;
+                    let want = old_decode_jpeg_scaled(&bytes, |w, h| {
+                        let r = (max.0 as f64 / w as f64).min(max.1 as f64 / h as f64);
+                        let t = (((w as f64 * r).round() as u32).max(1), ((h as f64 * r).round() as u32).max(1));
+                        target = Some(t);
+                        t
+                    })
+                    .map(|(img, ..)| {
+                        let (tw, th) = target.unwrap();
+                        gpui::resample(&img, tw, th, FilterType::CatmullRom)
+                    });
+                    // Past a half-scale decode the full decode takes over, as it did before.
+                    if want.is_some() {
+                        assert!(alike(got, want, o), "{w}x{h} orientation {o} into {max:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rows_fed_one_at_a_time_match_the_whole_picture() {
+        let mut seed = 0x9e37_79b9u32;
+        for (w, h, nw, nh) in [(97, 65, 31, 20), (31, 20, 97, 65), (640, 480, 100, 75), (5, 300, 3, 7), (1, 1, 4, 4), (300, 2, 299, 1)] {
+            let px: Vec<u8> = (0..w * h * 3)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    seed as u8
+                })
+                .collect();
+            let img = image::RgbImage::from_raw(w, h, px).unwrap();
+            for filter in [FilterType::Triangle, FilterType::CatmullRom] {
+                let want = gpui::resample(&img, nw, nh, filter).into_raw();
+                let mut got = vec![0u8; want.len()];
+                let mut rows = gpui::Rows::<3>::new(w, h, nw, nh, filter).unwrap();
+                let line = nw as usize * 3;
+                for (y, row) in img.as_raw().chunks_exact(w as usize * 3).enumerate() {
+                    rows.push(y, row, |r, o| got[r * line..][..line].copy_from_slice(o));
+                }
+                assert!(got == want, "{w}x{h} into {nw}x{nh} {filter:?}");
             }
         }
     }

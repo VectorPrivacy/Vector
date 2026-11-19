@@ -96,6 +96,28 @@ fn taps(len: u32, new_len: u32, kernel: fn(f32) -> f32, support: f32) -> std::rc
     })
 }
 
+/// One output row: the source rows its span reaches folded down the columns, then filtered across.
+fn row_out<'a, const C: usize>(column: &mut [f32], lines: impl Iterator<Item = (&'a [u8], f32)>, across: &Taps, out: &mut [u8]) {
+    column.fill(0.0);
+    for (line, wt) in lines {
+        for (acc, &v) in column.iter_mut().zip(line) {
+            *acc += v as f32 * wt;
+        }
+    }
+    for ((left, ws), px) in across.iter().zip(out.chunks_exact_mut(C)) {
+        let mut t = [0f32; C];
+        for (i, &wt) in ws.iter().enumerate() {
+            let p = &column[(left + i) * C..][..C];
+            for c in 0..C {
+                t[c] += p[c] * wt;
+            }
+        }
+        for c in 0..C {
+            px[c] = t[c].clamp(0.0, 255.0).round() as u8;
+        }
+    }
+}
+
 fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(f32) -> f32, support: f32) -> Vec<u8> {
     let (w, nwu) = (w as usize, nw as usize);
     let down = taps(h, nh, kernel, support);
@@ -105,31 +127,67 @@ fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(
     column.clear();
     column.resize(w * C, 0.);
     for ((top, ws), row) in down.iter().zip(out.chunks_exact_mut(nwu * C)) {
-        column.fill(0.0);
-        for (j, &wt) in ws.iter().enumerate() {
-            let line = &src[(top + j) * w * C..][..w * C];
-            for (acc, &v) in column.iter_mut().zip(line) {
-                *acc += v as f32 * wt;
-            }
-        }
-        for ((left, ws), px) in across.iter().zip(row.chunks_exact_mut(C)) {
-            let mut t = [0f32; C];
-            for (i, &wt) in ws.iter().enumerate() {
-                let p = &column[(left + i) * C..][..C];
-                for c in 0..C {
-                    t[c] += p[c] * wt;
-                }
-            }
-            for c in 0..C {
-                px[c] = t[c].clamp(0.0, 255.0).round() as u8;
-            }
-        }
+        let lines = ws.iter().enumerate().map(|(j, &wt)| (&src[(top + j) * w * C..][..w * C], wt));
+        row_out::<C>(&mut column, lines, &across, row);
     }
     // A wide row is let go rather than held for the thread's life.
     if column.capacity() <= 1 << 14 {
         COLUMN.set(column);
     }
     out
+}
+
+/// [`resample`] fed its source a row at a time, top to bottom, so a decoder scales as it goes:
+/// only the rows one output row reaches are held. Bit-identical to [`resample`].
+pub struct Rows<const C: usize> {
+    w: usize,
+    down: std::rc::Rc<Taps>,
+    across: std::rc::Rc<Taps>,
+    ring: Vec<u8>,
+    held: usize,
+    next: usize,
+    column: Vec<f32>,
+    out: Vec<u8>,
+}
+
+impl<const C: usize> Rows<C> {
+    /// None for a filter [`resample`] hands to the image crate, or an empty side.
+    pub fn new(w: u32, h: u32, nw: u32, nh: u32, filter: FilterType) -> Option<Self> {
+        let (kernel, support) = kernel(filter)?;
+        if w == 0 || h == 0 || nw == 0 || nh == 0 {
+            return None;
+        }
+        let down = taps(h, nh, kernel, support);
+        let across = taps(w, nw, kernel, support);
+        let held = down.spans.iter().map(|s| s.1).max().unwrap_or(1);
+        let w = w as usize;
+        Some(Self {
+            w,
+            ring: vec![0; held * w * C],
+            held,
+            next: 0,
+            column: vec![0.; w * C],
+            out: vec![0; nw as usize * C],
+            down,
+            across,
+        })
+    }
+
+    /// Source row `y`, which follows row `y - 1`: each output row it completes goes to `emit`.
+    pub fn push(&mut self, y: usize, row: &[u8], mut emit: impl FnMut(usize, &[u8])) {
+        let n = self.w * C;
+        self.ring[(y % self.held) * n..][..n].copy_from_slice(&row[..n]);
+        while let Some(&(top, len, at)) = self.down.spans.get(self.next) {
+            if top + len > y + 1 {
+                break;
+            }
+            let (ring, held) = (&self.ring, self.held);
+            let lines = self.down.weights[at..at + len].iter().enumerate().map(|(j, &wt)| (&ring[((top + j) % held) * n..][..n], wt));
+            row_out::<C>(&mut self.column, lines, &self.across, &mut self.out);
+            emit(self.next, &self.out);
+            self.next += 1;
+        }
+    }
 }
 
 /// `image::imageops::resize` for 8-bit buffers, without its full-size float copy; other
