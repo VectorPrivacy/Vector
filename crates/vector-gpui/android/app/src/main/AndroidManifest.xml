@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Vulkan where the phone has it, else GLES 3. -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Vector"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true">
+        <!-- The Tauri client's activity name, so launcher icons and shortcuts survive an update.
+             One window for the whole run: configuration changes never recreate it, and the
+             keyboard's height arrives as an inset rather than a resize. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|layoutDirection|smallestScreenSize|screenLayout|uiMode|density|fontScale|navigation"
+            android:windowSoftInputMode="adjustNothing">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="vector" />
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="vectorapp.io" />
+                <data android:pathPrefix="/profile" />
+                <data android:pathPrefix="/invite" />
+                <data android:pathPrefix="/emojis" />
+                <data android:pathPrefix="/go" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
