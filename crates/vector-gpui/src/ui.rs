@@ -3014,6 +3014,12 @@ impl VectorApp {
             },
         )
         .detach();
+        cx.subscribe_in(&view, window, |this, _, crate::login::ResetAccount(npub), window, cx| {
+            if this.live && !npub.is_empty() {
+                this.remove_account_or(npub.clone(), t::account_logout_failed(), window, cx);
+            }
+        })
+        .detach();
         let fixture = (!self.live).then(|| self.store.borrow().fixture_net.as_ref().and_then(|n| n.get("view").cloned())).flatten();
         let live = self.live;
         view.update(cx, |v, cx| v.net_setup(live, fixture, cx));
@@ -16641,6 +16647,7 @@ impl VectorApp {
             clock: None,
             dialog: None,
             sec_kind: self.security.read(cx).kind().to_string(),
+            bio_supported: self.live && backend::biometric::supported(),
             signer: if self.live {
                 backend::bunker::status()
             } else {
@@ -18626,6 +18633,7 @@ impl VectorApp {
             Act::PreviewSound => backend::sound::play(backend::sound::Sound::parse(&s.notif_sound)),
             Act::PickSound => self.pick_sound(cx),
             Act::ChangeCredential => self.security.update(cx, |f, cx| f.change(cx)),
+            Act::SwitchUnlock => self.security.update(cx, |f, cx| f.switch_unlock(cx)),
             Act::ShowKeys => self.security.update(cx, |f, cx| f.show_keys(cx)),
             Act::Reauthorize => self.open_reauth(window, cx),
             Act::Transfer => self.security.update(cx, |f, cx| f.open_transfer(true, cx)),

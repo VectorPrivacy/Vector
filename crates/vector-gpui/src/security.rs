@@ -13,7 +13,7 @@ use gpui::{
 };
 use zeroize::Zeroizing;
 
-use crate::backend::{self, security::MigrationProgress};
+use crate::backend::{self, biometric::CANCELLED, security::MigrationProgress};
 use crate::composer::{CancelInput, Look, SendText, TextInput};
 use crate::kit;
 use crate::t;
@@ -190,6 +190,22 @@ impl SecurityFlow {
         self.busy = true;
         cx.spawn(async move |this, cx| {
             change(&this, cx).await;
+            this.update(cx, |f, cx| {
+                f.busy = false;
+                f.state(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn switch_unlock(&mut self, cx: &mut Context<Self>) {
+        if self.busy || !self.enabled {
+            return;
+        }
+        self.busy = true;
+        cx.spawn(async move |this, cx| {
+            switch_unlock(&this, cx).await;
             this.update(cx, |f, cx| {
                 f.busy = false;
                 f.state(cx);
@@ -450,6 +466,14 @@ pub(crate) async fn with_current<T: Send + 'static>(
     attempt: impl Fn(Zeroizing<String>) -> oneshot::Receiver<Result<T, String>>,
 ) -> Result<Option<T>, String> {
     let kind = kind(this, cx);
+    if kind == "biometric" {
+        // The backend raises the phone's own prompt in the credential's place.
+        return match attempt(Zeroizing::new(String::new())).await.unwrap_or_else(|_| Err(CANCELLED.into())) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e == CANCELLED => Ok(None),
+            Err(e) => Err(e),
+        };
+    }
     let mut prompt = lead;
     let mut mistake = false;
     loop {
@@ -503,6 +527,10 @@ async fn current(
     title: &str,
     lead: String,
 ) -> Option<Zeroizing<String>> {
+    if kind(this, cx) == "biometric" {
+        // Proven by the phone's prompt when the step it guards runs.
+        return Some(Zeroizing::new(String::new()));
+    }
     let live = this.read_with(cx, |f, _| f.live).unwrap_or(false);
     let result = with_current(this, cx, title, lead, |cred| {
         if !live {
@@ -635,6 +663,16 @@ async fn migrate(
 }
 
 async fn enable(this: &This, cx: &mut AsyncApp) {
+    if this.read_with(cx, |f, _| f.live).unwrap_or(false) && backend::biometric::supported() {
+        let mut offer = kit::Popup::notice(t::security_biometric_offer_title());
+        offer.icon = Some("icons/vector-check.svg");
+        offer.text = Some(t::security_biometric_offer_text());
+        offer.confirm = t::security_use_biometrics();
+        offer.cancel = Some(t::dialog_cancel());
+        if confirm(this, cx, offer).await {
+            return enable_biometric(this, cx).await;
+        }
+    }
     let Some((cred, kind)) = new_credential(
         this,
         cx,
@@ -703,6 +741,7 @@ async fn disable(this: &This, cx: &mut AsyncApp) {
             })
             .ok();
         }
+        Err(e) if e == CANCELLED => {}
         Err(e) => {
             notice(
                 this,
@@ -727,14 +766,12 @@ async fn change(this: &This, cx: &mut AsyncApp) {
     else {
         return;
     };
-    let Some((new, new_kind)) = new_credential(
-        this,
-        cx,
-        &by(&kind, t::security_change_pin, t::security_change_password),
-        &t::security_change_text(),
-    )
-    .await
-    else {
+    let (title, text) = if kind == "biometric" {
+        (t::security_switch_credential_title(), t::security_switch_credential_text())
+    } else {
+        (by(&kind, t::security_change_pin, t::security_change_password), t::security_change_text())
+    };
+    let Some((new, new_kind)) = new_credential(this, cx, &title, &text).await else {
         return;
     };
     let k = new_kind.clone();
@@ -750,6 +787,7 @@ async fn change(this: &This, cx: &mut AsyncApp) {
             })
             .ok();
         }
+        Err(e) if e == CANCELLED => {}
         Err(e) => {
             notice(
                 this,
@@ -759,6 +797,90 @@ async fn change(this: &This, cx: &mut AsyncApp) {
             )
             .await
         }
+    }
+}
+
+/// The warning biometrics-only mode ships with: the screen lock now guards this device's data.
+pub(crate) fn biometric_warning() -> kit::Popup {
+    let mut p = kit::Popup::notice(t::security_biometric_warning_title());
+    p.text = Some(t::security_biometric_warning_text());
+    p.confirm = t::dialog_confirm();
+    p.cancel = Some(t::dialog_cancel());
+    p
+}
+
+async fn enable_biometric(this: &This, cx: &mut AsyncApp) {
+    if !confirm(this, cx, biometric_warning()).await {
+        return;
+    }
+    let result = migrate(this, cx, t::security_enabling(), |report| {
+        #[cfg(target_os = "android")]
+        {
+            backend::run(backend::security::enable_biometric(report))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            drop(report);
+            backend::run(async { Err::<(), String>(CANCELLED.into()) })
+        }
+    })
+    .await;
+    match result {
+        Ok(()) => {
+            this.update(cx, |f, cx| {
+                f.enabled = true;
+                f.kind = "biometric".into();
+                cx.emit(Event::Toast(t::security_enabled().into()));
+            })
+            .ok();
+        }
+        Err(e) if e == CANCELLED => {}
+        Err(e) => notice(this, cx, &t::security_biometric_failed(), e).await,
+    }
+}
+
+/// A typed credential's account moves onto the phone's prompt; a biometric one picks a PIN or
+/// a password instead.
+async fn switch_unlock(this: &This, cx: &mut AsyncApp) {
+    let kind = kind(this, cx);
+    if kind == "biometric" {
+        return change(this, cx).await;
+    }
+    if !confirm(this, cx, biometric_warning()).await {
+        return;
+    }
+    let Some(cred) = current(
+        this,
+        cx,
+        &by(&kind, t::security_current_pin, t::security_current_password),
+        by(&kind, t::security_switch_biometric_lead_pin, t::security_switch_biometric_lead_password).into(),
+    )
+    .await
+    else {
+        return;
+    };
+    let result = migrate(this, cx, t::security_changing(), move |report| {
+        #[cfg(target_os = "android")]
+        {
+            backend::run(backend::security::switch_to_biometric(cred, report))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            drop((cred, report));
+            backend::run(async { Err::<(), String>(CANCELLED.into()) })
+        }
+    })
+    .await;
+    match result {
+        Ok(()) => {
+            this.update(cx, |f, cx| {
+                f.kind = "biometric".into();
+                cx.emit(Event::Toast(t::security_now_biometric().into()));
+            })
+            .ok();
+        }
+        Err(e) if e == CANCELLED => {}
+        Err(e) => notice(this, cx, &t::security_switch_failed(), e).await,
     }
 }
 
@@ -819,6 +941,9 @@ async fn show_keys(this: &This, cx: &mut AsyncApp) {
             .ok();
         }
         Ok(None) => {
+            this.update(cx, |f, cx| f.close_keys(cx)).ok();
+        }
+        Err(e) if e == CANCELLED => {
             this.update(cx, |f, cx| f.close_keys(cx)).ok();
         }
         Err(e) => {

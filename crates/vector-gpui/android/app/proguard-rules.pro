@@ -12,3 +12,4 @@
 -keep class io.vectorapp.VectorNotificationService { *; }
 -keep class io.vectorapp.VectorBatteryHelper { *; }
 -keep class io.vectorapp.VectorFiles { *; }
+-keep class io.vectorapp.BiometricUnlock { *; }

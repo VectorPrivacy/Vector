@@ -81,6 +81,7 @@ cc = "1"
 [target.'cfg(target_os = "android")'.dependencies]
 whisper-rs = { version = "0.15.1", optional = true }
 jni = "0.21.1"
+zeroize = "1.8"
 ndk-context = "0.1.1"
 # AAudio streams opened as a phone call's (the patched crate, as the desktop client's).
 ndk = { version = "0.9", default-features = false, features = ["audio"] }

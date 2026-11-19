@@ -46,10 +46,7 @@ pub async fn approve(credential: Option<Zeroizing<String>>) -> Result<(), String
     }
     let session = vector_core::db::current_session();
     let key = if vector_core::state::is_encryption_enabled_fast() {
-        let credential = credential
-            .filter(|c| !c.is_empty())
-            .ok_or(vector_core::db::at_rest::CREDENTIAL_REQUIRED)?;
-        Some(vector_core::db::at_rest::prove_credential(&credential).await?)
+        Some(super::security::prove(credential).await?)
     } else {
         None
     };

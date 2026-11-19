@@ -123,3 +123,21 @@ security-export-account-changed = The account changed, so nothing was exported
 
 security-rekey-starting = Starting...
 security-rekey-keep-open = Do not close the app during this process
+
+## The phone's fingerprint or screen lock as the only credential
+
+security-biometric-offer-title = Protect with Biometrics?
+# <b> is bold, <br> a line break.
+security-biometric-offer-text = Unlock Vector with your fingerprint, face, or device PIN. No Vector PIN to remember.<br><br>Choose Cancel to set a PIN or Password instead.
+security-use-biometrics = Use Biometrics
+security-biometric-warning-title = Before you continue
+# <b> is bold, <br> a line break.
+security-biometric-warning-text = Vector will be protected by your device's screen lock: fingerprint, face, or device PIN.<br><br><b>Do not remove your phone's screen lock without first disabling Local Encryption in Vector</b>, or this device loses access to its encrypted data and you will need to sign in with your keys again.<br><br>Changing your PIN or adding fingerprints is always safe.
+security-biometric-rejected = Biometric hardware rejected the key, try again
+security-biometric-failed = Could not enable biometrics
+security-switch-credential-title = Switch to PIN or Password
+security-switch-credential-text = Choose the credential that will unlock Vector from now on. There is no recovery if you forget it!
+security-switch-biometric-lead-pin = Enter your current PIN to switch to biometric unlock.
+security-switch-biometric-lead-password = Enter your current password to switch to biometric unlock.
+security-now-biometric = Now unlocking with biometrics
+security-switch-failed = Could not switch

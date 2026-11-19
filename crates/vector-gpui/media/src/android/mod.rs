@@ -17,4 +17,6 @@ pub mod incoming_call;
 #[path = "../../../../../src-tauri/src/android/storage.rs"]
 #[allow(dead_code)]
 pub mod storage;
+#[path = "../../../../../src-tauri/src/android/biometric.rs"]
+pub mod biometric;
 pub mod background_sync;

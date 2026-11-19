@@ -31,6 +31,7 @@ pub mod notify;
 pub mod packs;
 pub mod prefs;
 pub mod security;
+pub mod biometric;
 pub mod selfsync;
 pub mod sound;
 pub mod storage;

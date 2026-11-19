@@ -54,6 +54,11 @@ impl EventEmitter<MethodInfo> for LoginView {}
 
 impl EventEmitter<PickAccount> for LoginView {}
 
+/// This device's copy of the account can no longer be opened: remove it, so its keys can sign in
+/// afresh.
+pub struct ResetAccount(pub String);
+impl EventEmitter<ResetAccount> for LoginView {}
+
 /// The pre-login account pill (`#login-account-picker`) and its list of the other accounts.
 struct Picker {
     rows: Vec<crate::switcher::Row>,
@@ -84,6 +89,8 @@ enum Cred {
     Choose,
     Pin,
     Password,
+    /// The account opens only behind the phone's own prompt.
+    Biometric,
 }
 
 fn methods() -> &'static [Choice] {
@@ -133,9 +140,19 @@ pub struct LoginView {
     reauth_from: Step,
     /// The open popup offers that re-pair.
     popup_reauth: bool,
+    /// The open popup offers to reset this device's copy of the account.
+    popup_reset: bool,
+    /// The open popup is the warning before a new account takes the phone's prompt.
+    popup_bio_setup: bool,
     live: bool,
     /// The system's language, offered once before anything else is chosen.
     offer: Option<LangOffer>,
+    /// The phone's prompt is offered, under this label.
+    bio: Option<SharedString>,
+    /// Its prompt is up, or the unlock it passed to is running.
+    bio_busy: bool,
+    /// A new account may choose the phone's prompt, under this label.
+    bio_option: Option<SharedString>,
 }
 
 struct LangOffer {
@@ -213,21 +230,18 @@ impl LoginView {
             reauth: None,
             reauth_from: Step::Start,
             popup_reauth: false,
+            popup_reset: false,
+            popup_bio_setup: false,
             live: false,
             offer: crate::lang::offer().map(|o| LangOffer { tag: o.tag, name: o.name, busy: None, error: None }),
+            bio: None,
+            bio_busy: false,
+            bio_option: None,
         };
         if let Some(security) = unlock {
             view.unlock = true;
             view.step = Step::Encrypt;
-            view.start_credential(
-                if security == "password" {
-                    Cred::Password
-                } else {
-                    Cred::Pin
-                },
-                window,
-                cx,
-            );
+            view.start_credential(cred_for(security), window, cx);
         }
         view
     }
@@ -602,6 +616,8 @@ impl LoginView {
     fn show_error(&mut self, title: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.popup = Some(Popup::notice(title));
         self.popup_reauth = false;
+        self.popup_reset = false;
+        self.popup_bio_setup = false;
         cx.notify();
     }
 
@@ -622,6 +638,9 @@ impl LoginView {
         self.net.fixture = fixture;
         if self.step == Step::Start {
             self.net_refresh(cx);
+        }
+        if self.unlock && self.step == Step::Encrypt {
+            self.offer_biometric(cx);
         }
     }
 
@@ -709,15 +728,8 @@ impl LoginView {
                 if info.encrypted {
                     self.unlock = true;
                     self.step = Step::Encrypt;
-                    self.start_credential(
-                        if info.security_type == "password" {
-                            Cred::Password
-                        } else {
-                            Cred::Pin
-                        },
-                        window,
-                        cx,
-                    );
+                    self.start_credential(cred_for(&info.security_type), window, cx);
+                    self.offer_biometric(cx);
                 } else {
                     self.finish_unlock(None, window, cx);
                 }
@@ -766,6 +778,57 @@ impl LoginView {
         self.busy = false;
         self.wrong = None;
         cx.notify();
+        if cfg!(target_os = "android") && self.live && self.bio_option.is_none() {
+            let rx = backend::run(backend::biometric::status());
+            cx.spawn(async move |this, cx| {
+                let Ok(status) = rx.await else { return };
+                if !status.supported {
+                    return;
+                }
+                this.update(cx, |this, cx| {
+                    this.bio_option = Some(if status.label.is_empty() {
+                        t::security_use_biometrics()
+                    } else {
+                        status.label.into()
+                    });
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// A new account guarded only by the phone's prompt, once its warning is accepted.
+    fn commit_biometric(&mut self, cx: &mut Context<Self>) {
+        self.set_title(t::login_setting_up(), true, cx);
+        #[cfg(target_os = "android")]
+        let rx = backend::run(account::commit_biometric());
+        #[cfg(not(target_os = "android"))]
+        let rx = backend::run(async { Err::<(), String>(backend::biometric::CANCELLED.into()) });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
+            this.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    let npub = vector_core::my_public_key()
+                        .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+                        .unwrap_or_default();
+                    cx.emit(LoggedIn { npub });
+                }
+                Err(e) => {
+                    if e != backend::biometric::CANCELLED {
+                        let mut p = Popup::notice(t::security_biometric_failed());
+                        p.icon = None;
+                        p.text = Some(kit::escape(&e).into());
+                        this.popup = Some(p);
+                        this.popup_reauth = false;
+                    }
+                    this.open_encryption(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn choose(&mut self, which: &'static str, window: &mut Window, cx: &mut Context<Self>) {
@@ -810,6 +873,7 @@ impl LoginView {
         self.pin.clear();
         self.wrong = None;
         let title = match (cred, self.unlock) {
+            (Cred::Biometric, _) => t::login_biometric_unlock(),
             (Cred::Pin, true) => t::login_enter_pin(),
             (Cred::Pin, false) => t::login_create_your_pin(),
             (_, true) => t::login_enter_password(),
@@ -818,11 +882,141 @@ impl LoginView {
         self.set_title(title, false, cx);
         match cred {
             Cred::Pin => window.focus(&self.pin_focus, cx),
+            Cred::Biometric => {}
             _ => {
                 self.password.update(cx, |p, cx| p.clear(window, cx));
                 window.focus(&self.password.focus_handle(cx), cx);
             }
         }
+    }
+
+    /// On Android, the phone's prompt beside the pad when this account has a wrapped key, and
+    /// straight away for an account that has nothing else.
+    fn offer_biometric(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "android") || !self.live {
+            return;
+        }
+        let rx = backend::run(backend::biometric::status());
+        cx.spawn(async move |this, cx| {
+            let Ok(status) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if !this.unlock || this.step != Step::Encrypt {
+                    return;
+                }
+                let only = this.cred == Cred::Biometric;
+                if !status.enrolled {
+                    if only {
+                        this.biometric_recovery(cx);
+                    }
+                    return;
+                }
+                let label: SharedString = if status.label.is_empty() {
+                    t::login_biometric_unlock()
+                } else {
+                    status.label.clone().into()
+                };
+                if only && !status.label.is_empty() {
+                    this.set_title(t::login_biometric_title(status.label.as_str()), false, cx);
+                }
+                this.bio = Some(label);
+                cx.notify();
+                if only {
+                    this.attempt_biometric(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn attempt_biometric(&mut self, cx: &mut Context<Self>) {
+        if self.bio_busy || self.busy || self.bio.is_none() {
+            return;
+        }
+        self.bio_busy = true;
+        let (passed_tx, passed_rx) = futures::channel::oneshot::channel::<()>();
+        #[cfg(target_os = "android")]
+        let rx = backend::run(async move {
+            let npub = backend::biometric::unlock(move || {
+                let _ = passed_tx.send(());
+            })
+            .await?;
+            account::connect().await;
+            Ok::<_, String>(npub)
+        });
+        #[cfg(not(target_os = "android"))]
+        let rx = {
+            drop(passed_tx);
+            backend::run(async { Err::<String, String>(backend::biometric::UNAVAILABLE.into()) })
+        };
+        cx.spawn(async move |this, cx| {
+            if passed_rx.await.is_ok() {
+                this.update(cx, |this, cx| {
+                    this.wrong = None;
+                    this.set_title(t::login_decrypting(), true, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
+            this.update(cx, |this, cx| {
+                this.bio_busy = false;
+                let e = match result {
+                    Ok(npub) => return cx.emit(LoggedIn { npub }),
+                    Err(e) => e,
+                };
+                let only = this.cred == Cred::Biometric;
+                // Past the prompt, the title was showing the unlock at work.
+                let passed = this.busy;
+                if passed {
+                    let resting = match this.cred {
+                        Cred::Biometric => t::login_biometric_unlock(),
+                        Cred::Password => t::login_enter_password(),
+                        _ => t::login_enter_pin(),
+                    };
+                    this.set_title(resting, false, cx);
+                }
+                match e.as_str() {
+                    backend::biometric::INVALIDATED => {
+                        this.bio = None;
+                        if only {
+                            this.biometric_recovery(cx);
+                        } else if this.cred == Cred::Password {
+                            this.set_title(t::login_biometric_changed_password(), false, cx);
+                        } else {
+                            this.set_title(t::login_biometric_changed_pin(), false, cx);
+                        }
+                    }
+                    backend::biometric::UNAVAILABLE => {
+                        if only {
+                            this.set_title(t::login_biometric_unavailable(), false, cx);
+                        }
+                    }
+                    backend::biometric::CANCELLED => {}
+                    _ if only || passed => this.show_error(e, cx),
+                    _ => log::warn!("biometric unlock: {e}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The wrap is gone and it was the only way in: reset this device's copy, or leave it be.
+    fn biometric_recovery(&mut self, cx: &mut Context<Self>) {
+        self.set_title(t::login_biometric_recovery_state(), false, cx);
+        self.bio = None;
+        let mut p = Popup::notice(t::login_biometric_recovery_title());
+        p.text = Some(t::login_biometric_recovery_text());
+        p.cancel = Some(t::dialog_cancel());
+        p.confirm = t::dialog_confirm();
+        self.popup = Some(p);
+        self.popup_reauth = false;
+        self.popup_reset = true;
+        cx.notify();
     }
 
     fn pin_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1335,12 +1529,20 @@ impl LoginView {
                         .text_size(px(10.))
                         .line_height(px(24.))
                         .text_color(c(ACCENT))
-                        .child(t::login_recommended()),
+                        .child(if self.bio_option.is_some() { t::login_recommended_options() } else { t::login_recommended() }),
                 )
                 .child(
                     lg_btn("lg-pin", t::login_create_pin(), 1)
                         .on_click(cx.listener(|this, _, w, cx| this.choose("pin", w, cx))),
                 )
+                .children(self.bio_option.clone().map(|label| {
+                    lg_btn("lg-bio-option", label, 1).on_click(cx.listener(|this, _, _, cx| {
+                        this.popup = Some(crate::security::biometric_warning());
+                        this.popup_reauth = false;
+                        this.popup_bio_setup = true;
+                        cx.notify();
+                    }))
+                }))
                 .into_any_element();
         }
         if let Some(what) = self.wrong {
@@ -1468,9 +1670,28 @@ impl LoginView {
                     cx,
                 ));
             }
-            Cred::Choose => {}
+            Cred::Choose | Cred::Biometric => {}
+        }
+        if let Some(label) = self.bio.clone().filter(|_| !self.bio_busy) {
+            block = block.child(
+                lg_btn("lg-bio", label, 0)
+                    .mt(px(18.))
+                    .gap(px(8.))
+                    .text_size(px(16.))
+                    .child(svg().path("ui/fingerprint.svg").size(px(20.)).flex_none().text_color(c(0xffffff)))
+                    .on_click(cx.listener(|this, _, _, cx| this.attempt_biometric(cx))),
+            );
         }
         block.into_any_element()
+    }
+}
+
+/// The unlock step an account's `security_type` asks for.
+fn cred_for(security: &str) -> Cred {
+    match security {
+        "password" => Cred::Password,
+        "biometric" => Cred::Biometric,
+        _ => Cred::Pin,
     }
 }
 
@@ -1552,6 +1773,13 @@ impl Render for LoginView {
                     this.popup = None;
                     if std::mem::take(&mut this.popup_reauth) && yes {
                         this.start_reauth(true, window, cx);
+                    }
+                    if std::mem::take(&mut this.popup_bio_setup) && yes {
+                        this.commit_biometric(cx);
+                    }
+                    if std::mem::take(&mut this.popup_reset) && yes {
+                        let npub = vector_core::db::get_current_account().unwrap_or_default();
+                        cx.emit(ResetAccount(npub));
                     }
                     cx.notify();
                 })

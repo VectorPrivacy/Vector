@@ -47,6 +47,7 @@ login-skip-encryption = Skip Encryption
 login-create-password = Create Password
 login-create-pin = Create PIN
 login-recommended = *Recommended Option
+login-recommended-options = *Recommended Options
 login-setting-up = Setting up your account...
 login-decrypting = Decrypting your keys...
 login-encrypting = Encrypting your keys...
@@ -70,6 +71,19 @@ login-correct-pin = Enter the Correct Pin.
 login-correct-password = Enter the Correct Password.
 login-save-password-failed = Could not save your password
 login-save-pin-failed = Could not save your PIN
+
+## Unlocking with the phone's fingerprint or screen lock
+
+login-biometric-unlock = Unlock with Biometrics
+# $label is the phone's own words for its prompt, such as "Use fingerprint".
+login-biometric-title = { $label } to unlock Vector
+login-biometric-changed-pin = Biometrics changed. Enter your PIN.
+login-biometric-changed-password = Biometrics changed. Enter your password.
+login-biometric-unavailable = Unlock unavailable right now. Restart Vector and try again.
+login-biometric-recovery-state = Device security changed
+login-biometric-recovery-title = Device Security Changed
+# <b> is bold, <br> a line break.
+login-biometric-recovery-text = This device's encrypted data can no longer be unlocked: its hardware key was invalidated (screen lock removed, or the data was moved to a new device).<br><br><b>Reset this device and sign in with your keys to restore from the network.</b>
 
 ## The welcome screen's footer
 

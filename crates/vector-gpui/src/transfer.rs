@@ -492,6 +492,7 @@ impl SecurityFlow {
                 match result {
                     Ok(Some(())) => {}
                     Ok(None) => x.busy = false,
+                    Err(e) if e == backend::biometric::CANCELLED => x.busy = false,
                     Err(e) => {
                         x.busy = false;
                         x.error = e;

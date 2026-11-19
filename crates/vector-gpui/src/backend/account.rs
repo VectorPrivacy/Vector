@@ -301,6 +301,38 @@ pub async fn commit(
     if password.as_ref().is_some_and(|p| p.trim().is_empty()) {
         return Err(crate::t::login_password_empty().into());
     }
+    // One derivation seals the key and the seed; the vault and the flag change only once the
+    // commit has landed, so a failed commit leaves nothing behind for a retry.
+    let sealed = match &password {
+        Some(pwd) => {
+            let kdf = vector_core::crypto::Kdf::fresh();
+            let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
+            Some((key, kdf))
+        }
+        None => None,
+    };
+    drop(password);
+    commit_with(sealed, security_type, None).await
+}
+
+/// Commit the pending account under a credential only the phone's prompt opens. Its keystore
+/// key goes again if the commit fails.
+#[cfg(target_os = "android")]
+pub async fn commit_biometric() -> Result<(), String> {
+    let npub = pending().map_or_else(db::get_current_account, Ok)?;
+    let (wrapped, key, kdf) = super::biometric::generate_and_wrap(&npub).await?;
+    let out = commit_with(Some((key, kdf)), "biometric", Some(wrapped)).await;
+    if out.is_err() {
+        super::biometric::forget_keystore(&npub);
+    }
+    out
+}
+
+async fn commit_with(
+    sealed: Option<(Zeroizing<[u8; 32]>, vector_core::crypto::Kdf)>,
+    security_type: &str,
+    wrap: Option<String>,
+) -> Result<(), String> {
     let nsec = Zeroizing::new(
         PENDING_NSEC
             .lock()
@@ -309,15 +341,9 @@ pub async fn commit(
             .ok_or("No pending key")?, // i18n-exempt: developer error
     );
     let seed = MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()).clone().map(Zeroizing::new);
-
-    // One derivation seals the key and the seed; the vault and the flag change only once the
-    // commit has landed, so a failed commit leaves nothing behind for a retry.
-    let kdf = password.as_ref().map(|_| vector_core::crypto::Kdf::fresh());
-    let key = match (&password, &kdf) {
-        (Some(pwd), Some(kdf)) => Some(Zeroizing::new(
-            vector_core::crypto::derive_key(pwd.as_str(), kdf).await,
-        )),
-        _ => None,
+    let (key, kdf) = match sealed {
+        Some((key, kdf)) => (Some(key), Some(kdf)),
+        None => (None, None),
     };
     let seal = |plain: &str| -> Result<String, String> {
         match &key {
@@ -345,27 +371,28 @@ pub async fn commit(
             vector_core::log_warn!("[Account] network start for new account failed: {e}");
         }
     }
-    let security = password.as_ref().map(|_| security_type);
+    let encrypted = key.is_some();
+    let security = encrypted.then_some(security_type);
     if vector_core::signer_kind() == SignerKind::Bunker {
         let (url, remote_hex) = state::pending_bunker_setup()
             .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?; // i18n-exempt: matched by the re-pair offer
         db::settings::commit_bunker_account_setup(
             &stored_key,
-            password.is_some(),
+            encrypted,
             security,
             &seal(&url)?,
             &remote_hex,
-            None,
+            wrap.as_deref(),
             kdf_row.as_deref(),
         )?;
         state::clear_pending_bunker_setup();
     } else {
         db::settings::commit_account_setup(
             &stored_key,
-            password.is_some(),
+            encrypted,
             security,
             stored_seed.as_deref(),
-            None,
+            wrap.as_deref(),
             kdf_row.as_deref(),
         )?;
     }
@@ -379,7 +406,7 @@ pub async fn commit(
         }
         *guard = None;
     }
-    state::set_encryption_enabled(password.is_some());
+    state::set_encryption_enabled(encrypted);
     touch_last_active();
     vector_core::blossom_servers::refresh_cache();
     stamp_fresh_account_profile();
@@ -425,8 +452,28 @@ pub fn abandon_pending() {
     *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// What opens the stored key.
+enum Opener {
+    Plain,
+    Password(Zeroizing<String>),
+    /// The vault key itself, from the system's own prompt.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Key(Zeroizing<[u8; 32]>),
+}
+
 /// Unlock the stored account: its key opened under `password` when it is encrypted.
 pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, String> {
+    open_with(password.map_or(Opener::Plain, Opener::Password)).await
+}
+
+/// Unlock with the vault key itself. A key that does not open the stored one is refused with
+/// [`super::biometric::INVALIDATED`] before the vault sees it.
+#[cfg(target_os = "android")]
+pub(super) async fn unlock_with_key(key: Zeroizing<[u8; 32]>) -> Result<String, String> {
+    open_with(Opener::Key(key)).await
+}
+
+async fn open_with(opener: Opener) -> Result<String, String> {
     *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
     state::init_encryption_enabled();
     if let Some(pk) = vector_core::my_public_key().filter(|_| state::nostr_client().is_some()) {
@@ -465,8 +512,8 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
         );
     }
     let stored = db::get_pkey()?.ok_or_else(|| crate::t::login_no_private_key().to_string())?;
-    let mut nsec = match &password {
-        Some(pwd) => {
+    let mut nsec = match &opener {
+        Opener::Password(pwd) => {
             // The vault takes the key only once it has opened the stored key.
             let kdf = vector_core::crypto::Kdf::of_account()?;
             let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
@@ -482,7 +529,13 @@ pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, Strin
             }
             nsec
         }
-        None => stored,
+        Opener::Key(key) => {
+            let nsec = vector_core::crypto::decrypt_with_key(&stored, key)
+                .map_err(|_| super::biometric::INVALIDATED.to_string())?;
+            vector_core::crypto::install_unlocked_key(key, &vector_core::crypto::Kdf::of_account()?)?;
+            nsec
+        }
+        Opener::Plain => stored,
     };
     let keys = Keys::parse(&nsec).map_err(|_| crate::t::login_invalid_stored_key().to_string())?;
     nsec.zeroize();
@@ -566,6 +619,9 @@ pub async fn reset() {
     super::attachments::cancel_all();
     super::messaging::cancel_all_uploads();
     crate::miniapp::end_for_account_swap().await;
+    // A prompt parked on its answer wakes rather than unlocking an account no longer here.
+    #[cfg(target_os = "android")]
+    crate::android::biometric::on_session_reset();
     vector_core::VectorCore.swap_session().await;
     super::market::reset().await;
     if let Some(bunker) = vector_core::drain_bunker_state() {

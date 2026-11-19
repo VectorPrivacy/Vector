@@ -53,10 +53,15 @@ pub async fn verify(credential: Zeroizing<String>) -> Result<(), String> {
     at_rest::prove_credential(&credential).await.map(drop)
 }
 
-/// The key from the user's own proof, never the vault.
-async fn prove(credential: Option<Zeroizing<String>>) -> Result<Zeroizing<[u8; 32]>, String> {
+/// The key from the user's own proof, never the vault: the typed credential, or the phone's
+/// prompt for an account that has none.
+pub(super) async fn prove(credential: Option<Zeroizing<String>>) -> Result<Zeroizing<[u8; 32]>, String> {
     if !state::is_encryption_enabled_fast() {
         return Err(crate::t::security_not_enabled().into());
+    }
+    #[cfg(target_os = "android")]
+    if super::biometric::is_only_credential() {
+        return super::biometric::prove().await;
     }
     let credential = credential
         .filter(|c| !c.is_empty())
@@ -99,12 +104,73 @@ pub async fn disable(
     progress: impl Fn(MigrationProgress),
 ) -> Result<(), String> {
     let session = db::current_session();
+    let biometric = super::biometric::is_only_credential();
     let key = prove(credential).await?;
     let _one = Migrating::enter()?;
     if !session.is_live() {
         return Err(crate::t::security_account_changed().into());
     }
-    sweep(|| at_rest::disable(&key, &progress))
+    sweep(|| at_rest::disable(&key, &progress))?;
+    if biometric {
+        forget_keystore();
+    }
+    Ok(())
+}
+
+/// The keystore key of a wrap the store no longer holds.
+fn forget_keystore() {
+    #[cfg(target_os = "android")]
+    if let Ok(npub) = db::get_current_account() {
+        super::biometric::forget_keystore(&npub);
+    }
+}
+
+/// Turn encryption on under a credential only the phone's prompt opens.
+#[cfg(target_os = "android")]
+pub async fn enable_biometric(progress: impl Fn(MigrationProgress)) -> Result<(), String> {
+    if state::is_encryption_enabled_fast() {
+        return Err(crate::t::security_already_enabled().into());
+    }
+    let session = db::current_session();
+    let npub = db::get_current_account()?;
+    let (wrapped, key, kdf) = super::biometric::generate_and_wrap(&npub).await?;
+    let out = (|| {
+        let _one = Migrating::enter()?;
+        if !session.is_live() {
+            return Err(crate::t::security_account_changed().to_string());
+        }
+        if state::is_encryption_enabled_fast() {
+            return Err(crate::t::security_already_enabled().into());
+        }
+        sweep(|| at_rest::enable(&key, &kdf, "biometric", Some(&wrapped), None, &progress))
+    })();
+    if out.is_err() {
+        super::biometric::forget_keystore(&npub);
+    }
+    out
+}
+
+/// Move a typed credential's account onto the phone's prompt, re-sealing in one transaction.
+#[cfg(target_os = "android")]
+pub async fn switch_to_biometric(
+    credential: Zeroizing<String>,
+    progress: impl Fn(MigrationProgress),
+) -> Result<(), String> {
+    let session = db::current_session();
+    let old_key = prove(Some(credential)).await?;
+    let npub = db::get_current_account()?;
+    let (wrapped, new_key, kdf) = super::biometric::generate_and_wrap(&npub).await?;
+    let out = (|| {
+        let _one = Migrating::enter()?;
+        if !session.is_live() {
+            return Err(crate::t::security_account_changed().to_string());
+        }
+        sweep(|| at_rest::rekey(&old_key, &new_key, &kdf, "biometric", Some(&wrapped), &progress))
+    })();
+    if out.is_err() {
+        super::biometric::forget_keystore(&npub);
+    }
+    out
 }
 
 /// Re-seal everything under a new credential, all in one transaction.
@@ -116,15 +182,19 @@ pub async fn rekey(
 ) -> Result<(), String> {
     let session = db::current_session();
     let _one = Migrating::enter()?;
-    let old_key = at_rest::prove_credential(&old).await?;
-    drop(old);
+    let biometric = super::biometric::is_only_credential();
+    let old_key = prove(Some(old)).await?;
     let kdf = vector_core::crypto::Kdf::fresh();
     let new_key = Zeroizing::new(vector_core::crypto::derive_key(&new, &kdf).await);
     drop(new);
     if !session.is_live() {
         return Err(crate::t::security_account_changed().into());
     }
-    sweep(|| at_rest::rekey(&old_key, &new_key, &kdf, &kind, None, &progress))
+    sweep(|| at_rest::rekey(&old_key, &new_key, &kdf, &kind, None, &progress))?;
+    if biometric {
+        forget_keystore();
+    }
+    Ok(())
 }
 
 /// The account's nsec and seed phrase. An encrypted account opens them with a key from the

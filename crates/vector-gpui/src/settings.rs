@@ -282,6 +282,7 @@ pub fn help(key: &str) -> Option<(SharedString, String)> {
         "clearStorage" => (t::settings_help_clear_storage(), t::settings_help_clear_storage_text()),
         "encryption" => (t::settings_help_encryption(), t::settings_help_encryption_text()),
         "changePin" => (t::settings_help_change_pin(), t::settings_help_change_pin_text()),
+        "unlockMethod" => (t::settings_help_unlock_method(), t::settings_help_unlock_method_text()),
         "changePassword" => (t::settings_help_change_password(), t::settings_help_change_password_text()),
         "exportAccount" => (t::settings_help_export_account(), t::settings_help_export_account_text()),
         "transfer" => (t::settings_help_transfer(), t::settings_help_transfer_text()),
@@ -408,8 +409,10 @@ pub struct Settings {
     pub servers: Option<Vec<vector_core::blossom_servers::BlossomServerInfo>>,
     pub clock: Option<vector_core::clock::Status>,
     pub dialog: Option<crate::netdialog::NetDialog>,
-    /// The credential Local Encryption uses: `pin` or `password`.
+    /// The credential Local Encryption uses: `pin`, `password` or `biometric`.
     pub sec_kind: String,
+    /// The phone can unlock with its fingerprint or screen lock.
+    pub bio_supported: bool,
     /// A remote-signer account: the signer's npub and its connection state.
     pub signer: Option<(String, &'static str)>,
     /// The fold over Private Keys.
@@ -533,6 +536,7 @@ pub enum Act {
     PickSound,
     ClearSound,
     ChangeCredential,
+    SwitchUnlock,
     ShowKeys,
     Reauthorize,
     Transfer,
@@ -2662,7 +2666,23 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
         switch,
         false,
     ));
-    if enabled {
+    let bio = s.sec_kind == "biometric";
+    if enabled && (s.bio_supported || bio) {
+        let (label, button) = match s.sec_kind.as_str() {
+            "biometric" => (t::settings_unlock_biometrics(), t::settings_use_pin()),
+            "password" => (t::settings_unlock_password(), t::settings_use_biometrics()),
+            _ => (t::settings_unlock_pin(), t::settings_use_biometrics()),
+        };
+        col = col.child(st_row(
+            "unlock-method",
+            label,
+            "unlockMethod",
+            st_btn("unlock-method-btn", button, || Act::SwitchUnlock, on),
+            on,
+        ));
+    }
+    // A biometrics-only account has nothing to type; the unlock row switches it.
+    if enabled && !bio {
         let (label, help) = if s.sec_kind == "password" {
             (t::settings_change_password(), "changePassword")
         } else {
