@@ -595,13 +595,11 @@ pub fn sidebar(
                             .child(drop_half(false, on, move |d: &CategoryDrag| Act::DropCategory(d.id.clone(), below.clone(), false)))
                     })
                     .child(
-                        div().min_w_0().overflow_hidden().child(
-                            crate::kit::spaced(cat.name.to_uppercase(), 0.99)
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(11.))
-                                .line_height(px(24.))
-                                .text_color(c(LABEL)),
-                        ),
+                        crate::kit::spaced_cut(cat.name.to_uppercase(), 0.99)
+                            .font_weight(FontWeight::BOLD)
+                            .text_size(px(11.))
+                            .line_height(px(24.))
+                            .text_color(c(LABEL)),
                     )
                     .child(
                         div()
@@ -1101,7 +1099,7 @@ pub fn roster<E: ParentElement>(
                             }
                         })
                         .child(
-                            crate::kit::spaced(label.to_uppercase(), 0.99)
+                            crate::kit::spaced_cut(label.to_uppercase(), 0.99)
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(11.))
                                 .line_height(px(24.))
@@ -1109,7 +1107,7 @@ pub fn roster<E: ParentElement>(
                         )
                         .child(
                             div()
-                                .flex_1()
+                                .flex_none()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(11.))
                                 .line_height(px(24.))
@@ -1118,6 +1116,8 @@ pub fn roster<E: ParentElement>(
                         )
                         .child(
                             div()
+                                .flex_none()
+                                .ml_auto()
                                 .mt(px(8.))
                                 .size(px(16.))
                                 .flex()

@@ -632,7 +632,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
         .flex_col()
         .gap(px(8.))
         .child(
-            crate::kit::spaced(eyebrow.to_uppercase(), 0.9)
+            crate::kit::spaced_wrap(eyebrow.to_uppercase(), 0.9)
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(10.))
                 .line_height(px(14.))
@@ -1422,7 +1422,7 @@ pub fn modal(m: &Modal, env: &Env, viewport_h: f32) -> AnyElement {
     if let Some(name) = reposter {
         col = col.child(
             pad_first(div()).child(
-                crate::kit::spaced(t::embed_reposted_by(name).to_uppercase(), 0.9)
+                crate::kit::spaced_wrap(t::embed_reposted_by(name).to_uppercase(), 0.9)
                     .font_weight(FontWeight::BOLD)
                     .text_size(px(10.))
                     .line_height(px(14.))
