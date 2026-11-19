@@ -2,7 +2,7 @@
     // The root: everything under <body>. The popups and overlays keep their containers
     // (their openers mount into them by id); the screens migrated to islands are empty
     // mounts nav shows and hides through the shell store.
-    import { shellPanes, shellScreens, shellReveals, shellHandlers, reveal, bindShellEl } from '../lib/shell.svelte.js';
+    import { shellPanes, shellState, shellScreens, shellReveals, shellHandlers, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import { profileScreen } from '../lib/profilescreen.svelte.js';
     import { profileEdit } from '../lib/profileedit.svelte.js';
     import { loginState } from '../lib/login.svelte.js';
@@ -10,6 +10,7 @@
     import Settings from '../settings/Settings.svelte';
     import InvitesScreen from '../people/InvitesScreen.svelte';
     import CreateCommunity from '../community/CreateCommunity.svelte';
+    import Welcome from '../chatlist/Welcome.svelte';
     import LoginScreen from '../auth/LoginScreen.svelte';
     import Navbar from './Navbar.svelte';
     import WindowChrome from './WindowChrome.svelte';
@@ -70,6 +71,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
     import StartMenu from './StartMenu.svelte';
     const panes = shellPanes();
     const screens = shellScreens();
+    const shell = shellState();
     const reveals = shellReveals();
     const profileView = profileScreen();
     const edit = profileEdit();
@@ -107,6 +109,7 @@ import VoiceBar from '../calls/VoiceBar.svelte';
     <div id="ws-conv-empty">
         <img src="./icons/vector-logo.svg" alt="">
         <p>Pick a conversation to get started</p>
+        {#if shell.ws && shell.welcome && screens.chatlist}<Welcome h={screens.chatlist.h} />{/if}
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div id="ws-list-resize" title="Drag to resize (double-click to reset)"

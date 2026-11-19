@@ -1,27 +1,17 @@
 <script>
     // The empty list: a Get Started card that rides the New Chat button, and Viktor's
-    // welcome pointing at the Hub. Viktor's little state machine stays a leaf action.
-    // Widescreen gives the welcome the empty conversation pane, which has the room for it.
-    import { shellState } from '../lib/shell.svelte.js';
+    // welcome. Widescreen gives the welcome the empty conversation pane, which has the room
+    // for it: App renders it there while this is up. Rendered twice rather than moved: a
+    // node Svelte placed has to stay where it was put.
+    import { shellState, setWelcome } from '../lib/shell.svelte.js';
+    import Welcome from './Welcome.svelte';
     let { h } = $props();   // h: newChat, openHub, bindViktor
     const shell = shellState();
 
-    /** Show `node` inside the element `target` names, or back where it was rendered. */
-    function portal(node, target) {
-        const home = node.parentNode;
-        const anchor = document.createComment('');
-        home.insertBefore(anchor, node);
-        const place = (t) => {
-            const dest = t && document.querySelector(t);
-            if (dest) dest.appendChild(node);
-            else if (anchor.parentNode) anchor.parentNode.insertBefore(node, anchor);
-        };
-        place(target);
-        return {
-            update: place,
-            destroy() { node.remove(); anchor.remove(); },
-        };
-    }
+    $effect(() => {
+        setWelcome(true);
+        return () => setWelcome(false);
+    });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -34,11 +24,4 @@
         <p>Create your first private chat.</p>
     </div>
 </div>
-<div class="chatlist-intro" use:portal={shell.ws ? '#ws-conv-empty' : null}>
-    <img class="chatlist-intro-viktor" alt="Viktor" use:h.bindViktor>
-    <div class="chatlist-intro-text">
-        <h4>Welcome to Vector!</h4>
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <p>Feel free to <span class="chatlist-intro-link" onclick={h.openHub}>join the public community</span> to learn more about Vector, discuss privacy, and make some new friends.</p>
-    </div>
-</div>
+{#if !shell.ws}<Welcome {h} />{/if}
