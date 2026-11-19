@@ -1608,7 +1608,8 @@ pub fn find_bech_people(text: &str) -> Vec<(usize, usize, Option<String>)> {
             i += 1;
             continue;
         };
-        let len = b[i + hrp..].iter().take_while(|&&c| body(c)).count();
+        // Far past any real nprofile; an endless run would be rescanned from every match in it.
+        let len = b[i + hrp..].iter().take(4096).take_while(|&&c| body(c)).count();
         let end = i + hrp + len;
         let npub = if profile {
             (len > 0).then_some(()).and_then(|_| Nip19Profile::from_bech32(&lower[i..end]).ok())

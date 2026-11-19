@@ -1002,7 +1002,7 @@ impl FrameSource for GifCanvas<'_> {
         self.shown.copy_from_slice(&self.canvas);
         // The part of the frame on the canvas: a frame may overhang it.
         let (xs, ys) = (fw.min(cw.saturating_sub(left)), fh.min(ch.saturating_sub(top)));
-        for y in 0..ys {
+        for y in 0..if xs == 0 { 0 } else { ys } {
             let src = &self.raw[y * fw * 4..][..xs * 4];
             let at = ((top + y) * cw + left) * 4;
             let shown = &mut (*self.shown)[at..at + xs * 4];
@@ -1212,6 +1212,77 @@ mod tests {
         let mut webp = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\x02\0\0\0".to_vec();
         webp.extend([0xff, 0x3f, 0, 0xff, 0x3f, 0]);
         assert!(super::decode(&webp, "webp", (64, 64)).is_none());
+    }
+
+    /// Animated pictures as other people send them: every format's own compositing code, fed
+    /// valid files with random bytes changed. `PICFUZZ_ITERS` and `PICFUZZ_SEED` run more.
+    #[test]
+    fn no_damaged_animation_panics_the_decoder() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, 12, 10, &[]).unwrap();
+            for i in 0..3u16 {
+                let mut f = gif::Frame::from_rgba_speed(6, 5, &mut vec![(i * 60) as u8; 6 * 5 * 4], 30);
+                f.left = i * 2;
+                f.top = i;
+                f.dispose = [gif::DisposalMethod::Keep, gif::DisposalMethod::Background, gif::DisposalMethod::Previous][i as usize];
+                f.delay = 5;
+                enc.write_frame(&f).unwrap();
+            }
+        }
+        let mut apng = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut apng, 12, 10);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_animated(3, 0).unwrap();
+            let mut w = enc.write_header().unwrap();
+            for i in 0..3u8 {
+                if i > 0 {
+                    w.set_frame_dimension(6, 5).unwrap();
+                    w.set_frame_position(u32::from(i) * 2, u32::from(i)).unwrap();
+                    w.set_dispose_op([png::DisposeOp::None, png::DisposeOp::Background, png::DisposeOp::Previous][i as usize]).unwrap();
+                    w.set_blend_op([png::BlendOp::Source, png::BlendOp::Over][i as usize % 2]).unwrap();
+                }
+                let (fw, fh) = if i == 0 { (12, 10) } else { (6, 5) };
+                w.write_image_data(&vec![i * 80; fw * fh * 4]).unwrap();
+            }
+        }
+        let webp = {
+            let mut enc = crate::shared::animated_webp::Encoder::new(12, 10, 80.).unwrap();
+            for i in 0..3u8 {
+                enc.add(&vec![i * 80; 12 * 10 * 4], 50).unwrap();
+            }
+            enc.finish().unwrap()
+        };
+        let iters: usize = std::env::var("PICFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        let mut seed: u64 = std::env::var("PICFUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x2545_f491_4f6c_dd1d);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let mut b = [&gif, &apng, &webp][i % 3].clone();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % b.len() as u64) as usize;
+                match next() % 5 {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 => b.truncate(at.max(8)),
+                    _ => b[at] ^= 1 << (next() % 8),
+                }
+            }
+            if std::panic::catch_unwind(|| super::decode(&b, "", (64, 64))).is_err() {
+                failed.push(b);
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        assert!(failed.is_empty(), "files that panicked: {failed:?}");
     }
 
     #[test]

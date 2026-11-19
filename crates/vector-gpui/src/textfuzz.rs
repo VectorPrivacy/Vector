@@ -169,3 +169,37 @@ fn no_text_panics_a_parser() {
     }
     assert!(failed.is_empty(), "inputs that panicked: {failed:#?}");
 }
+
+/// Deep nesting and long runs, on the stack a main thread gets.
+#[test]
+fn deep_and_long_text_parses() {
+    let cases: Vec<String> = [
+        ">", "> ", "[", "](", "*", "**", "_", "~~", "`", "(", "<", "<b>", "- ", "  ", "1. ", "|", "#{", "\n", "a", "😀", ":a:", "npub1",
+        "https://", "**a", "||", "![", "&amp;", "\\", "#", "e\u{301}", "東京", "שלום ",
+    ]
+    .iter()
+    .flat_map(|t| [t.repeat(20_000), format!("{}x", t.repeat(5_000))])
+    .chain([format!("{}x{}", "> ".repeat(3_000), "\n".repeat(10)), "- ".repeat(2_000) + "\n" + &"  - x\n".repeat(2_000)])
+    .collect();
+    let slow = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = slow.clone();
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            for s in &cases {
+                let t = std::time::Instant::now();
+                all(s, &mut Rng(7));
+                out.lock().unwrap().push((t.elapsed().as_millis(), s.chars().take(12).collect::<String>(), s.len()));
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("a parser panicked or overflowed on deep or long text");
+    if std::env::var_os("TEXTFUZZ_TIMES").is_some() {
+        let mut v = slow.lock().unwrap().clone();
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+        for (ms, head, len) in v.iter().take(12) {
+            eprintln!("{ms:>6} ms  {len:>7} bytes  {head:?}");
+        }
+    }
+}
