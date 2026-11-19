@@ -321,7 +321,7 @@ mod tests {
 
     /// New text in vector-core that a person might see needs a line in `coretext_table.rs`; what
     /// only a developer reads (logs, internal errors) raises the file's allowance instead:
-    /// `I18N_RATCHET=write cargo test --bin vector-gpui core_text_ratchet`.
+    /// `I18N_RATCHET=write cargo test --lib core_text_ratchet`.
     #[test]
     fn core_text_ratchet() {
         let known: HashSet<&str> = TABLE.iter().map(|(f, _)| *f).collect();

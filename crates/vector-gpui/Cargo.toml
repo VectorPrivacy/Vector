@@ -6,6 +6,13 @@ license = "MIT"
 description = "Vector on GPUI: the native-rendered client, at parity with the Tauri one."
 publish = false
 
+# A library under a small binary, so Android can load the same client as a cdylib
+# (`cargo rustc --lib --crate-type cdylib`).
+[lib]
+name = "vector_gpui"
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "vector-gpui"
 path = "src/main.rs"

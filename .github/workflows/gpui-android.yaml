@@ -1,13 +1,17 @@
 name: GPUI Android
 
-# GPUI's Android platform (crates/vector-gpui/vendor/gpui_android), compiled for phones with the
-# runner's NDK. Its own concurrency group, so it never waits behind or replaces a desktop build.
+# The GPUI client for Android phones, compiled with the runner's NDK: its platform
+# (crates/vector-gpui/vendor/gpui_android) and the client itself. Its own concurrency group, so
+# it never waits behind or replaces a desktop build.
 on:
   push:
     branches: [gpui]
     paths:
-      - 'crates/vector-gpui/vendor/**'
-      - 'crates/vector-gpui/Cargo.lock'
+      - 'crates/vector-gpui/**'
+      - 'crates/vector-i18n/**'
+      - 'crates/vector-core/**'
+      - 'crates/vector-calls/**'
+      - 'src-tauri/src/**'
       - '.github/workflows/gpui-android.yaml'
   workflow_dispatch:
 
@@ -24,6 +28,16 @@ env:
 
 jobs:
   check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: platform
+          # Expected to fail until the client's desktop-only dependencies are ported.
+          - name: client
+            experimental: true
+    name: check (${{ matrix.name }})
+    continue-on-error: ${{ matrix.experimental || false }}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -39,8 +53,12 @@ jobs:
 
       - name: NDK toolchain
         run: |
-          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ndk="$ANDROID_NDK_LATEST_HOME"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
           {
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "ANDROID_NDK_ROOT=$ndk"
+            echo "ANDROID_NDK=$ndk"
             echo "CC_aarch64_linux_android=$bin/aarch64-linux-android26-clang"
             echo "CXX_aarch64_linux_android=$bin/aarch64-linux-android26-clang++"
             echo "AR_aarch64_linux_android=$bin/llvm-ar"
@@ -50,12 +68,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/vector-gpui -> target
-          key: android-aarch64
+          key: android-aarch64-${{ matrix.name }}
 
       # Warnings fail only in our own platform crates: -D warnings would reach the vendored ones too.
       - name: Clippy
+        if: matrix.name == 'platform'
         shell: bash
         run: |
           cargo clippy --locked -p gpui_platform -p gpui_android --target aarch64-linux-android \
             --message-format short 2>&1 | tee clippy.log
           ! grep -E '^vendor/gpui_(android|platform)/.*: (warning|error)' clippy.log
+
+      - name: Check
+        if: matrix.name == 'client'
+        run: cargo check --locked --lib --target aarch64-linux-android --no-default-features --features tor,i2p --message-format short

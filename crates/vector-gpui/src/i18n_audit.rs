@@ -5,7 +5,7 @@
 //! line or the one above.
 //!
 //! After converting strings, or when a file's count changes for a good reason:
-//! `I18N_RATCHET=write cargo test --bin vector-gpui i18n_audit`.
+//! `I18N_RATCHET=write cargo test --lib i18n_audit`.
 
 use std::collections::BTreeMap;
 use std::path::Path;

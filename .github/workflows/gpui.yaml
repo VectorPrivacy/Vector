@@ -117,7 +117,7 @@ jobs:
       - name: Tests
         shell: bash
         run: |
-          cargo test --locked ${{ matrix.features }} --bin vector-gpui
+          cargo test --locked ${{ matrix.features }} --lib
           cargo test --locked --manifest-path ../vector-i18n/Cargo.toml
 
   # Release builds to try the port on a Mac or a PC: a push whose message carries [package].
