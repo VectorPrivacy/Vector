@@ -137,4 +137,71 @@ mod tests {
         let px = |x: usize, y: usize| bgra[(y * w as usize + x) * 4 + 1];
         assert!(px(8, 24) < 80 && px(56, 24) > 180, "left {} right {}", px(8, 24), px(56, 24));
     }
+
+    fn packets(w: u32, h: u32, n: i64) -> Vec<Vec<u8>> {
+        let codec = ffmpeg::encoder::find(ffmpeg::codec::Id::VP8).unwrap();
+        let mut enc = ffmpeg::codec::context::Context::new_with_codec(codec).encoder().video().unwrap();
+        enc.set_width(w);
+        enc.set_height(h);
+        enc.set_format(Pixel::YUV420P);
+        enc.set_time_base((1, 30));
+        enc.set_bit_rate(200_000);
+        let mut enc = enc.open().unwrap();
+        let mut out = Vec::new();
+        let mut drain = |enc: &mut ffmpeg::encoder::Video| {
+            let mut pkt = ffmpeg::Packet::empty();
+            while enc.receive_packet(&mut pkt).is_ok() {
+                out.push(pkt.data().unwrap().to_vec());
+            }
+        };
+        for i in 0..n {
+            let mut f = ffmpeg::frame::Video::new(Pixel::YUV420P, w, h);
+            for (k, b) in f.data_mut(0).iter_mut().enumerate() {
+                *b = (k as i64 * 7 + i * 13) as u8;
+            }
+            f.data_mut(1).fill(90);
+            f.data_mut(2).fill(160);
+            f.set_pts(Some(i));
+            enc.send_frame(&f).unwrap();
+            drain(&mut enc);
+        }
+        enc.send_eof().unwrap();
+        drain(&mut enc);
+        out
+    }
+
+    /// A peer's frames, damaged or changing size: refused or shown, never a panic.
+    /// `VP8FUZZ_ITERS` runs more.
+    #[test]
+    fn damaged_vp8_frames_never_panic() {
+        if !super::available() || ffmpeg::encoder::find(ffmpeg::codec::Id::VP8).is_none() {
+            return;
+        }
+        let streams = [packets(64, 48, 8), packets(33, 17, 4), packets(2, 2, 2)];
+        let iters: usize = std::env::var("VP8FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let mut seed = 0x0dd5_eed5_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..iters {
+            let mut dec = super::Vp8::new().unwrap();
+            for _ in 0..12 {
+                let s = &streams[(next() % 3) as usize];
+                let mut p = s[(next() % s.len() as u64) as usize].clone();
+                for _ in 0..next() % 6 {
+                    let at = (next() % p.len() as u64) as usize;
+                    match next() % 4 {
+                        0 => p[at] = next() as u8,
+                        1 => p.truncate(at.max(1)),
+                        2 => p[at] ^= 1 << (next() % 8),
+                        _ => p.extend((0..next() % 64).map(|_| next() as u8)),
+                    }
+                }
+                let _ = dec.decode(&p, 1 << 20);
+            }
+        }
+    }
 }

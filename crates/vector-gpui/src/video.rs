@@ -792,7 +792,7 @@ fn stretched(track: &Track, input: Option<&AudioInputSpec>, speed: f32, duration
         && duration > 0
     {
         if (speed - 1.).abs() < 1e-3 {
-            return spec.open().and_then(|i| load_audio(&i));
+            return spec.open().and_then(|i| load_audio(i, duration));
         }
         let wav = stretched::open(spec.open()?, speed, duration)?;
         return crate::audio::engine()?.load_from_file(&AudioInput::Held(wav)).map(|r| r.id);
@@ -802,7 +802,7 @@ fn stretched(track: &Track, input: Option<&AudioInputSpec>, speed: f32, duration
         Some(t) => t,
         None => {
             let i = input.ok_or("no source")?.open()?; // i18n-exempt: developer error
-            let t = Arc::new(decode_audio(&i)?);
+            let t = Arc::new(decode_audio(&i, WHOLE_MAX_SAMPLES)?);
             if let Ok(mut slot) = track.lock() {
                 *slot = Some(t.clone());
             }
@@ -835,7 +835,7 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
         // spawn-detached: decodes bytes in hand into the engine; owns no account state.
         std::thread::spawn(move || {
             let res = if (speed - 1.).abs() < 1e-3 {
-                input.open().and_then(|i| load_audio(&i))
+                input.open().and_then(|i| load_audio(i, duration))
             } else {
                 stretched(&track, Some(&input), speed, duration)
             };
@@ -879,15 +879,23 @@ fn start(input: AudioInputSpec, info: &Info, from: u64, scale: f32, big: bool, s
     })
 }
 
-/// The track through the engine: streamed where it reads the container, decoded whole where not.
-fn load_audio(input: &AudioInput) -> Result<u32, String> {
+/// A track decoded whole stops here (half an hour at 48 kHz): its container's duration can lie.
+const WHOLE_MAX_SAMPLES: usize = 48_000 * 60 * 30;
+
+/// The track through the engine: streamed where it reads the container, made as the engine
+/// reads it where the clip is long, decoded whole where neither.
+fn load_audio(input: AudioInput, duration: u64) -> Result<u32, String> {
     let e = crate::audio::engine()?;
     let mp4 = input.extension().is_some_and(|x| matches!(x.as_str(), "mp4" | "mov" | "m4v"));
     // A stream decodes as it plays: reading all of it first would download the whole video.
-    if (mp4 || input.is_remote()) && let Ok(r) = e.load_from_file(input) {
+    if (mp4 || input.is_remote()) && let Ok(r) = e.load_from_file(&input) {
         return Ok(r.id);
     }
-    let (samples, rate) = decode_audio(input)?;
+    if duration > STRETCH_WHOLE_MAX_MS {
+        let wav = stretched::open(input, 1., duration)?;
+        return e.load_from_file(&AudioInput::Held(wav)).map(|r| r.id);
+    }
+    let (samples, rate) = decode_audio(&input, WHOLE_MAX_SAMPLES)?;
     e.load_from_samples(samples, rate).map(|r| r.id)
 }
 
@@ -982,7 +990,7 @@ mod ff {
     pub fn decode(_: AudioInput, _: (u32, u32), _: u64, _: Receiver<Cmd>, _: std::sync::mpsc::SyncSender<Out>) -> Option<()> {
         None
     }
-    pub fn decode_audio(_: &AudioInput) -> Result<(Vec<f32>, u32), String> {
+    pub fn decode_audio(_: &AudioInput, _: usize) -> Result<(Vec<f32>, u32), String> {
         Err("no decoder".into()) // i18n-exempt: developer error
     }
     pub struct AudioReader;

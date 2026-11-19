@@ -65,7 +65,8 @@ fn at(p: &Plane, depth: Depth, x: usize, y: usize) -> i32 {
     match depth {
         Depth::U8 => (row[x] as i32) << 2,
         Depth::Low(bits) => {
-            let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as i32;
+            // A damaged stream can set the bits above the depth.
+            let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as i32 & ((1 << bits) - 1);
             if bits >= 10 { v >> (bits - 10) } else { v << (10 - bits) }
         }
         Depth::High => (u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) >> 6) as i32,
@@ -176,5 +177,27 @@ mod tests {
         assert!(out[0] > 250 && out[4] < 5 && out[8] < 5 && out[12] < 5);
         convert(&f, 2, 2, 270, &mut out);
         assert!(out[12] > 250 && out[0] < 5);
+    }
+
+    #[test]
+    fn samples_with_bits_above_their_depth_read_as_their_depth() {
+        let frame = |y: u16| {
+            let (yp, cp) = (y.to_le_bytes().repeat(16), 512u16.to_le_bytes().repeat(4));
+            let f = Yuv {
+                w: 4,
+                h: 4,
+                y: Plane { data: &yp, stride: 8 },
+                u: Plane { data: &cp, stride: 4 },
+                v: Some(Plane { data: &cp, stride: 4 }),
+                shift: (1, 1),
+                depth: Depth::Low(10),
+                full_range: false,
+                bt709: true,
+            };
+            let mut out = vec![0; 3 * 3 * 4];
+            convert(&f, 3, 3, 0, &mut out);
+            out
+        };
+        assert_eq!(frame(0xffff), frame(0x3ff));
     }
 }

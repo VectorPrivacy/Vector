@@ -380,8 +380,9 @@ pub fn decode(input: AudioInput, size: (u32, u32), from: u64, cmds: Receiver<Cmd
     }
 }
 
-/// A track FFmpeg reads that the engine's own decoders do not (Opus in WebM): whole, mono.
-pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
+/// A track FFmpeg reads that the engine's own decoders do not (Opus in WebM): whole, mono, up
+/// to `max` samples.
+pub fn decode_audio(input: &AudioInput, max: usize) -> Result<(Vec<f32>, u32), String> {
     let reader: Box<dyn ReadSeek> = Box::new(Reader(input.open()?));
     let mut src = Source::open(reader).ok_or("unreadable")?;
     let stream = src.input.streams().best(ffmpeg::media::Type::Audio).ok_or("no audio")?; // i18n-exempt: developer error
@@ -398,7 +399,7 @@ pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
         }
     };
     let mut packet = ffmpeg::Packet::empty();
-    loop {
+    while samples.len() < max {
         match packet.read(&mut src.input) {
             Ok(()) if packet.stream() == index => {
                 let _ = dec.send_packet(&packet);
@@ -408,8 +409,11 @@ pub fn decode_audio(input: &AudioInput) -> Result<(Vec<f32>, u32), String> {
             Err(_) => break,
         }
     }
-    let _ = dec.send_eof();
-    drain(&mut dec, &mut samples, &mut rate);
+    if samples.len() < max {
+        let _ = dec.send_eof();
+        drain(&mut dec, &mut samples, &mut rate);
+    }
+    samples.truncate(max);
     if samples.is_empty() || rate == 0 {
         return Err("no audio".into()); // i18n-exempt: developer error
     }
@@ -569,6 +573,99 @@ mod tests {
         t.join().unwrap();
     }
 
+    /// Videos as other people send them: the fixture clips with random bytes changed, through the
+    /// poster, the player's decoder and both sound readers. `VIDFUZZ_DIR` adds seeds,
+    /// `VIDFUZZ_ITERS` and `VIDFUZZ_SEED` run more, `VIDFUZZ_OUT` keeps what failed.
+    #[test]
+    fn no_damaged_video_panics() {
+        let mut seeds: Vec<(Vec<u8>, String)> = ["clip.mp4", "turned.mov"]
+            .iter()
+            .map(|n| (std::fs::read(format!("{}/reference/media/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap(), n.rsplit('.').next().unwrap().to_string()))
+            .collect();
+        if let Ok(dir) = std::env::var("VIDFUZZ_DIR") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+                seeds.push((std::fs::read(e.path()).unwrap(), ext));
+            }
+        }
+        let iters: usize = std::env::var("VIDFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+        let mut seed: u64 = std::env::var("VIDFUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x5eed_f00d_cafe_d00d);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let dir = std::env::temp_dir().join(format!("vidfuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let (mut b, ext) = seeds[i % seeds.len()].clone();
+            for _ in 0..1 + next() % 8 {
+                let at = (next() % b.len() as u64) as usize;
+                match next() % 6 {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 if next() % 4 == 0 => b.truncate(at.max(16)),
+                    4 => b[at..].iter_mut().take(4).for_each(|x| *x = 0xff),
+                    _ => b[at] ^= 1 << (next() % 8),
+                }
+            }
+            let path = dir.join(format!("case.{ext}"));
+            std::fs::write(&path, &b).unwrap();
+            let input = AudioInput::File(path);
+            let t = std::time::Instant::now();
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = probe(input.clone(), 1.);
+                let (cmd, cmds) = std::sync::mpsc::channel();
+                let (tx, rx) = std::sync::mpsc::sync_channel(QUEUE);
+                let feed = input.clone();
+                let player = std::thread::spawn(move || decode(feed, (48, 32), 0, cmds, tx));
+                for n in 0..8 {
+                    match rx.recv_timeout(Duration::from_secs(10)) {
+                        Ok(Out::Frame { .. }) if n == 3 => {
+                            let _ = cmd.send(Cmd::Seek(200, 1));
+                        }
+                        Ok(Out::Frame { .. }) => {}
+                        _ => break,
+                    }
+                }
+                let _ = cmd.send(Cmd::Stop);
+                drop(rx);
+                let played = player.join().is_ok();
+                let _ = decode_audio(&input, 48_000 * 4);
+                if let Ok(mut r) = AudioReader::open(&input) {
+                    let mut out = Vec::new();
+                    for n in 0..24 {
+                        if n == 6 {
+                            r.seek(150);
+                        }
+                        if r.next(&mut out).is_none() {
+                            break;
+                        }
+                    }
+                }
+                played
+            }))
+            .unwrap_or(false);
+            if !ok || t.elapsed() > Duration::from_secs(20) {
+                eprintln!("case {i} ({ext}, {} bytes): {}", b.len(), if ok { "stalled" } else { "panicked" });
+                failed.push((ext, b));
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Ok(out) = std::env::var("VIDFUZZ_OUT") {
+            for (i, (ext, b)) in failed.iter().enumerate() {
+                std::fs::write(format!("{out}/bad-{i}.{ext}"), b).unwrap();
+            }
+        }
+        assert!(failed.is_empty(), "{} damaged videos panicked or stalled", failed.len());
+    }
+
     /// `VIDEO_PROBE=a.webm:b.mov cargo test probe_files -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -576,7 +673,7 @@ mod tests {
         for p in std::env::var("VIDEO_PROBE").unwrap_or_default().split(':').filter(|p| !p.is_empty()) {
             let i = info(p);
             println!("{p}: {:?}", i.map(|i| (i.w, i.h, i.duration, i.audio)));
-            if let Ok((s, rate)) = decode_audio(&AudioInput::File(p.into())) {
+            if let Ok((s, rate)) = decode_audio(&AudioInput::File(p.into()), usize::MAX) {
                 println!("  audio {} samples at {rate}", s.len());
             }
         }

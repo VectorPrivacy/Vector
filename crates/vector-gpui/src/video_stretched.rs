@@ -265,4 +265,14 @@ mod tests {
         let ms = vector_media::audio_engine::probe_duration(&input).unwrap();
         assert!((2400..=2600).contains(&ms), "{ms}");
     }
+
+    #[test]
+    fn at_its_own_speed_it_is_the_clip_as_long_as_it_was() {
+        let s = open(clip(), 1., 5000).unwrap();
+        let ms = vector_media::audio_engine::probe_duration(&AudioInput::Held(s.clone())).unwrap();
+        assert!((4900..=5100).contains(&ms), "{ms}");
+        let mut all = Vec::new();
+        vector_core::media::reader(s).read_to_end(&mut all).unwrap();
+        assert!(all.iter().any(|&b| b != 0), "silent");
+    }
 }

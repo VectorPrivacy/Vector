@@ -1391,6 +1391,29 @@ mod tests {
     }
 
     #[test]
+    fn pictures_drawn_from_disk_refuse_huge_canvases() {
+        let open = |format, bytes: Vec<u8>| {
+            gpui::Image::from_bytes(format, bytes).to_image_data(gpui::SvgRenderer::new(std::sync::Arc::new(())))
+        };
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, 2, 2, &[]).unwrap();
+            enc.write_frame(&gif::Frame::from_rgba_speed(2, 2, &mut vec![200; 16], 30)).unwrap();
+        }
+        assert!(open(gpui::ImageFormat::Gif, gif.clone()).is_ok());
+        gif[6..10].fill(0xff);
+        assert!(open(gpui::ImageFormat::Gif, gif).is_err(), "a 65535×65535 canvas");
+        let png = |w, h| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h)).write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        assert!(open(gpui::ImageFormat::Png, png(64, 64)).is_ok());
+        assert!(open(gpui::ImageFormat::Png, png(16_385, 1)).is_err());
+        assert!(open(gpui::ImageFormat::Png, png(9_000, 8_000)).is_err(), "72 megapixels, 288 MB as RGBA");
+    }
+
+    #[test]
     fn a_gif_composites_as_the_image_crate_does() {
         use super::FrameSource as _;
         use gif::DisposalMethod::*;
