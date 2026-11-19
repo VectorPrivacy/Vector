@@ -1671,15 +1671,11 @@ impl Element for List {
         });
 
         let mut mask = ContentMask::new(bounds);
-        if let Some(depth) = self.style.edge_fade {
+        if let Some(fade) = self.style.edge_fade {
             let max = self.state.max_offset_for_scrollbar().y.max(Pixels::ZERO);
             let above = (-self.state.scroll_px_offset_for_scrollbar().y).clamp(Pixels::ZERO, max);
-            mask.fade = crate::MaskFade {
-                top: bounds.top(),
-                top_len: above.min(depth),
-                bottom: bounds.bottom(),
-                bottom_len: (max - above).min(depth),
-            };
+            let room = Edges { top: above, bottom: max - above, ..Default::default() };
+            mask.fade = crate::MaskFade::within(bounds, fade.lengths(room));
         }
         window.with_content_mask(Some(mask), |window| {
             for item in &mut prepaint.layout.item_layouts {

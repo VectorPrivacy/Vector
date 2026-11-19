@@ -261,16 +261,13 @@ pub fn render(
             div()
                 .id(("eh-text", i))
                 .relative()
-                .when(collapsed, |d| d.max_h(px(13. * 4.4)).overflow_hidden())
+                .when(collapsed, |d| {
+                    d.max_h(px(13. * 4.4))
+                        .overflow_hidden()
+                        .fade_out(gpui::Edges { bottom: px(13. * 4.4 * 0.45), ..Default::default() })
+                })
                 .when(long, |d| d.cursor_pointer().on_click(move |_, w, cx| toggle(i, w, cx)))
                 .child(rendered(&texts[0], &h.tags, store, media, text_look(), "eh-0"))
-                .when(collapsed, |d| {
-                    d.child(div().absolute().left_0().right_0().bottom_0().h(px(26.)).bg(gpui::linear_gradient(
-                        180.,
-                        gpui::linear_color_stop(ca(0x14, 0x14, 0x14, 0.), 0.),
-                        gpui::linear_color_stop(ca(0x14, 0x14, 0x14, 1.), 1.),
-                    )))
-                })
         };
         let last = i == 0;
         div()

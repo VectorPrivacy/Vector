@@ -1188,22 +1188,6 @@ fn shelf(
         }));
     }
     head = head.child(div().flex().gap(px(6.)).child(arrow(-1., at_start)).child(arrow(1., at_end)));
-    let fade = |left: bool, on: bool| {
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .w(px(32.))
-            .when(left, |d| d.left_0())
-            .when(!left, |d| d.right_0())
-            .when(on, |d| {
-                d.bg(gpui::linear_gradient(
-                    if left { 90. } else { 270. },
-                    gpui::linear_color_stop(c(BG), 0.),
-                    gpui::linear_color_stop(ca(3, 3, 3, 0.), 1.),
-                ))
-            })
-    };
     div()
         .mt(px(if narrow { 30. } else { 36. }))
         .child(head)
@@ -1220,11 +1204,10 @@ fn shelf(
                         .pt(px(6.))
                         .pb(px(10.))
                         .overflow_x_scroll()
+                        .edge_fades(gpui::Edges { left: px(32.), right: px(32.), ..Default::default() })
                         .track_scroll(handle)
                         .children(tiles),
-                )
-                .child(fade(true, !at_start))
-                .child(fade(false, !at_end && max > 0.)),
+                ),
         )
         .into_any_element()
 }

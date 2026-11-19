@@ -145,27 +145,6 @@ pub fn view(id: &str, l: &Lyrics, sheet: &Sheet, pos: u64, playing: bool, on: On
     }
     let cur = current(l, pos);
     let scroll = &sheet.scroll;
-    let view_top = f32::from(scroll.bounds().origin.y);
-    let view_h = f32::from(scroll.bounds().size.height).max(1.);
-    let offset = -f32::from(scroll.offset().y);
-    let max = f32::from(scroll.max_offset().y);
-    let (fade_top, fade_bottom) = (
-        if offset > 1. { 0.18 } else { 0. },
-        if offset < max - 1. { 0.20 } else { 0. },
-    );
-    // The stylesheet's mask, taken per line at its middle.
-    let fade = |i: usize| -> f32 {
-        let Some(b) = scroll.bounds_for_item(i) else { return 1. };
-        let y = (f32::from(b.origin.y + b.size.height / 2.) - view_top) / view_h;
-        let mut a: f32 = 1.;
-        if fade_top > 0. && y < fade_top {
-            a = a.min((y / fade_top).max(0.));
-        }
-        if fade_bottom > 0. && y > 1. - fade_bottom {
-            a = a.min(((1. - y) / fade_bottom).max(0.));
-        }
-        a
-    };
     let lines = l.lines.iter().enumerate().map(|(i, line)| {
         let i_s = i as isize;
         if !l.synced {
@@ -188,7 +167,7 @@ pub fn view(id: &str, l: &Lyrics, sheet: &Sheet, pos: u64, playing: bool, on: On
         } else {
             0.75
         };
-        let alpha = base * fade(i);
+        let alpha = base;
         let lit = |fill: f32| gpui::white().opacity(0.4 + 0.6 * fill.clamp(0., 1.));
         let body: AnyElement = if line.text.is_empty() {
             let pulse = if i_s == cur {
@@ -274,6 +253,7 @@ pub fn view(id: &str, l: &Lyrics, sheet: &Sheet, pos: u64, playing: bool, on: On
                     .px(px(4.))
                     .when(!l.synced, |d| d.py(px(4.)))
                     .overflow_y_scroll()
+                    .edge_fades(gpui::Edges { top: px(HEIGHT * 0.18), bottom: px(HEIGHT * 0.20), ..Default::default() })
                     .track_scroll(scroll)
                     .on_scroll(move |_, w, cx| hold(None, w, cx))
                     .children(lines),

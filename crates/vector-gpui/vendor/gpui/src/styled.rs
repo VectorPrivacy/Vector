@@ -2,7 +2,7 @@ use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
     FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
-    Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
+    Edges, Pixels, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
     TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
@@ -757,8 +757,31 @@ pub trait Styled: Sized {
 
     /// Fades a scroller's ends over up to `depth`, each by as much as is left to scroll that way,
     /// so a row at rest against an end is never dimmed.
-    fn edge_fade(mut self, depth: Pixels) -> Self {
-        self.style().edge_fade = Some(depth);
+    fn edge_fade(self, depth: Pixels) -> Self {
+        self.edge_fades(Edges::all(depth))
+    }
+
+    /// [`Styled::edge_fade`] with its own depth at each edge.
+    fn edge_fades(mut self, depth: Edges<Pixels>) -> Self {
+        self.style().edge_fade = Some(crate::EdgeFade {
+            top: depth.top,
+            bottom: depth.bottom,
+            left: depth.left,
+            right: depth.right,
+            by_scroll: true,
+        });
+        self
+    }
+
+    /// Fades the content out toward its edges over fixed lengths, whatever the scroll.
+    fn fade_out(mut self, len: Edges<Pixels>) -> Self {
+        self.style().edge_fade = Some(crate::EdgeFade {
+            top: len.top,
+            bottom: len.bottom,
+            left: len.left,
+            right: len.right,
+            by_scroll: false,
+        });
         self
     }
 

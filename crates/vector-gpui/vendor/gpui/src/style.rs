@@ -174,6 +174,37 @@ pub struct GridTemplate {
     pub min_size: GridTemplateMinSize,
 }
 
+/// How far content fades out toward each edge of its box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EdgeFade {
+    /// The top ramp's length.
+    pub top: Pixels,
+    /// The bottom ramp's length.
+    pub bottom: Pixels,
+    /// The left ramp's length.
+    pub left: Pixels,
+    /// The right ramp's length.
+    pub right: Pixels,
+    /// Each ramp shortens to what is left to scroll that way, so an end at rest is sharp.
+    pub by_scroll: bool,
+}
+
+impl EdgeFade {
+    /// The ramps for a box with `room` left to scroll toward each edge.
+    pub fn lengths(&self, room: Edges<Pixels>) -> Edges<Pixels> {
+        let len = Edges { top: self.top, bottom: self.bottom, left: self.left, right: self.right };
+        if !self.by_scroll {
+            return len;
+        }
+        Edges {
+            top: len.top.min(room.top),
+            bottom: len.bottom.min(room.bottom),
+            left: len.left.min(room.left),
+            right: len.right.min(room.right),
+        }
+    }
+}
+
 /// The CSS styling that can be applied to an element via the `Styled` trait
 #[derive(Clone, Refineable, Debug)]
 #[refineable(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -304,8 +335,8 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
-    /// A scroller's ends fade over up to this depth, each by as much as is left to scroll that way.
-    pub edge_fade: Option<Pixels>,
+    /// The content fades out toward the edges, as CSS `mask-image` gradients do.
+    pub edge_fade: Option<EdgeFade>,
 
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`

@@ -17,7 +17,7 @@
 
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, BackGestureEvent, Bounds, ClickEvent,
-    DispatchPhase, Display, Element, ElementId, Entity, EntityId, ExternalDragPayload,
+    DispatchPhase, Display, Edges, Element, ElementId, Entity, EntityId, ExternalDragPayload,
     ExternalDragPayloadSource, FileDropEvent, FocusHandle, Global, GlobalElementId, Hitbox,
     HitboxBehavior, HitboxId, InspectorElementId, IsZero, KeyContext, KeyDownEvent, KeyUpEvent,
     KeyboardButton, KeyboardClickEvent, LayoutId, LongPressEvent, ModifiersChangedEvent,
@@ -2630,17 +2630,28 @@ impl Interactivity {
     }
 
     /// How far this scroller has scrolled down, and how far it can still go.
-    fn scroll_room(&self, bounds: Bounds<Pixels>, style: &Style, window: &Window) -> (Pixels, Pixels) {
+    /// How far the content runs past each edge.
+    fn scroll_room(&self, bounds: Bounds<Pixels>, style: &Style, window: &Window) -> Edges<Pixels> {
         let Some(offset) = self.scroll_offset.as_ref() else {
-            return (Pixels::ZERO, Pixels::ZERO);
+            return Edges::default();
         };
+        let offset = *offset.borrow();
         let padding = style
             .padding
             .to_pixels(bounds.size.into(), window.rem_size())
             .map(|edge| window.pixel_snap(*edge));
-        let max = (self.content_size.height + padding.top + padding.bottom - bounds.size.height).max(Pixels::ZERO);
-        let above = (-offset.borrow().y).clamp(Pixels::ZERO, max);
-        (above, max - above)
+        let max_y = (self.content_size.height + padding.top + padding.bottom - bounds.size.height).max(Pixels::ZERO);
+        let max_x = (self.content_size.width + padding.left + padding.right - bounds.size.width).max(Pixels::ZERO);
+        let top = (-offset.y).clamp(Pixels::ZERO, max_y);
+        // Mirrored content overflows to the left and scrolls with a positive offset.
+        let (left, right) = if window.mirrored() {
+            let right = offset.x.clamp(Pixels::ZERO, max_x);
+            (max_x - right, right)
+        } else {
+            let left = (-offset.x).clamp(Pixels::ZERO, max_x);
+            (left, max_x - left)
+        };
+        Edges { top, bottom: max_y - top, left, right }
     }
 
     fn clamp_scroll_position(
@@ -2762,14 +2773,9 @@ impl Interactivity {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
                             let mut mask = style.overflow_mask_in(bounds, window);
-                                if let (Some(depth), Some(mask)) = (style.edge_fade, mask.as_mut()) {
-                                    let (above, below) = self.scroll_room(bounds, &style, window);
-                                    mask.fade = crate::MaskFade {
-                                        top: bounds.top(),
-                                        top_len: above.min(depth),
-                                        bottom: bounds.bottom(),
-                                        bottom_len: below.min(depth),
-                                    };
+                                if let (Some(fade), Some(mask)) = (style.edge_fade, mask.as_mut()) {
+                                    let room = self.scroll_room(bounds, &style, window);
+                                    mask.fade = crate::MaskFade::within(bounds, fade.lengths(room));
                                 }
                             window.with_content_mask(
                                 mask,

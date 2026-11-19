@@ -2522,12 +2522,12 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Each corner's rounding; zero clips square.
     pub corner_radii: Corners<P>,
-    /// Vertical alpha ramps, as CSS `mask-image` fades a scroller's ends.
+    /// Alpha ramps at the edges, as CSS `mask-image` fades a scroller's ends.
     pub fade: MaskFade<P>,
 }
 
-/// Content fading out toward a mask's top and bottom: transparent at `top`, opaque `top_len`
-/// below it, and likewise up from `bottom`. A zero length is no ramp.
+/// Content fading out toward a mask's edges: transparent at `top`, opaque `top_len` below it,
+/// and likewise in from `bottom`, `left` and `right`. A zero length is no ramp.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct MaskFade<P: Clone + Debug + Default + PartialEq> {
@@ -2539,15 +2539,41 @@ pub struct MaskFade<P: Clone + Debug + Default + PartialEq> {
     pub bottom: P,
     /// How far the bottom ramp runs.
     pub bottom_len: P,
+    /// Where the left ramp starts.
+    pub left: P,
+    /// How far the left ramp runs.
+    pub left_len: P,
+    /// Where the right ramp ends.
+    pub right: P,
+    /// How far the right ramp runs.
+    pub right_len: P,
 }
 
 impl MaskFade<Pixels> {
+    /// Ramps of the given lengths at the edges of `bounds`.
+    pub fn within(bounds: Bounds<Pixels>, len: Edges<Pixels>) -> Self {
+        MaskFade {
+            top: bounds.top(),
+            top_len: len.top,
+            bottom: bounds.bottom(),
+            bottom_len: len.bottom,
+            left: bounds.left(),
+            left_len: len.left,
+            right: bounds.right(),
+            right_len: len.right,
+        }
+    }
+
     fn scale(&self, factor: f32) -> MaskFade<ScaledPixels> {
         MaskFade {
             top: self.top.scale(factor),
             top_len: self.top_len.scale(factor),
             bottom: self.bottom.scale(factor),
             bottom_len: self.bottom_len.scale(factor),
+            left: self.left.scale(factor),
+            left_len: self.left_len.scale(factor),
+            right: self.right.scale(factor),
+            right_len: self.right_len.scale(factor),
         }
     }
 }
@@ -2587,9 +2613,11 @@ impl ContentMask<Pixels> {
             mine.max(theirs).min(most)
         };
         let (outer, inner) = (&self.fade, &other.fade);
-        let (top, top_len) = if outer.top_len > px(0.) { (outer.top, outer.top_len) } else { (inner.top, inner.top_len) };
-        let (bottom, bottom_len) =
-            if outer.bottom_len > px(0.) { (outer.bottom, outer.bottom_len) } else { (inner.bottom, inner.bottom_len) };
+        let pick = |o: (Pixels, Pixels), i: (Pixels, Pixels)| if o.1 > px(0.) { o } else { i };
+        let (top, top_len) = pick((outer.top, outer.top_len), (inner.top, inner.top_len));
+        let (bottom, bottom_len) = pick((outer.bottom, outer.bottom_len), (inner.bottom, inner.bottom_len));
+        let (left, left_len) = pick((outer.left, outer.left_len), (inner.left, inner.left_len));
+        let (right, right_len) = pick((outer.right, outer.right_len), (inner.right, inner.right_len));
         ContentMask {
             bounds,
             corner_radii: Corners {
@@ -2598,7 +2626,7 @@ impl ContentMask<Pixels> {
                 bottom_right: corner(|b| b.bottom_right(), |c| c.bottom_right),
                 bottom_left: corner(|b| b.bottom_left(), |c| c.bottom_left),
             },
-            fade: MaskFade { top, top_len, bottom, bottom_len },
+            fade: MaskFade { top, top_len, bottom, bottom_len, left, left_len, right, right_len },
         }
     }
 }

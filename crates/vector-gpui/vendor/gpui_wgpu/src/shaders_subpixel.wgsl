@@ -21,6 +21,7 @@ struct SubpixelSpriteOutput {
     @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
     @location(5) @interpolate(flat) mask_radii: vec4<f32>,
     @location(6) @interpolate(flat) mask_fade: vec4<f32>,
+    @location(7) @interpolate(flat) mask_fade_x: vec4<f32>,
 }
 
 struct SubpixelSpriteFragmentOutput {
@@ -41,6 +42,7 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
     out.mask_bounds = vec4<f32>(sprite.content_mask.origin, sprite.content_mask.size);
     out.mask_radii = vec4<f32>(sprite.content_radii.top_left, sprite.content_radii.top_right, sprite.content_radii.bottom_right, sprite.content_radii.bottom_left);
     out.mask_fade = vec4<f32>(sprite.content_fade.top, sprite.content_fade.top_len, sprite.content_fade.bottom, sprite.content_fade.bottom_len);
+    out.mask_fade_x = vec4<f32>(sprite.content_fade.left, sprite.content_fade.left_len, sprite.content_fade.right, sprite.content_fade.right_len);
     return out;
 }
 
@@ -59,6 +61,6 @@ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutp
 
     var out = SubpixelSpriteFragmentOutput();
     out.foreground = vec4<f32>(input.color.rgb, 1.0);
-    out.alpha = vec4<f32>(input.color.a * alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade), 1.0);
+    out.alpha = vec4<f32>(input.color.a * alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade, input.mask_fade_x), 1.0);
     return out;
 }

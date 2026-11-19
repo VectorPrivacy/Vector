@@ -1117,6 +1117,12 @@ float mask_alpha(float2 point, ContentMask_ScaledPixels mask) {
   if (mask.fade.bottom_len > 0.) {
     alpha *= saturate((mask.fade.bottom - point.y) / mask.fade.bottom_len);
   }
+  if (mask.fade.left_len > 0.) {
+    alpha *= saturate((point.x - mask.fade.left) / mask.fade.left_len);
+  }
+  if (mask.fade.right_len > 0.) {
+    alpha *= saturate((mask.fade.right - point.x) / mask.fade.right_len);
+  }
   if (mask.corner_radii.top_left == 0. && mask.corner_radii.top_right == 0. &&
       mask.corner_radii.bottom_right == 0. && mask.corner_radii.bottom_left == 0.) {
     return alpha;

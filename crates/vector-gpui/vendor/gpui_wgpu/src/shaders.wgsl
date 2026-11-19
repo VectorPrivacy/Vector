@@ -116,6 +116,10 @@ struct Fade {
     top_len: f32,
     bottom: f32,
     bottom_len: f32,
+    left: f32,
+    left_len: f32,
+    right: f32,
+    right_len: f32,
 }
 
 struct Edges {
@@ -409,6 +413,12 @@ fn mask_alpha(point: vec2<f32>, bounds: Bounds, radii: Corners, fade: Fade) -> f
     }
     if (fade.bottom_len > 0.0) {
         alpha *= saturate((fade.bottom - point.y) / fade.bottom_len);
+    }
+    if (fade.left_len > 0.0) {
+        alpha *= saturate((point.x - fade.left) / fade.left_len);
+    }
+    if (fade.right_len > 0.0) {
+        alpha *= saturate((fade.right - point.x) / fade.right_len);
     }
     if (radii.top_left == 0.0 && radii.top_right == 0.0 && radii.bottom_right == 0.0 && radii.bottom_left == 0.0) {
         return alpha;
@@ -1279,6 +1289,7 @@ struct MonoSpriteVarying {
     @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
     @location(5) @interpolate(flat) mask_radii: vec4<f32>,
     @location(6) @interpolate(flat) mask_fade: vec4<f32>,
+    @location(7) @interpolate(flat) mask_fade_x: vec4<f32>,
 }
 
 @vertex
@@ -1295,12 +1306,18 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     out.mask_bounds = vec4<f32>(sprite.content_mask.origin, sprite.content_mask.size);
     out.mask_radii = vec4<f32>(sprite.content_radii.top_left, sprite.content_radii.top_right, sprite.content_radii.bottom_right, sprite.content_radii.bottom_left);
     out.mask_fade = vec4<f32>(sprite.content_fade.top, sprite.content_fade.top_len, sprite.content_fade.bottom, sprite.content_fade.bottom_len);
+    out.mask_fade_x = vec4<f32>(sprite.content_fade.left, sprite.content_fade.left_len, sprite.content_fade.right, sprite.content_fade.right_len);
     return out;
 }
 
 // `mask_alpha` over a mask carried in flat varyings.
-fn varying_mask_alpha(point: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>, fade: vec4<f32>) -> f32 {
-    return mask_alpha(point, Bounds(bounds.xy, bounds.zw), Corners(radii.x, radii.y, radii.z, radii.w), Fade(fade.x, fade.y, fade.z, fade.w));
+fn varying_mask_alpha(point: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>, fade: vec4<f32>, fade_x: vec4<f32>) -> f32 {
+    return mask_alpha(
+        point,
+        Bounds(bounds.xy, bounds.zw),
+        Corners(radii.x, radii.y, radii.z, radii.w),
+        Fade(fade.x, fade.y, fade.z, fade.w, fade_x.x, fade_x.y, fade_x.z, fade_x.w),
+    );
 }
 
 @fragment
@@ -1313,7 +1330,7 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    return blend_color(input.color, alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade));
+    return blend_color(input.color, alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade, input.mask_fade_x));
 }
 
 // --- polychrome sprites --- //

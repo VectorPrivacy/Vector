@@ -8441,7 +8441,7 @@ fn chat_list(
                     })
                     .size_full()
                     .pb(px(if app.is_slim { 16. } else { 8. }))
-                    .edge_fade(px(if app.is_slim { 0. } else { 24. })),
+                    .edge_fade(px(24.)),
                 )
                 .child(kit::pump()),
         )

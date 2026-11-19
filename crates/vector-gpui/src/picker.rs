@@ -1173,23 +1173,9 @@ impl EmojiPicker {
                     }))
                     .child(cat.name)
             });
-            let max = self.kaomoji_strip.max_offset().x;
-            let x = px(crate::kit::scrolled(&self.kaomoji_strip));
-            let fade = |left: bool| {
-                let (from, to) = if left { (1., 0.) } else { (0., 1.) };
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom(px(6.))
-                    .w(px(48.))
-                    .when(left, |d| d.left_0())
-                    .when(!left, |d| d.right_0())
-                    .bg(gpui::linear_gradient(
-                        90.,
-                        gpui::linear_color_stop(ca(10, 10, 10, from), 0.),
-                        gpui::linear_color_stop(ca(10, 10, 10, to), 1.),
-                    ))
-            };
+            // 15% of the strip, as the stylesheet's mask; the panel's own width before its first layout.
+            let strip_w = self.kaomoji_strip.bounds().size.width;
+            let fade = if strip_w > px(0.) { strip_w * 0.15 } else { px(60.) };
             strip = Some(
                 div()
                     .relative()
@@ -1202,11 +1188,10 @@ impl EmojiPicker {
                             .px(px(8.))
                             .pb(px(6.))
                             .overflow_x_scroll()
+                            .edge_fades(gpui::Edges { left: fade, right: fade, ..Default::default() })
                             .track_scroll(&self.kaomoji_strip)
                             .children(pills),
-                    )
-                    .when(x > px(1.), |d| d.child(fade(true)))
-                    .when(x < max - px(1.), |d| d.child(fade(false))),
+                    ),
             );
         }
         div()

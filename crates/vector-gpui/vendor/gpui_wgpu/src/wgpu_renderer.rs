@@ -2829,14 +2829,14 @@ mod tests {
 
     #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
-        assert_eq!(std::mem::size_of::<Quad>(), 48 * 4);
-        assert_eq!(std::mem::size_of::<Shadow>(), 36 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 52 * 4);
+        assert_eq!(std::mem::size_of::<Shadow>(), 40 * 4);
         assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
-        assert_eq!(std::mem::size_of::<Underline>(), 24 * 4);
-        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 36 * 4);
-        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 36 * 4);
-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 32 * 4);
+        assert_eq!(std::mem::size_of::<Underline>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 36 * 4);
     }
 
     #[test]
@@ -2925,6 +2925,10 @@ mod tests {
                 6.0_f32.to_bits(),
                 7.0_f32.to_bits(),
                 8.0_f32.to_bits(),
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,

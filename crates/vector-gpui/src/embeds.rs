@@ -1035,26 +1035,15 @@ fn body(
     let text: String = e.text.chars().take(4000).collect();
     let clamped = lines(&text, size) > max;
     let ex = expand.clone();
-    let fade = clamped.then(|| {
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(px(lh * max as f32 * 0.35))
-            .bg(gpui::linear_gradient(
-                180.,
-                gpui::linear_color_stop(ca(9, 9, 9, 0.), 0.),
-                gpui::linear_color_stop(c(0x090909), 1.),
-            ))
-    });
     let el = div()
         .id(SharedString::from(format!("{key}-text")))
         .relative()
         .max_h(px(lh * max as f32))
         .overflow_hidden()
         .when(clamped, |d| {
-            d.cursor_pointer().on_click(move |_, w, cx| ex(w, cx))
+            d.cursor_pointer()
+                .fade_out(gpui::Edges { bottom: px(lh * max as f32 * 0.35), ..Default::default() })
+                .on_click(move |_, w, cx| ex(w, cx))
         })
         .child(rich(
             env,
@@ -1064,7 +1053,6 @@ fn body(
             Look::new(RUBIK, size, lh, color),
             None,
         ))
-        .children(fade)
         .into_any_element();
     (el, clamped)
 }

@@ -39,6 +39,10 @@ struct Fade {
     float top_len;
     float bottom;
     float bottom_len;
+    float left;
+    float left_len;
+    float right;
+    float right_len;
 };
 
 struct Edges {
@@ -330,6 +334,12 @@ float mask_alpha(float2 pt, Bounds bounds, Corners radii, Fade fade) {
     if (fade.bottom_len > 0.) {
         alpha *= saturate((fade.bottom - pt.y) / fade.bottom_len);
     }
+    if (fade.left_len > 0.) {
+        alpha *= saturate((pt.x - fade.left) / fade.left_len);
+    }
+    if (fade.right_len > 0.) {
+        alpha *= saturate((fade.right - pt.x) / fade.right_len);
+    }
     if (radii.top_left == 0. && radii.top_right == 0. && radii.bottom_right == 0. && radii.bottom_left == 0.) {
         return alpha;
     }
@@ -337,7 +347,7 @@ float mask_alpha(float2 pt, Bounds bounds, Corners radii, Fade fade) {
 }
 
 // `mask_alpha` over a mask carried in interpolants.
-float varying_mask_alpha(float2 pt, float4 bounds, float4 radii, float4 fade) {
+float varying_mask_alpha(float2 pt, float4 bounds, float4 radii, float4 fade, float4 fade_x) {
     Bounds b;
     b.origin = bounds.xy;
     b.size = bounds.zw;
@@ -351,6 +361,10 @@ float varying_mask_alpha(float2 pt, float4 bounds, float4 radii, float4 fade) {
     f.top_len = fade.y;
     f.bottom = fade.z;
     f.bottom_len = fade.w;
+    f.left = fade_x.x;
+    f.left_len = fade_x.y;
+    f.right = fade_x.z;
+    f.right_len = fade_x.w;
     return mask_alpha(pt, b, r, f);
 }
 
@@ -1218,6 +1232,7 @@ struct MonochromeSpriteVertexOutput {
     nointerpolation float4 mask_bounds: TEXCOORD1;
     nointerpolation float4 mask_radii: TEXCOORD2;
     nointerpolation float4 mask_fade: TEXCOORD3;
+    nointerpolation float4 mask_fade_x: TEXCOORD4;
 };
 
 struct MonochromeSpriteFragmentInput {
@@ -1228,6 +1243,7 @@ struct MonochromeSpriteFragmentInput {
     nointerpolation float4 mask_bounds: TEXCOORD1;
     nointerpolation float4 mask_radii: TEXCOORD2;
     nointerpolation float4 mask_fade: TEXCOORD3;
+    nointerpolation float4 mask_fade_x: TEXCOORD4;
 };
 
 StructuredBuffer<MonochromeSprite> mono_sprites: register(t1);
@@ -1250,13 +1266,14 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
     output.mask_bounds = float4(sprite.content_mask.origin, sprite.content_mask.size);
     output.mask_radii = float4(sprite.content_radii.top_left, sprite.content_radii.top_right, sprite.content_radii.bottom_right, sprite.content_radii.bottom_left);
     output.mask_fade = float4(sprite.content_fade.top, sprite.content_fade.top_len, sprite.content_fade.bottom, sprite.content_fade.bottom_len);
+    output.mask_fade_x = float4(sprite.content_fade.left, sprite.content_fade.left_len, sprite.content_fade.right, sprite.content_fade.right_len);
     return output;
 }
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
     float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
     float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
-    return float4(input.color.rgb, input.color.a * alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade));
+    return float4(input.color.rgb, input.color.a * alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade, input.mask_fade_x));
 }
 
 MonochromeSpriteVertexOutput subpixel_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
@@ -1272,7 +1289,7 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
 
     SubpixelSpriteFragmentOutput output;
     output.foreground = float4(input.color.rgb, 1.0f);
-    output.alpha = float4(input.color.a * alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade), 1.0f);
+    output.alpha = float4(input.color.a * alpha_corrected * varying_mask_alpha(input.position.xy, input.mask_bounds, input.mask_radii, input.mask_fade, input.mask_fade_x), 1.0f);
     return output;
 }
 
