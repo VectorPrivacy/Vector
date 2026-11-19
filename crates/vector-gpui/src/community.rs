@@ -595,14 +595,17 @@ pub fn sidebar(
                             .child(drop_half(false, on, move |d: &CategoryDrag| Act::DropCategory(d.id.clone(), below.clone(), false)))
                     })
                     .child(
-                        crate::kit::spaced(cat.name.to_uppercase(), 0.99)
-                            .font_weight(FontWeight::BOLD)
-                            .text_size(px(11.))
-                            .line_height(px(24.))
-                            .text_color(c(LABEL)),
+                        div().min_w_0().overflow_hidden().child(
+                            crate::kit::spaced(cat.name.to_uppercase(), 0.99)
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(11.))
+                                .line_height(px(24.))
+                                .text_color(c(LABEL)),
+                        ),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .size(px(18.))
                             .flex()
                             .items_center()
@@ -622,6 +625,7 @@ pub fn sidebar(
                     div()
                         .id(SharedString::from(format!("cat-add-{}", cat.category_id)))
                         .tip(t::community_add_channel_to(cat.name.as_str()))
+                        .flex_none()
                         .size(px(22.))
                         .rounded(px(6.))
                         .flex()
@@ -700,11 +704,13 @@ pub fn header(
                     div()
                         .flex()
                         .items_center()
-                        .flex_shrink_0()
+                        .min_w_0()
                         .gap(px(8.))
-                        .child(icon(channel_glyph(ch), 19., white_a(0.45)))
+                        .child(icon(channel_glyph(ch), 19., white_a(0.45)).flex_none())
                         .child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .font_family(RUBIK)
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(18.72))
