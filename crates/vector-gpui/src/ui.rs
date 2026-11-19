@@ -1848,11 +1848,7 @@ impl VectorApp {
         cx.observe_window_activation(window, move |_, window, _| {
             let active = window.is_window_active();
             backend::notify::set_focused(active);
-            let asleep = gpui::animations_asleep();
             animation_idle(active);
-            if active && asleep {
-                window.refresh();
-            }
             // `resume_after_away`: back after a minute or more, the relays are proven, the live
             // subscriptions re-armed and the gap caught up.
             if !active {
