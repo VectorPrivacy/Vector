@@ -143,9 +143,34 @@ fn verify(raw: &str, trusted: &PublicKey) -> Result<(Index, u64, PublicKey), Str
     best.ok_or_else(|| crate::t::language_index_unsigned().to_string())
 }
 
-/// Fetches the index, keeping the one held when the fetched one is older.
+/// Fetches the index, keeping the one held when the fetched one is older. The release is asked
+/// first; Vector's relays carry the same signed events for networks that can't reach it.
 pub async fn refresh() -> Result<Arc<Index>, String> {
     let dir = DIR.get().ok_or_else(|| crate::t::language_pack_unsaved().to_string())?.clone();
+    let trusted = trusted();
+    let fetched = match from_release().await.and_then(|raw| verify(&raw, &trusted).map(|v| (v, raw))) {
+        Ok(v) => v,
+        Err(e) => {
+            vector_core::log_debug!("[Languages] release: {e}; asking relays");
+            from_relays(trusted).await.and_then(|raw| verify(&raw, &trusted).map(|v| (v, raw))).map_err(|_| e)?
+        }
+    };
+    let ((index, at, signer), raw) = fetched;
+    super::device::set(CHECKED_KEY, now().to_string());
+    let mut held = INDEX.write().unwrap();
+    if let Some(c) = held.as_ref().filter(|c| c.at > at) {
+        return Ok(c.index.clone());
+    }
+    if signer != trusted {
+        super::device::set(SIGNER_KEY, signer.to_hex());
+    }
+    write_atomic(&dir.join(INDEX_FILE), raw.as_bytes());
+    let index = Arc::new(index);
+    *held = Some(Cached { index: index.clone(), at });
+    Ok(index)
+}
+
+async fn from_release() -> Result<String, String> {
     let client = vector_core::net::shared_http_client();
     let mut resp = client.get(INDEX_URL).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
@@ -158,20 +183,38 @@ pub async fn refresh() -> Result<Arc<Index>, String> {
         }
         body.extend_from_slice(&chunk);
     }
-    let raw = String::from_utf8(body).map_err(|_| crate::t::language_index_invalid().to_string())?;
-    let (index, at, signer) = verify(&raw, &trusted())?;
-    super::device::set(CHECKED_KEY, now().to_string());
-    let mut held = INDEX.write().unwrap();
-    if let Some(c) = held.as_ref().filter(|c| c.at > at) {
-        return Ok(c.index.clone());
+    String::from_utf8(body).map_err(|_| crate::t::language_index_invalid().to_string())
+}
+
+/// The newest index event of `trusted` and of each successor it names, from Vector's relays,
+/// in the release's shape. A scratch client: no account, no authenticator.
+async fn from_relays(trusted: PublicKey) -> Result<String, String> {
+    use nostr_sdk::prelude::{ClientBuilder, Filter};
+    use vector_core::ClientRelayExt as _;
+    let client = vector_core::apply_transport(ClientBuilder::new(), vector_core::transport::Lane::Shared).build();
+    for url in vector_core::state::TRUSTED_RELAYS {
+        let _ = client.add_managed_relay(*url).await;
     }
-    if signer != trusted() {
-        super::device::set(SIGNER_KEY, signer.to_hex());
+    client.connect().await;
+    let timeout = vector_core::relay_request_timeout(std::time::Duration::from_secs(8));
+    let mut events = vec![];
+    let mut key = trusted;
+    for _ in 0..MAX_HOPS {
+        let filter = Filter::new().kind(Kind::Custom(KIND)).author(key).identifier(D_TAG);
+        let Ok(got) = client.fetch_events(filter).timeout(timeout).await else { break };
+        let Some(ev) = got.into_iter().filter(|e| e.verify().is_ok()).max_by_key(|e| e.created_at) else { break };
+        let next = Index::parse(&ev.content).ok().and_then(|i| i.next).and_then(|n| PublicKey::from_hex(&n).ok()).filter(|n| *n != key);
+        events.push(serde_json::from_str::<serde_json::Value>(&ev.as_json()).map_err(|e| e.to_string())?);
+        match next {
+            Some(n) => key = n,
+            None => break,
+        }
     }
-    write_atomic(&dir.join(INDEX_FILE), raw.as_bytes());
-    let index = Arc::new(index);
-    *held = Some(Cached { index: index.clone(), at });
-    Ok(index)
+    client.shutdown().await;
+    if events.is_empty() {
+        return Err(crate::t::language_index_unsigned().to_string());
+    }
+    Ok(serde_json::Value::Array(events).to_string())
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {

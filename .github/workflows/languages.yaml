@@ -1,7 +1,8 @@
 name: 'languages'
 # Builds every language in crates/vector-i18n/locales, signs the index with the language key,
 # and publishes both: packs to Blossom and to the `languages` release (by hash), then the index
-# beside them. The GPUI client reads releases/download/languages/index.json.
+# beside them and on Vector's relays. The GPUI client reads releases/download/languages/index.json,
+# and the relays when it can't.
 #
 # Nothing is published until the VECTOR_LANGUAGES_KEY secret exists ("Publishing" in
 # crates/vector-i18n/TRANSLATING.md).
@@ -90,6 +91,15 @@ jobs:
             grep -qx "$(basename "$f")" <<< "$have" || gh release upload languages "$f" --repo "$GITHUB_REPOSITORY"
           done
           gh release upload languages out/index.json --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Index to relays
+        if: steps.key.outputs.set == 'true'
+        continue-on-error: true
+        run: |
+          pip install --quiet websockets
+          # The app's TRUSTED_RELAYS, where it looks when the release can't be reached.
+          python3 crates/vector-i18n/scripts/broadcast.py out/index.json \
+            wss://jskitty.com/nostr wss://asia.vectorapp.io/nostr wss://nostr.computingcache.com wss://relay.ditto.pub
 
       - name: Broken translations
         if: steps.key.outputs.set == 'true' && steps.build.outputs.status != '0'

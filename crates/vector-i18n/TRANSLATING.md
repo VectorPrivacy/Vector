@@ -124,9 +124,10 @@ Settings > Appearance > Language.
 ## Publishing
 
 Once a translation merges, CI (`.github/workflows/languages.yaml`) builds every language at 10%
-or more, signs an index of them with Vector's language key, and publishes the packs and the index
-to the `languages` release and the packs to Blossom. The app checks the signature against the key
-it has built in, and each pack against the hash the index gives, so any mirror is safe.
+or more and signs an index of them with Vector's language key. The packs and the index go to the
+`languages` release, the packs to Blossom too, and the index to Vector's relays. The app checks
+the signature against the key it has built in, and each pack against the hash the index gives,
+so any mirror is safe.
 
 The key signs nothing but language indexes. Whoever holds it makes it once, from
 `crates/vector-i18n`:
