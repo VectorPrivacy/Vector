@@ -882,16 +882,7 @@ pub fn resize_premultiplied_from(pre: &mut image::RgbaImage, w: u32, h: u32) -> 
         }
     }
     let mut out = super::resample(pre, w, h, image::imageops::FilterType::Triangle);
-    for px in out.chunks_exact_mut(4) {
-        let a = px[3] as u32;
-        if a == 0 {
-            px[..3].fill(0);
-        } else if a < 255 {
-            for c in &mut px[..3] {
-                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
-            }
-        }
-    }
+    unpremultiply(&mut out);
     out
 }
 
@@ -903,6 +894,18 @@ pub fn decode_jpeg_scaled(
     bytes: &[u8],
     need: impl FnOnce(u32, u32) -> (u32, u32),
 ) -> Option<(image::RgbaImage, u32, u32)> {
+    jpeg_scaled(bytes, need, |_, _, w, h| (0, 0, w, h), false)
+}
+
+/// [`decode_jpeg_scaled`] cut to the part `crop` picks of the scaled upright picture (given the
+/// full upright size, then the scaled one), in BGRA where `bgra`: each decoded row is written
+/// straight to its upright place, so no RGB, rotated or cropped copy is made.
+pub fn jpeg_scaled(
+    bytes: &[u8],
+    need: impl FnOnce(u32, u32) -> (u32, u32),
+    crop: impl FnOnce(u32, u32, u32, u32) -> (u32, u32, u32, u32),
+    bgra: bool,
+) -> Option<(image::RgbaImage, u32, u32)> {
     use image::metadata::Orientation;
     let mut dec = jpeg_decoder::Decoder::new(bytes);
     dec.read_info().ok()?;
@@ -913,6 +916,11 @@ pub fn decode_jpeg_scaled(
     if u64::from(w) * u64::from(h) * 4 > 512 << 20 {
         return None;
     }
+    let channels = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => 3,
+        jpeg_decoder::PixelFormat::L8 => 1,
+        _ => return None,
+    };
     let orientation = dec
         .exif_data()
         .and_then(Orientation::from_exif_chunk)
@@ -931,60 +939,112 @@ pub fn decode_jpeg_scaled(
     if sw < rw || sh < rh {
         return None;
     }
-    let px = dec.decode().ok()?;
-    let mut rgba = Vec::with_capacity(sw as usize * sh as usize * 4);
-    match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => {
-            for p in px.chunks_exact(3) {
-                rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
-            }
-        }
-        jpeg_decoder::PixelFormat::L8 => {
-            for &l in &px {
-                rgba.extend_from_slice(&[l, l, l, 255]);
-            }
-        }
-        _ => return None,
+    let (ow, oh) = if turned { (sh, sw) } else { (sw, sh) };
+    let (x0, y0, cw, ch) = crop(uw, uh, ow, oh);
+    if cw == 0 || ch == 0 || x0 + cw > ow || y0 + ch > oh {
+        return None;
     }
-    drop(px);
-    let mut img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(sw, sh, rgba)?);
-    img.apply_orientation(orientation);
-    Some((img.into_rgba8(), uw, uh))
+    let mut out = vec![0u8; cw as usize * ch as usize * 4];
+    let (dw, dh) = (i64::from(sw), i64::from(sh));
+    let (x0, y0, cw, ch) = (i64::from(x0), i64::from(y0), i64::from(cw), i64::from(ch));
+    // Where a decoded row lands upright: its first pixel, then the step from one pixel to the next.
+    let line = |y: i64| match orientation {
+        Orientation::NoTransforms => (0, y, 1, 0),
+        Orientation::FlipHorizontal => (dw - 1, y, -1, 0),
+        Orientation::Rotate180 => (dw - 1, dh - 1 - y, -1, 0),
+        Orientation::FlipVertical => (0, dh - 1 - y, 1, 0),
+        Orientation::Rotate90 => (dh - 1 - y, 0, 0, 1),
+        Orientation::Rotate270 => (y, dw - 1, 0, -1),
+        Orientation::Rotate90FlipH => (y, 0, 0, 1),
+        Orientation::Rotate270FlipH => (dh - 1 - y, dw - 1, 0, -1),
+    };
+    // The decoded columns whose upright coordinate `c0 + x * d` falls in `lo..lo + len`.
+    let span = |c0: i64, d: i64, lo: i64, len: i64| match d {
+        0 if (lo..lo + len).contains(&c0) => (0, dw),
+        0 => (0, 0),
+        1 => (lo - c0, lo + len - c0),
+        _ => (c0 - lo - len + 1, c0 - lo + 1),
+    };
+    let (r, b) = if bgra { (2, 0) } else { (0, 2) };
+    dec.decode_rows(|y, row| {
+        let (ux, uy, dx, dy) = line(y as i64);
+        let (ax, bx) = span(ux, dx, x0, cw);
+        let (ay, by) = span(uy, dy, y0, ch);
+        let (from, to) = (ax.max(ay).max(0), bx.min(by).min(dw));
+        if from >= to {
+            return;
+        }
+        let at = |x: i64| (((uy + x * dy - y0) * cw + (ux + x * dx - x0)) * 4) as isize;
+        let step = (dy * cw + dx) * 4;
+        let mut o = at(from);
+        for p in row[from as usize * channels..to as usize * channels].chunks_exact(channels) {
+            let px = &mut out[o as usize..o as usize + 4];
+            if channels == 3 {
+                px[r] = p[0];
+                px[1] = p[1];
+                px[b] = p[2];
+            } else {
+                px[..3].fill(p[0]);
+            }
+            px[3] = 255;
+            o += step as isize;
+        }
+    })
+    .ok()?;
+    Some((image::RgbaImage::from_raw(cw as u32, ch as u32, out)?, uw, uh))
+}
+
+/// [`resize_premultiplied`] for a picture with no transparency, which premultiplying leaves as it is.
+pub fn resize_opaque(buf: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    let mut out = super::resample(buf, w, h, image::imageops::FilterType::Triangle);
+    unpremultiply(&mut out);
+    out
+}
+
+fn unpremultiply(out: &mut image::RgbaImage) {
+    for px in out.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            px[..3].fill(0);
+        } else if a < 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
 }
 
 /// [`fit_frame`] for a JPEG, decoded no larger than the fit needs: the same size comes out.
 pub fn jpeg_fitted(bytes: &[u8], max: u32, square: bool) -> Option<image::Frame> {
     let mut target = None;
-    let (img, w, h) = decode_jpeg_scaled(bytes, |w, h| {
-        let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
-        if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
-            return (w, h);
-        }
-        let scale = (max as f64 / cw.max(ch) as f64).min(1.);
-        let (nw, nh) = (
-            ((cw as f64 * scale).round() as u32).max(1),
-            ((ch as f64 * scale).round() as u32).max(1),
-        );
-        target = Some((nw, nh));
-        (
-            (w as f64 * nw as f64 / cw as f64).ceil() as u32,
-            (h as f64 * nh as f64 / ch as f64).ceil() as u32,
-        )
-    })?;
+    let (cut, _, _) = jpeg_scaled(
+        bytes,
+        |w, h| {
+            let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+            if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
+                return (w, h);
+            }
+            let scale = (max as f64 / cw.max(ch) as f64).min(1.);
+            let (nw, nh) = (
+                ((cw as f64 * scale).round() as u32).max(1),
+                ((ch as f64 * scale).round() as u32).max(1),
+            );
+            target = Some((nw, nh));
+            (
+                (w as f64 * nw as f64 / cw as f64).ceil() as u32,
+                (h as f64 * nh as f64 / ch as f64).ceil() as u32,
+            )
+        },
+        |w, h, sw, sh| {
+            let k = sw as f64 / w as f64;
+            let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+            let (cw, ch) = (((cw as f64 * k).round() as u32).clamp(1, sw), ((ch as f64 * k).round() as u32).clamp(1, sh));
+            ((sw - cw) / 2, (sh - ch) / 2, cw, ch)
+        },
+        true,
+    )?;
     let (nw, nh) = target?;
-    let (sw, sh) = img.dimensions();
-    let k = sw as f64 / w as f64;
-    let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
-    let (cw, ch) = (((cw as f64 * k).round() as u32).clamp(1, sw), ((ch as f64 * k).round() as u32).clamp(1, sh));
-    let cut = if (cw, ch) == (sw, sh) {
-        img
-    } else {
-        image::imageops::crop_imm(&img, (sw - cw) / 2, (sh - ch) / 2, cw, ch).to_image()
-    };
-    let mut buffer = if (cw, ch) == (nw, nh) { cut } else { resize_premultiplied(cut, nw, nh) };
-    for p in buffer.chunks_exact_mut(4) {
-        p.swap(0, 2);
-    }
+    let buffer = if cut.dimensions() == (nw, nh) { cut } else { resize_opaque(&cut, nw, nh) };
     Some(image::Frame::new(buffer))
 }
 

@@ -1112,7 +1112,7 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
     }
     if ext != "svg" && image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
         let mut target = None;
-        let scaled = gpui::decode_jpeg_scaled(bytes, |w, h| {
+        let need = |w: u32, h: u32| {
             if w <= max.0 && h <= max.1 {
                 return (w, h);
             }
@@ -1121,10 +1121,11 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
             let t = (((w as f64 * r).round() as u32).max(1), ((h as f64 * r).round() as u32).max(1));
             target = Some(t);
             t
-        });
+        };
+        let scaled = gpui::jpeg_scaled(bytes, need, |_, _, w, h| (0, 0, w, h), true);
         if let (Some((img, w, h)), Some((tw, th))) = (scaled, target) {
             let img = gpui::resample(&img, tw, th, FilterType::CatmullRom);
-            return Some((RenderImage::new(vec![Frame::new(to_bgra(img))]), w, h));
+            return Some((RenderImage::new(vec![Frame::new(img)]), w, h));
         }
     }
     let img = if ext == "svg" {
@@ -1612,9 +1613,18 @@ mod jpeg_tests {
 
     /// A smooth photo-like JPEG, with an EXIF orientation when given.
     fn jpeg(w: u32, h: u32, orientation: Option<u8>) -> Vec<u8> {
+        encoded(w, h, orientation, false)
+    }
+
+    fn encoded(w: u32, h: u32, orientation: Option<u8>, grey: bool) -> Vec<u8> {
         let img = RgbImage::from_fn(w, h, |x, y| {
             image::Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, ((x + y) * 127 / (w + h)) as u8])
         });
+        let (raw, kind) = if grey {
+            (DynamicImage::ImageRgb8(img).into_luma8().into_raw(), image::ExtendedColorType::L8)
+        } else {
+            (img.into_raw(), image::ExtendedColorType::Rgb8)
+        };
         let mut out = Vec::new();
         let mut enc = JpegEncoder::new_with_quality(&mut out, 90);
         if let Some(o) = orientation {
@@ -1623,7 +1633,7 @@ mod jpeg_tests {
             ];
             enc.set_exif_metadata(exif.to_vec()).unwrap();
         }
-        enc.write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8).unwrap();
+        enc.write_image(&raw, w, h, kind).unwrap();
         out
     }
 
@@ -1656,6 +1666,115 @@ mod jpeg_tests {
             }
             let d = mean_diff(got.as_bytes(0).unwrap(), &want);
             assert!(d < 3., "{w}x{h} {o:?}: mean difference {d}");
+        }
+    }
+
+    // The JPEG path before rows went straight to their upright place, as it shipped.
+    fn old_decode_jpeg_scaled(
+        bytes: &[u8],
+        need: impl FnOnce(u32, u32) -> (u32, u32),
+    ) -> Option<(image::RgbaImage, u32, u32)> {
+        use image::metadata::Orientation;
+        let mut dec = jpeg_decoder::Decoder::new(bytes);
+        dec.read_info().ok()?;
+        let info = dec.info()?;
+        let (w, h) = (info.width as u32, info.height as u32);
+        // The image crate's allocation limit, which this decoder lacks: a progressive file keeps
+        // coefficients for every pixel the header claims.
+        if u64::from(w) * u64::from(h) * 4 > 512 << 20 {
+            return None;
+        }
+        let orientation = dec
+            .exif_data()
+            .and_then(Orientation::from_exif_chunk)
+            .unwrap_or(Orientation::NoTransforms);
+        let turned = matches!(
+            orientation,
+            Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
+        );
+        let (uw, uh) = if turned { (h, w) } else { (w, h) };
+        let (nw, nh) = need(uw, uh);
+        let (rw, rh) = if turned { (nh, nw) } else { (nw, nh) };
+        let scaled = |len: u32, s: u32| (len * s - 1) / 8 + 1;
+        let s = [1u32, 2, 4].into_iter().find(|&s| scaled(w, s) >= rw && scaled(h, s) >= rh)?;
+        let (sw, sh) = dec.scale(scaled(w, s) as u16, scaled(h, s) as u16).ok()?;
+        let (sw, sh) = (sw as u32, sh as u32);
+        if sw < rw || sh < rh {
+            return None;
+        }
+        let px = dec.decode().ok()?;
+        let mut rgba = Vec::with_capacity(sw as usize * sh as usize * 4);
+        match info.pixel_format {
+            jpeg_decoder::PixelFormat::RGB24 => {
+                for p in px.chunks_exact(3) {
+                    rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
+                }
+            }
+            jpeg_decoder::PixelFormat::L8 => {
+                for &l in &px {
+                    rgba.extend_from_slice(&[l, l, l, 255]);
+                }
+            }
+            _ => return None,
+        }
+        drop(px);
+        let mut img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(sw, sh, rgba)?);
+        img.apply_orientation(orientation);
+        Some((img.into_rgba8(), uw, uh))
+    }
+
+    fn old_jpeg_fitted(bytes: &[u8], max: u32, square: bool) -> Option<image::Frame> {
+        let mut target = None;
+        let (img, w, h) = old_decode_jpeg_scaled(bytes, |w, h| {
+            let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+            if (cw == w && ch == h && w.max(h) <= max) || max == 0 || cw == 0 {
+                return (w, h);
+            }
+            let scale = (max as f64 / cw.max(ch) as f64).min(1.);
+            let (nw, nh) = (
+                ((cw as f64 * scale).round() as u32).max(1),
+                ((ch as f64 * scale).round() as u32).max(1),
+            );
+            target = Some((nw, nh));
+            (
+                (w as f64 * nw as f64 / cw as f64).ceil() as u32,
+                (h as f64 * nh as f64 / ch as f64).ceil() as u32,
+            )
+        })?;
+        let (nw, nh) = target?;
+        let (sw, sh) = img.dimensions();
+        let k = sw as f64 / w as f64;
+        let (cw, ch) = if square { (w.min(h), w.min(h)) } else { (w, h) };
+        let (cw, ch) = (((cw as f64 * k).round() as u32).clamp(1, sw), ((ch as f64 * k).round() as u32).clamp(1, sh));
+        let cut = if (cw, ch) == (sw, sh) {
+            img
+        } else {
+            image::imageops::crop_imm(&img, (sw - cw) / 2, (sh - ch) / 2, cw, ch).to_image()
+        };
+        let mut buffer = if (cw, ch) == (nw, nh) { cut } else { gpui::resize_premultiplied(cut, nw, nh) };
+        for p in buffer.chunks_exact_mut(4) {
+            p.swap(0, 2);
+        }
+        Some(image::Frame::new(buffer))
+    }
+
+    #[test]
+    fn rows_written_upright_match_the_copies_they_replaced() {
+        for o in 1..=8u8 {
+            for (w, h, grey) in [(1600, 1200, false), (333, 999, false), (97, 65, false), (333, 999, true)] {
+                let bytes = encoded(w, h, Some(o), grey);
+                for square in [false, true] {
+                    for max in [(w.min(h) / 5).max(2), w.max(h) / 3] {
+                        let f = gpui::jpeg_fitted(&bytes, max, square).map(|f| f.into_buffer());
+                        let want = old_jpeg_fitted(&bytes, max, square).map(|f| f.into_buffer());
+                        assert!(f == want, "{w}x{h} orientation {o} square {square} max {max}");
+                    }
+                }
+                let need = |w: u32, h: u32| (w / 3, h / 7);
+                let got = gpui::decode_jpeg_scaled(&bytes, need);
+                assert!(got == old_decode_jpeg_scaled(&bytes, need), "{w}x{h} orientation {o}");
+                assert!(got.is_some());
+            }
         }
     }
 

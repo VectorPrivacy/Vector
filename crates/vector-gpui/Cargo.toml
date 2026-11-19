@@ -151,11 +151,17 @@ gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57
 
 # Its own workspace: GPUI pins dependency versions the main client must not inherit.
 [workspace]
+members = [".", "vendor/jpeg-decoder"]
 
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# A workspace member, so "*" above doesn't reach it.
+[profile.dev.package.vector-jpeg]
 opt-level = 3
 debug = false
 
@@ -194,6 +200,8 @@ color_quant = "1.1"
 tempfile = "3"
 # The scanners that replaced regexes are tested against the patterns they replace.
 regex = "1"
+# JPEG thumbnails are checked against the decode, rotate, crop and resize they replaced.
+jpeg-decoder = { package = "vector-jpeg", path = "vendor/jpeg-decoder" }
 
 # Each platform's own shaper, for the bidi test that needs no window.
 [target.'cfg(target_os = "macos")'.dev-dependencies]

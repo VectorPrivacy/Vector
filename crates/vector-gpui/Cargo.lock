@@ -4326,7 +4326,6 @@ dependencies = [
  "image",
  "inventory",
  "itertools 0.14.0",
- "jpeg-decoder",
  "libc",
  "libwebp-sys",
  "log",
@@ -4361,6 +4360,7 @@ dependencies = [
  "url",
  "usvg 0.46.0",
  "uuid",
+ "vector-jpeg",
  "waker-fn",
  "windows 0.62.2",
  "zed-scap",
@@ -13516,6 +13516,7 @@ dependencies = [
  "vector-core",
  "vector-gpui-media",
  "vector-i18n",
+ "vector-jpeg",
  "vector-tauri-shim",
  "webkit2gtk",
  "wgpu",
@@ -13601,6 +13602,14 @@ dependencies = [
  "serde",
  "serde_json",
  "unic-langid",
+]
+
+[[package]]
+name = "vector-jpeg"
+version = "0.3.2"
+dependencies = [
+ "jpeg-decoder",
+ "memchr",
 ]
 
 [[package]]

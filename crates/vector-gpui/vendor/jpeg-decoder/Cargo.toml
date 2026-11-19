@@ -1,0 +1,24 @@
+[package]
+name = "vector-jpeg"
+version = "0.3.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "jpeg-decoder 0.3.2 for scaled decodes: rows out with no per-row allocation, progressive files held at the scale they decode to"
+publish = false
+
+[lib]
+name = "jpeg_decoder"
+
+[features]
+platform_independent = []
+nightly_aarch64_neon = []
+
+[dependencies]
+memchr = "2"
+
+[dev-dependencies]
+stock = { package = "jpeg-decoder", version = "0.3", default-features = false }
+
+[[bench]]
+name = "scaled"
+harness = false
