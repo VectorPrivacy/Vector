@@ -157,7 +157,7 @@ impl Node {
 pub fn file_icon(ext: &str) -> &'static str {
     match ext {
         e if IMAGE_EXTS.contains(&e) || e == "svg" => "icons/image.svg",
-        "mp4" | "webm" | "mov" | "avi" | "mkv" => "icons/film.svg",
+        "mp4" | "webm" | "mov" | "avi" | "mkv" | "m4v" => "icons/film.svg",
         "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => "icons/volume-max.svg",
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" | "tbz2" => {
             "icons/folder.svg"

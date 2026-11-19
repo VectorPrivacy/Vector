@@ -543,12 +543,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_fixture_clip() {
-        let i = info(concat!(env!("CARGO_MANIFEST_DIR"), "/reference/media/clip.mp4")).expect("probe");
-        assert_eq!((i.w, i.h), (640, 360));
-        assert!(i.audio && (4900..=5100).contains(&i.duration), "{}", i.duration);
-        let p = i.poster.expect("poster");
-        assert_eq!((p.size(0).width.0, p.size(0).height.0), (640, 360));
+    fn reads_the_fixture_clips() {
+        for name in ["clip.mp4", "clip.mkv"] {
+            let i = info(&format!("{}/reference/media/{name}", env!("CARGO_MANIFEST_DIR"))).expect(name);
+            assert_eq!((i.w, i.h), (640, 360), "{name}");
+            assert!(i.audio && (4900..=5100).contains(&i.duration), "{name}: {}", i.duration);
+            let p = i.poster.expect("poster");
+            assert_eq!((p.size(0).width.0, p.size(0).height.0), (640, 360), "{name}");
+        }
     }
 
     #[test]
@@ -578,7 +580,7 @@ mod tests {
     /// `VIDFUZZ_ITERS` and `VIDFUZZ_SEED` run more, `VIDFUZZ_OUT` keeps what failed.
     #[test]
     fn no_damaged_video_panics() {
-        let mut seeds: Vec<(Vec<u8>, String)> = ["clip.mp4", "turned.mov"]
+        let mut seeds: Vec<(Vec<u8>, String)> = ["clip.mp4", "turned.mov", "clip.mkv"]
             .iter()
             .map(|n| (std::fs::read(format!("{}/reference/media/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap(), n.rsplit('.').next().unwrap().to_string()))
             .collect();

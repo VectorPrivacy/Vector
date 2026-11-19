@@ -17,7 +17,7 @@ use vector_media::audio_engine::AudioInput;
 use crate::audio::AudioInputSpec;
 use crate::theme::*;
 
-pub const EXTENSIONS: &[&str] = &["mp4", "webm", "mov"];
+pub const EXTENSIONS: &[&str] = &["mp4", "webm", "mov", "mkv", "m4v"];
 
 /// `.dmsg-attachments video`: fitted inside this box, never upscaled.
 pub const MAX_W: f32 = 450.;

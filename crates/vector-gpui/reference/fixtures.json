@@ -789,6 +789,38 @@
      "edited": false
     },
     {
+     "id": "c043300000000000000000000000000000000000000000000000000000000000",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "6b1d0c8f3e2a4b5c9d7e1f0a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e",
+       "key": "",
+       "nonce": "",
+       "extension": "mkv",
+       "name": "2026-11-19 02-28-56.mkv",
+       "url": "https://example.invalid/recording",
+       "path": "media/clip.mkv",
+       "size": 176183,
+       "img_meta": {
+        "thumbhash": "",
+        "width": 640,
+        "height": 360
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794362390000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
      "id": "c044400000000000000000000000000000000000000000000000000000000000",
      "content": "",
      "replied_to": "",
