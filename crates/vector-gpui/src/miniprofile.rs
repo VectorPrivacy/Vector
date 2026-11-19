@@ -112,7 +112,7 @@ pub fn roles(view: &Value, owner: Option<&str>, npub: &str) -> Roles {
             .filter(|r| holds(r, npub))
             .map(|r| Role {
                 id: r["role_id"].as_str().unwrap_or_default().to_string(),
-                name: r["name"].as_str().unwrap_or_default().to_string(),
+                name: crate::kit::one_line(r["name"].as_str().unwrap_or_default()).into_owned(),
                 tint: tint(r["color"].as_u64()),
                 channel: r["channel_id"].as_str().map(channel).unwrap_or_default(),
                 removable: editable && manageable(r),

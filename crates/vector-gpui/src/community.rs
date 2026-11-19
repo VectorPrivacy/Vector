@@ -168,7 +168,7 @@ impl Graph {
                 .filter_map(|r| {
                     Some(GraphRole {
                         id: text(&r["role_id"])?,
-                        name: text(&r["name"]).unwrap_or_default(),
+                        name: text(&r["name"]).map(|n| crate::kit::one_line(&n).into_owned()).unwrap_or_default(),
                         position: r["position"].as_i64().unwrap_or(i64::MAX),
                         color: r["color"].as_u64().unwrap_or(0) as u32,
                         channel: text(&r["channel_id"]).map(|c| c.to_ascii_lowercase()),
@@ -731,7 +731,7 @@ pub fn header(
                         .text_size(px(13.5))
                         .line_height(px(18.))
                         .text_color(white_a(0.5))
-                        .child(topic)
+                        .child(crate::kit::one_line(&topic).into_owned())
                 })),
         )
         .children(pins.map(crate::pins::button))

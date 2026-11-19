@@ -148,6 +148,7 @@ impl From<RawInvite> for Invite {
 #[serde(default)]
 pub struct Community {
     pub community_id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
     pub description: String,
     pub is_owner: bool,
@@ -174,6 +175,7 @@ pub struct Community {
 #[serde(default)]
 pub struct Channel {
     pub channel_id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
     pub private: bool,
     #[serde(default = "yes")]
@@ -238,8 +240,10 @@ impl Channel {
 #[serde(default)]
 pub struct Category {
     pub category_id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
 }
+
 
 impl Community {
     pub fn channel(&self, id: &str) -> Option<&Channel> {
@@ -886,11 +890,12 @@ impl Store {
             .and_then(|c| self.nicknames.get(c))
             .and_then(|n| n.get(npub))
             .filter(|n| !n.is_empty());
+        let line = |n: &str| crate::kit::one_line(n).into_owned();
         match self.profiles.get(npub) {
-            Some(p) if !p.nickname.is_empty() => p.nickname.clone(),
-            _ if nick.is_some() => nick.cloned().unwrap_or_default(),
-            Some(p) if !p.name.is_empty() => p.name.clone(),
-            Some(p) if !p.display_name.is_empty() => p.display_name.clone(),
+            Some(p) if !p.nickname.is_empty() => line(&p.nickname),
+            _ if nick.is_some() => nick.map(|n| line(n)).unwrap_or_default(),
+            Some(p) if !p.name.is_empty() => line(&p.name),
+            Some(p) if !p.display_name.is_empty() => line(&p.display_name),
             _ => format!("{}…", &npub[..npub.len().min(12)]),
         }
     }

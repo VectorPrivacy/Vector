@@ -9,6 +9,39 @@ use crate::theme::*;
 
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
 /// with the spacing after it as CSS adds it (trailing included).
+/// Text as a page lays a name out: each run of spaces, tabs and line breaks one space, none at
+/// either end. A no-break space stays.
+pub fn one_line(text: &str) -> std::borrow::Cow<'_, str> {
+    let gap = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c');
+    let t = text.trim_matches(gap);
+    if t.len() == text.len() && !t.contains(['\t', '\n', '\r', '\x0c']) && !t.contains("  ") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(t.len());
+    let mut open = false;
+    for c in t.chars() {
+        if gap(c) {
+            open = true;
+            continue;
+        }
+        if open {
+            out.push(' ');
+            open = false;
+        }
+        out.push(c);
+    }
+    out.into()
+}
+
+/// A name read as [`one_line`] shows it, as the desktop's stylesheet shows every name.
+pub fn one_line_de<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = <String as serde::Deserialize>::deserialize(d)?;
+    Ok(match one_line(&s) {
+        std::borrow::Cow::Borrowed(_) => s,
+        std::borrow::Cow::Owned(o) => o,
+    })
+}
+
 pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
     let text = text.as_ref();
     // Joined scripts take no letter spacing, as CSS leaves them.
@@ -2046,6 +2079,18 @@ pub fn context_menu(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_name_shows_on_one_line_as_a_page_shows_it() {
+        use std::borrow::Cow;
+        assert!(matches!(super::one_line("Ann Lee"), Cow::Borrowed("Ann Lee")));
+        assert_eq!(super::one_line("  line one\nline two\r\n\n\tthree  "), "line one line two three");
+        assert_eq!(super::one_line("a  b"), "a b");
+        assert_eq!(super::one_line("no\u{a0}break"), "no\u{a0}break");
+        assert_eq!(super::one_line("\n\n"), "");
+        let c: crate::data::Community = serde_json::from_str(r#"{"name":"two\nlines","channels":[{"name":"\tgeneral\n"}],"categories":[{"name":"a\r\nb"}]}"#).unwrap();
+        assert_eq!((c.name.as_str(), c.channels[0].name.as_str(), c.categories[0].name.as_str()), ("two lines", "general", "a b"));
+    }
+
     #[test]
     fn a_sentence_of_pieces_shows_in_reading_order() {
         let v = |p: &[(&str, u8)], rtl| {

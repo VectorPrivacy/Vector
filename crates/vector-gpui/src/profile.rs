@@ -233,16 +233,12 @@ fn small_option(
 pub(crate) fn status_title(p: &SlimProfile) -> String {
     // Three lines show a few hundred characters; more would only cost layout time each frame.
     const SHOWN: usize = 4096;
-    let mut out = String::new();
-    for word in p.status.title.split_whitespace() {
-        if out.len() >= SHOWN {
-            break;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
+    let title = &p.status.title;
+    let mut end = title.len().min(SHOWN * 2);
+    while !title.is_char_boundary(end) {
+        end -= 1;
     }
+    let mut out = crate::kit::one_line(&title[..end]).into_owned();
     if out.len() > SHOWN {
         let mut end = SHOWN;
         while !out.is_char_boundary(end) {

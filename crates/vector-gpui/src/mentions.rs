@@ -26,6 +26,7 @@ pub struct Rules {
 #[serde(default)]
 pub struct Role {
     pub id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
     pub color: Option<u32>,
     pub mentionable: bool,
