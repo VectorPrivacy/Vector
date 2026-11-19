@@ -65,4 +65,9 @@ case "$(lipo -archs "$bin")" in
 esac
 # No AppleDouble ._ entries: the updater takes the first .app it unpacks.
 COPYFILE_DISABLE=1 tar -C "$out" -czf "$out/${prefix}_$arch.app.tar.gz" "$name.app"
-rm -rf "$app"
+# The download for a first install: the app beside a link to drag it into.
+dmg=$(mktemp -d)
+mv "$app" "$dmg/"
+ln -s /Applications "$dmg/Applications"
+hdiutil create -quiet -volname "$name" -srcfolder "$dmg" -ov -format UDZO "$out/${prefix}_${version}_$arch.dmg"
+rm -rf "$dmg"

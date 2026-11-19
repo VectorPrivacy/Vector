@@ -127,25 +127,49 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The Tauri client's release targets, on the same runners: each of its installs has a
+        # bundle of its own kind to update to. macOS: both on the Intel image, Arm cross-compiled.
         include:
           - platform: macos-26-intel
             target: aarch64-apple-darwin
             out: aarch64-apple-darwin/release
             features: '--target aarch64-apple-darwin --no-default-features --features video-static,tor,i2p'
+            ffmpeg: true
+            # ggml's native CPU probe would read the Intel host.
+            ggml_native: 'OFF'
+          - platform: macos-26-intel
+            target: x86_64-apple-darwin
+            out: x86_64-apple-darwin/release
+            features: '--target x86_64-apple-darwin --no-default-features --features video-static,tor,i2p'
+            ffmpeg: true
           - platform: windows-2022
             target: x86_64-pc-windows-msvc
             # The host's own target: a target directory level pushes whisper's Vulkan shader build past MAX_PATH.
             out: release
+            features: '--no-default-features --features video-static,tor,i2p'
+            ffmpeg: true
+          # scripts/build-ffmpeg.sh has no Windows on Arm target yet: video attachments draw as files.
+          - platform: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            out: release
             features: '--no-default-features --features tor,i2p'
-          # The Tauri client's Linux release host: its glibc is the floor the AppImage runs on.
+          # The Tauri client's Linux release hosts: their glibc is the floor the packages run on.
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             out: release
             features: '--no-default-features --features video-static,tor,i2p'
+            ffmpeg: true
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            out: release
+            features: '--no-default-features --features video-static,tor,i2p'
+            ffmpeg: true
     runs-on: ${{ matrix.platform }}
     env:
       CARGO_PROFILE_RELEASE_LTO: thin
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      # A release's bundles take the Tauri client's names; a test package keeps its own.
+      VECTOR_RELEASE: ${{ inputs.release_tag && '1' || '' }}
     defaults:
       run:
         working-directory: crates/vector-gpui
@@ -165,25 +189,36 @@ jobs:
           $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
           echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
 
+      # ring assembles its ARM64 Windows code with clang; MSVC's assembler can't.
+      - name: LLVM (Windows ARM)
+        if: matrix.platform == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
+            if (Get-Command choco -ErrorAction SilentlyContinue) { choco install llvm -y --no-progress }
+            else { winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements }
+          }
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+
       - name: Install dependencies (Linux)
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf libasound2-dev \
             libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
-            libvulkan-dev libssl-dev libzstd-dev clang cmake xdg-utils
+            libvulkan-dev libssl-dev libzstd-dev clang cmake xdg-utils rpm
 
-      # whisper builds its Vulkan backend on Linux, which needs glslc, as in the Tauri release.
-      - name: Vulkan SDK (Linux)
-        if: startsWith(matrix.platform, 'ubuntu')
+      # whisper builds its Vulkan backend on x64 Linux, which needs glslc, as in the Tauri release.
+      - name: Vulkan SDK (Linux x64)
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
 
-      - name: Cache FFmpeg (macOS, Linux)
-        if: startsWith(matrix.platform, 'macos') || startsWith(matrix.platform, 'ubuntu')
+      - name: Cache FFmpeg
+        if: matrix.ffmpeg
         id: ffmpeg-cache
         uses: actions/cache@v5
         with:
@@ -191,35 +226,56 @@ jobs:
           key: ffmpeg-${{ matrix.target }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
 
       - name: Build FFmpeg (macOS, Linux)
-        if: (startsWith(matrix.platform, 'macos') || startsWith(matrix.platform, 'ubuntu')) && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        if: matrix.ffmpeg && !startsWith(matrix.platform, 'windows') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
         working-directory: .
         run: |
           if [ "$RUNNER_OS" = macOS ]; then brew install nasm; else sudo apt-get install -y nasm; fi
           scripts/build-ffmpeg.sh ${{ matrix.target }}
 
-      - name: Linux environment
-        if: startsWith(matrix.platform, 'ubuntu')
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.ffmpeg && startsWith(matrix.platform, 'windows') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+
+      - uses: msys2/setup-msys2@v2
+        if: matrix.ffmpeg && startsWith(matrix.platform, 'windows') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make nasm diffutils
+
+      - name: Build FFmpeg (Windows)
+        if: matrix.ffmpeg && startsWith(matrix.platform, 'windows') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        working-directory: .
+        run: scripts/build-ffmpeg.sh ${{ matrix.target }}
+
+      - name: FFmpeg environment
+        if: matrix.ffmpeg
+        shell: bash
         run: echo "FFMPEG_DIR=$GITHUB_WORKSPACE/src-tauri/native-deps/ffmpeg/${{ matrix.target }}" >> "$GITHUB_ENV"
 
-      # An Intel host building for arm64: ggml's native CPU probe would read the host.
+      # Set only where the matrix asks: any value at all turns off whisper's x86-64-v3 pin.
+      - name: GGML_NATIVE
+        if: matrix.ggml_native
+        shell: bash
+        run: echo "GGML_NATIVE=${{ matrix.ggml_native }}" >> "$GITHUB_ENV"
+
       - name: macOS environment
         if: startsWith(matrix.platform, 'macos')
         run: |
-          echo "FFMPEG_DIR=$GITHUB_WORKSPACE/src-tauri/native-deps/ffmpeg/${{ matrix.target }}" >> "$GITHUB_ENV"
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
-          echo "GGML_NATIVE=OFF" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
-      - name: Cache Vulkan (Windows)
-        if: startsWith(matrix.platform, 'windows')
+      # Whisper transcribes on Vulkan on x64 Windows, as the desktop client does.
+      - name: Cache Vulkan (Windows x64)
+        if: matrix.platform == 'windows-2022'
         id: vulkan-cache
         uses: actions/cache@v5
         with:
           path: C:\vcpkg\installed
           key: vulkan-x64-windows-headers-loader-spirv-tools-glslc
 
-      - name: Install Vulkan SDK (Windows)
-        if: startsWith(matrix.platform, 'windows') && steps.vulkan-cache.outputs.cache-hit != 'true'
+      - name: Install Vulkan SDK (Windows x64)
+        if: matrix.platform == 'windows-2022' && steps.vulkan-cache.outputs.cache-hit != 'true'
         shell: pwsh
         working-directory: .
         run: |
@@ -229,8 +285,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $vcpkgBin
           Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
 
-      - name: Vulkan environment (Windows)
-        if: startsWith(matrix.platform, 'windows')
+      - name: Vulkan environment (Windows x64)
+        if: matrix.platform == 'windows-2022'
         shell: pwsh
         run: |
           $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
@@ -251,23 +307,46 @@ jobs:
         if: startsWith(matrix.platform, 'macos')
         run: scripts/bundle-macos.sh target/${{ matrix.out }}/vector-gpui "$RUNNER_TEMP/pkg"
 
+      # NSIS for the Tauri client's NSIS installs, an MSI with its upgrade code for its MSI ones.
       - name: Bundle (Windows)
         if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\pkg" | Out-Null
-          Copy-Item "$env:CARGO_TARGET_DIR\${{ matrix.out }}\vector-gpui.exe" "$env:RUNNER_TEMP\pkg\Vector GPUI.exe"
+          $arch = if ("${{ matrix.target }}" -like "aarch64-*") { "arm64" } else { "x64" }
+          $prefix = if ($env:VECTOR_RELEASE -eq "1") { "Vector" } else { "Vector-GPUI" }
+          $pkg = "$env:RUNNER_TEMP\pkg"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          $exe = "$env:CARGO_TARGET_DIR\${{ matrix.out }}\vector-gpui.exe"
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
-          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 `
-            "/DSOURCE=$env:RUNNER_TEMP\pkg\Vector GPUI.exe" "/DICON=$env:GITHUB_WORKSPACE\src-tauri\icons\icon.ico" `
-            "/DVERSION=$version" "/DOUTFILE=$env:RUNNER_TEMP\pkg\Vector-GPUI_x64-setup.exe" scripts\installer.nsi
+          $icon = "$env:GITHUB_WORKSPACE\src-tauri\icons\icon.ico"
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DSOURCE=$exe" "/DICON=$icon" "/DVERSION=$version" `
+            "/DOUTFILE=$pkg\${prefix}_${version}_$arch-setup.exe" scripts\installer.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # MSI versions are numeric: a preview's number is the fourth field, as tauri-bundler writes it.
+          $msiVersion = $version -replace '-', '.'
+          $wix = if ($env:WIX) { "$env:WIX\bin" } else { "" }
+          if (-not $wix -or -not (Test-Path "$wix\candle.exe")) {
+            $wix = "$env:RUNNER_TEMP\wix"
+            Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile "$env:RUNNER_TEMP\wix.zip"
+            Expand-Archive "$env:RUNNER_TEMP\wix.zip" -DestinationPath $wix
+          }
+          $obj = "$env:RUNNER_TEMP\installer.wixobj"
+          & "$wix\candle.exe" -nologo -arch $arch "-dVersion=$msiVersion" "-dSource=$exe" "-dIcon=$icon" `
+            -ext WixUIExtension -out $obj scripts\installer.wxs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$wix\light.exe" -nologo -ext WixUIExtension -cultures:en-us `
+            -out "$pkg\${prefix}_${version}_${arch}_en-US.msi" $obj
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem $pkg
 
       - name: Bundle (Linux)
         if: startsWith(matrix.platform, 'ubuntu')
         env:
           TOOLS: ${{ runner.temp }}/appimage-tools
-        run: scripts/bundle-appimage.sh target/${{ matrix.out }} "$RUNNER_TEMP/pkg"
+        run: |
+          scripts/bundle-appimage.sh target/${{ matrix.out }} "$RUNNER_TEMP/pkg"
+          scripts/bundle-linux-pkg.sh target/${{ matrix.out }} "$RUNNER_TEMP/pkg"
 
       - uses: actions/upload-artifact@v4
         with:

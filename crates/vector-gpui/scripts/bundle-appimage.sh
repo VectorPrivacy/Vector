@@ -2,12 +2,15 @@
 # The Linux updater bundle, built the way the Tauri bundler builds Vector's AppImage
 # (linuxdeploy + its GTK plugin, WebKitGTK's helper processes copied in for Mini Apps).
 #   scripts/bundle-appimage.sh <dir holding vector-gpui and vector-gpui-miniapp> <out dir>
+# VECTOR_RELEASE=1 names it as a release's (Vector_…); otherwise Vector-GPUI_….
 set -euo pipefail
 
 bins=$(realpath "$1")
 out=$(realpath -m "$2")
 here=$(cd "$(dirname "$0")/.." && pwd)
 repo=$(cd "$here/../.." && pwd)
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$here/Cargo.toml" | head -1)
+prefix=$([ "${VECTOR_RELEASE:-}" = 1 ] && echo Vector || echo Vector-GPUI)
 
 case "$(uname -m)" in
   x86_64) arch=x86_64; name=amd64; multiarch=x86_64-linux-gnu ;;
@@ -57,7 +60,7 @@ cp "$app/usr/share/icons/hicolor/256x256/apps/vector-gpui.png" "$app/vector-gpui
 ln -sf vector-gpui.png "$app/.DirIcon"
 ln -sf usr/share/applications/vector-gpui.desktop "$app/vector-gpui.desktop"
 
-export PATH="$tools:$PATH" ARCH="$arch" APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT="$out/Vector-GPUI_$name.AppImage"
+export PATH="$tools:$PATH" ARCH="$arch" APPIMAGE_EXTRACT_AND_RUN=1 OUTPUT="$out/${prefix}_${version}_$name.AppImage"
 "$tools/linuxdeploy-$arch.AppImage" --appimage-extract-and-run --appdir "$app" \
   --executable "$app/usr/bin/vector-gpui-miniapp" --plugin gtk --output appimage
 rm -rf "$app"

@@ -37,7 +37,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          VERSION=$(grep -m1 '^version' crates/vector-gpui/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           TAG="${TAG_PREFIX}v$VERSION"
           PRE=false
           [[ "$VERSION" == *-* ]] && PRE=true
@@ -57,218 +57,6 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "id=$ID" >> $GITHUB_OUTPUT
           echo "prerelease=$PRE" >> $GITHUB_OUTPUT
-
-  publish-tauri:
-    needs: release
-    permissions:
-      contents: write
-      actions: write
-    strategy:
-      fail-fast: false
-      matrix:
-        # `cold`: no Rust cache. These finish well inside the Intel Mac build, and the repo's
-        # caches share 10 GB, so only the jobs that set the release's length keep one. macOS:
-        # both on the Intel image, Arm cross-compiled; GitHub's Arm macOS pools often go
-        # without a free runner, and the Intel one carries the same Xcode.
-        include:
-          - platform: 'macos-26-intel' # for Arm based macs (M1 and above).
-            args: '--target aarch64-apple-darwin'
-            ffmpeg: 'aarch64-apple-darwin'
-            # ggml's native CPU probe would read the Intel host.
-            ggml_native: 'OFF'
-          - platform: 'macos-26-intel' # for Intel based macs.
-            args: '--target x86_64-apple-darwin'
-            ffmpeg: 'x86_64-apple-darwin'
-          - platform: 'ubuntu-22.04'
-            args: ''
-            cold: true
-          - platform: 'windows-2022'
-            args: ''
-            ffmpeg: 'x86_64-pc-windows-msvc'
-          # ARM: native runners, Whisper on the CPU, and (for now) no video compression.
-          - platform: 'ubuntu-22.04-arm'
-            args: ''
-            cold: true
-          - platform: 'windows-11-arm'
-            args: ''
-            cold: true
-
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: setup node
-        uses: actions/setup-node@v5
-        with:
-          node-version: lts/*
-
-      - name: install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
-          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      # A throwaway runner: scanning every compiler write costs minutes and protects nothing.
-      # The target dir sits at the root of the workspace's drive (D:, the fast disk, on x64),
-      # keeping paths short for whisper's CMake build. /Brepro leaves the link time out of the
-      # executable, so a rebuild of one commit is identical.
-      - name: Prepare the runner (Windows)
-        if: startsWith(matrix.platform, 'windows')
-        shell: pwsh
-        run: |
-          Set-MpPreference -DisableRealtimeMonitoring $true
-          $drive = Split-Path -Qualifier $env:GITHUB_WORKSPACE
-          echo "CARGO_TARGET_DIR=$drive\t" >> $env:GITHUB_ENV
-          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=-C link-arg=/Brepro" >> $env:GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS=-C link-arg=/Brepro" >> $env:GITHUB_ENV
-
-      # ring assembles its ARM64 Windows code with clang; MSVC's assembler can't.
-      - name: LLVM (Windows ARM)
-        if: matrix.platform == 'windows-11-arm'
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) {
-            if (Get-Command choco -ErrorAction SilentlyContinue) { choco install llvm -y --no-progress }
-            else { winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements }
-          }
-          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-          & "C:\Program Files\LLVM\bin\clang.exe" --version
-
-      - name: install dependencies (Linux)
-        if: startsWith(matrix.platform, 'ubuntu')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
-
-      - name: Vulkan SDK (Linux x64)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc > /dev/null
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk
-
-      # vcpkg builds these from source (13 minutes). One fixed key: image updates move vcpkg's
-      # baseline weekly, and holding a single build keeps glslc's shader output the same.
-      - name: Cache Vulkan (Windows)
-        if: matrix.platform == 'windows-2022'
-        id: vulkan-cache
-        uses: actions/cache@v5
-        with:
-          path: C:\vcpkg\installed
-          key: vulkan-x64-windows-headers-loader-spirv-tools-glslc
-
-      - name: Install Vulkan SDK (Windows)
-        if: matrix.platform == 'windows-2022' && steps.vulkan-cache.outputs.cache-hit != 'true'
-        run: |
-          vcpkg install vulkan:x64-windows vulkan-headers:x64-windows vulkan-loader:x64-windows spirv-tools:x64-windows
-          Invoke-WebRequest -Uri "https://jskitty.com/glslc.exe" -OutFile "glslc.exe"
-          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
-          New-Item -ItemType Directory -Force -Path $vcpkgBin
-          Move-Item "glslc.exe" "$vcpkgBin\glslc.exe" -Force
-
-      - name: Vulkan environment (Windows)
-        if: matrix.platform == 'windows-2022'
-        run: |
-          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
-          echo "VULKAN_SDK=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=C:\vcpkg\installed\x64-windows" >> $env:GITHUB_ENV
-          echo "$vcpkgBin" >> $env:GITHUB_PATH
-          & "$vcpkgBin\glslc.exe" --version
-
-      # Video compression (VideoToolbox, Media Foundation) needs a selective FFmpeg; `npm run
-      # tauri` turns the feature on when it is present, so a failed FFmpeg build fails the job.
-      - name: Cache FFmpeg
-        if: matrix.ffmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@v5
-        with:
-          path: src-tauri/native-deps/ffmpeg/${{ matrix.ffmpeg }}
-          key: ffmpeg-${{ matrix.ffmpeg }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
-
-      - name: Build FFmpeg (macOS)
-        if: startsWith(matrix.platform, 'macos') && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        run: |
-          brew install nasm
-          scripts/build-ffmpeg.sh ${{ matrix.ffmpeg }}
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: matrix.platform == 'windows-2022' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-
-      - uses: msys2/setup-msys2@v2
-        if: matrix.platform == 'windows-2022' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        with:
-          msystem: MSYS
-          path-type: inherit
-          install: make nasm diffutils
-
-      - name: Build FFmpeg (Windows)
-        if: matrix.platform == 'windows-2022' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: msys2 {0}
-        run: scripts/build-ffmpeg.sh ${{ matrix.ffmpeg }}
-
-      - name: install frontend dependencies
-        run: npm ci
-
-      # Compiled dependencies, reused only where every input matches (source, flags, rustc), so a
-      # cached build links the same binary as a cold one. Written by release branches alone: a
-      # branch reads only its own caches and master's, never a pull request's.
-      - uses: Swatinem/rust-cache@v2
-        if: ${{ !matrix.cold }}
-        id: rust-cache
-        with:
-          workspaces: src-tauri -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
-          key: ${{ matrix.ffmpeg || matrix.platform }}
-          save-if: ${{ github.ref_name == 'release' || github.ref_name == 'rehearsal' }}
-
-      # Set only where the matrix asks: any value at all, even empty, turns off whisper's x86-64-v3 pin.
-      - name: GGML_NATIVE
-        if: matrix.ggml_native
-        run: echo "GGML_NATIVE=${{ matrix.ggml_native }}" >> "$GITHUB_ENV"
-
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          releaseId: ${{ needs.release.outputs.id }}
-          # latest.json is built once by `checksums`: every matrix job editing the shared asset raced.
-          includeUpdaterJson: false
-          # One more `tauri build` and upload on a failure: a flake this late would otherwise cost
-          # the whole job again. tauri.ci.conf.json and VECTOR_FRONTEND_ONCE keep the retry from
-          # recompiling the app.
-          retryAttempts: 1
-          tauriScript: npm run tauri
-          args: ${{ matrix.args }} --config src-tauri/tauri.ci.conf.json ${{ needs.release.outputs.prerelease == 'true' && '--config src-tauri/tauri.preview.conf.json' || '' }}
-
-      # The executable before bundling: two builds of one commit should print the same hash.
-      - name: Fingerprint the binary
-        shell: bash
-        run: |
-          dir="${CARGO_TARGET_DIR:-src-tauri/target}"
-          command -v cygpath > /dev/null && dir=$(cygpath -u "$dir")
-          for f in "$dir"/release/Vector "$dir"/release/Vector.exe "$dir"/*/release/Vector; do
-            [ -f "$f" ] && sha256sum "$f"
-          done
-          true
-
-      # A moved key (lockfile, toolchain) saves a fresh cache as the job ends. Drop the one it
-      # replaces first: both would count against the 10 GB, and eviction takes the oldest-read.
-      - name: Drop the superseded Rust cache
-        if: steps.rust-cache.outputs.cache-hit == 'false' && (github.ref_name == 'release' || github.ref_name == 'rehearsal')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREFIX: v0-rust-${{ matrix.ffmpeg || matrix.platform }}-${{ github.job }}-
-        run: |
-          gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f ref="$GITHUB_REF" -f key="$PREFIX" \
-            --jq '.actions_caches[] | "\(.id) \(.key)"' |
-            while read -r id key; do
-              echo "dropping $key"
-              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
-            done
 
   # Android APKs: the ARM pair (and the universal fallback) alongside x86_64 for Chromebooks and
   # emulators, which ships as its own APK so the universal one doesn't grow.
@@ -391,8 +179,8 @@ jobs:
   # One file that vouches for every download: SHA256SUMS.txt over the release's assets, signed
   # with the updater key the app already trusts (minisign), and a build-provenance attestation per
   # asset so `gh attestation verify` ties each file to this workflow and commit.
-  # The GPUI client's updater bundles. Optional: a failure here leaves its `*-gpui` manifest
-  # entries out and never holds back the Tauri release.
+  # The desktop release: every target and installer type the Tauri client shipped, under its
+  # names, so each of its installs updates in place (scripts/updater-manifest.mjs).
   build-gpui:
     needs: release
     permissions:
@@ -427,20 +215,25 @@ jobs:
           path: pkg
           merge-multiple: true
 
+      # Test packages' zip and the DMG are downloads, not updates: no signature, and no zip.
       - name: Sign with the updater key
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          rm -f pkg/*.zip
           ls -l pkg
-          for f in pkg/Vector-GPUI_*; do npx --yes @tauri-apps/cli@2.12.2 signer sign "$f"; done
+          for f in pkg/*; do
+            case "$f" in *.dmg) continue ;; esac
+            npx --yes @tauri-apps/cli@2.12.2 signer sign "$f"
+          done
 
       - name: Upload to the release
-        run: gh release upload "$TAG" pkg/Vector-GPUI_* --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" pkg/* --clobber --repo "$GITHUB_REPOSITORY"
 
   checksums:
-    needs: [release, publish-tauri, publish-android, publish-android-fdroid, publish-gpui]
-    if: ${{ !cancelled() && needs.publish-tauri.result == 'success' && needs.publish-android.result == 'success' && needs.publish-android-fdroid.result == 'success' }}
+    needs: [release, publish-gpui, publish-android, publish-android-fdroid]
+    if: ${{ !cancelled() && needs.publish-gpui.result == 'success' && needs.publish-android.result == 'success' && needs.publish-android-fdroid.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

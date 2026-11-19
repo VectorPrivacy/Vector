@@ -97,6 +97,12 @@ Section
   ${EndIf}
   File "/oname=${MAINBINARYNAME}.exe" "${SOURCE}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  ; The Tauri client's sounds: this build carries them in its exe.
+  Delete "$INSTDIR\resources\sounds\notif-prelude.mp3"
+  Delete "$INSTDIR\resources\sounds\notif-techno.mp3"
+  Delete "$INSTDIR\resources\sounds\claim-badge.mp3"
+  RMDir "$INSTDIR\resources\sounds"
+  RMDir "$INSTDIR\resources"
 
   WriteRegStr HKCU "${MANUPRODUCTKEY}" "" $INSTDIR
   WriteRegStr HKCU "${UNINSTKEY}" "" $INSTDIR
