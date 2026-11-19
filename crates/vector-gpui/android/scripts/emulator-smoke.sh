@@ -30,7 +30,15 @@ size=$(adb shell wm size | sed 's/.*: //' | tr -d '\r')
 adb shell input tap $((${size%x*} / 2)) $((${size#*x} * 36 / 100))
 sleep 8
 adb exec-out screencap -p > "$out/after-tap.png"
-for shot in screen after-tap; do
+# Back to the start, then Login and some typing, to see the keyboard's text reach the field.
+adb shell input keyevent 4
+sleep 3
+adb shell input tap $((${size%x*} / 2)) $((${size#*x} * 47 / 100))
+sleep 5
+adb shell input text "nsec1typed"
+sleep 4
+adb exec-out screencap -p > "$out/typed.png"
+for shot in screen after-tap typed; do
   echo "::group::$shot.png"
   echo "SCREEN-BEGIN $shot"
   base64 -w0 "$out/$shot.png"
