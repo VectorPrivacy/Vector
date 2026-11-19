@@ -956,7 +956,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
                                     .id("bot")
                                     .flex()
                                     .tip(t::community_bot())
-                                    .child(svg().path("icons/bot.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT))),
+                                    .child(svg().path("icons/bot.svg").size(px(14.)).flex_shrink_0().text_color(c(0x5b6060))),
                             )
                         })
                         .children(crate::timeline::timeout_mark(store, Some(cid), npub))
