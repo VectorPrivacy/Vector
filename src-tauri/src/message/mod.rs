@@ -118,13 +118,12 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     // only: [https://trusted.com](https://evil.io) must never preview the claimed
     // site while the click goes elsewhere.
     const MAX_URLS_TO_TRY: usize = 3;
-    let urls = util::extract_https_urls(&vector_core::net::strip_md_link_claims(&text));
+    let urls = util::extract_https_urls(&vector_core::net::strip_md_link_claims(&text), MAX_URLS_TO_TRY);
     if urls.is_empty() {
         return false;
     }
 
-    // Only try the first few URLs
-    for url in urls.into_iter().take(MAX_URLS_TO_TRY) {
+    for url in urls {
         // A link to a Nostr post, article or video gets its own card from relays.
         if vector_core::nostr_embed::EmbedRef::from_url(&url).is_some() {
             continue;
