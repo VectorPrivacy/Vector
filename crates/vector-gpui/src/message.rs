@@ -23,6 +23,24 @@ pub mod types {
             self.bytes.is_empty() && self.original_size > 0
         }
     }
+
+    /// The desktop's picker cache, read before a content URI: uri -> (bytes, extension, name,
+    /// size, when cached). Pickers here hand over files, so it stays empty.
+    #[cfg(target_os = "android")]
+    #[allow(clippy::type_complexity)]
+    pub static ANDROID_FILE_CACHE: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, (Arc<Vec<u8>>, String, String, u64, std::time::Instant)>>,
+    > = std::sync::LazyLock::new(Default::default);
+}
+
+#[cfg(target_os = "android")]
+pub use vector_core::types::AttachmentFile;
+
+#[cfg(target_os = "android")]
+pub struct FileInfo {
+    pub size: u64,
+    pub name: String,
+    pub extension: String,
 }
 
 #[path = "../../../src-tauri/src/message/video_compression.rs"]

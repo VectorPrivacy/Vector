@@ -7,9 +7,37 @@ pub mod error;
 #[path = "../../../../src-tauri/src/miniapps/marketplace.rs"]
 #[allow(dead_code)]
 pub mod marketplace;
+#[cfg(not(target_os = "android"))]
 #[path = "../../../../src-tauri/src/miniapps/isolated.rs"]
 #[allow(dead_code)]
 mod isolated_core;
+/// The desktop's loopback host, which Android doesn't run: an app needing it never opens there.
+#[cfg(target_os = "android")]
+mod isolated_core {
+    pub(crate) struct Started {
+        pub id: u64,
+        pub port: u16,
+        pub boot_url: url::Url,
+    }
+    pub(crate) enum StartError {
+        #[allow(dead_code)]
+        AlreadyOpen(String),
+        Failed(String),
+    }
+    pub(crate) async fn start(_: &tauri::AppHandle, _: &str, _: &str, _: Option<&str>) -> Result<Started, StartError> {
+        Err(StartError::Failed("Cross-origin isolated Mini Apps can't run on Android yet".into()))
+    }
+    pub(crate) fn origin(port: u16) -> String {
+        format!("http://localhost:{port}")
+    }
+    pub(crate) fn window_for_partition(_: &str, _: &str) -> Option<String> {
+        None
+    }
+    pub(crate) fn stop_if(_: &str, _: u64) {}
+    pub(crate) fn is_live_port(_: u16) -> bool {
+        false
+    }
+}
 #[cfg(target_os = "linux")]
 #[path = "../../../../src-tauri/src/miniapps/network_isolation.rs"]
 pub mod network_isolation;

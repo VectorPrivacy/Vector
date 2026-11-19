@@ -1,0 +1,17 @@
+//! The desktop client's JNI glue for calls and the microphone, compiled from its sources, over
+//! the activity and services in `crates/vector-gpui/android`.
+
+#[path = "../../../../../src-tauri/src/android/utils.rs"]
+#[allow(dead_code)]
+pub mod utils;
+#[path = "../../../../../src-tauri/src/android/permissions.rs"]
+pub mod permissions;
+#[path = "../../../../../src-tauri/src/android/call_audio.rs"]
+#[allow(dead_code)]
+pub mod call_audio;
+#[path = "../../../../../src-tauri/src/android/call_service.rs"]
+pub mod call_service;
+#[path = "../../../../../src-tauri/src/android/incoming_call.rs"]
+#[allow(dead_code)]
+pub mod incoming_call;
+pub mod background_sync;

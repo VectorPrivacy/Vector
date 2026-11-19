@@ -7044,11 +7044,10 @@ dependencies = [
 [[package]]
 name = "ndk"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3f42e7bbe13d351b6bead8286a43aac9534b82bd3cc43e47037f012ebfd62d4"
 dependencies = [
  "bitflags 2.13.2",
  "jni-sys 0.3.1",
+ "libc",
  "log",
  "ndk-sys",
  "num_enum",
@@ -13491,6 +13490,7 @@ dependencies = [
  "gtk",
  "http",
  "image",
+ "jni 0.21.1",
  "jpegxl-src",
  "jxl-oxide",
  "libc",
@@ -13498,6 +13498,7 @@ dependencies = [
  "log",
  "memchr",
  "minisign-verify",
+ "ndk-context",
  "nokhwa",
  "nostr-sdk",
  "objc2 0.6.5",
@@ -13573,10 +13574,13 @@ dependencies = [
  "image",
  "iroh",
  "iroh-gossip",
+ "jni 0.21.1",
  "libc",
  "lofty",
  "log",
  "memchr",
+ "ndk",
+ "ndk-context",
  "nostr-sdk",
  "objc2 0.6.5",
  "objc2-core-audio-types",

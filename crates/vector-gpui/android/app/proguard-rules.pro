@@ -1,2 +1,10 @@
 # The bridge is called by name from Rust over JNI.
 -keep class io.vectorapp.gpui.Bridge { *; }
+# The desktop client's call and permission glue, called by name from the same Rust.
+-keep class io.vectorapp.CallService { *; }
+-keep class io.vectorapp.IncomingCall { *; }
+-keep class io.vectorapp.CallAudioRouter { *; }
+-keep class io.vectorapp.PermissionHandler { *; }
+-keepclassmembers class io.vectorapp.MainActivity {
+    native <methods>;
+}

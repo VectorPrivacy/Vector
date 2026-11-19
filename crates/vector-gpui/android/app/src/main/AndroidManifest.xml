@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Voice messages and calls, a call kept live in the background, and its ring. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Vulkan where the phone has it, else GLES 3. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
@@ -44,5 +54,10 @@
                 <data android:pathPrefix="/go" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".CallService"
+            android:foregroundServiceType="microphone|mediaPlayback"
+            android:exported="false" />
     </application>
 </manifest>

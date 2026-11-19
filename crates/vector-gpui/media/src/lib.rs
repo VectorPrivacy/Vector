@@ -59,6 +59,8 @@ pub mod shared {
     }
 }
 
+#[cfg(target_os = "android")]
+pub mod android;
 #[allow(dead_code)]
 pub mod audio;
 #[path = "../../../../src-tauri/src/audio_codecs.rs"]
@@ -186,6 +188,13 @@ pub mod message {
 }
 
 pub mod deep_link {
+    #[cfg(target_os = "android")]
+    pub use vector_core::deep_link::DeepLinkAction;
+
+    /// Where the desktop's Android glue leaves a tapped call; here its event carries it instead.
+    #[cfg(target_os = "android")]
+    pub fn set_pending_action(_: DeepLinkAction) {}
+
     pub fn open_chat_from_notification<R: tauri::Runtime>(
         _: &tauri::AppHandle<R>,
         chat_id: &str,

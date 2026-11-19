@@ -80,6 +80,10 @@ cc = "1"
 # Android transcribes on the CPU too, as the Tauri client does there.
 [target.'cfg(target_os = "android")'.dependencies]
 whisper-rs = { version = "0.15.1", optional = true }
+jni = "0.21.1"
+ndk-context = "0.1.1"
+# AAudio streams opened as a phone call's (the patched crate, as the desktop client's).
+ndk = { version = "0.9", default-features = false, features = ["audio"] }
 
 # Vulkan on x86-64 Windows and Linux; ARM transcribes on the CPU, as the desktop client does.
 [target.'cfg(all(any(windows, target_os = "linux"), target_arch = "x86_64"))'.dependencies]

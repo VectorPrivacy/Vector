@@ -4,6 +4,8 @@
 extern crate vector_core;
 
 mod album;
+#[cfg(target_os = "android")]
+mod android;
 mod applog;
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};

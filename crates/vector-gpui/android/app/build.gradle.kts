@@ -1,3 +1,4 @@
+import java.util.Properties
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
 
@@ -39,7 +40,7 @@ android {
     signingConfigs {
         if (keystore.exists()) {
             create("release") {
-                val props = java.util.Properties().apply { keystore.inputStream().use { load(it) } }
+                val props = Properties().apply { keystore.inputStream().use { load(it) } }
                 keyAlias = props["keyAlias"] as String
                 keyPassword = props["password"] as String
                 storeFile = file(props["storeFile"] as String)

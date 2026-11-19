@@ -2,6 +2,7 @@ package io.vectorapp
 
 import android.content.Intent
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.core.view.ViewCompat
@@ -15,12 +16,24 @@ class MainActivity : ComponentActivity() {
     lateinit var view: GpuiView
         private set
 
+    companion object {
+        /** The ring's notification was tapped (`answer` false) or answered. */
+        @JvmStatic
+        external fun nativeOnCallTap(callId: String, npub: String, answer: Boolean)
+    }
+
+    /** The desktop client's glue (calls, permissions) holds this activity while it lives. */
+    private external fun nativeCreated()
+    private external fun nativeDestroyed()
+    private external fun nativeForeground(on: Boolean)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         view = GpuiView(this)
         setContentView(view)
         Bridge.attach(this)
+        nativeCreated()
         configuration(resources.configuration)
         ViewCompat.setOnApplyWindowInsetsListener(view) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
@@ -38,7 +51,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun link(intent: Intent?) {
-        intent?.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.let(Bridge::nativeOpenUrl)
+        intent ?: return
+        val callNpub = intent.getStringExtra(IncomingCall.EXTRA_CALL_NPUB)
+        if (!callNpub.isNullOrEmpty()) {
+            val callId = intent.getStringExtra(IncomingCall.EXTRA_CALL_ID) ?: ""
+            val answer = intent.getBooleanExtra(IncomingCall.EXTRA_CALL_ANSWER, false)
+            intent.removeExtra(IncomingCall.EXTRA_CALL_NPUB)
+            // A ringing call shows over the lock screen.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            }
+            nativeOnCallTap(callId, callNpub, answer)
+            return
+        }
+        intent.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.let(Bridge::nativeOpenUrl)
     }
 
     private fun configuration(config: Configuration) {
@@ -58,11 +85,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        nativeForeground(true)
         Bridge.nativeLifecycle(2)
     }
 
     override fun onPause() {
         Bridge.nativeLifecycle(3)
+        nativeForeground(false)
         super.onPause()
     }
 
@@ -73,7 +102,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         Bridge.nativeLifecycle(5)
+        nativeDestroyed()
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        PermissionHandler.handlePermissionResult(requestCode, grantResults)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

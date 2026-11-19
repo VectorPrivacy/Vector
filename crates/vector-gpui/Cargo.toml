@@ -114,6 +114,10 @@ xcap = "0.9"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3.7", default-features = false }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"
+ndk-context = "0.1.1"
+
 # The same wgpu GPUI draws with on Linux; elsewhere its default backends (Metal, DX12).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 git = "https://github.com/gfx-rs/wgpu"
@@ -196,6 +200,8 @@ nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
 nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
 saturating-time = { path = "../vendor/saturating-time" }
+# ndk 0.9.0 with the desktop client's switch that opens every AAudio stream as a phone call's.
+ndk = { path = "../vendor/ndk" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
