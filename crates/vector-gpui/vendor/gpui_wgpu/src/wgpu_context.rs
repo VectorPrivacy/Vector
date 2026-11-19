@@ -469,9 +469,14 @@ impl WgpuContext {
                 .using_alignment(adapter.limits())
         };
         #[cfg(not(target_family = "wasm"))]
-        let required_limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter.limits())
-            .using_alignment(adapter.limits());
+        let required_limits = if Self::needs_webgl_transport(adapter) {
+            log::info!("no storage buffers in the vertex stage: instances travel in textures");
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::downlevel_defaults()
+        }
+        .using_resolution(adapter.limits())
+        .using_alignment(adapter.limits());
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -783,7 +788,26 @@ impl WgpuContext {
     }
 
     pub fn uses_webgl_instance_data(&self) -> bool {
-        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
+        #[cfg(target_family = "wasm")]
+        return matches!(self.backend, WgpuBackend::Gl);
+        #[cfg(not(target_family = "wasm"))]
+        Self::needs_webgl_transport(&self.adapter)
+    }
+
+    /// GLES 3.0 has no storage buffers and 3.1 may allow none in the vertex stage: such a
+    /// device takes WebGL2's limits and its texture-borne instances.
+    #[cfg(not(target_family = "wasm"))]
+    fn needs_webgl_transport(adapter: &wgpu::Adapter) -> bool {
+        let limits = adapter.limits();
+        let storage = wgpu::Limits::downlevel_defaults()
+            .using_resolution(limits.clone())
+            .using_alignment(limits.clone());
+        adapter.get_info().backend == wgpu::Backend::Gl
+            && !(adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::VERTEX_STORAGE)
+                && storage.check_limits(&limits))
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {
