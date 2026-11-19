@@ -24,6 +24,8 @@ const TOKENS: &[&str] = &[
     "https://www.google.com/search?q=", "https://www.ebay.com/itm/", "123456789",
     "[00:12.34]", "[99:99.999]", "[-1:00]", "<00:01.00>", "[ar:", "[offset:", "[offset:-99999999]", "TRACK 01 AUDIO\n",
     "INDEX 01 00:00:00\n", "INDEX 01 99:99:99\n", "TITLE \"", "PERFORMER \"", "FILE \"a.flac\" WAVE\n", "REM ",
+    ".xdc", "app%20x.xdc", "%E6%9D%B1", "%", "+", "v0.5.2", "-preview.", "0.6.0-", "99999999999999999999", "<b>", "</b>",
+    "<span class=\"", "&lt;", "&#x1F600;", "&#99999999;", "member.ban", "channel.", "(╯°□°)╯", "^_^",
 ];
 
 struct Rng(u64);
@@ -170,6 +172,24 @@ fn all(s: &str, r: &mut Rng) {
     let _ = vector_media::lyrics::parse_text(s);
     let _ = vector_media::chapters::parse_cue(s);
     let _ = vector_media::chapters::parse_chap(s.as_bytes(), r.below(2) == 0);
+    let _ = untrack::shown(s);
+    let _ = newchat::invite_url(s);
+    let _ = backend::gifs::original_url(s);
+    let _ = backend::xdcurl::find(s);
+    let _ = backend::xdcurl::file_name(s);
+    let _ = backend::xdcurl::host(s);
+    let _ = backend::updates::Version::parse(s);
+    let _ = timeline::is_image_url(s);
+    let _ = texttime::code_at(s);
+    let _ = kit::rich(s);
+    let _ = emoji::text_symbol_code(s);
+    let _ = emoji::by_char(s);
+    let _ = emoji::kaomoji(s);
+    let _ = audit::family_of(s);
+    let _ = audit::tone_of(s);
+    let _ = uploaderr::humanize(s);
+    let _ = nexus::tag_label(s);
+    let _ = routes::tag_colors(s);
 }
 
 #[test]
