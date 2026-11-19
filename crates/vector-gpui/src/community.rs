@@ -880,7 +880,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
     let status = store
         .profiles
         .get(npub)
-        .map(|p| p.status.title.clone())
+        .map(crate::profile::status_title)
         .filter(|t| !t.is_empty());
     let key = SharedString::from(format!("roster:{npub}"));
     let (tap, k, n) = (on.clone(), key.clone(), npub.to_string());

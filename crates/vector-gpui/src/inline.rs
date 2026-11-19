@@ -285,8 +285,8 @@ pub struct Inline {
     base: Look,
     on_click: Option<OnClick>,
     clock: f32,
-    /// One line, cut with `…` (`white-space: nowrap; text-overflow: ellipsis`).
-    ellipsis: bool,
+    /// At most this many lines, the last cut with `…`; 0 wraps freely.
+    clamp: usize,
     /// Told whether the one line was cut, as laid out.
     clipped: Option<Rc<std::cell::Cell<bool>>>,
     /// A message's paragraph, which a drag can select.
@@ -297,6 +297,8 @@ pub struct Inline {
     ltr: bool,
     /// Each paragraph sits at its own start edge rather than the UI's (`dir=auto`).
     dir_auto: bool,
+    /// Each line centred in the box (`text-align: center`).
+    centre: bool,
     /// Its pictures hold their first frame until their row is hovered (`data-motion="hover"`).
     held: bool,
 }
@@ -308,12 +310,13 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         base,
         on_click: None,
         clock: 0.,
-        ellipsis: false,
+        clamp: 0,
         clipped: None,
         select: None,
         nowrap: false,
         ltr: false,
         dir_auto: false,
+        centre: false,
         held: false,
     }
 }
@@ -329,8 +332,15 @@ impl Inline {
         self
     }
 
+    /// One line, cut with `…` (`white-space: nowrap; text-overflow: ellipsis`).
     pub fn single_line(mut self) -> Self {
-        self.ellipsis = true;
+        self.clamp = 1;
+        self
+    }
+
+    /// Wraps to at most `lines`, the last cut with `…` (`-webkit-line-clamp`).
+    pub fn clamp(mut self, lines: usize) -> Self {
+        self.clamp = lines;
         self
     }
 
@@ -354,6 +364,11 @@ impl Inline {
 
     /// Message text: a paragraph that reads left to right stays left in a right-to-left UI,
     /// where a label sits against the UI's start edge whatever its script.
+    pub fn centre(mut self) -> Self {
+        self.centre = true;
+        self
+    }
+
     pub fn dir_auto(mut self) -> Self {
         self.dir_auto = true;
         self
@@ -448,7 +463,12 @@ fn metrics(look: &Look, window: &Window) -> Metrics {
 }
 
 fn shape(text: &str, look: &Look, color: Hsla, window: &Window) -> ShapedLine {
-    let text: SharedString = text.to_string().into();
+    // A line break inside a text atom is white space, as in HTML; the same length keeps offsets.
+    let text: SharedString = if text.contains(['\n', '\r']) {
+        text.replace(['\n', '\r'], " ").into()
+    } else {
+        text.to_string().into()
+    };
     window.text_system().shape_line(
         text.clone(),
         px(look.size),
@@ -682,11 +702,16 @@ pub fn has_rtl(text: &str) -> bool {
 }
 
 fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -> Laid {
+    layout_upto(atoms, base, width, usize::MAX, ltr, window)
+}
+
+/// Wraps until a line past `limit` begins, which a clamp needs only to know there is more.
+fn layout_upto(atoms: &[Atom], base: &Look, width: f32, limit: usize, ltr: bool, window: &Window) -> Laid {
     let mut segs = segments(atoms, window);
     let mut lines: Vec<Vec<Placed>> = vec![Vec::new()];
     let mut x = 0f32;
     let mut i = 0;
-    while i < segs.len() {
+    while i < segs.len() && lines.len() <= limit {
         // The word: segments up to and including the next break opportunity.
         let mut j = i;
         let mut w = 0f32;
@@ -706,7 +731,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -
         if visible > width && x == 0. {
             // Too wide for any line: place what fits, split the segment that overflows.
             let mut k = i;
-            while k <= j {
+            while k <= j && lines.len() <= limit {
                 let s = &segs[k];
                 let sw = s.lead + s.width + s.tail;
                 if x + sw - s.hang <= width
@@ -766,6 +791,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -
         i = j + 1;
     }
     if lines.len() > 1
+        && lines.len() <= limit
         && lines.last().is_some_and(|l| l.is_empty())
         && !segs
             .last()
@@ -873,6 +899,35 @@ fn to_start(laid: &mut Laid) {
     }
 }
 
+/// Centres each line in a box `width` wide; the last carries the cut's `…`, `ell` wide.
+fn centre_lines(laid: &mut Laid, width: f32, ell: f32) {
+    let count = laid.lines.len();
+    let mut cut = laid.ellipsis;
+    for (i, line) in laid.lines.iter_mut().enumerate() {
+        let mut start = line.items.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        if !start.is_finite() {
+            continue;
+        }
+        let mut end = line_end(line);
+        if i + 1 == count
+            && let Some((x, _)) = cut
+        {
+            start = start.min(x);
+            end = end.max(x + ell);
+        }
+        let shift = ((width - (end - start)) / 2.).floor() - start;
+        for p in &mut line.items {
+            p.x += shift;
+        }
+        if i + 1 == count
+            && let Some((x, _)) = &mut cut
+        {
+            *x += shift;
+        }
+    }
+    laid.ellipsis = cut;
+}
+
 /// Moves the right-set lines to the edge of the box the paragraph was given, which a stretched
 /// layout makes wider than its text.
 fn flush_to(laid: &mut Laid, edge: f32) {
@@ -888,8 +943,64 @@ fn flush_to(laid: &mut Laid, edge: f32) {
     laid.flush = edge;
 }
 
-/// One line at most `width` wide, cut at a grapheme with `…` after.
-fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -> Laid {
+/// Wrapped at `width`, kept to `lines` when that is not 0.
+fn layout_clamped(atoms: &[Atom], base: &Look, width: f32, lines: usize, ltr: bool, window: &Window) -> Laid {
+    match lines {
+        0 => layout(atoms, base, width, ltr, window),
+        // A clamped box clips, so it asks no room of its own (`min-width: auto` is 0).
+        1 => layout_cut(atoms, base, width, ltr, false, window),
+        _ if width <= 0. => layout_cut(atoms, base, width, ltr, false, window),
+        n => layout_clamp(atoms, base, width, n, ltr, window),
+    }
+}
+
+/// `n` lines wrapped at `width`: the last holds everything after the ones before, cut with `…`.
+fn layout_clamp(atoms: &[Atom], base: &Look, width: f32, n: usize, ltr: bool, window: &Window) -> Laid {
+    let mut laid = layout_upto(atoms, base, width, n, ltr, window);
+    if laid.lines.len() <= n {
+        return laid;
+    }
+    let Some((from, at)) = laid.lines[n - 1].items.iter().map(|p| (p.atom, p.range.start)).min() else {
+        laid.lines.truncate(n);
+        laid.size.height = laid.lines.last().map_or(px(0.), |l| px(l.top + l.height));
+        return laid;
+    };
+    let mut rest: Vec<Atom> = atoms[from..].to_vec();
+    if let Some(Atom::Text { text, .. }) = rest.first_mut() {
+        *text = text[at..].to_string().into();
+    }
+    let mut tail = layout_cut(&rest, base, width, ltr, true, window);
+    let Some(mut last) = tail.lines.pop() else {
+        return laid;
+    };
+    for p in &mut last.items {
+        if p.atom == 0 && matches!(rest[0], Atom::Text { .. }) {
+            p.range = p.range.start + at..p.range.end + at;
+        }
+        p.atom += from;
+    }
+    // Right-set lines all end at the box's edge, where the cut line's mirror image ends.
+    let shift = width - laid.flush;
+    for line in laid.lines.iter_mut().filter(|l| l.right) {
+        for p in &mut line.items {
+            p.x += shift;
+        }
+    }
+    laid.lines.truncate(n - 1);
+    let top = laid.lines.last().map_or(0., |l| l.top + l.height);
+    last.top += top;
+    last.baseline += top;
+    laid.size = size(px(width), px(last.top + last.height));
+    laid.lines.push(last);
+    laid.ellipsis = tail.ellipsis.take().map(|(x, atom)| (x, atom + from));
+    laid.flush = width;
+    laid.width = Some(width);
+    laid
+}
+
+/// One line at most `width` wide, cut at a grapheme with `…` after; also when the text goes on
+/// past it (`more`).
+fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, more: bool, window: &Window) -> Laid {
     let mut laid = layout(atoms, base, f32::INFINITY, ltr, window);
     laid.lines.truncate(1);
     let Some(line) = laid.lines.first_mut() else {
@@ -900,7 +1011,7 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         .last()
         .map(|p| p.x + p.lead + p.width + p.tail)
         .unwrap_or(0.);
-    if end <= width {
+    if end <= width && !more {
         laid.width = Some(width);
         laid.size.width = px(end.min(width).ceil());
         return laid;
@@ -970,12 +1081,9 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         cut_at = Some((p.x, p.atom));
         break;
     }
-    let cut = cut_at.unwrap_or((
-        keep.last()
-            .map(|p| p.x + p.lead + p.width + p.tail)
-            .unwrap_or(0.),
-        0,
-    ));
+    let cut = cut_at.unwrap_or_else(|| {
+        keep.last().map_or((0., 0), |p| (p.x + p.lead + p.width + p.tail, p.atom))
+    });
     let cut = if rtl_line {
         mirror_items(&mut keep, width);
         let look = look_of(cut.1);
@@ -1070,7 +1178,7 @@ impl Element for Inline {
             self.atoms.clone(),
             self.base.clone(),
             laid.clone(),
-            self.ellipsis,
+            self.clamp,
             self.nowrap,
             self.ltr,
         );
@@ -1087,11 +1195,7 @@ impl Element for Inline {
                 };
                 let mut s = state.borrow_mut();
                 if s.width != Some(width) {
-                    *s = if cut {
-                        layout_cut(&atoms, &base, width, ltr, window)
-                    } else {
-                        layout(&atoms, &base, width, ltr, window)
-                    };
+                    *s = layout_clamped(&atoms, &base, width, cut, ltr, window);
                 }
                 s.size
             });
@@ -1111,18 +1215,24 @@ impl Element for Inline {
             let w = f32::from(bounds.size.width);
             let mut s = laid.borrow_mut();
             if !self.nowrap && s.width.is_none_or(|lw| {
-                (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)
+                (lw - w).abs() > 0.5 && (self.clamp > 0 || f32::from(s.size.width) > w)
             }) {
-                *s = if self.ellipsis {
-                    layout_cut(&self.atoms, &self.base, w, self.ltr, window)
-                } else {
-                    layout(&self.atoms, &self.base, w, self.ltr, window)
-                };
+                *s = layout_clamped(&self.atoms, &self.base, w, self.clamp, self.ltr, window);
             }
             if !self.dir_auto && window.mirrored() {
                 to_start(&mut s);
             }
             flush_to(&mut s, w);
+            if self.centre {
+                let ell = s.ellipsis.map(|(_, atom)| {
+                    let look = match &self.atoms[atom] {
+                        Atom::Text { look, .. } => look,
+                        _ => &self.base,
+                    };
+                    f32::from(shape("…", look, look.color, window).width)
+                });
+                centre_lines(&mut s, w, ell.unwrap_or(0.));
+            }
         }
         if let Some(key) = &self.select {
             crate::select::place(key, &self.atoms, laid, bounds);
@@ -1422,7 +1532,7 @@ impl Element for Inline {
                 }
             }
         }
-        if let (Some((x, atom)), Some(line)) = (s.ellipsis, s.lines.first()) {
+        if let (Some((x, atom)), Some(line)) = (s.ellipsis, s.lines.last()) {
             let look = match &self.atoms[atom] {
                 Atom::Text { look, .. } => look.clone(),
                 _ => self.base.clone(),

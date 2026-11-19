@@ -171,7 +171,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
     } else {
         crate::t::member_loading().into()
     };
-    let status = if veiled { String::new() } else { p.map(|p| p.status.title.trim().to_string()).unwrap_or_default() };
+    let status = if veiled { String::new() } else { p.map(crate::profile::status_title).unwrap_or_default() };
     let about = if veiled { String::new() } else { p.map(|p| p.about.trim().to_string()).unwrap_or_default() };
     let fingerprint = if veiled {
         String::new()

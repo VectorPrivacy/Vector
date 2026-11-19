@@ -3,6 +3,7 @@
 
 use crate::kit::Tipped as _;
 use std::rc::Rc;
+use vector_core::profile::SlimProfile;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, FontWeight, Hsla, MouseButton, ObjectFit, SharedString, Window, div, px, svg};
@@ -228,8 +229,30 @@ fn small_option(
     }
 }
 
-/// Status or bio text as the desktop client draws it: emoji, the profile's `:shortcode:`s, and
-/// (`mentions`) npubs as pills.
+/// A status as the desktop shows it: white space, line breaks too, runs as one space.
+pub(crate) fn status_title(p: &SlimProfile) -> String {
+    // Three lines show a few hundred characters; more would only cost layout time each frame.
+    const SHOWN: usize = 4096;
+    let mut out = String::new();
+    for word in p.status.title.split_whitespace() {
+        if out.len() >= SHOWN {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.len() > SHOWN {
+        let mut end = SHOWN;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
 /// Whether `npub`'s status carries `:shortcode:`s that [`status`] draws.
 pub(crate) fn status_has_emoji(store: &Store, npub: &str) -> bool {
     store.profiles.get(npub).is_some_and(|p| !p.status.emoji_tags.is_empty())
@@ -239,11 +262,13 @@ pub(crate) fn status_has_emoji(store: &Store, npub: &str) -> bool {
 pub(crate) fn status(store: &Store, npub: &str, look: crate::inline::Look) -> crate::inline::Inline {
     let media = crate::media::shared();
     let p = store.profiles.get(npub);
-    let text = p.map(|p| p.status.title.trim()).unwrap_or_default();
+    let text = p.map(status_title).unwrap_or_default();
     let tags = p.map(|p| p.status.emoji_tags.as_slice()).unwrap_or_default();
-    rich(store, Some(&media), text, tags, look, false).single_line()
+    rich(store, Some(&media), &text, tags, look, false).single_line()
 }
 
+/// Status or bio text as the desktop client draws it: emoji, the profile's `:shortcode:`s, and
+/// (`mentions`) npubs as pills.
 pub(crate) fn rich(
     store: &Store,
     media: Option<&std::cell::RefCell<crate::media::Media>>,
@@ -285,7 +310,7 @@ pub fn pane(
     };
     let mine = p.mine;
     let name = store.name(&s.npub);
-    let status = p.status.title.clone();
+    let status = status_title(p);
     let status_text = if status.is_empty() && mine {
         t::profile_set_status().to_string()
     } else {
@@ -362,6 +387,7 @@ pub fn pane(
                         .items_center()
                         .gap(px(6.))
                         .min_w_0()
+                        .max_w_full()
                         .child(crate::ui::avatar(store, &s.npub, 22.))
                         .child(
                             div()
@@ -573,7 +599,7 @@ pub fn pane(
                 .flex()
                 .justify_center()
                 .gap(px(4.))
-                .child(secondary)
+                .child(div().min_w_0().child(secondary))
                 .when(p.bot, |d| {
                     d.child(
                         svg()
@@ -607,7 +633,8 @@ pub fn pane(
                 crate::inline::Look::new(INTER, 14., 21., c(TEXT)),
                 false,
             )
-            .single_line(),
+            .clamp(3)
+            .centre(),
         );
     body = body.child(status_line);
     // #profile-badges: empty, its margin collapses into the options'.
@@ -1031,4 +1058,29 @@ fn edit_fields(e: &Edit, no_banner: bool, on: &OnAct) -> gpui::Div {
                 .pb(px(12.))
                 .child(div().min_h(px(60.)).child(e.bio.clone())),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with(title: &str) -> SlimProfile {
+        let mut p = SlimProfile::default();
+        p.status.title = title.into();
+        p
+    }
+
+    #[test]
+    fn a_status_reads_as_one_line() {
+        assert_eq!(status_title(&with("  first line\nsecond\r\n\n third\tend ")), "first line second third end");
+        assert_eq!(status_title(&with("\n\n")), "");
+    }
+
+    #[test]
+    fn a_huge_status_keeps_what_a_line_can_show() {
+        assert_eq!(status_title(&with(&"é".repeat(100_000))).len(), 4096);
+        assert_eq!(status_title(&with(&"€".repeat(100_000))).len(), 4095);
+        let words = status_title(&with(&"word ".repeat(100_000)));
+        assert!(words.len() <= 4096 && words.starts_with("word word"));
+    }
 }

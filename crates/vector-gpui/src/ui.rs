@@ -7958,7 +7958,7 @@ fn rail(
     let parts = navbar.as_ref().map(|n| n.on.clone());
     let me = store.me();
     let my_name = me.map(|p| store.name(&p.id)).unwrap_or_default();
-    let status = me.map(|p| p.status.title.clone()).filter(|t| !t.is_empty());
+    let status = me.map(crate::profile::status_title).filter(|t| !t.is_empty());
 
     div()
         .w(px(mode.width()))
@@ -8901,7 +8901,7 @@ impl VectorApp {
         } else if store.stream_hidden(&id) {
             String::new()
         } else {
-            store.profiles.get(id.as_ref()).map(|p| p.status.title.clone()).unwrap_or_default()
+            store.profiles.get(id.as_ref()).map(crate::profile::status_title).unwrap_or_default()
         };
         let name_row = div()
             .id("chat-header-info")
@@ -8913,9 +8913,13 @@ impl VectorApp {
             .flex()
             .items_center()
             .gap(px(6.))
+            .min_w_0()
+            .max_w_full()
             .child(if notes { div().into_any_element() } else { avatar(store, &id, 22.).into_any_element() })
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .font_family(RUBIK)
                     .font_weight(FontWeight::BOLD)
                     .text_size(px(18.72))
@@ -8924,6 +8928,8 @@ impl VectorApp {
                     .child(if notes { t::chat_notes().to_string() } else { store.name(&id) }),
             );
         let menu = !notes || store.chat(&id).is_some();
+        // The header's grid: centred while the name fits, else it takes the room up to the buttons.
+        let actions_w = 40. * ((!notes) as u8 + menu as u8) as f32 + 10.;
         div()
             .h(px(61.))
             .flex_shrink_0()
@@ -8933,7 +8939,10 @@ impl VectorApp {
             .justify_center()
             .map(|d| {
                 if subtext.is_empty() {
-                    d.items_center().child(name_row.mt(px(5.)))
+                    d.items_center()
+                        .child(div().flex_1())
+                        .child(div().px(px(10.)).min_w_0().flex().child(name_row.mt(px(5.))))
+                        .child(div().flex_1().min_w(px(actions_w)))
                 } else {
                     d.child(
                         div()
@@ -10192,6 +10201,7 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                 ),
             };
             div()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -10205,6 +10215,8 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                 .child(div().motion_live().mb(px(8.)).child(art))
                 .child(
                     div()
+                        .max_w_full()
+                        .text_center()
                         .text_size(px(16.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(white_a(0.9))
