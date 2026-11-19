@@ -16729,6 +16729,8 @@ button.popout-thumb {
   flex-shrink: 0;
   width: 16px;
   height: 16px;
+  /* The label's line box: bottom-aligned in the windowed roster, the two centre together. */
+  height: 1lh;
   margin-left: auto;
 }
 
