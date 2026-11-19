@@ -4367,6 +4367,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_android"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "calloop",
+ "futures",
+ "gpui",
+ "gpui_wgpu",
+ "jni 0.21.1",
+ "libc",
+ "log",
+ "ndk",
+ "ndk-context",
+ "ndk-sys",
+ "parking_lot",
+ "raw-window-handle",
+ "uuid",
+]
+
+[[package]]
 name = "gpui_apple"
 version = "0.1.0"
 dependencies = [
@@ -4521,11 +4541,11 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed?rev=f8cfc7ed9e57503def9479138894f3139f5400cc#f8cfc7ed9e57503def9479138894f3139f5400cc"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "gpui",
+ "gpui_android",
  "gpui_ios",
  "gpui_linux",
  "gpui_macos",

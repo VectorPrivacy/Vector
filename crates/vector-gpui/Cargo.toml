@@ -220,8 +220,11 @@ gpui_macos = { path = "vendor/gpui_macos" }
 gpui_apple = { path = "vendor/gpui_apple" }
 # gpui_windows at the same rev: the open dialog takes file-type filters.
 gpui_windows = { path = "vendor/gpui_windows" }
-# gpui_wgpu at the same rev, bringing up one GPU API (Vulkan, else GL) instead of both.
+# gpui_wgpu at the same rev, bringing up one GPU API (Vulkan, else GL) instead of both, and finding
+# Android's system fonts.
 gpui_wgpu = { path = "vendor/gpui_wgpu" }
+# gpui_platform at the same rev, with Android's platform (vendor/gpui_android, ours).
+gpui_platform = { path = "vendor/gpui_platform" }
 
 [build-dependencies]
 jpegxl-src = "0.12"

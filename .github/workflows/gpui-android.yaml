@@ -1,0 +1,61 @@
+name: GPUI Android
+
+# GPUI's Android platform (crates/vector-gpui/vendor/gpui_android), compiled for phones with the
+# runner's NDK. Its own concurrency group, so it never waits behind or replaces a desktop build.
+on:
+  push:
+    branches: [gpui]
+    paths:
+      - 'crates/vector-gpui/vendor/**'
+      - 'crates/vector-gpui/Cargo.lock'
+      - '.github/workflows/gpui-android.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpui-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/vector-gpui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android
+          components: clippy
+
+      - name: NDK toolchain
+        run: |
+          bin="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android26-clang"
+            echo "CXX_aarch64_linux_android=$bin/aarch64-linux-android26-clang++"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android26-clang"
+          } >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> target
+          key: android-aarch64
+
+      # Warnings fail only in our own platform crates: -D warnings would reach the vendored ones too.
+      - name: Clippy
+        shell: bash
+        run: |
+          cargo clippy --locked -p gpui_platform -p gpui_android --target aarch64-linux-android \
+            --message-format short 2>&1 | tee clippy.log
+          ! grep -E '^vendor/gpui_(android|platform)/.*: (warning|error)' clippy.log

@@ -129,7 +129,11 @@ impl CosmicTextSystem {
     }
 
     pub fn new(system_font_fallback: &str) -> Self {
-        let font_system = FontSystem::new();
+        #[allow(unused_mut)]
+        let mut font_system = FontSystem::new();
+        // fontdb finds no system fonts on Android; they live here.
+        #[cfg(target_os = "android")]
+        font_system.db_mut().load_fonts_dir("/system/fonts");
 
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
