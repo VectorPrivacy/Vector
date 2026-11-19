@@ -714,7 +714,7 @@ fn fold_body(id: &str, size: f32, body: gpui::Div) -> AnyElement {
                 .left(px(-REACH))
                 .right_0()
                 .overflow_y_hidden()
-                .child(body.absolute().top_0().left(px(REACH)).right_0()),
+                .child(div().absolute().top_0().left(px(REACH)).right_0().child(body)),
         )
         .into_any_element()
 }
