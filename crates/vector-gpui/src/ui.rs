@@ -6659,7 +6659,25 @@ impl VectorApp {
             .capture_key_down(cx.listener(|app, e: &gpui::KeyDownEvent, window, cx| {
                 // An open dropdown has focus and answers its own keys.
                 // i18n-exempt: key context names
-                if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu") || k.contains("Timeline")) {
+                if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu")) {
+                    return;
+                }
+                // Cmd/Ctrl+K searches every chat, Cmd/Ctrl+F the open one, from wherever focus is.
+                let m = &e.keystroke.modifiers;
+                let primary = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
+                if primary && !m.alt && !m.shift && matches!(e.keystroke.key.as_str(), "k" | "f") && matches!(app.screen, Screen::Main) {
+                    let here = e.keystroke.key == "f" && app.open.is_some();
+                    app.open_search(here, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if app.voice_key(e, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                // The message list walks with the plain keys and Escape.
+                // i18n-exempt: key context name
+                if window.context_stack().iter().any(|k| k.contains("Timeline")) {
                     return;
                 }
                 if e.keystroke.key == "escape" {
@@ -6702,23 +6720,11 @@ impl VectorApp {
                     cx.stop_propagation();
                     return;
                 }
-                // Cmd/Ctrl+K searches every chat, Cmd/Ctrl+F the open one.
-                let m = &e.keystroke.modifiers;
-                let primary = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
-                if primary && !m.alt && !m.shift && matches!(e.keystroke.key.as_str(), "k" | "f") && matches!(app.screen, Screen::Main) {
-                    let here = e.keystroke.key == "f" && app.open.is_some();
-                    app.open_search(here, window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
                 if e.keystroke.key == "escape"
                     && (app.escape_overlay() || app.escape_panel(window, cx) || app.nexus_escape(window, cx))
                 {
                     cx.stop_propagation();
                     cx.notify();
-                }
-                if app.voice_key(e, cx) {
-                    cx.stop_propagation();
                 }
             }))
             .size_full()
