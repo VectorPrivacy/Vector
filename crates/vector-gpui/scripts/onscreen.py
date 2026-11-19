@@ -8,7 +8,8 @@ Each check opens a screen from the fixtures and reads the app's own counters: a 
 draw nothing, a menu must close on Escape and fit the window when opened in a corner, a chat at its
 newest message must follow arrivals while one scrolled up holds still, a window in the background
 must stop presenting, and memory at rest must stay near the recorded baseline (`--update` records
-it). Linux needs `xdotool` for focus; `xterm` enables the background check.
+it). Linux needs `xdotool` for focus and `xterm` for the background check; macOS brings Finder
+forward for it.
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
 
@@ -28,6 +29,7 @@ ap.add_argument("--update", action="store_true")
 args = ap.parse_args()
 env = dict(os.environ, TZ="UTC")
 results = []
+MAC = sys.platform == "darwin"
 
 
 def dev(cmd, wait=True):
@@ -68,6 +70,10 @@ def check(name, ok, detail=""):
 
 
 def window_of(pid):
+    """The X window `pid` opened. macOS needs no handle: the app raises itself."""
+    if MAC:
+        time.sleep(4)
+        return "app"
     for _ in range(200):
         r = subprocess.run(["xdotool", "search", "--pid", str(pid)], env=env, capture_output=True, text=True)
         if r.stdout.split():
@@ -77,9 +83,21 @@ def window_of(pid):
 
 
 def focus(wid):
-    if wid:
+    if MAC:
+        dev("raise", wait=False)
+    elif wid:
         subprocess.run(["xdotool", "windowfocus", wid], env=env, capture_output=True)
-        time.sleep(0.5)
+    time.sleep(0.5)
+
+
+def a11y():
+    """The accessibility tree, its bounds in window points."""
+    tree = dev("a11y")
+    scale = (tree.get("frame") or {}).get("scale_factor") or 1
+    for n in tree.get("nodes", {}).values():
+        if n.get("bounds"):
+            n["bounds"] = [v / scale for v in n["bounds"]]
+    return tree
 
 
 def menus(tree):
@@ -146,22 +164,22 @@ try:
         time.sleep(1.5)
         dev(f"rclick:{W // 2 + 150},{H // 2}", wait=False)
         time.sleep(0.8)
-        opened = len(menus(dev("a11y")))
+        opened = len(menus(a11y()))
         dev("key:escape", wait=False)
         time.sleep(0.8)
-        left = len(menus(dev("a11y")))
+        left = len(menus(a11y()))
         check("menu:escape", opened > 0 and left == 0, f"menus open={opened} after Escape={left}")
 
     if wanted("menu:clamp") and chats:
         # Opened on the lowest, rightmost text above the composer, a menu must still fit the window.
-        texts = [n["bounds"] for n in dev("a11y")["nodes"].values()
+        texts = [n["bounds"] for n in a11y()["nodes"].values()
                  if n.get("bounds") and n["aria"].get("role") == "Label" and n["bounds"][3] < H - 60 and n["bounds"][0] > W / 2]
         if texts:
             b = max(texts, key=lambda b: b[2] + b[3])
             x, y = round(b[2] - 3), round((b[1] + b[3]) / 2)
             dev(f"rclick:{x},{y}", wait=False)
             time.sleep(0.8)
-            found = menus(dev("a11y"))
+            found = menus(a11y())
             out = [n for n in found if not inside(n)]
             dev("key:escape", wait=False)
             time.sleep(0.5)
@@ -192,16 +210,21 @@ try:
             check("scroll:hold", not held["following"] and now["scroll"] == held["scroll"] and now["timeline_items"] > held["timeline_items"],
                   f"following={held['following']} scroll={held['scroll']}->{now['scroll']} items={held['timeline_items']}->{now['timeline_items']}")
 
-    if wanted("background") and shutil.which("xterm") and wid:
+    if wanted("background") and (MAC or shutil.which("xterm")) and wid:
         if chats:
             dev("chat:" + chats[0], wait=False)
-        term = subprocess.Popen(["xterm", "-geometry", "20x4+0+0"], env=env)
+        term = None
         try:
-            focus(window_of(term.pid))
+            if MAC:
+                subprocess.run(["osascript", "-e", 'tell application "Finder" to activate'], capture_output=True)
+            else:
+                term = subprocess.Popen(["xterm", "-geometry", "20x4+0+0"], env=env)
+                focus(window_of(term.pid))
             draws, presents = at_rest(settle=1.5)
             check("background", presents == 0 and draws <= 1, f"draws={draws} presents={presents}")
         finally:
-            term.kill()
+            if term:
+                term.kill()
             focus(wid)
 
     if wanted("memory"):
