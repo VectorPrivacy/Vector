@@ -78,6 +78,11 @@ pub fn init(data_dir: Option<PathBuf>) {
     }));
 }
 
+#[cfg(all(target_os = "android", debug_assertions))]
+pub fn debug_mirror(dir: &std::path::Path) {
+    logcat::mirror::into(dir);
+}
+
 /// Android points stdout and stderr at /dev/null: both go to logcat instead, so core's lines,
 /// `log` records and the panic report can be read there.
 #[cfg(target_os = "android")]
@@ -124,6 +129,8 @@ mod logcat {
                 for b in line.iter_mut().filter(|b| **b == 0) {
                     *b = b' ';
                 }
+                #[cfg(debug_assertions)]
+                mirror::line(&line);
                 line.push(0);
                 // SAFETY: both strings are NUL-terminated and outlive the call.
                 unsafe { __android_log_write(priority(&line), c"vector".as_ptr(), line.as_ptr().cast()) };
@@ -138,6 +145,51 @@ mod logcat {
                 libc::dup2(fds[1], 2);
             }
             libc::close(fds[1]);
+        }
+    }
+
+    /// Debug builds also keep a launch's output where the phone's Files app can read it, so a
+    /// test build that never draws can be diagnosed without adb.
+    #[cfg(debug_assertions)]
+    pub mod mirror {
+        use std::io::Write;
+        use std::path::Path;
+        use std::sync::Mutex;
+
+        enum Mirror {
+            Waiting(Vec<u8>),
+            Open(std::fs::File),
+            Off,
+        }
+
+        static MIRROR: Mutex<Mirror> = Mutex::new(Mirror::Waiting(Vec::new()));
+        const HELD: usize = 512 * 1024;
+
+        pub(super) fn line(text: &[u8]) {
+            let mut mirror = MIRROR.lock().unwrap_or_else(|e| e.into_inner());
+            match &mut *mirror {
+                Mirror::Waiting(held) if held.len() < HELD => {
+                    held.extend_from_slice(text);
+                    held.push(b'\n');
+                }
+                Mirror::Open(file) => {
+                    let _ = file.write_all(text).and_then(|()| file.write_all(b"\n"));
+                }
+                _ => {}
+            }
+        }
+
+        /// From here on, and everything since launch, into `dir`/vector-gpui-debug.log.
+        pub fn into(dir: &Path) {
+            let mut mirror = MIRROR.lock().unwrap_or_else(|e| e.into_inner());
+            let Mirror::Waiting(held) = &*mirror else { return };
+            let opened = std::fs::create_dir_all(dir)
+                .and_then(|()| std::fs::File::create(dir.join("vector-gpui-debug.log")))
+                .and_then(|mut file| file.write_all(held).map(|()| file));
+            *mirror = match opened {
+                Ok(file) => Mirror::Open(file),
+                Err(_) => Mirror::Off,
+            };
         }
     }
 }

@@ -130,10 +130,16 @@ pub(crate) fn core(data_dir: PathBuf) -> &'static tokio::runtime::Runtime {
         #[cfg(target_os = "android")]
         {
             use vector_media::android::storage;
-            if let Some(dir) = storage::external_media_dir() {
+            let media = storage::external_media_dir();
+            if let Some(dir) = media.clone() {
                 vector_core::db::set_download_dir(dir.into());
             }
-            if let Some(dir) = storage::public_dir() {
+            let public = storage::public_dir();
+            #[cfg(debug_assertions)]
+            if let Some(dir) = public.as_ref().or(media.as_ref()) {
+                crate::applog::debug_mirror(std::path::Path::new(dir));
+            }
+            if let Some(dir) = public {
                 vector_core::db::set_public_dir(dir.into());
             }
         }
