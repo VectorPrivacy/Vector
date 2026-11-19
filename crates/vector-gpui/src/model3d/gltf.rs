@@ -130,16 +130,14 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
     let get = |b: gltf::Buffer| buffers.get(b.index()).and_then(|d| d.as_deref());
 
     let mut scene = Scene::default();
+    let mut budget = super::scene::TEXTURE_BUDGET;
     for img in g.images() {
         let data: Option<Vec<u8>> = match img.source() {
             gltf::image::Source::View { view, .. } => get(view.buffer()).and_then(|d| d.get(view.offset()..view.offset() + view.length())).map(|s| s.to_vec()),
             gltf::image::Source::Uri { uri, .. } => data_uri(uri),
         };
-        let decoded = data.and_then(|d| image::load_from_memory(&d).ok()).map(|i| i.to_rgba8());
-        scene.images.push(match decoded {
-            Some(i) => Image { w: i.width(), h: i.height(), rgba: i.into_raw() },
-            None => Image { w: 1, h: 1, rgba: vec![255; 4] },
-        });
+        let decoded = data.and_then(|d| Image::decode(&d, &mut budget));
+        scene.images.push(decoded.unwrap_or_else(|| Image { w: 1, h: 1, rgba: vec![255; 4] }));
     }
     let tex = |t: gltf::Texture| -> Option<TexRef> {
         let image = t.source().index();

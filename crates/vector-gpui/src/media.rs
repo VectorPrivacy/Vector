@@ -1158,6 +1158,24 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
     ))
 }
 
+/// Someone else's picture, within limits: a small file can claim a huge canvas.
+pub fn decode_bounded(bytes: &[u8]) -> Option<DynamicImage> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    reader.decode().ok()
+}
+
+/// [`decode_bounded`] as RGBA no larger than `max_side`.
+pub fn decode_rgba(bytes: &[u8], max_side: u32) -> Option<image::RgbaImage> {
+    let img = decode_bounded(bytes)?;
+    let img = if img.width() > max_side || img.height() > max_side {
+        gpui::resample_within(&img, max_side, max_side, FilterType::Triangle)
+    } else {
+        img
+    };
+    Some(img.into_rgba8())
+}
+
 /// `formatBytes`: binary units, two decimals with trailing zeros dropped.
 pub fn format_bytes(n: u64) -> String {
     format_bytes_with(n as f64, 2, false)
@@ -1298,6 +1316,78 @@ mod tests {
             }
         }
         assert!(failed.is_empty(), "files that panicked: {failed:?}");
+    }
+
+    /// Still pictures as other people send them, in every format the viewer opens.
+    /// `PICFUZZ_DIR` adds sample files as seeds; `PICFUZZ_OUT` keeps what failed.
+    #[test]
+    fn no_damaged_still_panics_the_decoder() {
+        let (w, h) = (20u32, 14u32);
+        let px: Vec<u8> = (0..w * h).flat_map(|i| [(i * 7) as u8, (i * 3) as u8, (i / 2) as u8, 200]).collect();
+        let img = image::DynamicImage::ImageRgba8(RgbaImage::from_raw(w, h, px.clone()).unwrap());
+        let encoded = |f: image::ImageFormat, img: &image::DynamicImage| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, f).unwrap();
+            out.into_inner()
+        };
+        let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+        let mut seeds: Vec<(Vec<u8>, String)> = vec![
+            (encoded(image::ImageFormat::Png, &img), "png".into()),
+            (encoded(image::ImageFormat::Jpeg, &rgb), "jpg".into()),
+            (encoded(image::ImageFormat::Bmp, &img), "bmp".into()),
+            (encoded(image::ImageFormat::Tiff, &img), "tiff".into()),
+            (encoded(image::ImageFormat::Ico, &img), "ico".into()),
+            (encoded(image::ImageFormat::WebP, &img), "webp".into()),
+            (crate::jxl::lossless(&px, w, h, true).unwrap(), "jxl".into()),
+            (
+                br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="14"><defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs><rect width="20" height="14" fill="url(#g)"/><text x="1" y="9">Hi</text></svg>"##.to_vec(),
+                "svg".into(),
+            ),
+        ];
+        if let Ok(dir) = std::env::var("PICFUZZ_DIR") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+                seeds.push((std::fs::read(e.path()).unwrap(), ext));
+            }
+        }
+        let iters: usize = std::env::var("PICFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
+        let mut seed: u64 = std::env::var("PICFUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x1234_5678_9abc_def1);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let (mut b, ext) = seeds[i % seeds.len()].clone();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % b.len() as u64) as usize;
+                match next() % 6 {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 => b.truncate(at.max(8)),
+                    4 => b[at..].iter_mut().take(4).for_each(|x| *x = 0xff),
+                    _ => b[at] ^= 1 << (next() % 8),
+                }
+            }
+            let max = if i % 2 == 0 { (8, 8) } else { (64, 64) };
+            let t = Instant::now();
+            if std::panic::catch_unwind(|| super::decode(&b, &ext, max)).is_err() || t.elapsed() > Duration::from_secs(5) {
+                eprintln!("case {i} ({ext}, {} bytes)", b.len());
+                failed.push((ext, b));
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        if let Ok(out) = std::env::var("PICFUZZ_OUT") {
+            for (i, (ext, b)) in failed.iter().enumerate() {
+                std::fs::write(format!("{out}/bad-{i}.{ext}"), b).unwrap();
+            }
+        }
+        assert!(failed.is_empty(), "{} damaged pictures panicked or stalled", failed.len());
     }
 
     #[test]

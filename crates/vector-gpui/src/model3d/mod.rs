@@ -244,6 +244,24 @@ pub fn fit(radius: f32, aspect: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn embedded_textures_stay_within_bounds() {
+        let png = |w: u32, h: u32| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h)).write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let mut budget = usize::MAX;
+        assert!(super::scene::Image::decode(&png(16_385, 1), &mut budget).is_none());
+        assert_eq!(super::scene::Image::decode(&png(4_100, 2), &mut budget).map(|i| (i.w, i.h)), Some((4096, 2)));
+        let tex = png(64, 64);
+        let mut budget = 64 * 64 * 4 * 2 + 1;
+        assert!(super::scene::Image::decode(&tex, &mut budget).is_some());
+        assert!(super::scene::Image::decode(&tex, &mut budget).is_some());
+        assert!(super::scene::Image::decode(&tex, &mut budget).is_none());
+        assert_eq!(budget, 1);
+    }
+
     fn footprint_mb() -> f64 {
         #[cfg(target_os = "macos")]
         {

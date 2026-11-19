@@ -780,7 +780,7 @@ pub enum WorkDone {
 }
 
 fn tags_from(m: vector_media::tags::Meta) -> Tags {
-    let art = m.cover.as_deref().and_then(|b| image::load_from_memory(b).ok());
+    let art = m.cover.as_deref().and_then(crate::media::decode_bounded);
     let cover = art.as_ref().map(|a| {
         let a = a.resize_to_fill(256, 256, image::imageops::FilterType::CatmullRom);
         Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(a.into_rgba8()))]))
