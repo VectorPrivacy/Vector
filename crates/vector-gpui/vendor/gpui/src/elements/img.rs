@@ -868,6 +868,11 @@ fn still_of(source: &ImageSource) -> Option<ImageSource> {
 pub fn resize_premultiplied(buf: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
     // Premultiplied in place: the caller's buffer is consumed, never copied first.
     let mut pre = buf;
+    resize_premultiplied_from(&mut pre, w, h)
+}
+
+/// [`resize_premultiplied`] from a scratch buffer the caller reuses: `buf` is left premultiplied.
+pub fn resize_premultiplied_from(pre: &mut image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
     for px in pre.chunks_exact_mut(4) {
         let a = px[3] as u32;
         if a < 255 {
@@ -876,7 +881,7 @@ pub fn resize_premultiplied(buf: image::RgbaImage, w: u32, h: u32) -> image::Rgb
             }
         }
     }
-    let mut out = super::resample(&pre, w, h, image::imageops::FilterType::Triangle);
+    let mut out = super::resample(pre, w, h, image::imageops::FilterType::Triangle);
     for px in out.chunks_exact_mut(4) {
         let a = px[3] as u32;
         if a == 0 {
