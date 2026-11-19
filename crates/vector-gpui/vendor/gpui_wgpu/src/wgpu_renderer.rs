@@ -17,6 +17,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
+/// Path textures are window-sized, four times over for MSAA, and most frames draw no paths, so
+/// they go after this many frames without one; a spinner that comes and goes keeps them.
+const PATH_TEXTURE_IDLE_FRAMES: u32 = 60;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 
@@ -225,6 +228,7 @@ struct WgpuRendererCore {
     adapter_info: wgpu::AdapterInfo,
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
+    pathless_frames: u32,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -1391,6 +1395,7 @@ impl WgpuRendererCore {
             adapter_info: context.adapter.get_info(),
             target_format,
             max_texture_size,
+            pathless_frames: 0,
         }
     }
 
@@ -1458,7 +1463,15 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
+        if scene.paths.is_empty() {
+            self.pathless_frames = self.pathless_frames.saturating_add(1);
+            if self.pathless_frames >= PATH_TEXTURE_IDLE_FRAMES {
+                self.resources.invalidate_intermediate_textures();
+            }
+        } else {
+            self.pathless_frames = 0;
+            self.ensure_intermediate_textures(size);
+        }
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,

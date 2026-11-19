@@ -43,6 +43,9 @@ const SHADERS_SOURCE_FILE: &str = include_str!(concat!(env!("OUT_DIR"), "/stitch
 // Use 4x MSAA, all devices support it.
 // https://developer.apple.com/documentation/metal/mtldevice/1433355-supportstexturesamplecount
 const PATH_SAMPLE_COUNT: u32 = 4;
+/// Path textures are window-sized and most frames draw no paths, so they go after this many
+/// frames without one; a spinner that comes and goes keeps them.
+const PATH_TEXTURE_IDLE_FRAMES: u32 = 60;
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
@@ -150,6 +153,7 @@ pub struct MetalRenderer {
     path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_sample_count: u32,
+    pathless_frames: u32,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -438,6 +442,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            pathless_frames: 0,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         })
@@ -509,7 +514,9 @@ impl MetalRenderer {
         if let Some(layer) = &self.layer {
             layer.setDrawableSize(CGSize::new(size.width.0 as f64, size.height.0 as f64));
         }
-        if let Err(error) = self.update_path_intermediate_textures(size) {
+        if self.path_intermediate_texture.is_some()
+            && let Err(error) = self.update_path_intermediate_textures(size)
+        {
             log::error!("failed to resize path textures: {error:#}");
         }
     }
@@ -652,8 +659,17 @@ impl MetalRenderer {
         texture: &ProtocolObject<dyn MTLTexture>,
         viewport_size: Size<DevicePixels>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
-        if self.path_intermediate_texture.is_none() {
-            self.update_path_intermediate_textures(viewport_size)?;
+        if scene.paths.is_empty() {
+            self.pathless_frames = self.pathless_frames.saturating_add(1);
+            if self.pathless_frames >= PATH_TEXTURE_IDLE_FRAMES {
+                self.path_intermediate_texture = None;
+                self.path_intermediate_msaa_texture = None;
+            }
+        } else {
+            self.pathless_frames = 0;
+            if self.path_intermediate_texture.is_none() {
+                self.update_path_intermediate_textures(viewport_size)?;
+            }
         }
         let mut writer = InstanceBufferWriter::new(
             &self.device,
