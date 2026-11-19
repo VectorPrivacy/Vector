@@ -91,5 +91,28 @@ fn main() {
             let mean = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y) as u64).sum::<u64>() as f64 / a.len() as f64;
             println!("  same size {}  max diff {d:?}  mean {mean:.3}", a.len() == b.len());
         }
+        // Each side's parts on their own: the two decodes, and the two resizes of one picture.
+        println!("{path} parts");
+        run("image dec", || image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap().into_bytes());
+        run("rows dec", || {
+            let mut d = jpeg_decoder::Decoder::new(&bytes[..]);
+            let mut sum = 0u8;
+            d.decode_rows(|_, row| sum ^= row[0]).unwrap();
+            vec![sum]
+        });
+        let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap().into_rgb8();
+        let (w, h) = img.dimensions();
+        let r = (1200. / w as f64).min(1200. / h as f64);
+        let (tw, th) = (((w as f64 * r).round() as u32).max(1), ((h as f64 * r).round() as u32).max(1));
+        run("resample", || resample::resample(&img, tw, th, FilterType::CatmullRom).into_raw());
+        run("rows", || {
+            let mut out = vec![0u8; tw as usize * th as usize * 3];
+            let line = tw as usize * 3;
+            let mut z = resample::Rows::<3>::new(w, h, tw, th, FilterType::CatmullRom).unwrap();
+            for (y, row) in img.chunks_exact(w as usize * 3).enumerate() {
+                z.push(y, row, |r, o| out[r * line..][..line].copy_from_slice(o));
+            }
+            out
+        });
     }
 }
