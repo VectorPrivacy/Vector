@@ -101,6 +101,10 @@ impl vector_core::EventEmitter for Emitter {
 /// Where accounts live: the Tauri client's own folder (its app_data_dir), so either client
 /// resumes the other's accounts. `--data-dir` points it anywhere else.
 pub fn default_data_dir() -> PathBuf {
+    #[cfg(target_os = "android")]
+    if let Some(dir) = crate::android::data_dir() {
+        return dir.clone();
+    }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("io.vectorapp")
@@ -218,6 +222,10 @@ pub fn fixture_runtime() {
 /// The desktop client's local data folder: Whisper models live under it, so one download
 /// serves both clients.
 fn models_home() -> PathBuf {
+    #[cfg(target_os = "android")]
+    if let Some(dir) = crate::android::data_dir() {
+        return dir.clone();
+    }
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("io.vectorapp")
 }
 

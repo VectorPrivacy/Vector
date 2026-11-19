@@ -27,7 +27,8 @@ fun versionCode(): Int {
 android {
     namespace = "io.vectorapp"
     compileSdk = 36
-    ndkVersion = "29.0.14206865"
+    // `-PvectorNdk=<version>` picks another installed NDK (CI takes the runner's latest).
+    ndkVersion = findProperty("vectorNdk") as String? ?: "29.0.14206865"
     defaultConfig {
         // The Tauri client's id: an install updates in place and keeps its data.
         applicationId = "io.vectorapp"

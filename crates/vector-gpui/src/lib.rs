@@ -349,5 +349,10 @@ pub fn run() {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub fn gpui_android_main() {
+    // Unset, the temporary folder is one apps can't write to.
+    if let Some(cache) = android::cache_dir() {
+        // SAFETY: before the client starts a thread of its own.
+        unsafe { std::env::set_var("TMPDIR", cache) };
+    }
     run();
 }

@@ -100,3 +100,40 @@ jobs:
 
       - name: Compile
         run: ./gradlew --no-daemon :app:compileDebugKotlin :app:compileReleaseKotlin
+
+  # The phone app: a debug APK for arm64 phones, which installs beside an installed Vector.
+  apk:
+    needs: shell
+    # Expected to fail until the client links for Android.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/vector-gpui/android
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> target
+          key: android-apk
+
+      - name: Build
+        run: ./gradlew --no-daemon :app:assembleDebug -PvectorNdk="$(basename "$ANDROID_NDK_LATEST_HOME")"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vector-gpui-android-arm64-debug
+          path: crates/vector-gpui/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14

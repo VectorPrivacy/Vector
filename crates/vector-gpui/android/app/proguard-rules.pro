@@ -8,3 +8,4 @@
 -keepclassmembers class io.vectorapp.MainActivity {
     native <methods>;
 }
+-keep class io.vectorapp.NotificationActionReceiver { *; }

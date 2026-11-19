@@ -59,5 +59,9 @@
             android:name=".CallService"
             android:foregroundServiceType="microphone|mediaPlayback"
             android:exported="false" />
+
+        <receiver
+            android:name=".NotificationActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>
