@@ -75,6 +75,8 @@ object Bridge {
 
     @JvmStatic fun finish() = ui { it.finish() }
 
+    @JvmStatic fun moveToBack() = ui { it.moveTaskToBack(true) }
+
     @JvmStatic fun pickFiles(id: Int, multiple: Boolean, extensions: Array<String>) {
         main.post {
             val activity = activity.get()

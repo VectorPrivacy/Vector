@@ -366,6 +366,10 @@ pub(crate) fn finish() {
     call_void("finish", "()V", &[]);
 }
 
+pub(crate) fn move_to_back() {
+    call_void("moveToBack", "()V", &[]);
+}
+
 pub(crate) fn open_url(url: &str) {
     with_env(|env, class| {
         let url = env.new_string(url)?;

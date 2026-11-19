@@ -500,7 +500,10 @@ impl PlatformWindow for AndroidWindow {
 
     fn set_background_appearance(&self, _background_appearance: WindowBackgroundAppearance) {}
 
-    fn minimize(&self) {}
+    /// Android's own Back on a root screen: the task goes behind, its state kept.
+    fn minimize(&self) {
+        bridge::move_to_back();
+    }
 
     fn zoom(&self) {}
 

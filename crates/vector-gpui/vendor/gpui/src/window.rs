@@ -7440,6 +7440,18 @@ impl Window {
         self.platform_window.minimize();
     }
 
+    /// Takes the system's Back (Android's button and gesture) for `f`, which runs outside any
+    /// update. An app with nowhere to go back to calls [`Self::minimize_window`], as Android's
+    /// own Back would.
+    pub fn on_system_back(&self, cx: &App, mut f: impl FnMut(&mut Window, &mut App) + 'static) {
+        let handle = self.handle;
+        let mut cx = cx.to_async();
+        self.platform_window.set_back_handler(Box::new(move || {
+            handle.update(&mut cx, |_, window, cx| f(window, cx)).log_err();
+        }));
+        self.platform_window.set_back_enabled(true);
+    }
+
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen();

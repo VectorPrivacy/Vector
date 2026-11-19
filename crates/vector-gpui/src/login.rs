@@ -626,6 +626,49 @@ impl LoginView {
         cx.notify();
     }
 
+    /// The step a back link would take; false where there is none, as on the unlock screen.
+    pub fn back_step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(p) = self.popup.as_ref() {
+            let yes = p.cancel.is_none();
+            self.answer_popup(yes, window, cx);
+            return true;
+        }
+        if self.busy {
+            return false;
+        }
+        match self.step {
+            Step::Start if self.adding.is_some() => cx.emit(AddProfile::Back),
+            Step::Import if self.reauth.is_some() => self.end_reauth(cx),
+            Step::Import => self.back_to_start(window, cx),
+            Step::Encrypt if self.unlock => return false,
+            Step::Encrypt if matches!(self.cred, Cred::Pin | Cred::Password) => {
+                self.cred = Cred::Choose;
+                self.first = None;
+                self.pin.clear();
+                self.wrong = None;
+                cx.notify();
+            }
+            Step::Encrypt => self.back_to_start(window, cx),
+            Step::Start => return false,
+        }
+        true
+    }
+
+    fn answer_popup(&mut self, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.popup = None;
+        if std::mem::take(&mut self.popup_reauth) && yes {
+            self.start_reauth(true, window, cx);
+        }
+        if std::mem::take(&mut self.popup_bio_setup) && yes {
+            self.commit_biometric(cx);
+        }
+        if std::mem::take(&mut self.popup_reset) && yes {
+            let npub = vector_core::db::get_current_account().unwrap_or_default();
+            cx.emit(ResetAccount(npub));
+        }
+        cx.notify();
+    }
+
     fn back_to_start(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.method == "signer" {
             self.signer_leave(cx);
@@ -1839,20 +1882,7 @@ impl Render for LoginView {
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();
             root.child(kit::popup(&p, move |yes, window, cx| {
-                entity.update(cx, |this, cx| {
-                    this.popup = None;
-                    if std::mem::take(&mut this.popup_reauth) && yes {
-                        this.start_reauth(true, window, cx);
-                    }
-                    if std::mem::take(&mut this.popup_bio_setup) && yes {
-                        this.commit_biometric(cx);
-                    }
-                    if std::mem::take(&mut this.popup_reset) && yes {
-                        let npub = vector_core::db::get_current_account().unwrap_or_default();
-                        cx.emit(ResetAccount(npub));
-                    }
-                    cx.notify();
-                })
+                entity.update(cx, |this, cx| this.answer_popup(yes, window, cx))
             }))
         })
     }

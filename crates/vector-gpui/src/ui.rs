@@ -955,6 +955,19 @@ impl VectorApp {
         if !live {
             backend::fixture_runtime();
         }
+        #[cfg(target_os = "android")]
+        {
+            let app = cx.entity().downgrade();
+            window.on_system_back(cx, move |window, cx| {
+                // The layer a keyboard's Escape would close, then the step a back arrow takes.
+                if window.dispatch_keystroke(gpui::Keystroke::parse("escape").expect("a key name"), cx) {
+                    return;
+                }
+                if !app.update(cx, |app, cx| app.back_step(window, cx)).unwrap_or(false) {
+                    window.minimize_window();
+                }
+            });
+        }
         if let Some(mut rx) = crate::audio::listen() {
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt;
@@ -15551,6 +15564,34 @@ impl VectorApp {
 
     /// The full-pane overlays that close on Escape, each through its own Close so a busy or
     /// unsaved one can refuse.
+    /// The step a back arrow would take from the screen showing; false at a root.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn back_step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match &self.screen {
+            Screen::Main => {}
+            Screen::Login(login) => return login.clone().update(cx, |l, cx| l.back_step(window, cx)),
+            Screen::Booting(_) => return false,
+        }
+        if self.slim.details.is_some() {
+            self.slim.details = None;
+        } else if self.profile.is_some() {
+            self.on_profile(crate::profile::Act::Back, window, cx);
+        } else if self.new_chat.is_some() {
+            self.on_new_chat(crate::newchat::Act::Cancel, window, cx);
+        } else if let Some(m) = self.create_community.as_ref() {
+            let act = if m.step == 2 { crate::createcommunity::Act::Back } else { crate::createcommunity::Act::Cancel };
+            self.on_create_community(act, window, cx);
+        } else if self.settings.is_some() || self.nexus.is_some() {
+            self.nav_to("chat", window, cx);
+        } else if crate::theme::is_slim() && (self.open.is_some() || self.community.is_some() || self.slim.drawer) {
+            self.slim_back(cx);
+        } else {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn escape_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.menu.is_some() {
             return false;
