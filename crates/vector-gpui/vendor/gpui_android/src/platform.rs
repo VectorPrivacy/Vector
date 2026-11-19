@@ -122,6 +122,7 @@ impl PlatformState {
         let window = self.window();
         match event {
             Event::SurfaceCreated(surface) => {
+                log::info!("gpui_android: surface {}x{}", surface.width(), surface.height());
                 if let Some(window) = &window {
                     window.attach_surface(surface.clone());
                 }

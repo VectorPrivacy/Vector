@@ -581,6 +581,8 @@ impl PlatformWindow for AndroidWindow {
             return;
         }
         renderer.draw(scene);
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| log::info!("gpui_android: first frame drawn"));
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

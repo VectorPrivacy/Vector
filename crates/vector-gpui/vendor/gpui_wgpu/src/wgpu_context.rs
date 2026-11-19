@@ -518,14 +518,29 @@ impl WgpuContext {
             return make(backends);
         }
         let vulkan = make(wgpu::Backends::VULKAN);
-        let found = !gpui::block_on(vulkan.enumerate_adapters(wgpu::Backends::VULKAN)).is_empty();
+        let adapters = gpui::block_on(vulkan.enumerate_adapters(wgpu::Backends::VULKAN));
+        let found = adapters.iter().any(|a| !Self::vulkan_unreliable(&a.get_info()));
+        drop(adapters);
         if found {
             BACKENDS.get_or_init(|| wgpu::Backends::VULKAN);
             return vulkan;
         }
         drop(vulkan);
+        log::info!("no reliable Vulkan adapter: drawing with GL");
         BACKENDS.get_or_init(|| wgpu::Backends::GL);
         make(wgpu::Backends::GL)
+    }
+
+    /// PowerVR's Android Vulkan drivers, frozen on budget phones, leave wgpu's window black;
+    /// their GLES driver draws.
+    #[cfg(not(target_family = "wasm"))]
+    fn vulkan_unreliable(info: &wgpu::AdapterInfo) -> bool {
+        const IMAGINATION: u32 = 0x1010;
+        let unreliable = cfg!(target_os = "android") && (info.vendor == IMAGINATION || info.name.contains("PowerVR"));
+        if unreliable {
+            log::info!("skipping Vulkan on {} (driver {} {})", info.name, info.driver, info.driver_info);
+        }
+        unreliable
     }
 
     pub fn check_compatible_with_surface(&self, surface: &wgpu::Surface<'_>) -> anyhow::Result<()> {

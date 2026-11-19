@@ -138,11 +138,19 @@ jobs:
           path: crates/vector-gpui/android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
 
-  # The app on an emulated phone (x86_64, software GPU): what it shows after launch, and its log.
+  # The app on emulated phones (x86_64, software GPU): what it shows after launch, and its log.
+  # Android 11 without Vulkan is the GLES path phones with PowerVR GPUs draw with.
   emulator:
     needs: shell
     continue-on-error: true
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { api: 34, gpu: vulkan, features: '' }
+          - { api: 30, gpu: gles, features: '-feature -Vulkan' }
+    name: emulator (API ${{ matrix.api }}, ${{ matrix.gpu }})
     steps:
       - uses: actions/checkout@v5
 
@@ -174,16 +182,16 @@ jobs:
 
       - uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim ${{ matrix.features }}
           disable-animations: true
           script: crates/vector-gpui/android/scripts/emulator-smoke.sh crates/vector-gpui/android/app/build/outputs/apk/debug/app-debug.apk smoke
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: vector-gpui-android-emulator
+          name: vector-gpui-android-emulator-${{ matrix.api }}
           path: smoke/
           retention-days: 14
