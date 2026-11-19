@@ -14,13 +14,15 @@ const INVITE_PREFIXES: [&str; 2] = [
     "https://www.vectorapp.io/invite",
 ];
 
-fn extract_https_urls(text: &str) -> Vec<String> {
+/// Links in the order they start, overlapping ones included, read lazily: a message of
+/// nothing but `https://` names one link per byte, each running to its end.
+fn https_urls(text: &str) -> impl Iterator<Item = &str> {
     const DELIMITERS: &[u8] = b" \t\n\r\"<>)]}|";
-    let mut urls = Vec::new();
     let mut from = 0;
-    while let Some(i) = text[from..].find("https://") {
-        let start = from + i;
-        let rest = text[start..].as_bytes();
+    std::iter::from_fn(move || loop {
+        let start = from + text.get(from..)?.find("https://")?;
+        from = start + 1;
+        let rest = &text.as_bytes()[start..];
         let mut end = rest
             .iter()
             .position(|b| DELIMITERS.contains(b))
@@ -29,11 +31,9 @@ fn extract_https_urls(text: &str) -> Vec<String> {
             end -= 1;
         }
         if end > "https://".len() {
-            urls.push(text[start..start + end].to_string());
+            return Some(&text[start..start + end]);
         }
-        from = start + 1;
-    }
-    urls
+    })
 }
 
 fn off_clearnet() -> bool {
@@ -238,20 +238,18 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     let Some((_, message)) = VectorCore.get_message(&msg_id).await else {
         return false;
     };
-    for url in extract_https_urls(&vector_core::net::strip_md_link_claims(&message.content))
-        .into_iter()
-        .take(3)
-    {
+    let text = vector_core::net::strip_md_link_claims(&message.content);
+    for url in https_urls(&text).take(3) {
         if INVITE_PREFIXES.iter().any(|p| url.starts_with(p))
-            || vector_core::golink::is_go_url(&url)
+            || vector_core::golink::is_go_url(url)
         {
             continue;
         }
         // A link to a Nostr post, article or video gets its own card from relays.
-        if vector_core::nostr_embed::EmbedRef::from_url(&url).is_some() {
+        if vector_core::nostr_embed::EmbedRef::from_url(url).is_some() {
             continue;
         }
-        let Ok(metadata) = site_metadata(&url).await else {
+        let Ok(metadata) = site_metadata(url).await else {
             continue;
         };
         let has_content = metadata.og_title.is_some()
@@ -280,4 +278,54 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::https_urls;
+
+    /// The scan as it was: every link collected before any is used.
+    fn eager(text: &str) -> Vec<String> {
+        const DELIMITERS: &[u8] = b" \t\n\r\"<>)]}|";
+        let mut urls = Vec::new();
+        let mut from = 0;
+        while let Some(i) = text[from..].find("https://") {
+            let start = from + i;
+            let rest = text[start..].as_bytes();
+            let mut end = rest.iter().position(|b| DELIMITERS.contains(b)).unwrap_or(rest.len());
+            while end > 0 && matches!(rest[end - 1], b'.' | b',' | b':' | b';') {
+                end -= 1;
+            }
+            if end > "https://".len() {
+                urls.push(text[start..start + end].to_string());
+            }
+            from = start + 1;
+        }
+        urls
+    }
+
+    #[test]
+    fn lazy_links_are_the_links_found_eagerly() {
+        const PARTS: &[&str] = &["https://", "http://", "a.io", "/x", " ", "\n", ".", ",", ":", ";", ")", "]", "|", "\"", "<", "é", "日本", "[a](", "https://b.c/https://d.e"];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..20_000 {
+            let text: String = (0..next() % 24).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect();
+            let lazy: Vec<&str> = https_urls(&text).collect();
+            assert_eq!(lazy, eager(&text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_of_bare_schemes_reads_only_the_links_it_uses() {
+        let text = "https://".repeat(20_000);
+        let t = std::time::Instant::now();
+        assert_eq!(https_urls(&text).take(3).count(), 3);
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
+    }
 }
