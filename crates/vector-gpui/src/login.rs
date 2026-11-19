@@ -153,6 +153,9 @@ pub struct LoginView {
     bio_busy: bool,
     /// A new account may choose the phone's prompt, under this label.
     bio_option: Option<SharedString>,
+    /// A signer app (Amber) is installed to sign in with.
+    nip55: bool,
+    nip55_busy: bool,
 }
 
 struct LangOffer {
@@ -237,6 +240,8 @@ impl LoginView {
             bio: None,
             bio_busy: false,
             bio_option: None,
+            nip55: false,
+            nip55_busy: false,
         };
         if let Some(security) = unlock {
             view.unlock = true;
@@ -636,6 +641,7 @@ impl LoginView {
     pub fn net_setup(&mut self, live: bool, fixture: Option<serde_json::Value>, cx: &mut Context<Self>) {
         self.live = live;
         self.net.fixture = fixture;
+        self.nip55 = cfg!(target_os = "android") && live && backend::nip55::installed();
         if self.step == Step::Start {
             self.net_refresh(cx);
         }
@@ -712,6 +718,68 @@ impl LoginView {
             .ok();
         })
         .detach();
+    }
+
+    /// Sign in through the signer app on this phone: it pairs, then the account picks its
+    /// security like any other.
+    fn login_nip55(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nip55_busy {
+            return;
+        }
+        let Ok(add) = self.gate(cx) else { return };
+        self.nip55_busy = true;
+        cx.notify();
+        #[cfg(target_os = "android")]
+        let rx = backend::run(async move {
+            if let Some((kind, opts)) = add {
+                account::enter_add_mode(kind, opts).await?;
+            }
+            let imported = backend::nip55::login().await?;
+            if matches!(imported, account::Imported::Staged(_)) {
+                account::connect().await;
+            }
+            Ok::<_, String>(imported)
+        });
+        #[cfg(not(target_os = "android"))]
+        let rx = {
+            drop(add);
+            backend::run(async { Err::<account::Imported, String>(t::login_signer_app_missing().into()) })
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
+            this.update_in(cx, |this, window, cx| {
+                this.nip55_busy = false;
+                match result {
+                    Ok(imported) => this.imported(imported, window, cx),
+                    Err(e) => {
+                        this.net_settle(cx);
+                        this.show_error(e, cx)
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `.lg-link`: Sign in with Amber, under the key and signer forms.
+    fn nip55_link(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.nip55 || self.reauth.is_some() || !matches!(self.method, "key" | "signer") {
+            return None;
+        }
+        let busy = self.nip55_busy;
+        Some(
+            div()
+                .id("lg-nip55")
+                .mt(px(14.))
+                .text_size(px(11.))
+                .text_color(c(PRIMARY))
+                .when(busy, |d| d.opacity(0.5))
+                .when(!busy, |d| d.cursor_pointer().hover(|s| s.underline()))
+                .child(kit::spaced(t::login_nip55(), 1.1))
+                .on_click(cx.listener(|this, _, w, cx| this.login_nip55(w, cx)))
+                .into_any_element(),
+        )
     }
 
     /// Signed in with a key: a new one picks its security, one already here unlocks as at boot.
@@ -1501,9 +1569,11 @@ impl LoginView {
                         .child(lg_back(t::login_back_changed_mind(), move |_, cx| back.update(cx, |this, cx| this.end_reauth(cx))))
                         .into_any_element();
                 }
+                let link = self.nip55_link(cx);
                 block
                     .child(self.sign_in_with(cx))
                     .child(lg_back(t::login_back_change_accounts(), move |w, cx| back.update(cx, |this, cx| this.back_to_start(w, cx))))
+                    .children(link)
                     .into_any_element()
             }
             Step::Encrypt => self.encrypt(window, cx),

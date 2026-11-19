@@ -3027,6 +3027,30 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// Pair with this phone's signer app again, keeping the account's identity.
+    fn reauthorize_nip55(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "android")]
+        let rx = backend::run(backend::nip55::reauthorize());
+        #[cfg(not(target_os = "android"))]
+        let rx = backend::run(async { Err::<(), String>(t::settings_signer_app_missing().into()) });
+        cx.spawn(async move |this, cx| {
+            let result = rx.await.unwrap_or_else(|_| Err(t::backend_stopped().into()));
+            this.update(cx, |this, cx| {
+                let installed = backend::nip55::installed();
+                if let Some((_, dot)) = this.settings.as_mut().and_then(|s| s.signer.as_mut()) {
+                    *dot = if installed { "online" } else { "offline" };
+                }
+                match result {
+                    Ok(()) => this.toast = Some((t::settings_signer_reauthorized(), std::time::Instant::now())),
+                    Err(e) => this.popup = Some((kit::Popup::notice(e), PopupAct::Notice)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The signer form over the app, re-pairing this account's signer in place.
     fn open_reauth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| LoginView::new(None, window, cx));
@@ -16653,7 +16677,12 @@ impl VectorApp {
             } else {
                 std::env::var("VECTOR_SIGNER").ok()
             }
-            .map(|npub| (npub, vector_core::bunker_state().as_label())),
+            .map(|npub| (npub, vector_core::bunker_state().as_label()))
+            .or_else(|| {
+                let (npub, installed) = backend::nip55::status().filter(|_| self.live)?;
+                Some((npub, if installed { "online" } else { "offline" }))
+            }),
+            signer_offline: self.live && backend::nip55::status().is_some(),
             sec_advanced: false,
             updates: self.updates.clone(),
             audio: None,
@@ -18635,6 +18664,7 @@ impl VectorApp {
             Act::ChangeCredential => self.security.update(cx, |f, cx| f.change(cx)),
             Act::SwitchUnlock => self.security.update(cx, |f, cx| f.switch_unlock(cx)),
             Act::ShowKeys => self.security.update(cx, |f, cx| f.show_keys(cx)),
+            Act::Reauthorize if s.signer_offline => self.reauthorize_nip55(cx),
             Act::Reauthorize => self.open_reauth(window, cx),
             Act::Transfer => self.security.update(cx, |f, cx| f.open_transfer(true, cx)),
             Act::SecAdvanced => s.sec_advanced = !s.sec_advanced,

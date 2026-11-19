@@ -415,6 +415,8 @@ pub struct Settings {
     pub bio_supported: bool,
     /// A remote-signer account: the signer's npub and its connection state.
     pub signer: Option<(String, &'static str)>,
+    /// That signer is an app on this phone (NIP-55), not one reached over relays.
+    pub signer_offline: bool,
     /// The fold over Private Keys.
     pub sec_advanced: bool,
     /// The release check, mirrored from the app's own.
@@ -2564,7 +2566,7 @@ fn connecting_dot() -> impl IntoElement {
 }
 
 /// `.remote-signer-card`: who signs for this account, and a way to re-pair it.
-fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
+fn signer_card(npub: &str, dot: &str, offline: bool, on: &OnAct) -> AnyElement {
     let short = if npub.len() > 18 { format!("{}…{}", &npub[..12], &npub[npub.len() - 6..]) } else { npub.to_string() };
     let (fill, glow) = match dot {
         "online" => (c(0x2ecc71), Some(ca(46, 204, 113, 0.55))),
@@ -2610,7 +2612,7 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(15.2))
                         .child(dot)
-                        .child(t::settings_signer()),
+                        .child(if offline { t::settings_signer_offline() } else { t::settings_signer() }),
                 )
                 .child(
                     st_btn("signer-reauth", t::settings_signer_reauthorize(), || Act::Reauthorize, on),
@@ -2642,7 +2644,7 @@ fn signer_card(npub: &str, dot: &str, on: &OnAct) -> AnyElement {
                 .text_size(px(12.5))
                 .line_height(px(17.5))
                 .text_color(white_a(0.45))
-                .child(t::settings_signer_note()),
+                .child(if offline { t::settings_signer_offline_note() } else { t::settings_signer_note() }),
         )
         .into_any_element()
 }
@@ -2658,7 +2660,7 @@ fn security_block(s: &Settings, on: &OnAct) -> AnyElement {
     let mut col = div()
         .flex()
         .flex_col()
-        .children(s.signer.as_ref().map(|(npub, dot)| signer_card(npub, dot, on)))
+        .children(s.signer.as_ref().map(|(npub, dot)| signer_card(npub, dot, s.signer_offline, on)))
         .child(toggle_row(
         "encryption",
         t::settings_encryption(),

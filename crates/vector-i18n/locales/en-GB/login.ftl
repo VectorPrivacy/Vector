@@ -134,6 +134,9 @@ login-invalid-seed = Invalid Seed Phrase
 login-already-signed-in = Another account is already signed in.
 login-password-empty = Password must not be empty.
 login-external-signer = This account signs with an external signer, which this client cannot use yet.
+login-nip55 = Sign in with Amber (Offline)
+login-signer-app-missing = No compatible signer app is installed. Install Amber to sign in offline.
+login-signer-setup-lost = Offline signer setup state missing. Please re-run Sign in with Amber.
 login-no-private-key = No private key found
 login-invalid-stored-key = Invalid stored key
 # $error is why.

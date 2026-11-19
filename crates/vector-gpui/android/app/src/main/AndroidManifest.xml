@@ -18,6 +18,14 @@
     <!-- Vulkan where the phone has it, else GLES 3. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
+    <!-- The NIP-55 signer apps an account can sign with. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="nostrsigner" />
+        </intent>
+    </queries>
+
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"

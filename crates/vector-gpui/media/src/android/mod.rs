@@ -19,4 +19,6 @@ pub mod incoming_call;
 pub mod storage;
 #[path = "../../../../../src-tauri/src/android/biometric.rs"]
 pub mod biometric;
+#[path = "../../../../../src-tauri/src/android/external_signer.rs"]
+pub mod external_signer;
 pub mod background_sync;

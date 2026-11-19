@@ -221,7 +221,7 @@ fn metadata(npub: &str) -> Account {
     meta
 }
 
-fn touch_last_active() {
+pub(super) fn touch_last_active() {
     let _ = db::set_sql_setting("last_active".into(), vector_core::clock::now_secs().to_string());
 }
 
@@ -328,11 +328,35 @@ pub async fn commit_biometric() -> Result<(), String> {
     out
 }
 
+/// The staged account becomes the one on disk: its database, the marker, and its network.
+pub(super) async fn open_pending() -> Result<(), String> {
+    let pending = PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(npub) = pending else { return Ok(()) };
+    // The welcome screen's network carries on into the new account's first session.
+    if !super::transport::running_prelogin() {
+        super::transport::stop_and_join_if_running().await;
+    }
+    if let Err(e) = db::init_database(&npub) {
+        let _ = super::transport::sync_to_active_account().await;
+        return Err(e);
+    }
+    db::set_current_account(npub.clone())?;
+    db::write_active_account_file(&npub)?;
+    if let Err(e) = super::transport::sync_to_active_account().await {
+        vector_core::log_warn!("[Account] network start for new account failed: {e}");
+    }
+    Ok(())
+}
+
 async fn commit_with(
     sealed: Option<(Zeroizing<[u8; 32]>, vector_core::crypto::Kdf)>,
     security_type: &str,
     wrap: Option<String>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    if vector_core::signer_kind() == SignerKind::Nip55 {
+        return super::nip55::commit(sealed, security_type, wrap).await;
+    }
     let nsec = Zeroizing::new(
         PENDING_NSEC
             .lock()
@@ -355,22 +379,7 @@ async fn commit_with(
     let stored_seed = seed.as_deref().map(|s| seal(s)).transpose()?;
     let kdf_row = kdf.as_ref().and_then(|k| k.descriptor());
 
-    let pending = PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if let Some(npub) = pending {
-        // The welcome screen's network carries on into the new account's first session.
-        if !super::transport::running_prelogin() {
-            super::transport::stop_and_join_if_running().await;
-        }
-        if let Err(e) = db::init_database(&npub) {
-            let _ = super::transport::sync_to_active_account().await;
-            return Err(e);
-        }
-        db::set_current_account(npub.clone())?;
-        db::write_active_account_file(&npub)?;
-        if let Err(e) = super::transport::sync_to_active_account().await {
-            vector_core::log_warn!("[Account] network start for new account failed: {e}");
-        }
-    }
+    open_pending().await?;
     let encrypted = key.is_some();
     let security = encrypted.then_some(security_type);
     if vector_core::signer_kind() == SignerKind::Bunker {
@@ -506,6 +515,10 @@ async fn open_with(opener: Opener) -> Result<String, String> {
     let kind =
         SignerKind::from_setting_str(&db::get_signer_type().unwrap_or_else(|_| "local".into()));
     let bunker = matches!(kind, SignerKind::Bunker);
+    #[cfg(target_os = "android")]
+    if matches!(kind, SignerKind::Nip55) {
+        return unlock_nip55(opener).await;
+    }
     if !matches!(kind, SignerKind::Local | SignerKind::Bunker) {
         return Err(
             crate::t::login_external_signer().into(),
@@ -546,6 +559,43 @@ async fn open_with(opener: Opener) -> Result<String, String> {
         state::set_my_public_key(remote);
     }
     drop(keys);
+    finish_unlock().await
+}
+
+/// An account whose identity lives in a signer app on the phone: nothing secret is stored here,
+/// so a credential opens only the local data, proven against the canary its setup wrote.
+#[cfg(target_os = "android")]
+async fn unlock_nip55(opener: Opener) -> Result<String, String> {
+    use vector_core::crypto::{Kdf, install_unlocked_key};
+    match &opener {
+        Opener::Password(pwd) => {
+            let kdf = Kdf::of_account()?;
+            let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
+            install_unlocked_key(&key, &kdf)?;
+            match db::at_rest::upgrade_after_unlock(pwd, &key).await {
+                Ok(true) => {
+                    let _ = db::at_rest::vacuum_now();
+                }
+                Ok(false) => {}
+                Err(e) => vector_core::log_warn!("[Encryption] Salt upgrade deferred: {e}"),
+            }
+        }
+        Opener::Key(key) => install_unlocked_key(key, &Kdf::of_account()?)
+            .map_err(|_| super::biometric::INVALIDATED.to_string())?,
+        Opener::Plain => {}
+    }
+    drop(opener);
+    let hex = db::get_nip55_user_pubkey()?.ok_or_else(|| crate::t::login_no_private_key().to_string())?;
+    let pk = PublicKey::parse(&hex).map_err(|e| e.to_string())?;
+    // A signer app removed since: the account still opens, and Settings offers the re-pair.
+    if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
+        vector_core::set_nip55_state(vector_core::Nip55State::Missing);
+    }
+    vector_core::set_signer_kind(SignerKind::Nip55);
+    if let Ok(Some(package)) = db::get_nip55_signer_package() {
+        crate::android::external_signer::set_signer_package(package);
+    }
+    state::set_my_public_key(pk);
     finish_unlock().await
 }
 

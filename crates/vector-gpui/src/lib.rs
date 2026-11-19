@@ -356,5 +356,7 @@ pub fn gpui_android_main() {
         // Copies of what the picker chose: nothing reads them after the run that picked them.
         let _ = std::fs::remove_dir_all(cache.join("picked"));
     }
+    // An Amber account signs through the signer app from its first event.
+    android::external_signer::register();
     run();
 }

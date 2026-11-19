@@ -164,6 +164,13 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    // The signer app answers through the platform's own result path.
+    @Deprecated("ExternalSigner launches with startActivityForResult")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        ExternalSigner.handleActivityResult(requestCode, resultCode, data)
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         PermissionHandler.handlePermissionResult(requestCode, grantResults)

@@ -32,6 +32,7 @@ pub mod packs;
 pub mod prefs;
 pub mod security;
 pub mod biometric;
+pub mod nip55;
 pub mod selfsync;
 pub mod sound;
 pub mod storage;
