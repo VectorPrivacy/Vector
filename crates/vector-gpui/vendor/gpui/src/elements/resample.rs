@@ -68,12 +68,42 @@ impl Taps {
     }
 }
 
+type TapsKey = (u32, u32, usize, u32);
+
+thread_local! {
+    /// The last few filters and the float row: an animation's frames all resize alike.
+    static TAPS: std::cell::RefCell<Vec<(TapsKey, std::rc::Rc<Taps>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static COLUMN: std::cell::Cell<Vec<f32>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+fn taps(len: u32, new_len: u32, kernel: fn(f32) -> f32, support: f32) -> std::rc::Rc<Taps> {
+    let key = (len, new_len, kernel as usize, support.to_bits());
+    TAPS.with_borrow_mut(|all| {
+        if let Some(i) = all.iter().position(|(k, _)| *k == key) {
+            let hit = all.remove(i);
+            all.push(hit);
+            return all.last().expect("just pushed").1.clone();
+        }
+        let taps = std::rc::Rc::new(Taps::new(len, new_len, kernel, support));
+        // Only small filters are kept: each thread holds its own.
+        if taps.weights.len() <= 8192 && new_len <= 1024 {
+            if all.len() == 4 {
+                all.remove(0);
+            }
+            all.push((key, taps.clone()));
+        }
+        taps
+    })
+}
+
 fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(f32) -> f32, support: f32) -> Vec<u8> {
     let (w, nwu) = (w as usize, nw as usize);
-    let down = Taps::new(h, nh, kernel, support);
-    let across = Taps::new(w as u32, nw, kernel, support);
+    let down = taps(h, nh, kernel, support);
+    let across = taps(w as u32, nw, kernel, support);
     let mut out = vec![0u8; nwu * nh as usize * C];
-    let mut column = vec![0f32; w * C];
+    let mut column = COLUMN.take();
+    column.clear();
+    column.resize(w * C, 0.);
     for ((top, ws), row) in down.iter().zip(out.chunks_exact_mut(nwu * C)) {
         column.fill(0.0);
         for (j, &wt) in ws.iter().enumerate() {
@@ -94,6 +124,10 @@ fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(
                 px[c] = t[c].clamp(0.0, 255.0).round() as u8;
             }
         }
+    }
+    // A wide row is let go rather than held for the thread's life.
+    if column.capacity() <= 1 << 14 {
+        COLUMN.set(column);
     }
     out
 }
