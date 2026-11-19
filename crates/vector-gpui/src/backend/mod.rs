@@ -143,6 +143,8 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
     notify::install();
     {
         let _guard = rt.enter();
+        // Calls take the engine as they find it and register for device changes once, here.
+        vector_media::audio_engine::AudioEngine::init();
         crate::calls::session::install();
     }
     crate::miniapp::init(|n| match n {
