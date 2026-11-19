@@ -20,6 +20,11 @@ use crate::message::types::CachedCompressedImage;
 use crate::theme::{INTER, PRIMARY, c, white_a};
 
 pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
+/// Pictures shown before sending but sent as they are: the send pipeline cannot read them.
+#[cfg(feature = "video")]
+const SHOWN_ONLY: &[&str] = &["heic", "heif"];
+#[cfg(not(feature = "video"))]
+const SHOWN_ONLY: &[&str] = &[];
 const MIN_COMPRESS_SIZE: u64 = 25 * 1024;
 
 pub type Compressed = Shared<Task<Option<CachedCompressedImage>>>;
@@ -156,7 +161,7 @@ impl Node {
 /// `getFileIcon`: the glyph a file without a picture shows.
 pub fn file_icon(ext: &str) -> &'static str {
     match ext {
-        e if IMAGE_EXTS.contains(&e) || e == "svg" => "icons/image.svg",
+        e if IMAGE_EXTS.contains(&e) || SHOWN_ONLY.contains(&e) || e == "svg" => "icons/image.svg",
         "mp4" | "webm" | "mov" | "avi" | "mkv" | "m4v" => "icons/film.svg",
         "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" => "icons/volume-max.svg",
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" | "tbz2" => {
@@ -324,7 +329,7 @@ impl FilePreview {
             shared
         });
 
-        if is_image {
+        if is_image || SHOWN_ONLY.contains(&ext.as_str()) {
             let file = path.clone();
             let e = ext.clone();
             cx.spawn(async move |this, cx| {
@@ -922,7 +927,7 @@ impl Render for FilePreview {
                         )
                         .into_any_element()
                 }
-                None if IMAGE_EXTS.contains(&self.ext.as_str()) => {
+                None if IMAGE_EXTS.contains(&self.ext.as_str()) || SHOWN_ONLY.contains(&self.ext.as_str()) => {
                     div().h(px(100.)).into_any_element()
                 }
                 None if let Some(v) = self.clip_view(500f32.min(f32::from(window.viewport_size().width) - 40.) - 48., max_h, cx) => v,

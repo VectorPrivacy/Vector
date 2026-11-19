@@ -1009,6 +1009,8 @@ mod ff {
 }
 
 use ff::{decode, decode_audio, probe};
+#[cfg(feature = "video")]
+pub use ff::{Sequence, ready as ffmpeg_ready};
 
 #[path = "video_stretched.rs"]
 mod stretched;

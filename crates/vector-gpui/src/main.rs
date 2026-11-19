@@ -141,6 +141,7 @@ mod select;
 mod sprite;
 mod stretch;
 mod video;
+mod heif;
 #[cfg(feature = "video")]
 mod yuv;
 

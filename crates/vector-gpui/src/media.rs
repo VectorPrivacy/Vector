@@ -934,6 +934,25 @@ trait FrameSource {
     fn advance(&mut self) -> Option<u32>;
     /// The frame `advance` reached, scaled to `to` when given.
     fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage;
+    /// Whether `take` hands over BGRA already.
+    fn bgra(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "video")]
+impl FrameSource for crate::video::Sequence {
+    fn advance(&mut self) -> Option<u32> {
+        crate::video::Sequence::advance(self)
+    }
+
+    fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage {
+        crate::video::Sequence::take(self, to)
+    }
+
+    fn bgra(&self) -> bool {
+        true
+    }
 }
 
 /// Frames a decoder hands over whole.
@@ -1041,6 +1060,7 @@ fn frames_of(
     count: usize,
     to: &impl Fn(u32, u32) -> (u32, u32),
 ) -> Option<(Vec<Frame>, u32, u32)> {
+    let bgra = frames.bgra();
     let (tw, th) = fit_budget(to(w, h), count);
     let scale = (tw < w || th < h).then_some((tw.max(1), th.max(1)));
     // Browsers play 10ms or less as 100ms.
@@ -1082,7 +1102,10 @@ fn frames_of(
     }
     let frames = kept
         .into_iter()
-        .map(|(buf, delay)| Frame::from_parts(to_bgra(buf), 0, 0, image::Delay::from_numer_denom_ms(delay, 1)))
+        .map(|(buf, delay)| {
+            let buf = if bgra { buf } else { to_bgra(buf) };
+            Frame::from_parts(buf, 0, 0, image::Delay::from_numer_denom_ms(delay, 1))
+        })
         .collect();
     Some((frames, w, h))
 }
@@ -1099,6 +1122,12 @@ pub fn decode_gif_cover(bytes: &[u8], side: u32) -> Option<RenderImage> {
 /// A picture as frames no larger than `max`, with its natural size.
 pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
     let _trim = crate::trim::OnDrop;
+    if ext != "svg"
+        && crate::heif::sniff(bytes)
+        && let Some(d) = heif(bytes, max)
+    {
+        return Some(d);
+    }
     if ext != "svg"
         && let Some((frames, w, h)) = gif_frames(bytes, |w, h| {
             let s = (max.0 as f32 / w.max(1) as f32)
@@ -1157,6 +1186,20 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
         w,
         h,
     ))
+}
+
+/// A HEIF file: a sequence or burst plays as an animation, else its primary picture shows.
+fn heif(bytes: &[u8], max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
+    #[cfg(feature = "video")]
+    if crate::heif::has_track(bytes)
+        && let Some((seq, w, h, count)) = crate::video::Sequence::open(bytes.to_vec())
+        && let Some((frames, w, h)) = frames_of(seq, w, h, count, &|w, h| crate::heif::fit((w, h), max))
+        && frames.len() > 1
+    {
+        return Some((RenderImage::new(frames), w, h));
+    }
+    let (img, w, h) = crate::heif::decode(bytes, max)?;
+    Some((RenderImage::new(vec![Frame::new(img)]), w, h))
 }
 
 /// Someone else's picture, within limits: a small file can claim a huge canvas.

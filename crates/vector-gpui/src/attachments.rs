@@ -17,11 +17,11 @@ use crate::media::{self, Media, Slot, Source, Transfer};
 use crate::theme::*;
 use crate::timeline::{Act, Ctx, DANGER};
 
-const IMAGES: [&str; 11] = [
-    "png", "jpeg", "jpg", "gif", "webp", "jxl", "svg", "bmp", "tiff", "tif", "ico",
+const IMAGES: [&str; 13] = [
+    "png", "jpeg", "jpg", "gif", "webp", "jxl", "svg", "bmp", "tiff", "tif", "ico", "heic", "heif",
 ];
 /// Pictures that wait behind their blur rather than a file box.
-const BLURRED: [&str; 9] = ["png", "jpeg", "jpg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
+const BLURRED: [&str; 11] = ["png", "jpeg", "jpg", "gif", "webp", "jxl", "tiff", "tif", "ico", "heic", "heif"];
 
 const BOX_BG: u32 = 0x161616;
 const BOX_BG_HOVER: u32 = 0x1d1d1d;

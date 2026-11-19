@@ -13,6 +13,11 @@ use vector_media::audio_engine::AudioInput;
 use super::{Cmd, Info, Out, fit};
 use crate::yuv;
 
+/// Whether FFmpeg is up, for decoders outside this module.
+pub fn ready() -> bool {
+    init()
+}
+
 fn init() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
@@ -170,9 +175,13 @@ impl Video {
     /// `threads`: 0 for FFmpeg's choice. A poster wants one: each frame thread holds its own buffers.
     fn open(reader: Box<dyn ReadSeek>, threads: usize) -> Option<(Video, Option<usize>)> {
         let src = Source::open(reader)?;
-        let stream = src.input.streams().best(ffmpeg::media::Type::Video)?;
-        let index = stream.index();
+        let index = src.input.streams().best(ffmpeg::media::Type::Video)?.index();
         let audio = src.input.streams().best(ffmpeg::media::Type::Audio).map(|s| s.index());
+        Some((Video::of(src, index, threads)?, audio))
+    }
+
+    fn of(src: Source, index: usize, threads: usize) -> Option<Video> {
+        let stream = src.input.stream(index)?;
         let tb = f64::from(stream.time_base());
         let rot = rotation(&stream);
         let params = stream.parameters();
@@ -183,7 +192,7 @@ impl Video {
         let mut ctx = ffmpeg::codec::context::Context::from_parameters(params).ok()?;
         ctx.set_threading(ffmpeg::threading::Config { kind: ffmpeg::threading::Type::Frame, count: threads });
         let decoder = ctx.decoder().video().ok()?;
-        Some((Video { src, index, decoder, tb, rot }, audio))
+        Some(Video { src, index, decoder, tb, rot })
     }
 
     fn size(&self) -> (u32, u32) {
@@ -226,6 +235,64 @@ impl Video {
         let ts = (ms as i64) * 1000;
         let _ = self.src.input.seek(ts, ..ts + 1);
         self.decoder.flush();
+    }
+}
+
+/// A HEIF sequence's track a frame at a time, for the animation path: its delay first, its
+/// pixels only for a frame that is kept.
+pub struct Sequence {
+    video: Video,
+    eof: bool,
+    at: ffmpeg::frame::Video,
+    ahead: Option<ffmpeg::frame::Video>,
+    /// A frame's length when the next one gives none: the track's own rate.
+    each: u32,
+}
+
+impl Sequence {
+    /// The track with the most frames, its size as shown, and how many frames it says it has.
+    pub fn open(bytes: Vec<u8>) -> Option<(Sequence, u32, u32, usize)> {
+        let src = Source::open(Box::new(std::io::Cursor::new(bytes)))?;
+        let (index, count, rate) = src
+            .input
+            .streams()
+            .filter(|s| s.parameters().medium() == ffmpeg::media::Type::Video)
+            .map(|s| (s.index(), s.frames().max(0) as usize, f64::from(s.avg_frame_rate())))
+            .max_by_key(|&(_, n, _)| n)?;
+        if count < 2 {
+            return None;
+        }
+        let video = Video::of(src, index, 2)?;
+        let (w, h) = video.size();
+        let each = if rate > 0. { (1000. / rate).round().max(1.) as u32 } else { 100 };
+        Some((Sequence { video, eof: false, at: ffmpeg::frame::Video::empty(), ahead: None, each }, w, h, count))
+    }
+
+    fn decoded(&mut self) -> Option<ffmpeg::frame::Video> {
+        let mut f = ffmpeg::frame::Video::empty();
+        self.video.next(&mut f, &mut self.eof)?;
+        Some(f)
+    }
+
+    /// The next frame's length in ms; None at the end.
+    pub fn advance(&mut self) -> Option<u32> {
+        let at = match self.ahead.take() {
+            Some(f) => f,
+            None => self.decoded()?,
+        };
+        self.ahead = self.decoded();
+        let delay = match &self.ahead {
+            Some(next) => self.video.pts(next).saturating_sub(self.video.pts(&at)) as u32,
+            None => 0,
+        };
+        self.at = at;
+        Some(if delay == 0 { self.each } else { delay })
+    }
+
+    /// The frame `advance` reached, as straight BGRA at its shown size or `to`.
+    pub fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage {
+        let size = to.unwrap_or_else(|| self.video.size());
+        convert(&self.at, size, self.video.rot).unwrap_or_else(|| image::RgbaImage::new(size.0.max(1), size.1.max(1)))
     }
 }
 
