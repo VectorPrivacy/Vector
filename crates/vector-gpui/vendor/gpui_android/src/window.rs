@@ -23,6 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::{c_long, c_void};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// The surface as wgpu takes it.
 #[derive(Clone, Debug)]
@@ -90,6 +91,7 @@ pub(crate) struct WindowState {
     input_handler: CallbackSlot<PlatformInputHandler>,
     /// The field as the keyboard's copy last stood, when both sides agreed.
     field: RefCell<Option<Field>>,
+    ime_serial: Cell<i32>,
     callbacks: Callbacks,
 }
 
@@ -133,6 +135,7 @@ impl AndroidWindow {
             force_next_frame: Cell::new(true),
             input_handler: CallbackSlot::default(),
             field: RefCell::new(None),
+            ime_serial: Cell::new(0),
             callbacks: Callbacks::default(),
         });
         FRAME_WINDOW.with(|w| *w.borrow_mut() = Rc::downgrade(&state));
@@ -293,7 +296,7 @@ impl WindowState {
         }
     }
 
-    pub(crate) fn handle_touch(&self, id: i32, phase: i32, x: f32, y: f32, pressure: f32) {
+    pub(crate) fn handle_touch(&self, id: i32, phase: i32, x: f32, y: f32, pressure: f32, time: Instant) {
         let phase = match phase {
             0 => TouchPhase::Started,
             1 => TouchPhase::Moved,
@@ -309,6 +312,7 @@ impl WindowState {
             position,
             predicted_position: None,
             force: (pressure > 0.).then(|| pressure.clamp(0., 1.)),
+            time: Some(time),
         }));
         if phase == TouchPhase::Ended {
             self.sync_field();
@@ -359,7 +363,8 @@ impl WindowState {
         );
     }
 
-    pub(crate) fn handle_ime_state(&self, edited: Field) {
+    pub(crate) fn handle_ime_state(&self, edited: Field, serial: i32) {
+        self.ime_serial.set(serial);
         let before = self.field.borrow().clone();
         let Some(before) = before else {
             self.sync_field();
@@ -370,7 +375,7 @@ impl WindowState {
         if let Some(now) = &now
             && *now != edited
         {
-            now.send();
+            now.send(serial);
         }
         self.field.replace(now);
         self.schedule_frame();
@@ -382,7 +387,7 @@ impl WindowState {
         let changed = *self.field.borrow() != now;
         if changed {
             if let Some(now) = &now {
-                now.send();
+                now.send(self.ime_serial.get());
             }
             self.field.replace(now);
         }
@@ -617,7 +622,7 @@ impl PlatformWindow for AndroidWindow {
         match change {
             TextInputStateChange::FocusLost => {
                 self.0.field.replace(None);
-                Field::default().send();
+                Field::default().send(self.0.ime_serial.get());
             }
             _ => self.0.sync_field(),
         }

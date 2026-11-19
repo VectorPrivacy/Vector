@@ -134,6 +134,10 @@ pub struct TouchEvent {
     pub predicted_position: Option<Point<Pixels>>,
     /// Normalized touch force in `0.0..=1.0`, if the hardware reports it.
     pub force: Option<f32>,
+    /// When the platform saw the touch, for one that delivers touches after a delay (GPUI off
+    /// the UI thread, events batched behind a frame); `None` is the moment it is handled.
+    /// Gesture timing (velocity, taps, long presses) reads it.
+    pub time: Option<scheduler::Instant>,
 }
 
 impl Sealed for TouchEvent {}

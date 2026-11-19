@@ -40,12 +40,13 @@ impl Field {
         Self { selection: (a.min(b), a.max(b)), composing, text }
     }
 
-    pub fn send(&self) {
+    pub fn send(&self, serial: i32) {
         let (cs, ce) = self.composing.map_or((-1, -1), |(s, e)| (s as i32, e as i32));
         bridge::set_text_state(
             &String::from_utf16_lossy(&self.text),
             (self.selection.0 as i32, self.selection.1 as i32),
             (cs, ce),
+            serial,
         );
     }
 }

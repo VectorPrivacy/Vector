@@ -5414,6 +5414,7 @@ mod tests {
                         position: touch_position,
                         predicted_position: None,
                         force: None,
+                        time: None,
                     }
                     .to_platform_input(),
                     cx,
@@ -5440,6 +5441,7 @@ mod tests {
                         position: moved_position,
                         predicted_position: None,
                         force: None,
+                        time: None,
                     }
                     .to_platform_input(),
                     cx,
@@ -5461,6 +5463,7 @@ mod tests {
                         position: moved_position,
                         predicted_position: None,
                         force: None,
+                        time: None,
                     }
                     .to_platform_input(),
                     cx,
@@ -5745,6 +5748,7 @@ mod tests {
                     phase: TouchPhase::Started,
                     position: point(px(75.), px(75.)),
                     force: None,
+                    time: None,
                     predicted_position: None,
                 };
                 window.dispatch_event(started.clone().to_platform_input(), cx);
@@ -5804,6 +5808,7 @@ mod tests {
                             position: point(px(75.), px(vertical_position)),
                             predicted_position: None,
                             force: None,
+                            time: None,
                         }
                         .to_platform_input(),
                         cx,

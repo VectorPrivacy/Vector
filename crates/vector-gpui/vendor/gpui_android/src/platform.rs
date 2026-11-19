@@ -156,9 +156,9 @@ impl PlatformState {
                 }
                 self.displays_changed.with(|callback| callback());
             }
-            Event::Touch { id, phase, x, y, pressure } => {
+            Event::Touch { id, phase, x, y, pressure, time } => {
                 if let Some(window) = &window {
-                    window.handle_touch(id, phase, x, y, pressure);
+                    window.handle_touch(id, phase, x, y, pressure, time);
                 }
             }
             Event::Key { down, key_code, unicode, base, meta, repeat } => {
@@ -214,9 +214,9 @@ impl PlatformState {
                     self.pending_urls.borrow_mut().push(url);
                 }
             }
-            Event::ImeState { text, selection, composing } => {
+            Event::ImeState { text, selection, composing, serial } => {
                 if let Some(window) = &window {
-                    window.handle_ime_state(Field::from_keyboard(&text, selection, composing));
+                    window.handle_ime_state(Field::from_keyboard(&text, selection, composing), serial);
                 }
             }
             Event::ImeAction => {

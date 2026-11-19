@@ -3,12 +3,12 @@
 //! static methods, from its own thread, attached to the VM for good.
 
 use jni::objects::{GlobalRef, JClass, JObject, JString};
-use jni::sys::{jboolean, jfloat, jint};
+use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::{JNIEnv, JavaVM};
 use ndk::native_window::NativeWindow;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::{Mutex, OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) enum Event {
     SurfaceCreated(NativeWindow),
@@ -18,7 +18,7 @@ pub(crate) enum Event {
     /// Device pixels: top, right, bottom, left, then the keyboard's height.
     Insets { safe: [f32; 4], ime: f32 },
     Configuration { density: f32, dark: bool },
-    Touch { id: i32, phase: i32, x: f32, y: f32, pressure: f32 },
+    Touch { id: i32, phase: i32, x: f32, y: f32, pressure: f32, time: Instant },
     Key { down: bool, key_code: i32, unicode: u32, base: u32, meta: i32, repeat: i32 },
     Lifecycle(i32),
     Focus(bool),
@@ -26,8 +26,8 @@ pub(crate) enum Event {
     TrimMemory(i32),
     OpenUrl(String),
     /// The keyboard's view of the focused field after an edit, in UTF-16 offsets; a
-    /// composing region of -1 is none.
-    ImeState { text: String, selection: (i32, i32), composing: (i32, i32) },
+    /// composing region of -1 is none. `serial` counts the keyboard's edits.
+    ImeState { text: String, selection: (i32, i32), composing: (i32, i32), serial: i32 },
     /// The keyboard's action key (send, done, go…): GPUI's fields all take it as Enter.
     ImeAction,
 }
@@ -214,8 +214,19 @@ pub extern "system" fn Java_io_vectorapp_gpui_Bridge_nativeTouch<'l>(
     x: jfloat,
     y: jfloat,
     pressure: jfloat,
+    uptime_nanos: jlong,
 ) {
-    push(Event::Touch { id, phase, x, y, pressure });
+    let time = Instant::now().checked_sub(since_uptime(uptime_nanos)).unwrap_or_else(Instant::now);
+    push(Event::Touch { id, phase, x, y, pressure, time });
+}
+
+/// How long ago a `SystemClock.uptime` moment was: CLOCK_MONOTONIC, the clock `Instant` reads.
+fn since_uptime(nanos: jlong) -> Duration {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes one timespec into a valid buffer.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    let now = now.tv_sec as i64 * 1_000_000_000 + now.tv_nsec as i64;
+    Duration::from_nanos(now.saturating_sub(nanos).max(0) as u64)
 }
 
 #[unsafe(no_mangle)]
@@ -318,12 +329,14 @@ pub extern "system" fn Java_io_vectorapp_gpui_Bridge_nativeImeState<'l>(
     selection_end: jint,
     composing_start: jint,
     composing_end: jint,
+    serial: jint,
 ) {
     let text = string(&mut env, &text);
     push(Event::ImeState {
         text,
         selection: (selection_start, selection_end),
         composing: (composing_start, composing_end),
+        serial,
     });
 }
 
@@ -384,19 +397,22 @@ pub(crate) fn clipboard() -> Option<String> {
 }
 
 /// The field the keyboard edits, as GPUI holds it: UTF-16 offsets, -1 for no composing region.
-pub(crate) fn set_text_state(text: &str, selection: (i32, i32), composing: (i32, i32)) {
+/// `serial` is the last keyboard edit GPUI has applied, so the keyboard can tell this state
+/// from one that predates its newer edits.
+pub(crate) fn set_text_state(text: &str, selection: (i32, i32), composing: (i32, i32), serial: i32) {
     with_env(|env, class| {
         let text = env.new_string(text)?;
         env.call_static_method(
             class,
             "setTextState",
-            "(Ljava/lang/String;IIII)V",
+            "(Ljava/lang/String;IIIII)V",
             &[
                 (&text).into(),
                 selection.0.into(),
                 selection.1.into(),
                 composing.0.into(),
                 composing.1.into(),
+                serial.into(),
             ],
         )
         .map(drop)
