@@ -821,6 +821,70 @@
      "edited": false
     },
     {
+     "id": "c043350000000000000000000000000000000000000000000000000000000000",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "adba5bd953d31858da35fa27f847c5b2511a3b2c2e4cde6a18716b09a2a057cf",
+       "key": "",
+       "nonce": "",
+       "extension": "heic",
+       "name": "IMG_4127.HEIC",
+       "url": "https://example.invalid/recording",
+       "path": "media/photo.heic",
+       "size": 6555,
+       "img_meta": {
+        "thumbhash": "",
+        "width": 1600,
+        "height": 1000
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794362393000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
+     "id": "c043360000000000000000000000000000000000000000000000000000000000",
+     "content": "",
+     "replied_to": "",
+     "preview_metadata": null,
+     "attachments": [
+      {
+       "id": "81e00555f1ff1708bc94ec9cc445cde14c19d6014b89725d19156a1936274e86",
+       "key": "",
+       "nonce": "",
+       "extension": "heics",
+       "name": "burst.heics",
+       "url": "https://example.invalid/recording",
+       "path": "media/sequence.heics",
+       "size": 2016,
+       "img_meta": {
+        "thumbhash": "",
+        "width": 64,
+        "height": 48
+       },
+       "downloading": false,
+       "downloaded": true
+      }
+     ],
+     "reactions": [],
+     "at": 1794362396000,
+     "pending": false,
+     "failed": false,
+     "mine": false,
+     "npub": "npub15387nevpzd0u700y2t24ym9l0zxe8fsxx2w7qn47ysn6mndn9gvqqmlahu",
+     "edited": false
+    },
+    {
      "id": "c044400000000000000000000000000000000000000000000000000000000000",
      "content": "",
      "replied_to": "",

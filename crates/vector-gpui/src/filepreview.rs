@@ -22,7 +22,7 @@ use crate::theme::{INTER, PRIMARY, c, white_a};
 pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
 /// Pictures shown before sending but sent as they are: the send pipeline cannot read them.
 #[cfg(feature = "video")]
-const SHOWN_ONLY: &[&str] = &["heic", "heif"];
+const SHOWN_ONLY: &[&str] = &["heic", "heif", "heics", "heifs"];
 #[cfg(not(feature = "video"))]
 const SHOWN_ONLY: &[&str] = &[];
 const MIN_COMPRESS_SIZE: u64 = 25 * 1024;

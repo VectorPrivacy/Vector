@@ -1384,7 +1384,7 @@ pub fn file_type(extension: &str) -> (&'static str, gpui::SharedString) {
         "gif" => ("film", t::file_type_gif_animation),
         "webp" => ("image", t::file_type_picture),
         "jxl" => ("image", t::file_type_picture),
-        "heic" | "heif" => ("image", t::file_type_picture),
+        "heic" | "heif" | "heics" | "heifs" => ("image", t::file_type_picture),
         "svg" => ("image", t::file_type_vector_image),
         "bmp" => ("image", t::file_type_bitmap_image),
         "ico" => ("image", t::file_type_icon),
