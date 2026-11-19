@@ -190,6 +190,22 @@ fn all(s: &str, r: &mut Rng) {
     let _ = uploaderr::humanize(s);
     let _ = nexus::tag_label(s);
     let _ = routes::tag_colors(s);
+    let _ = vector_core::types::outside_code(s);
+    let (plain, own) = vector_core::text_spans::extract(s);
+    let _ = texttime::spans_to_codes(&plain, &own);
+    let n = s.chars().count() + 4;
+    let mut tags: Vec<Vec<String>> = Vec::new();
+    for _ in 0..r.below(6) {
+        let (from, to) = (r.below(n).to_string(), r.below(n).to_string());
+        tags.push(if r.below(2) == 0 {
+            vec!["color".into(), from, to, ["solid", "rainbow", "gradient", "zz"][r.below(4)].into(), "#ff0000".into()]
+        } else {
+            let unix = ["1700000000", "-99999999999", "0", "9999999999999", "x"][r.below(5)];
+            vec!["time".into(), from, to, unix.into(), ["R", "f", "t", "x", ""][r.below(5)].into()]
+        });
+    }
+    let theirs = vector_core::text_spans::from_stored(&tags, s);
+    let _ = texttime::spans_to_codes(s, &theirs);
 }
 
 #[test]
@@ -236,6 +252,8 @@ fn deep_and_long_text_parses() {
         .unwrap()
         .join()
         .expect("a parser panicked or overflowed on deep or long text");
+    let worst = slow.lock().unwrap().iter().map(|t| t.0).max().unwrap_or(0);
+    assert!(worst < 20_000, "one text took {worst} ms through the parsers");
     if std::env::var_os("TEXTFUZZ_TIMES").is_some() {
         let mut v = slow.lock().unwrap().clone();
         v.sort_by(|a, b| b.0.cmp(&a.0));
