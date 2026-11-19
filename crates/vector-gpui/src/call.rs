@@ -148,6 +148,11 @@ pub struct Call {
     /// This platform captures a screen's sound itself.
     pub share_audio_native: bool,
     pub share_audio_denied: bool,
+    /// Their screen's sound comes with their share; it has a volume of its own.
+    pub share_audio_peer: bool,
+    pub share_volume: f32,
+    share_slider: Rc<Cell<Option<Bounds<Pixels>>>>,
+    share_sliding: Rc<Cell<bool>>,
 }
 
 impl Default for Call {
@@ -192,6 +197,10 @@ impl Default for Call {
             share_audio_mine: false,
             share_audio_native: false,
             share_audio_denied: false,
+            share_audio_peer: false,
+            share_volume: 1.,
+            share_slider: Rc::default(),
+            share_sliding: Rc::default(),
         }
     }
 }
@@ -258,6 +267,8 @@ impl Call {
         self.share_audio_mine = bool_of("share_audio_mine");
         self.share_audio_native = bool_of("share_audio_native");
         self.share_audio_denied = bool_of("share_audio_denied");
+        self.share_audio_peer = bool_of("share_audio_peer");
+        self.share_volume = s.get("share_volume").and_then(Value::as_f64).unwrap_or(1.) as f32;
         if self.maximized.is_some_and(|k| !self.video_peer[k]) {
             self.maximized = None;
         }
@@ -450,6 +461,7 @@ pub enum Act {
     Move(Point<Pixels>),
     Moved,
     Volume(f32),
+    ShareVolume(f32),
     Audio(Switch, bool),
     Hover(Option<usize>),
     /// One of our pictures on or off: camera 0, screen 1.
@@ -797,20 +809,35 @@ fn meter(level: f32, active: bool) -> impl IntoElement {
 
 /// Their volume, 0 to 200%: an 8px track, the accent to the value, a 14px thumb.
 fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
-    let pct = (call.volume / 2.).clamp(0., 1.);
+    slider("call-volume", t::call_their_volume(), call.volume, call.slider.clone(), call.sliding.clone(), Act::Volume, on)
+}
+
+/// The sound of their shared screen, 0 to 200%, while it comes with the share.
+fn share_slider(call: &Call, on: &OnAct) -> impl IntoElement {
+    slider("call-share-volume", t::call_their_screen(), call.share_volume, call.share_slider.clone(), call.share_sliding.clone(), Act::ShareVolume, on)
+}
+
+fn slider(
+    id: &'static str,
+    name: gpui::SharedString,
+    volume: f32,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    dragging: Rc<Cell<bool>>,
+    act: fn(f32) -> Act,
+    on: &OnAct,
+) -> impl IntoElement {
+    let pct = (volume / 2.).clamp(0., 1.);
     let at = |b: Bounds<Pixels>, x: Pixels| {
         let v = crate::kit::track_frac(b, x, px(0.)) * 200.;
         (v / 5.).round() * 5. / 100.
     };
-    let bounds = call.slider.clone();
-    let dragging = call.sliding.clone();
     let down = {
         let (on, bounds, dragging) = (on.clone(), bounds.clone(), dragging.clone());
         move |e: &gpui::MouseDownEvent, w: &mut Window, cx: &mut App| {
             cx.stop_propagation();
             let Some(b) = bounds.get() else { return };
             dragging.set(true);
-            on(Act::Volume(at(b, e.position.x)), w, cx);
+            on(act(at(b, e.position.x)), w, cx);
         }
     };
     let track = {
@@ -832,7 +859,7 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
                         return;
                     }
                     if let Some(b) = bounds.get() {
-                        on(Act::Volume(at(b, e.position.x)), w, cx);
+                        on(act(at(b, e.position.x)), w, cx);
                     }
                 });
                 let d = dragging.clone();
@@ -847,14 +874,14 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
         .items_center()
         .gap(px(10.))
         .pt(px(8.))
-        .child(label(t::call_their_volume()))
+        .child(label(name.clone()))
         .child(
             div()
-                .id("call-volume")
-                .as_slider(t::call_their_volume(), t::percent((call.volume * 100.).round()), pct)
+                .id(id)
+                .as_slider(name, t::percent((volume * 100.).round()), pct)
                 .slider_keys(pct, 0.025, {
                     let on = on.clone();
-                    move |f, w, cx| on(Act::Volume((f * 40.).round() / 20.), w, cx)
+                    move |f, w, cx| on(act((f * 40.).round() / 20.), w, cx)
                 })
                 .relative()
                 .flex_1()
@@ -902,7 +929,7 @@ fn volume_slider(call: &Call, on: &OnAct) -> impl IntoElement {
                 ),
         )
         .child(
-            value(format!("{}%", (call.volume * 100.).round() as i32))
+            value(format!("{}%", (volume * 100.).round() as i32))
                 .w(px(40.))
                 .flex_shrink_0()
                 .justify_end(),
@@ -1123,6 +1150,7 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
         .cursor_default()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(volume_slider(call, on))
+        .when(call.share_audio_peer, |d| d.child(share_slider(call, on)))
         .when(!call.muted && !call.mic_off, |d| {
             d.child(
                 div()

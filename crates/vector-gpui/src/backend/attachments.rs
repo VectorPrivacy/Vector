@@ -75,6 +75,16 @@ fn emit(event: &str, payload: serde_json::Value) {
     vector_core::emit_event(event, &payload);
 }
 
+/// A file that came without a size, asked of its server; the row learns it as an edit would.
+pub async fn probe_size(msg_id: String, attachment_id: String) {
+    if VectorCore.probe_attachment_size(&msg_id, &attachment_id).await.is_none() {
+        return;
+    }
+    if let Some((chat_id, message)) = VectorCore.get_message(&msg_id).await {
+        emit("message_update", json!({ "old_id": message.id, "message": message, "chat_id": chat_id }));
+    }
+}
+
 /// What a download reports once every server its message names holds no such file.
 pub const GONE_EVERYWHERE: &str = "No longer on any media server"; // i18n-exempt: sentinel, matched and shown translated
 

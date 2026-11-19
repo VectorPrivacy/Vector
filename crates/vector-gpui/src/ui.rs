@@ -9670,6 +9670,9 @@ impl VectorApp {
                     app.update(cx, |app, cx| app.audio_work(probes, cx)).ok();
                 });
             }
+            for (msg, att) in std::mem::take(&mut media.borrow_mut().size_queue) {
+                let _ = backend::run(backend::attachments::probe_size(msg, att));
+            }
             let autos = std::mem::take(&mut media.borrow_mut().auto_queue);
             if !autos.is_empty() {
                 let app = app_media.clone();
@@ -17214,6 +17217,12 @@ impl VectorApp {
                 if (v - self.call.volume).abs() > f32::EPSILON {
                     self.call.volume = v;
                     self.call_cmd(backend::calls::set_volume(v), cx);
+                }
+            }
+            Act::ShareVolume(v) => {
+                if (v - self.call.share_volume).abs() > f32::EPSILON {
+                    self.call.share_volume = v;
+                    self.call_cmd(backend::calls::set_share_volume(v), cx);
                 }
             }
             Act::Audio(which, on) => {

@@ -171,6 +171,10 @@ pub struct Media {
     wants: Vec<Want>,
     /// Downloads the renderer asks the app to start: (msg id, attachment id).
     pub auto_queue: Vec<(String, String)>,
+    /// Attachments that came without a size and asked their server for it, once a session.
+    pub sized: HashSet<String>,
+    /// Size asks the renderer leaves for the app: (msg id, attachment id).
+    pub size_queue: Vec<(String, String)>,
     linked: HashMap<String, Linked>,
     linked_wants: Vec<String>,
     /// The messages each linked picture shows in, and the pictures done loading (or failed)
