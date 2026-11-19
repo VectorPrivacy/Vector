@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use gpui::prelude::*;
+use crate::kit::Tipped as _;
 use gpui::{AnyElement, App, Entity, FontWeight, HighlightStyle, SharedString, StyledText, Window, div, px, svg};
 use vector_core::search::{Corpus, Filter, Found, Has, Query, Record};
 
@@ -74,13 +75,19 @@ impl Key {
 }
 
 /// `has:` values: the syntax word and what it asks for.
-const HAS: [(&str, Has); 6] = [
-    ("link", Has::LINK),   // i18n-exempt: search syntax
-    ("image", Has::IMAGE), // i18n-exempt: search syntax
-    ("video", Has::VIDEO), // i18n-exempt: search syntax
-    ("audio", Has::AUDIO), // i18n-exempt: search syntax
-    ("file", Has::FILE),   // i18n-exempt: search syntax
-    ("sound", Has::AUDIO), // i18n-exempt: search syntax
+const HAS: [(&str, Has); 12] = [
+    ("link", Has::LINK),       // i18n-exempt: search syntax
+    ("image", Has::IMAGE),     // i18n-exempt: search syntax
+    ("video", Has::VIDEO),     // i18n-exempt: search syntax
+    ("audio", Has::AUDIO),     // i18n-exempt: search syntax
+    ("file", Has::FILE),       // i18n-exempt: search syntax
+    ("sound", Has::AUDIO),     // i18n-exempt: search syntax
+    ("img", Has::IMAGE),       // i18n-exempt: search syntax
+    ("photo", Has::IMAGE),     // i18n-exempt: search syntax
+    ("picture", Has::IMAGE),   // i18n-exempt: search syntax
+    ("vid", Has::VIDEO),       // i18n-exempt: search syntax
+    ("url", Has::LINK),        // i18n-exempt: search syntax
+    ("attachment", Has::FILE), // i18n-exempt: search syntax
 ];
 
 fn has_icon(h: Has) -> &'static str {
@@ -187,10 +194,8 @@ impl Directory {
         people.sort_by(|a, b| a.folded.cmp(&b.folded));
         let mut chats = Vec::new();
         for chat in &store.chats {
-            if chat.chat_type == vector_core::ChatType::DirectMessage {
-                if store.listed(chat) || chat.id == store.my_npub {
-                    chats.push(named(chat.id.clone(), store.name(&chat.id)));
-                }
+            if chat.chat_type == vector_core::ChatType::DirectMessage && (store.listed(chat) || chat.id == store.my_npub) {
+                chats.push(named(chat.id.clone(), store.name(&chat.id)));
             }
         }
         for com in &store.communities {
@@ -434,7 +439,7 @@ pub fn fixture_corpus(store: &Store) -> Corpus {
             });
         }
     }
-    records.sort_by(|a, b| b.at.cmp(&a.at));
+    records.sort_by_key(|r| std::cmp::Reverse(r.at));
     build(&records, &names(store), &blocked(store))
 }
 
@@ -565,7 +570,6 @@ fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEve
 
 /// The header's magnifier: search the open chat.
 pub fn button(on: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
-    use crate::kit::Tipped as _;
     // i18n-exempt: key names
     let keys = if cfg!(target_os = "macos") { "\u{2318}F" } else { "Ctrl+F" };
     div()
@@ -643,6 +647,7 @@ fn chip(tok: &Token, store: &Store, dir: &Directory, on: &OnAct) -> AnyElement {
         .child(
             div()
                 .id(SharedString::from(format!("search-chip-x-{}", tok.range.start)))
+                .tip(t::search_remove_filter())
                 .size(px(18.))
                 .rounded_full()
                 .flex()
@@ -822,6 +827,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
         .child(
             div()
                 .id("search-sort")
+                .tip(t::search_sort())
                 .flex()
                 .items_center()
                 .gap(px(6.))
@@ -841,6 +847,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
         .child(
             div()
                 .id("search-close")
+                .tip(t::search_close())
                 .size(px(28.))
                 .rounded_full()
                 .flex()
@@ -865,10 +872,17 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
     let mut list = div().id("search-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&s.scroll).flex().flex_col().pb(px(8.));
     let mut status: Option<AnyElement> = None;
     if s.showing_suggestions() {
-        let title = if text_empty { Some(t::search_options()) } else { None };
+        let dated = matches!(s.suggest.first(), Some(Suggest::Value { key: Key::Before | Key::After | Key::During, .. }));
+        let title = if text_empty {
+            Some(t::search_options())
+        } else if dated {
+            Some(t::search_date_hint())
+        } else {
+            None
+        };
         list = list
             .children(title.map(|t| {
-                div().px(px(20.)).pt(px(12.)).pb(px(6.)).text_size(px(12.)).font_weight(FontWeight::BOLD).text_color(c(LIST_TIME)).child(t.to_uppercase())
+                div().px(px(20.)).pt(px(12.)).pb(px(6.)).text_size(px(12.)).font_weight(FontWeight::BOLD).text_color(c(LIST_TIME)).child(if text_empty { t.to_uppercase() } else { t.to_string() })
             }))
             .children(s.suggest.iter().enumerate().map(|(i, sg)| suggestion_row(i, sg, i == s.sel, store, on)));
     } else if s.corpus.is_none() {
@@ -915,7 +929,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
             .text_size(px(12.))
             .text_color(c(LIST_TIME))
             .child(label)
-            .child(div().text_color(white_a(0.3)).child(format!("{:.1} ms", s.took as f32 / 1000.)))
+            .child(div().text_color(white_a(0.3)).child(format!("{:.1} ms", s.took as f32 / 1000.))) // i18n-exempt: unit
     });
     let foot = div()
         .flex()

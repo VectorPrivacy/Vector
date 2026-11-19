@@ -300,47 +300,59 @@ impl Corpus {
                 && filter.after.is_none_or(|a| d.at >= a)
                 && filter.before.is_none_or(|b| d.at <= b)
         };
-        let take = |found: &mut Found, d: &Doc| {
+        // Matches as doc indices, newest first; hits are built only for those listed.
+        let mut matched: Vec<u32> = Vec::new();
+        let mut note = |ix: usize| {
             found.total += 1;
-            if filter.oldest {
-                // Walking newest first: keep the last `limit` seen.
-                found.hits.push(self.hit(d, query));
-                if found.hits.len() > limit {
-                    found.hits.remove(0);
+            if filter.oldest || matched.len() < limit {
+                matched.push(ix as u32);
+            }
+        };
+        match query.terms.split_first() {
+            None => {
+                for (ix, _) in self.docs.iter().enumerate().filter(|(_, d)| passes(d)) {
+                    note(ix);
                 }
-            } else if found.hits.len() < limit {
-                found.hits.push(self.hit(d, query));
             }
-        };
-        let Some((lead, rest)) = query.terms.split_first() else {
-            for d in self.docs.iter().filter(|d| passes(d)) {
-                take(&mut found, d);
+            // A chat filter walks only its chats' messages.
+            Some(_) if !chats.is_empty() => {
+                let finders: Vec<memmem::Finder> = query.terms.iter().map(|t| memmem::Finder::new(t.as_bytes())).collect();
+                let hay = self.folded.as_bytes();
+                for (ix, d) in self.docs.iter().enumerate() {
+                    if chats.contains(&d.chat) && passes(d) {
+                        let body = &hay[d.folded.start as usize..d.folded.end as usize];
+                        if finders.iter().all(|f| f.find(body).is_some()) {
+                            note(ix);
+                        }
+                    }
+                }
             }
-            if filter.oldest {
-                found.hits.reverse();
-            }
-            return found;
-        };
-        let finders: Vec<memmem::Finder> = rest.iter().map(|t| memmem::Finder::new(t.as_bytes())).collect();
-        let hay = self.folded.as_bytes();
-        let lead = memmem::Finder::new(lead.as_bytes());
-        let mut cursor = 0usize;
-        let mut doc_ix = 0usize;
-        while cursor < hay.len() {
-            let Some(pos) = lead.find(&hay[cursor..]).map(|p| p + cursor) else { break };
-            // Docs are laid out in order, so the owner is at or after the last one found.
-            doc_ix += self.docs[doc_ix..].partition_point(|d| (d.folded.end as usize) < pos);
-            let Some(doc) = self.docs.get(doc_ix) else { break };
-            cursor = doc.folded.end as usize + 1;
-            doc_ix += 1;
-            let body = &hay[doc.folded.start as usize..doc.folded.end as usize];
-            if passes(doc) && finders.iter().all(|f| f.find(body).is_some()) {
-                take(&mut found, doc);
+            Some((lead, rest)) => {
+                let finders: Vec<memmem::Finder> = rest.iter().map(|t| memmem::Finder::new(t.as_bytes())).collect();
+                let hay = self.folded.as_bytes();
+                let lead = memmem::Finder::new(lead.as_bytes());
+                let mut cursor = 0usize;
+                let mut doc_ix = 0usize;
+                while cursor < hay.len() {
+                    let Some(pos) = lead.find(&hay[cursor..]).map(|p| p + cursor) else { break };
+                    // Docs are laid out in order, so the owner is at or after the last one found.
+                    doc_ix += self.docs[doc_ix..].partition_point(|d| (d.folded.end as usize) < pos);
+                    let Some(doc) = self.docs.get(doc_ix) else { break };
+                    cursor = doc.folded.end as usize + 1;
+                    let body = &hay[doc.folded.start as usize..doc.folded.end as usize];
+                    if passes(doc) && finders.iter().all(|f| f.find(body).is_some()) {
+                        note(doc_ix);
+                    }
+                    doc_ix += 1;
+                }
             }
         }
         if filter.oldest {
-            found.hits.reverse();
+            let skip = matched.len().saturating_sub(limit);
+            matched.drain(..skip);
+            matched.reverse();
         }
+        found.hits = matched.into_iter().map(|ix| self.hit(&self.docs[ix as usize], query)).collect();
         found
     }
 
