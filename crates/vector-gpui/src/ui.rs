@@ -17070,7 +17070,8 @@ impl VectorApp {
         };
         let video = state.starts_with("video");
         self.call.apply_state(&serde_json::json!({ "id": "fixture", "peer": alice, "outgoing": outgoing, "phase": phase, "active_ms": 83_000, "volume": 1.0,
-            "video_mine": { "camera": video, "screen": false }, "video_peer": { "camera": video, "screen": video }, "peer_decodes": if video { vec!["h264"] } else { vec![] } }));
+            "video_mine": { "camera": video, "screen": false }, "video_peer": { "camera": video, "screen": video }, "peer_decodes": if video { vec!["h264"] } else { vec![] },
+            "share_audio_peer": video, "share_volume": 0.8 }));
         if video && std::env::var("VECTOR_CALL_PICS").is_ok() {
             let load = |f: &str| {
                 image::open(format!("reference/media/{f}"))
