@@ -47,7 +47,7 @@ impl VoiceEngine {
         let link = Arc::new(LiveLink {
             play: SpscRing::new(out_rate as usize),
             tap: SpscRing::new(out_rate as usize),
-            gain: AtomicU32::new(super::settings::speaker_gain().to_bits()),
+            gain: AtomicU32::new(1f32.to_bits()),
             share_play: SpscRing::new(out_rate as usize * 2),
             share_tap: SpscRing::new(out_rate as usize),
             share_gain: AtomicU32::new(1f32.to_bits()),
