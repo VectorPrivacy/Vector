@@ -2,7 +2,7 @@
 """On-screen regression checks for a devctl build, driven through `dev:` commands on an X display.
 
     cargo build --no-default-features --features tor,i2p,video,devctl --bin vector-gpui
-    DISPLAY=:99 python3 scripts/onscreen.py [--bin PATH] [--fixtures FILE] [--only NAME] [--update]
+    DISPLAY=:99 python3 scripts/onscreen.py [--bin PATH] [--fixtures FILE] [--only NAME] [--size WxH] [--update]
 
 Each check opens a screen from the fixtures and reads the app's own counters: a screen at rest must
 draw nothing, hover and toast fades must end, a menu must close on Escape and fit the window when
@@ -17,7 +17,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CRATE = os.path.dirname(HERE)
 ANSWER = os.path.join(tempfile.gettempdir(), "vector-devctl.json")
 BASELINE = os.path.join(CRATE, "reference", "onscreen-baseline.json")
-W, H = 1000, 760
 # Memory at rest may grow this much over the baseline before the check fails.
 MEM_SLACK = 1.15
 
@@ -26,7 +25,9 @@ ap.add_argument("--bin", default=os.path.join(CRATE, "target", "debug", "vector-
 ap.add_argument("--fixtures", default=os.path.join(CRATE, "reference", "fixtures.json"))
 ap.add_argument("--only")
 ap.add_argument("--update", action="store_true")
+ap.add_argument("--size", default="1000x760", help="window size; the memory baseline is kept per size")
 args = ap.parse_args()
+W, H = (int(v) for v in args.size.split("x"))
 env = dict(os.environ, TZ="UTC")
 results = []
 MAC = sys.platform == "darwin"
@@ -266,7 +267,7 @@ try:
         # macOS: the kernel's footprint ledger. Linux: dirty private pages, as clean ones are mostly code.
         mb = m.get("footprint", m.get("dirty"))
         base = json.load(open(BASELINE)) if os.path.exists(BASELINE) else {}
-        key = f"{sys.platform}-{'debug' if '/debug/' in os.path.abspath(args.bin) else 'release'}"
+        key = f"{sys.platform}-{'debug' if '/debug/' in os.path.abspath(args.bin) else 'release'}" + ("" if args.size == "1000x760" else f"-{args.size}")
         if args.update or key not in base:
             base[key] = mb
             with open(BASELINE, "w") as f:
