@@ -699,13 +699,23 @@ fn fold_body(id: &str, size: f32, body: gpui::Div) -> AnyElement {
         return body.into_any_element();
     }
     let h = FOLD_H.with_borrow(|m| m.get(&key).copied()).unwrap_or(0.);
-    // Clipped vertically only: an open community's bar reaches past the band to the rail's edge.
+    // Clipped vertically only: a community's bar reaches past the band to the rail's edge, and
+    // a visible axis still clips at the box, so the clipping box reaches out over the bars.
+    const REACH: f32 = 64.;
     div()
         .relative()
         .w_full()
         .h(px(h * size))
-        .overflow_y_hidden()
-        .child(body.absolute().top_0().left_0().w_full())
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-REACH))
+                .right_0()
+                .overflow_y_hidden()
+                .child(body.absolute().top_0().left(px(REACH)).right_0()),
+        )
         .into_any_element()
 }
 
