@@ -7,6 +7,7 @@
 
 mod check;
 mod dates;
+mod emoji;
 pub mod index;
 mod numbers;
 mod pack;
@@ -24,6 +25,7 @@ use unic_langid::LanguageIdentifier;
 
 pub use check::{Report, check};
 pub use dates::{Civil, Clock, DateStyle, Dates};
+pub use emoji::EmojiNames;
 pub use numbers::LocaleData;
 pub use pack::{PACK_FORMAT, english_revision};
 
@@ -66,6 +68,8 @@ pub struct Pack {
     /// `(file name, source)`, mirroring the en-GB files.
     pub files: Vec<(String, String)>,
     pub data: LocaleData,
+    /// Emoji names and search words (`emoji.tsv`); empty when the pack has none.
+    pub emoji: String,
     /// The [`english_revision`] it was built against.
     pub english: String,
     /// Translated share of that English, 0 to 100.
@@ -88,11 +92,12 @@ impl Pack {
             Ok(b) => serde_json::from_slice(&b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("locale.json: {e}")))?,
             Err(_) => LocaleData::default(),
         };
+        let emoji = std::fs::read_to_string(dir.join("emoji.tsv")).unwrap_or_default();
         let lang = Lang::new(tag, &files, LocaleData::default(), false);
         let name = lang.format(NAME_ID, None).unwrap_or_else(|| tag.to_string());
         let english_name = lang.format(ENGLISH_NAME_ID, None).unwrap_or_default();
         let coverage = check(&files).coverage_for(tag);
-        Ok(Self { tag: tag.to_string(), name, english_name, rtl: is_rtl_tag(tag), files, data, english: english_revision(), coverage })
+        Ok(Self { tag: tag.to_string(), name, english_name, rtl: is_rtl_tag(tag), files, data, emoji, english: english_revision(), coverage })
     }
 }
 
@@ -172,6 +177,7 @@ struct Active {
     /// Most specific first; en-GB last.
     chain: Vec<Arc<Lang>>,
     fixed: Box<[Arc<str>]>,
+    emoji: Option<Arc<EmojiNames>>,
 }
 
 impl Active {
@@ -188,7 +194,7 @@ impl Active {
                 d.dates.hour12 = h;
             }
         }
-        let mut a = Self { tag: tag.to_string(), rtl, pseudo, data, chain, fixed: Box::new([]) };
+        let mut a = Self { tag: tag.to_string(), rtl, pseudo, data, chain, fixed: Box::new([]), emoji: None };
         a.fixed = IDS
             .iter()
             .zip(FIXED)
@@ -360,9 +366,38 @@ pub fn set_language(tag: &str) -> bool {
         }
     };
     let tag = if found { tag } else { BUILT_IN };
-    *ACTIVE.write().unwrap() = Arc::new(Active::build(tag, chain, rtl, pseudo));
+    let mut active = Active::build(tag, chain, rtl, pseudo);
+    active.emoji = emoji_for(tag);
+    *ACTIVE.write().unwrap() = Arc::new(active);
     GENERATION.fetch_add(1, Ordering::AcqRel);
     found
+}
+
+/// The emoji names of `tag`'s pack, or of the nearest parent's that has them (`pt-BR`, then `pt`).
+fn emoji_for(tag: &str) -> Option<Arc<EmojiNames>> {
+    static PARSED: LazyLock<RwLock<Vec<(Arc<Pack>, Arc<EmojiNames>)>>> = LazyLock::new(Default::default);
+    let r = REGISTRY.read().unwrap();
+    let mut t = tag;
+    let pack = loop {
+        if let Some(p) = r.packs.iter().find(|p| p.tag == t && !p.emoji.is_empty()) {
+            break p.clone();
+        }
+        t = t.rsplit_once('-')?.0;
+    };
+    drop(r);
+    let mut parsed = PARSED.write().unwrap();
+    parsed.retain(|(p, _)| Arc::strong_count(p) > 1);
+    if let Some((_, n)) = parsed.iter().find(|(p, _)| Arc::ptr_eq(p, &pack)) {
+        return Some(n.clone());
+    }
+    let names = Arc::new(EmojiNames::parse(&pack.emoji));
+    parsed.push((pack, names.clone()));
+    Some(names)
+}
+
+/// The active language's emoji names and search words, when its pack carries them.
+pub fn emoji_names() -> Option<Arc<EmojiNames>> {
+    with_active(|a| a.emoji.clone())
 }
 
 /// The system's locale (`en-US`, `de_DE.UTF-8`) and clock, for what the language leaves to

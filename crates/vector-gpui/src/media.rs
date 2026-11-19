@@ -761,6 +761,14 @@ pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
 
 /// An animation's frames (GIF, animated WebP or APNG, sniffed from the bytes, not the name),
 /// each scaled to `to` when that is smaller. `None` for anything that doesn't animate.
+/// The most pixels an animation's canvas may hold: a header claims its size, and a few bytes
+/// can claim 65535 × 65535. Larger ones fall back to the still decode and its allocation limit.
+const MAX_CANVAS: u64 = 1 << 25;
+
+fn canvas_fits(w: u32, h: u32) -> bool {
+    u64::from(w) * u64::from(h) <= MAX_CANVAS
+}
+
 fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<Frame>, u32, u32)> {
     if bytes.starts_with(b"GIF8") {
         let gif = GifCanvas::new(bytes)?;
@@ -770,6 +778,13 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
         return frames_of(gif, w, h, count, &to);
     }
     if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        // An animation's VP8X chunk names the canvas, which libwebp allocates on opening.
+        if bytes.len() >= 30 && &bytes[12..16] == b"VP8X" {
+            let side = |b: &[u8]| 1 + (u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16);
+            if !canvas_fits(side(&bytes[24..27]), side(&bytes[27..30])) {
+                return None;
+            }
+        }
         // libwebp composites the frames: the image crate's compositor keeps parts of earlier
         // frames a later one should have cleared, which show as trails.
         let dec = crate::shared::animated_webp::Decoder::new(bytes).ok()?;
@@ -807,6 +822,9 @@ fn apng_frames(bytes: &[u8]) -> Option<(Vec<Frame>, u32, u32)> {
     dec.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = dec.read_info().ok()?;
     let (w, h) = (reader.info().width, reader.info().height);
+    if !canvas_fits(w, h) {
+        return None;
+    }
     let count = reader.info().animation_control?.num_frames as usize;
     // The default image is a frame only when its own fcTL comes before it.
     let default_shown = reader.info().frame_control.is_some();
@@ -824,7 +842,7 @@ fn apng_frames(bytes: &[u8]) -> Option<(Vec<Frame>, u32, u32)> {
         let (color, _) = reader.output_color_type();
         let rgba = to_rgba(&buf[..out.buffer_size()], color, out.width, out.height)?;
         let (fx, fy) = (fc.x_offset, fc.y_offset);
-        if fx + out.width > w || fy + out.height > h {
+        if fx.saturating_add(out.width) > w || fy.saturating_add(out.height) > h {
             return None;
         }
         let dispose = if first && fc.dispose_op == DisposeOp::Previous { DisposeOp::Background } else { fc.dispose_op };
@@ -965,6 +983,9 @@ impl<'a> GifCanvas<'a> {
         opts.set_color_output(gif::ColorOutput::RGBA);
         let reader = opts.read_info(Cursor::new(bytes)).ok()?;
         let (w, h) = (u32::from(reader.width()), u32::from(reader.height()));
+        if !canvas_fits(w, h) {
+            return None;
+        }
         Some(Self { reader, canvas: image::RgbaImage::new(w, h), shown: image::RgbaImage::new(w, h), raw: Vec::new() })
     }
 }
@@ -974,6 +995,10 @@ impl FrameSource for GifCanvas<'_> {
         let f = self.reader.next_frame_info().ok()??;
         let (left, top, fw, fh) = (f.left as usize, f.top as usize, f.width as usize, f.height as usize);
         let (dispose, delay) = (f.dispose, u32::from(f.delay) * 10);
+        // A frame's own header claims its size; the buffer is sized before the crate checks it.
+        if !canvas_fits(fw as u32, fh as u32) {
+            return None;
+        }
         self.raw.resize(self.reader.buffer_size(), 0);
         self.reader.read_into_buffer(&mut self.raw).ok()?;
         let cw = self.canvas.width() as usize;
@@ -981,7 +1006,7 @@ impl FrameSource for GifCanvas<'_> {
         self.shown.copy_from_slice(&self.canvas);
         // The part of the frame on the canvas: a frame may overhang it.
         let (xs, ys) = (fw.min(cw.saturating_sub(left)), fh.min(ch.saturating_sub(top)));
-        for y in 0..ys {
+        for y in 0..if xs == 0 { 0 } else { ys } {
             let src = &self.raw[y * fw * 4..][..xs * 4];
             let at = ((top + y) * cw + left) * 4;
             let shown = &mut (*self.shown)[at..at + xs * 4];
@@ -1111,6 +1136,8 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
             .ok()?
             .into_decoder()
             .ok()?;
+        // `from_decoder` skips the allocation limit `ImageReader::decode` checks.
+        image::Limits::default().reserve(dec.total_bytes()).ok()?;
         let orientation = dec.orientation().ok();
         let mut img = DynamicImage::from_decoder(dec).ok()?;
         if let Some(o) = orientation {
@@ -1129,6 +1156,24 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
         w,
         h,
     ))
+}
+
+/// Someone else's picture, within limits: a small file can claim a huge canvas.
+pub fn decode_bounded(bytes: &[u8]) -> Option<DynamicImage> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    reader.decode().ok()
+}
+
+/// [`decode_bounded`] as RGBA no larger than `max_side`.
+pub fn decode_rgba(bytes: &[u8], max_side: u32) -> Option<image::RgbaImage> {
+    let img = decode_bounded(bytes)?;
+    let img = if img.width() > max_side || img.height() > max_side {
+        gpui::resample_within(&img, max_side, max_side, FilterType::Triangle)
+    } else {
+        img
+    };
+    Some(img.into_rgba8())
 }
 
 /// `formatBytes`: binary units, two decimals with trailing zeros dropped.
@@ -1174,6 +1219,198 @@ mod tests {
 
     fn kept(media: &super::Media, names: &[&str]) -> Vec<String> {
         names.iter().filter(|n| media.custom.contains_key(**n)).map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn animations_claiming_huge_canvases_decode_to_nothing() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, u16::MAX, u16::MAX, &[]).unwrap();
+            for _ in 0..2 {
+                enc.write_frame(&gif::Frame::from_rgba(1, 1, &mut [255, 0, 0, 255])).unwrap();
+            }
+        }
+        assert!(super::decode(&gif, "gif", (64, 64)).is_none());
+        // A small canvas whose frame claims to be huge.
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, 2, 2, &[]).unwrap();
+            for _ in 0..2 {
+                enc.write_frame(&gif::Frame::from_rgba(1, 1, &mut [255, 0, 0, 255])).unwrap();
+            }
+        }
+        let at = gif.windows(9).position(|w| w == b"\x2c\0\0\0\0\x01\0\x01\0").unwrap();
+        gif[at + 5..at + 9].fill(0xff);
+        let _ = super::decode(&gif, "gif", (64, 64));
+        let mut webp = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\x02\0\0\0".to_vec();
+        webp.extend([0xff, 0x3f, 0, 0xff, 0x3f, 0]);
+        assert!(super::decode(&webp, "webp", (64, 64)).is_none());
+    }
+
+    /// Animated pictures as other people send them: every format's own compositing code, fed
+    /// valid files with random bytes changed. `PICFUZZ_ITERS` and `PICFUZZ_SEED` run more.
+    #[test]
+    fn no_damaged_animation_panics_the_decoder() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, 12, 10, &[]).unwrap();
+            for i in 0..3u16 {
+                let mut f = gif::Frame::from_rgba_speed(6, 5, &mut vec![(i * 60) as u8; 6 * 5 * 4], 30);
+                f.left = i * 2;
+                f.top = i;
+                f.dispose = [gif::DisposalMethod::Keep, gif::DisposalMethod::Background, gif::DisposalMethod::Previous][i as usize];
+                f.delay = 5;
+                enc.write_frame(&f).unwrap();
+            }
+        }
+        let mut apng = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut apng, 12, 10);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_animated(3, 0).unwrap();
+            let mut w = enc.write_header().unwrap();
+            for i in 0..3u8 {
+                if i > 0 {
+                    w.set_frame_dimension(6, 5).unwrap();
+                    w.set_frame_position(u32::from(i) * 2, u32::from(i)).unwrap();
+                    w.set_dispose_op([png::DisposeOp::None, png::DisposeOp::Background, png::DisposeOp::Previous][i as usize]).unwrap();
+                    w.set_blend_op([png::BlendOp::Source, png::BlendOp::Over][i as usize % 2]).unwrap();
+                }
+                let (fw, fh) = if i == 0 { (12, 10) } else { (6, 5) };
+                w.write_image_data(&vec![i * 80; fw * fh * 4]).unwrap();
+            }
+        }
+        let webp = {
+            let mut enc = crate::shared::animated_webp::Encoder::new(12, 10, 80.).unwrap();
+            for i in 0..3u8 {
+                enc.add(&vec![i * 80; 12 * 10 * 4], 50).unwrap();
+            }
+            enc.finish().unwrap()
+        };
+        let iters: usize = std::env::var("PICFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        let mut seed: u64 = std::env::var("PICFUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x2545_f491_4f6c_dd1d);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let mut b = [&gif, &apng, &webp][i % 3].clone();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % b.len() as u64) as usize;
+                match next() % 5 {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 => b.truncate(at.max(8)),
+                    _ => b[at] ^= 1 << (next() % 8),
+                }
+            }
+            if std::panic::catch_unwind(|| super::decode(&b, "", (64, 64))).is_err() {
+                failed.push(b);
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        assert!(failed.is_empty(), "files that panicked: {failed:?}");
+    }
+
+    /// Still pictures as other people send them, in every format the viewer opens.
+    /// `PICFUZZ_DIR` adds sample files as seeds; `PICFUZZ_OUT` keeps what failed.
+    #[test]
+    fn no_damaged_still_panics_the_decoder() {
+        let (w, h) = (20u32, 14u32);
+        let px: Vec<u8> = (0..w * h).flat_map(|i| [(i * 7) as u8, (i * 3) as u8, (i / 2) as u8, 200]).collect();
+        let img = image::DynamicImage::ImageRgba8(RgbaImage::from_raw(w, h, px.clone()).unwrap());
+        let encoded = |f: image::ImageFormat, img: &image::DynamicImage| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, f).unwrap();
+            out.into_inner()
+        };
+        let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+        let mut seeds: Vec<(Vec<u8>, String)> = vec![
+            (encoded(image::ImageFormat::Png, &img), "png".into()),
+            (encoded(image::ImageFormat::Jpeg, &rgb), "jpg".into()),
+            (encoded(image::ImageFormat::Bmp, &img), "bmp".into()),
+            (encoded(image::ImageFormat::Tiff, &img), "tiff".into()),
+            (encoded(image::ImageFormat::Ico, &img), "ico".into()),
+            (encoded(image::ImageFormat::WebP, &img), "webp".into()),
+            (crate::jxl::lossless(&px, w, h, true).unwrap(), "jxl".into()),
+            (
+                br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="14"><defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs><rect width="20" height="14" fill="url(#g)"/><text x="1" y="9">Hi</text></svg>"##.to_vec(),
+                "svg".into(),
+            ),
+        ];
+        if let Ok(dir) = std::env::var("PICFUZZ_DIR") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+                seeds.push((std::fs::read(e.path()).unwrap(), ext));
+            }
+        }
+        let iters: usize = std::env::var("PICFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
+        let mut seed: u64 = std::env::var("PICFUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x1234_5678_9abc_def1);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let (mut b, ext) = seeds[i % seeds.len()].clone();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % b.len() as u64) as usize;
+                match next() % 6 {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 => b.truncate(at.max(8)),
+                    4 => b[at..].iter_mut().take(4).for_each(|x| *x = 0xff),
+                    _ => b[at] ^= 1 << (next() % 8),
+                }
+            }
+            let max = if i % 2 == 0 { (8, 8) } else { (64, 64) };
+            let t = Instant::now();
+            if std::panic::catch_unwind(|| super::decode(&b, &ext, max)).is_err() || t.elapsed() > Duration::from_secs(5) {
+                eprintln!("case {i} ({ext}, {} bytes)", b.len());
+                failed.push((ext, b));
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        if let Ok(out) = std::env::var("PICFUZZ_OUT") {
+            for (i, (ext, b)) in failed.iter().enumerate() {
+                std::fs::write(format!("{out}/bad-{i}.{ext}"), b).unwrap();
+            }
+        }
+        assert!(failed.is_empty(), "{} damaged pictures panicked or stalled", failed.len());
+    }
+
+    #[test]
+    fn pictures_drawn_from_disk_refuse_huge_canvases() {
+        let open = |format, bytes: Vec<u8>| {
+            gpui::Image::from_bytes(format, bytes).to_image_data(gpui::SvgRenderer::new(std::sync::Arc::new(())))
+        };
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, 2, 2, &[]).unwrap();
+            enc.write_frame(&gif::Frame::from_rgba_speed(2, 2, &mut vec![200; 16], 30)).unwrap();
+        }
+        assert!(open(gpui::ImageFormat::Gif, gif.clone()).is_ok());
+        gif[6..10].fill(0xff);
+        assert!(open(gpui::ImageFormat::Gif, gif).is_err(), "a 65535×65535 canvas");
+        let png = |w, h| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h)).write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        assert!(open(gpui::ImageFormat::Png, png(64, 64)).is_ok());
+        assert!(open(gpui::ImageFormat::Png, png(16_385, 1)).is_err());
+        assert!(open(gpui::ImageFormat::Png, png(9_000, 8_000)).is_err(), "72 megapixels, 288 MB as RGBA");
     }
 
     #[test]

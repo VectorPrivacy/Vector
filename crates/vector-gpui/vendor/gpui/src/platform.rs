@@ -3396,19 +3396,36 @@ pub struct Image {
     pub id: u64,
 }
 
+/// What one picture may decode to: a few kilobytes can claim a canvas of gigabytes.
+pub fn picture_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 << 20);
+    limits
+}
+
+/// Whether a `w`×`h` canvas fits [`picture_limits`] as RGBA.
+pub fn canvas_fits(w: u32, h: u32) -> bool {
+    w <= 16_384 && h <= 16_384 && u64::from(w) * u64::from(h) * 4 <= 256 << 20
+}
+
 pub(crate) fn decode_static_image(
     bytes: &[u8],
     format: image::ImageFormat,
 ) -> Result<SmallVec<[Frame; 1]>> {
-    let decoder = image::ImageReader::with_format(Cursor::new(bytes), format)
-        .into_decoder()
-        .context("creating image decoder")?;
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(picture_limits());
+    let decoder = reader.into_decoder().context("creating image decoder")?;
     decode_static_image_from_decoder(decoder)
 }
 
 pub(crate) fn decode_static_image_from_decoder(
     mut decoder: impl image::ImageDecoder,
 ) -> Result<SmallVec<[Frame; 1]>> {
+    let (w, h) = decoder.dimensions();
+    // `from_decoder` checks no allocation limit, and the RGBA copy can be four times the decode.
+    anyhow::ensure!(canvas_fits(w, h) && decoder.total_bytes() <= 256 << 20, "a {w}×{h} picture is past the decode limit");
     let orientation = decoder
         .orientation()
         .context("reading decoder's orientation")?;
@@ -3479,8 +3496,15 @@ fn frames_with(
 }
 
 pub(crate) fn decode_gif_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
-    let decoder = GifDecoder::new(Cursor::new(bytes))?;
-    decode_animated_frames(decoder, "GIF")
+    decode_animated_frames(gif_decoder(bytes)?, "GIF")
+}
+
+/// The image crate opens a GIF with no limits: its canvas, and each frame, size from the header.
+fn gif_decoder(bytes: &[u8]) -> Result<GifDecoder<Cursor<&[u8]>>> {
+    use image::ImageDecoder as _;
+    let mut decoder = GifDecoder::new(Cursor::new(bytes))?;
+    decoder.set_limits(picture_limits())?;
+    Ok(decoder)
 }
 
 pub(crate) fn decode_gif_image_with(
@@ -3488,8 +3512,7 @@ pub(crate) fn decode_gif_image_with(
     each: impl FnMut(Frame) -> Frame,
     limit: Option<usize>,
 ) -> Result<(SmallVec<[Frame; 1]>, bool)> {
-    let decoder = GifDecoder::new(Cursor::new(bytes))?;
-    decode_animated_frames_with(decoder, "GIF", each, limit)
+    decode_animated_frames_with(gif_decoder(bytes)?, "GIF", each, limit)
 }
 
 pub(crate) fn decode_webp_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
@@ -3505,6 +3528,8 @@ pub(crate) fn decode_webp_image_with(
     if let Ok(anim) = animated_webp::Decoder::new(bytes)
         && anim.frame_count() > 1
     {
+        let (w, h) = anim.dimensions();
+        anyhow::ensure!(canvas_fits(w, h), "a {w}×{h} animation is past the decode limit");
         // libwebp composites the frames: the image crate's compositor keeps parts of earlier
         // frames a later one should have cleared, which show as trails.
         let frames = anim.map(|f| {
@@ -3515,8 +3540,11 @@ pub(crate) fn decode_webp_image_with(
     }
 
     let mut decoder = WebPDecoder::new(Cursor::new(bytes))?;
+    image::ImageDecoder::set_limits(&mut decoder, picture_limits())?;
 
     if decoder.has_animation() {
+        let (w, h) = image::ImageDecoder::dimensions(&decoder);
+        anyhow::ensure!(canvas_fits(w, h), "a {w}×{h} animation is past the decode limit");
         let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
         decode_animated_frames_with(decoder, "WebP", each, limit)
     } else {

@@ -10,7 +10,7 @@ use crate::{LocaleData, Pack};
 
 /// Bumped when a field changes meaning; an older app refuses a newer pack.
 pub const PACK_FORMAT: u32 = 1;
-/// Inflated packs are tens of KB; anything near this is not one.
+/// Inflated packs are a few hundred KB with emoji names; anything near this is not one.
 const MAX_INFLATED: u64 = 16 << 20;
 
 #[derive(Serialize, Deserialize)]
@@ -26,6 +26,8 @@ struct Wire {
     #[serde(default)]
     locale: LocaleData,
     files: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    emoji: String,
 }
 
 /// The built-in English a pack is measured against, so a pack can tell it was built for an
@@ -57,6 +59,7 @@ impl Pack {
             coverage: self.coverage,
             locale: self.data.clone(),
             files: self.files.iter().cloned().collect(),
+            emoji: self.emoji.clone(),
         };
         let json = serde_json::to_vec(&wire).expect("a pack serialises");
         let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
@@ -86,6 +89,7 @@ impl Pack {
             coverage: w.coverage.min(100),
             files: w.files.into_iter().collect(),
             data: w.locale,
+            emoji: w.emoji,
         })
     }
 }

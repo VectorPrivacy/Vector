@@ -18,16 +18,16 @@ static FAIL_REASONS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(De
 
 /// Stop every running upload and forget the failures: the account they belong to is leaving.
 pub fn cancel_all_uploads() {
-    let mut uploads = UPLOAD_CANCEL.lock().unwrap();
+    let mut uploads = UPLOAD_CANCEL.lock().unwrap_or_else(|e| e.into_inner());
     uploads
         .values()
         .for_each(|flag| flag.store(true, std::sync::atomic::Ordering::Release));
     uploads.clear();
-    FAIL_REASONS.lock().unwrap().clear();
+    FAIL_REASONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 pub fn cancel_upload(pending_id: &str) {
-    if let Some(flag) = UPLOAD_CANCEL.lock().unwrap().get(pending_id) {
+    if let Some(flag) = UPLOAD_CANCEL.lock().unwrap_or_else(|e| e.into_inner()).get(pending_id) {
         flag.store(true, Ordering::Relaxed);
     }
 }
@@ -48,7 +48,7 @@ impl SendCallback for Callback {
     }
 
     fn cancel_token(&self, pending_id: &str) -> Option<Arc<AtomicBool>> {
-        UPLOAD_CANCEL.lock().unwrap().get(pending_id).cloned()
+        UPLOAD_CANCEL.lock().unwrap_or_else(|e| e.into_inner()).get(pending_id).cloned()
     }
 
     fn on_upload_progress(
@@ -85,7 +85,7 @@ impl SendCallback for Callback {
     }
 
     fn on_sent(&self, chat_id: &str, old_id: &str, msg: &Message) {
-        UPLOAD_CANCEL.lock().unwrap().remove(old_id);
+        UPLOAD_CANCEL.lock().unwrap_or_else(|e| e.into_inner()).remove(old_id);
         if old_id.starts_with("pending-") && old_id != msg.id {
             let pending_id = old_id.to_string();
             db::spawn_bound(async move {
@@ -109,11 +109,11 @@ impl SendCallback for Callback {
             .remove(old_id)
             .is_some_and(|f| f.load(Ordering::Relaxed));
         if cancelled {
-            FAIL_REASONS.lock().unwrap().remove(old_id);
-            CANCELLED.lock().unwrap().push(old_id.to_string());
+            FAIL_REASONS.lock().unwrap_or_else(|e| e.into_inner()).remove(old_id);
+            CANCELLED.lock().unwrap_or_else(|e| e.into_inner()).push(old_id.to_string());
             return;
         }
-        let reason = FAIL_REASONS.lock().unwrap().remove(old_id);
+        let reason = FAIL_REASONS.lock().unwrap_or_else(|e| e.into_inner()).remove(old_id);
         vector_core::emit_event(
             "message_update",
             &json!({ "old_id": old_id, "message": msg, "chat_id": chat_id, "reason": reason }),
@@ -122,7 +122,7 @@ impl SendCallback for Callback {
 
     fn on_persist(&self, chat_id: &str, msg: &Message) {
         let cancelled = {
-            let mut c = CANCELLED.lock().unwrap();
+            let mut c = CANCELLED.lock().unwrap_or_else(|e| e.into_inner());
             c.iter().position(|id| *id == msg.id).map(|at| c.swap_remove(at))
         };
         if let Some(id) = cancelled {

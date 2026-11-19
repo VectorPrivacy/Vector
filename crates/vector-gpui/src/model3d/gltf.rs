@@ -27,6 +27,84 @@ fn wrap(w: gltf::texture::WrappingMode) -> Wrap {
     }
 }
 
+/// The crate panics on a dangling index or an invalid value, which only validation rules out.
+/// Missing accessor bounds and unknown extensions are common in real files and harmless here.
+fn sound(g: &gltf::Gltf) -> Result<(), String> {
+    use gltf::json::validation::{Error, Validate};
+    let root = g.document.as_json();
+    let mut bad = None;
+    root.validate(root, gltf::json::Path::new, &mut |path, e| {
+        let bounds = matches!(e, Error::Missing) && ["min", "max"].iter().any(|b| path().as_str().ends_with(b));
+        if bad.is_none() && !bounds && !matches!(e, Error::Unsupported) {
+            bad = Some(format!("{}: {e}", path().as_str()));
+        }
+    });
+    if let Some(e) = bad {
+        return Err(e);
+    }
+    shapes(root).then_some(()).ok_or_else(|| "an accessor doesn't hold what its use reads".into())
+}
+
+/// What validation leaves to the reader, which asserts or slices on it: animation targets, and
+/// each accessor's type, component and stride for the use that reads it.
+fn shapes(root: &gltf::json::Root) -> bool {
+    use gltf::json::accessor::{ComponentType as C, Type as T};
+    use gltf::json::animation::Property as P;
+    use gltf::json::mesh::Semantic as S;
+    use gltf::json::validation::Checked::Valid;
+    const FLOAT: &[C] = &[C::F32];
+    const NORMED: &[C] = &[C::F32, C::U8, C::U16];
+    const SIGNED: &[C] = &[C::F32, C::I8, C::U8, C::I16, C::U16];
+    let fits = |i: usize, types: &[T], comps: &[C]| {
+        root.accessors.get(i).is_some_and(|a| {
+            let (Valid(t), Valid(c)) = (&a.type_, &a.component_type) else { return false };
+            let size = c.0.size() * t.multiplicity();
+            let stride = a.buffer_view.and_then(|v| root.buffer_views.get(v.value())).and_then(|v| v.byte_stride).map_or(size, |s| s.0);
+            types.contains(t) && comps.contains(&c.0) && stride >= size
+        })
+    };
+    let prims = root.meshes.iter().flat_map(|m| &m.primitives);
+    for p in prims {
+        for (sem, a) in &p.attributes {
+            let ok = match sem {
+                Valid(S::Positions | S::Normals) => fits(a.value(), &[T::Vec3], FLOAT),
+                Valid(S::Tangents) => fits(a.value(), &[T::Vec4], FLOAT),
+                Valid(S::TexCoords(_)) => fits(a.value(), &[T::Vec2], NORMED),
+                Valid(S::Colors(_)) => fits(a.value(), &[T::Vec3, T::Vec4], NORMED),
+                Valid(S::Joints(_)) => fits(a.value(), &[T::Vec4], &[C::U8, C::U16]),
+                Valid(S::Weights(_)) => fits(a.value(), &[T::Vec4], NORMED),
+                _ => true,
+            };
+            if !ok {
+                return false;
+            }
+        }
+        if p.indices.is_some_and(|i| !fits(i.value(), &[T::Scalar], &[C::U8, C::U16, C::U32])) {
+            return false;
+        }
+        for t in p.targets.iter().flatten() {
+            if [t.positions, t.normals, t.tangents].into_iter().flatten().any(|a| !fits(a.value(), &[T::Vec3], FLOAT)) {
+                return false;
+            }
+        }
+    }
+    if root.skins.iter().filter_map(|s| s.inverse_bind_matrices).any(|a| !fits(a.value(), &[T::Mat4], FLOAT)) {
+        return false;
+    }
+    root.animations.iter().all(|anim| {
+        anim.channels.iter().all(|ch| {
+            let Some(s) = anim.samplers.get(ch.sampler.value()) else { return false };
+            let out = match &ch.target.path {
+                Valid(P::Translation | P::Scale) => fits(s.output.value(), &[T::Vec3], FLOAT),
+                Valid(P::Rotation) => fits(s.output.value(), &[T::Vec4], SIGNED),
+                Valid(P::MorphTargetWeights) => fits(s.output.value(), &[T::Scalar], SIGNED),
+                _ => false,
+            };
+            out && ch.target.node.value() < root.nodes.len() && fits(s.input.value(), &[T::Scalar], FLOAT) && matches!(s.interpolation, Valid(_))
+        })
+    })
+}
+
 pub fn load(bytes: &[u8]) -> Result<Scene, String> {
     for ext in COMPRESSED {
         let needle = ext.as_bytes();
@@ -40,6 +118,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
         }
     }
     let g = gltf::Gltf::from_slice_without_validation(bytes).map_err(|e| e.to_string())?;
+    sound(&g)?;
     let blob = g.blob.clone();
     let buffers: Vec<Option<Vec<u8>>> = g
         .buffers()
@@ -51,16 +130,14 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
     let get = |b: gltf::Buffer| buffers.get(b.index()).and_then(|d| d.as_deref());
 
     let mut scene = Scene::default();
+    let mut budget = super::scene::TEXTURE_BUDGET;
     for img in g.images() {
         let data: Option<Vec<u8>> = match img.source() {
             gltf::image::Source::View { view, .. } => get(view.buffer()).and_then(|d| d.get(view.offset()..view.offset() + view.length())).map(|s| s.to_vec()),
             gltf::image::Source::Uri { uri, .. } => data_uri(uri),
         };
-        let decoded = data.and_then(|d| image::load_from_memory(&d).ok()).map(|i| i.to_rgba8());
-        scene.images.push(match decoded {
-            Some(i) => Image { w: i.width(), h: i.height(), rgba: i.into_raw() },
-            None => Image { w: 1, h: 1, rgba: vec![255; 4] },
-        });
+        let decoded = data.and_then(|d| Image::decode(&d, &mut budget));
+        scene.images.push(decoded.unwrap_or_else(|| Image { w: 1, h: 1, rgba: vec![255; 4] }));
     }
     let tex = |t: gltf::Texture| -> Option<TexRef> {
         let image = t.source().index();

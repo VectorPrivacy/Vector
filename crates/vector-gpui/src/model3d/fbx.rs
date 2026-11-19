@@ -339,7 +339,8 @@ impl Layer {
             Some(ix) => *ix.get(key)? as usize,
             None => key,
         };
-        self.data.get(at * w..at * w + w)
+        let from = at.checked_mul(w)?;
+        self.data.get(from..from.checked_add(w)?)
     }
 }
 
@@ -403,6 +404,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
 
     // Images: each texture's embedded video content, decoded once.
     let mut image_of: HashMap<i64, Option<usize>> = HashMap::new();
+    let mut budget = super::scene::TEXTURE_BUDGET;
     let mut texture = |tex_id: i64, scene: &mut Scene| -> Option<TexRef> {
         let slot = image_of.entry(tex_id).or_insert_with(|| {
             let video = links.iter().find(|(c, p, _)| *p == tex_id && class(*c) == Some("Video")).map(|(c, _, _)| *c)?;
@@ -412,8 +414,7 @@ pub fn load(bytes: &[u8]) -> Result<Scene, String> {
                 Val::Str(s) => base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s.trim()).ok()?,
                 _ => return None,
             };
-            let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
-            scene.images.push(Image { w: img.width(), h: img.height(), rgba: img.into_raw() });
+            scene.images.push(Image::decode(&bytes, &mut budget)?);
             Some(scene.images.len() - 1)
         });
         let image = (*slot)?;

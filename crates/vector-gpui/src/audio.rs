@@ -780,7 +780,7 @@ pub enum WorkDone {
 }
 
 fn tags_from(m: vector_media::tags::Meta) -> Tags {
-    let art = m.cover.as_deref().and_then(|b| image::load_from_memory(b).ok());
+    let art = m.cover.as_deref().and_then(crate::media::decode_bounded);
     let cover = art.as_ref().map(|a| {
         let a = a.resize_to_fill(256, 256, image::imageops::FilterType::CatmullRom);
         Arc::new(RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(a.into_rgba8()))]))
@@ -806,9 +806,9 @@ fn tags_from(m: vector_media::tags::Meta) -> Tags {
         .as_ref()
         .map(|_| small.as_ref().and_then(art_accent).unwrap_or(gpui::hsla(0., 0., 0.949, 1.)));
     Tags {
-        title: m.title.filter(|t| !t.is_empty()),
-        artist: m.artist.filter(|t| !t.is_empty()),
-        album: m.album.filter(|t| !t.is_empty()),
+        title: m.title.map(|t| crate::kit::one_line(&t).into_owned()).filter(|t| !t.is_empty()),
+        artist: m.artist.map(|t| crate::kit::one_line(&t).into_owned()).filter(|t| !t.is_empty()),
+        album: m.album.map(|t| crate::kit::one_line(&t).into_owned()).filter(|t| !t.is_empty()),
         year: m.year,
         cover,
         glow,
@@ -950,6 +950,166 @@ mod edition_tests {
     }
 }
 
+#[cfg(test)]
+mod file_fuzz {
+    use vector_media::audio_engine::{AudioEngine, AudioInput};
+
+    /// A text frame of an ID3v2.4 tag.
+    fn frame(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let n = body.len() as u32;
+        let mut f = id.to_vec();
+        f.extend([((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8, 0, 0]);
+        f.extend_from_slice(body);
+        f
+    }
+
+    /// An ID3v2.4 tag with a title, art, plain and synced lyrics and a chapter, before `audio`.
+    fn tagged(audio: &[u8]) -> Vec<u8> {
+        let mut chap = b"c1\0".to_vec();
+        for n in [0u32, 1000, u32::MAX, u32::MAX] {
+            chap.extend(n.to_be_bytes());
+        }
+        chap.extend(frame(b"TIT2", b"\x03One"));
+        let mut sylt = b"\x03eng\x02\x01\0".to_vec();
+        for (t, w) in [(0u32, "a"), (500, "b")] {
+            sylt.extend(w.as_bytes());
+            sylt.push(0);
+            sylt.extend(t.to_be_bytes());
+        }
+        let frames = [
+            frame(b"TIT2", b"\x03Song"),
+            frame(b"TPE1", b"\x03Artist"),
+            frame(b"USLT", b"\x03eng\0[00:01.00]one\n[00:02.00]two"),
+            frame(b"SYLT", &sylt),
+            frame(b"CHAP", &chap),
+            frame(b"APIC", b"\x00image/png\0\x03\0\x89PNG\r\n\x1a\n"),
+        ]
+        .concat();
+        let n = frames.len() as u32;
+        let mut t = b"ID3\x04\x00\x00".to_vec();
+        t.extend([((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8]);
+        t.extend(frames);
+        t.extend_from_slice(audio);
+        t
+    }
+
+    fn wav() -> Vec<u8> {
+        let samples: Vec<i16> = (0..4000).map(|i| ((i as f32 * 0.05).sin() * 8000.) as i16).collect();
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut w = b"RIFF".to_vec();
+        w.extend((36 + data.len() as u32).to_le_bytes());
+        w.extend(b"WAVEfmt ");
+        w.extend(16u32.to_le_bytes());
+        w.extend(1u16.to_le_bytes());
+        w.extend(1u16.to_le_bytes());
+        w.extend(8000u32.to_le_bytes());
+        w.extend(16000u32.to_le_bytes());
+        w.extend(2u16.to_le_bytes());
+        w.extend(16u16.to_le_bytes());
+        w.extend(b"data");
+        w.extend((data.len() as u32).to_le_bytes());
+        w.extend(data);
+        w
+    }
+
+    /// Damaged audio from anyone: tags, the duration probe and the decoder must not panic, on
+    /// this thread or the engine's. `AUDIOFUZZ_DIR` adds sample files as seeds.
+    #[test]
+    fn no_damaged_audio_panics() {
+        let mut seeds: Vec<(Vec<u8>, String)> = vec![(wav(), "wav".into()), (tagged(&[0xff, 0xfb, 0x90, 0x64, 0, 0, 0, 0]), "mp3".into())];
+        if let Ok(dir) = std::env::var("AUDIOFUZZ_DIR") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+                let mut b = std::fs::read(e.path()).unwrap();
+                b.truncate(96 << 10);
+                if ext == "mp3" {
+                    seeds.push((tagged(&b), ext.clone()));
+                }
+                seeds.push((b, ext));
+            }
+        }
+        static PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        // Overflow inside a dependency panics only with debug assertions; release wraps it.
+        static WRAPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+            if msg.contains("with overflow") && at.contains("/.cargo/registry/") {
+                WRAPS.lock().unwrap_or_else(|e| e.into_inner()).push(at);
+                return;
+            }
+            PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            default_hook(info);
+        }));
+        let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
+        tauri::async_runtime::set(rt.handle().clone());
+        AudioEngine::init();
+        let dir = std::env::temp_dir().join(format!("vector-audiofuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let iters: usize = std::env::var("AUDIOFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+        let mut seed: u64 = std::env::var("AUDIOFUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x5851_f42d_4c95_7f2d);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let (mut b, ext) = seeds[i % seeds.len()].clone();
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % b.len().max(1) as u64) as usize;
+                match next() % 6 {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 => b.truncate(at.max(12)),
+                    4 => b[at..].iter_mut().take(4).for_each(|x| *x = 0xff),
+                    _ => b[at] ^= 1 << (next() % 8),
+                }
+            }
+            let path = dir.join(format!("case.{ext}"));
+            std::fs::write(&path, &b).unwrap();
+            let before = PANICS.load(std::sync::atomic::Ordering::SeqCst);
+            let t = std::time::Instant::now();
+            let input = AudioInput::File(path.clone());
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = vector_media::tags::read(&input);
+                let _ = vector_media::audio_engine::probe_duration(&input);
+                if let Ok(e) = AudioEngine::get()
+                    && let Ok(r) = e.load_from_file(&input)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    let _ = e.stop(r.id);
+                }
+            }));
+            if PANICS.load(std::sync::atomic::Ordering::SeqCst) > before || t.elapsed() > std::time::Duration::from_secs(5) {
+                eprintln!("case {i} ({ext}, {} bytes)", b.len());
+                failed.push((ext, b));
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::panic::take_hook();
+        if let Ok(out) = std::env::var("AUDIOFUZZ_OUT") {
+            for (i, (ext, b)) in failed.iter().enumerate() {
+                std::fs::write(format!("{out}/bad-{i}.{ext}"), b).unwrap();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut wraps = WRAPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        wraps.sort();
+        wraps.dedup();
+        if !wraps.is_empty() {
+            eprintln!("dependency overflow (wraps in release): {wraps:?}");
+        }
+        assert!(failed.is_empty() && PANICS.load(std::sync::atomic::Ordering::SeqCst) == 0, "damaged audio panicked or stalled");
+    }
+}
+
 pub fn format_time(ms: u64) -> String {
     let s = ms / 1000;
     crate::lang::digits(format!("{}:{:02}", s / 60, s % 60))
@@ -973,7 +1133,7 @@ fn album_view(
     let art_px = if narrow { 64. } else { 128. };
     let id = &att.id;
     let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
-    let full = t.album.clone().or(t.title.clone()).unwrap_or_else(|| att.name.clone());
+    let full = t.album.clone().or(t.title.clone()).unwrap_or_else(|| crate::kit::one_line(&att.name).into_owned());
     let (main, note) = split_title(&full);
     let byline = [t.artist.clone(), t.year.map(|y| y.to_string())]
         .into_iter()
@@ -1542,9 +1702,9 @@ pub fn view(
             Some(artist) => format!("{artist} \u{2014} {track}"), // i18n-exempt: two names
             None => track.to_string(),
         },
-        None => att.name.clone(),
+        None => crate::kit::one_line(&att.name).into_owned(),
     };
-    let now_title = chapters.map(|ch| split_title(&ch[track_idx.max(0) as usize].title).0);
+    let now_title = chapters.and_then(|ch| ch.get(track_idx.max(0) as usize)).map(|c| split_title(&c.title).0);
     let title = now_title.unwrap_or(title);
     let transcript = transcripts.and_then(|t| t.get(&att.id));
     let downloading = transcripts
@@ -1655,7 +1815,7 @@ pub fn view(
         .child(controls)
         .into_any_element(),
         (Some(t), Some(art)) => {
-            let track = t.title.clone().unwrap_or_else(|| att.name.clone());
+            let track = t.title.clone().unwrap_or_else(|| crate::kit::one_line(&att.name).into_owned());
             let byline = [
                 t.artist.clone(),
                 t.album.clone().filter(|a| Some(a) != t.title.as_ref()),

@@ -91,6 +91,14 @@ it out to keep `0123456789`.
 `dates.patterns` holds one CLDR pattern for each of the app's nine date styles, in the order
 `crates/vector-i18n/src/dates.rs` lists them.
 
+## Emoji names
+
+The emoji picker names emoji and searches for them in your language through an optional
+`emoji.tsv` in its folder: one emoji per line, then its name, then search words joined by `|`,
+separated by tabs. `scripts/cldr_emoji.py` writes it from CLDR's annotations (instructions at its
+top). Fix a word that reads oddly rather than adding many; English keeps working alongside it.
+A regional variant (`pt-BR`) without its own file uses its parent's.
+
 ## Check your work
 
 ```bash

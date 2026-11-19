@@ -151,7 +151,7 @@ impl VectorApp {
 
     /// `showPivxWalletPanel`: the card takes the Mini Apps view's place.
     pub(super) fn show_pivx_wallet(&mut self, cx: &mut Context<Self>) {
-        backend::device::set("pivx_last_used", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()).to_string());
+        backend::device::set("pivx_last_used", vector_core::clock::now_ms().to_string());
         self.pivx_wallet = Some(Wallet {
             opened: Instant::now(),
             balance: None,

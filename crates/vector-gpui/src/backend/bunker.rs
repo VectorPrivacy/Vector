@@ -41,7 +41,7 @@ pub async fn cancel() {
     vector_core::clear_my_public_key();
     state::clear_pending_bunker_setup();
     {
-        let mut g = PENDING_NSEC.lock().unwrap();
+        let mut g = PENDING_NSEC.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.as_mut() {
             s.zeroize();
         }
@@ -79,7 +79,7 @@ async fn stage(remote: PublicKey, client_keys: &Keys, url: String) -> Result<Imp
         return Err(crate::t::login_signer_gone().into());
     }
     let client_nsec = Zeroizing::new(client_keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
-    *PENDING_NSEC.lock().unwrap() = Some(String::clone(&client_nsec));
+    *PENDING_NSEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(String::clone(&client_nsec));
     state::set_pending_bunker_setup(url, remote.to_hex());
     let secret = Zeroizing::new(client_keys.secret_key().to_secret_bytes());
     MY_SECRET_KEY.set(*secret, &[&vector_core::ENCRYPTION_KEY]);

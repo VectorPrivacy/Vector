@@ -127,7 +127,7 @@ impl Tip {
         match self {
             Tip::Text(t) => t.to_string(),
             Tip::Dissolve(at) => {
-                let left = at - chrono::Utc::now().timestamp();
+                let left = at - vector_core::clock::now_secs() as i64;
                 if left > 0 {
                     crate::t::msg_dissolves_in(crate::timeline::countdown(left as u64)).to_string()
                 } else {
@@ -285,8 +285,8 @@ pub struct Inline {
     base: Look,
     on_click: Option<OnClick>,
     clock: f32,
-    /// One line, cut with `…` (`white-space: nowrap; text-overflow: ellipsis`).
-    ellipsis: bool,
+    /// At most this many lines, the last cut with `…`; 0 wraps freely.
+    clamp: usize,
     /// Told whether the one line was cut, as laid out.
     clipped: Option<Rc<std::cell::Cell<bool>>>,
     /// A message's paragraph, which a drag can select.
@@ -297,6 +297,8 @@ pub struct Inline {
     ltr: bool,
     /// Each paragraph sits at its own start edge rather than the UI's (`dir=auto`).
     dir_auto: bool,
+    /// Each line centred in the box (`text-align: center`).
+    centre: bool,
     /// Its pictures hold their first frame until their row is hovered (`data-motion="hover"`).
     held: bool,
 }
@@ -308,12 +310,13 @@ pub fn inline(atoms: impl Into<Rc<[Atom]>>, base: Look) -> Inline {
         base,
         on_click: None,
         clock: 0.,
-        ellipsis: false,
+        clamp: 0,
         clipped: None,
         select: None,
         nowrap: false,
         ltr: false,
         dir_auto: false,
+        centre: false,
         held: false,
     }
 }
@@ -329,8 +332,15 @@ impl Inline {
         self
     }
 
+    /// One line, cut with `…` (`white-space: nowrap; text-overflow: ellipsis`).
     pub fn single_line(mut self) -> Self {
-        self.ellipsis = true;
+        self.clamp = 1;
+        self
+    }
+
+    /// Wraps to at most `lines`, the last cut with `…` (`-webkit-line-clamp`).
+    pub fn clamp(mut self, lines: usize) -> Self {
+        self.clamp = lines;
         self
     }
 
@@ -354,6 +364,11 @@ impl Inline {
 
     /// Message text: a paragraph that reads left to right stays left in a right-to-left UI,
     /// where a label sits against the UI's start edge whatever its script.
+    pub fn centre(mut self) -> Self {
+        self.centre = true;
+        self
+    }
+
     pub fn dir_auto(mut self) -> Self {
         self.dir_auto = true;
         self
@@ -448,13 +463,52 @@ fn metrics(look: &Look, window: &Window) -> Metrics {
 }
 
 fn shape(text: &str, look: &Look, color: Hsla, window: &Window) -> ShapedLine {
-    let text: SharedString = text.to_string().into();
+    // A line break inside a text atom is white space, as in HTML; the same length keeps offsets.
+    let text: SharedString = if text.contains(['\n', '\r']) {
+        text.replace(['\n', '\r'], " ").into()
+    } else {
+        text.to_string().into()
+    };
     window.text_system().shape_line(
         text.clone(),
         px(look.size),
         &[look.run(text.len(), color)],
         None,
     )
+}
+
+/// How wide `text` runs on one line in `look`.
+pub(crate) fn text_width(text: &str, look: &Look, window: &Window) -> f32 {
+    f32::from(shape(text, look, look.color, window).width)
+}
+
+/// [`ShapedLine::x_for_index`] for indices asked in rising order, in one pass over the glyphs:
+/// asked afresh, each lookup rescans from the line's start, quadratic over a long message.
+struct Xs<'a> {
+    line: &'a ShapedLine,
+    run: usize,
+    glyph: usize,
+}
+
+impl<'a> Xs<'a> {
+    fn new(line: &'a ShapedLine) -> Self {
+        Self { line, run: 0, glyph: 0 }
+    }
+
+    /// No lower than the index asked last: the glyphs before it can't answer a later one.
+    fn at(&mut self, index: usize) -> f32 {
+        while let Some(run) = self.line.runs.get(self.run) {
+            while let Some(g) = run.glyphs.get(self.glyph) {
+                if g.index >= index {
+                    return g.position.x.into();
+                }
+                self.glyph += 1;
+            }
+            self.run += 1;
+            self.glyph = 0;
+        }
+        self.line.width.into()
+    }
 }
 
 fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
@@ -542,6 +596,7 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     continue;
                 }
                 let line = shape(text, look, look.color, window);
+                let mut xs = Xs::new(&line);
                 // The shaper lays right-to-left runs out visually, so offsets into the whole
                 // line don't measure a piece of one: such text is measured piece by piece.
                 let rtl = has_rtl(text);
@@ -561,10 +616,9 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                         let body = if trimmed.len() == piece.len() { full } else { f32::from(shape(trimmed, look, look.color, window).width) };
                         (full, body)
                     } else {
-                        (
-                            f32::from(line.x_for_index(end) - line.x_for_index(start)),
-                            f32::from(line.x_for_index(start + trimmed.len()) - line.x_for_index(start)),
-                        )
+                        let x0 = xs.at(start);
+                        let body = xs.at(start + trimmed.len()) - x0;
+                        (xs.at(end) - x0, body)
                     };
                     let at_end = end == text.len();
                     segs.push(Seg {
@@ -604,7 +658,8 @@ fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<u
         return None;
     };
     let line = shape(text, look, look.color, window);
-    let base = f32::from(line.x_for_index(seg.range.start));
+    let mut xs = Xs::new(&line);
+    let base = xs.at(seg.range.start);
     let rtl = has_rtl(text);
     let mut cut = None;
     for (off, g) in text[seg.range.clone()].grapheme_indices(true) {
@@ -615,7 +670,7 @@ fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<u
         let w = if rtl {
             f32::from(shape(&text[seg.range.start..end], look, look.color, window).width)
         } else {
-            f32::from(line.x_for_index(end)) - base
+            xs.at(end) - base
         };
         if w + seg.lead <= room {
             cut = Some(end);
@@ -641,7 +696,9 @@ fn piece_width(atoms: &[Atom], atom: usize, range: Range<usize>, window: &Window
         return text.get(range).map_or(0., |t| f32::from(shape(t, look, look.color, window).width));
     }
     let line = shape(text, look, look.color, window);
-    f32::from(line.x_for_index(range.end) - line.x_for_index(range.start))
+    let mut xs = Xs::new(&line);
+    let x0 = xs.at(range.start);
+    xs.at(range.end) - x0
 }
 
 pub fn has_rtl(text: &str) -> bool {
@@ -650,11 +707,16 @@ pub fn has_rtl(text: &str) -> bool {
 }
 
 fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -> Laid {
+    layout_upto(atoms, base, width, usize::MAX, ltr, window)
+}
+
+/// Wraps until a line past `limit` begins, which a clamp needs only to know there is more.
+fn layout_upto(atoms: &[Atom], base: &Look, width: f32, limit: usize, ltr: bool, window: &Window) -> Laid {
     let mut segs = segments(atoms, window);
     let mut lines: Vec<Vec<Placed>> = vec![Vec::new()];
     let mut x = 0f32;
     let mut i = 0;
-    while i < segs.len() {
+    while i < segs.len() && lines.len() <= limit {
         // The word: segments up to and including the next break opportunity.
         let mut j = i;
         let mut w = 0f32;
@@ -674,7 +736,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -
         if visible > width && x == 0. {
             // Too wide for any line: place what fits, split the segment that overflows.
             let mut k = i;
-            while k <= j {
+            while k <= j && lines.len() <= limit {
                 let s = &segs[k];
                 let sw = s.lead + s.width + s.tail;
                 if x + sw - s.hang <= width
@@ -734,6 +796,7 @@ fn layout(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -
         i = j + 1;
     }
     if lines.len() > 1
+        && lines.len() <= limit
         && lines.last().is_some_and(|l| l.is_empty())
         && !segs
             .last()
@@ -841,6 +904,35 @@ fn to_start(laid: &mut Laid) {
     }
 }
 
+/// Centres each line in a box `width` wide; the last carries the cut's `…`, `ell` wide.
+fn centre_lines(laid: &mut Laid, width: f32, ell: f32) {
+    let count = laid.lines.len();
+    let mut cut = laid.ellipsis;
+    for (i, line) in laid.lines.iter_mut().enumerate() {
+        let mut start = line.items.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        if !start.is_finite() {
+            continue;
+        }
+        let mut end = line_end(line);
+        if i + 1 == count
+            && let Some((x, _)) = cut
+        {
+            start = start.min(x);
+            end = end.max(x + ell);
+        }
+        let shift = ((width - (end - start)) / 2.).floor() - start;
+        for p in &mut line.items {
+            p.x += shift;
+        }
+        if i + 1 == count
+            && let Some((x, _)) = &mut cut
+        {
+            *x += shift;
+        }
+    }
+    laid.ellipsis = cut;
+}
+
 /// Moves the right-set lines to the edge of the box the paragraph was given, which a stretched
 /// layout makes wider than its text.
 fn flush_to(laid: &mut Laid, edge: f32) {
@@ -856,8 +948,64 @@ fn flush_to(laid: &mut Laid, edge: f32) {
     laid.flush = edge;
 }
 
-/// One line at most `width` wide, cut at a grapheme with `…` after.
-fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Window) -> Laid {
+/// Wrapped at `width`, kept to `lines` when that is not 0.
+fn layout_clamped(atoms: &[Atom], base: &Look, width: f32, lines: usize, ltr: bool, window: &Window) -> Laid {
+    match lines {
+        0 => layout(atoms, base, width, ltr, window),
+        // A clamped box clips, so it asks no room of its own (`min-width: auto` is 0).
+        1 => layout_cut(atoms, base, width, ltr, false, window),
+        _ if width <= 0. => layout_cut(atoms, base, width, ltr, false, window),
+        n => layout_clamp(atoms, base, width, n, ltr, window),
+    }
+}
+
+/// `n` lines wrapped at `width`: the last holds everything after the ones before, cut with `…`.
+fn layout_clamp(atoms: &[Atom], base: &Look, width: f32, n: usize, ltr: bool, window: &Window) -> Laid {
+    let mut laid = layout_upto(atoms, base, width, n, ltr, window);
+    if laid.lines.len() <= n {
+        return laid;
+    }
+    let Some((from, at)) = laid.lines[n - 1].items.iter().map(|p| (p.atom, p.range.start)).min() else {
+        laid.lines.truncate(n);
+        laid.size.height = laid.lines.last().map_or(px(0.), |l| px(l.top + l.height));
+        return laid;
+    };
+    let mut rest: Vec<Atom> = atoms[from..].to_vec();
+    if let Some(Atom::Text { text, .. }) = rest.first_mut() {
+        *text = text[at..].to_string().into();
+    }
+    let mut tail = layout_cut(&rest, base, width, ltr, true, window);
+    let Some(mut last) = tail.lines.pop() else {
+        return laid;
+    };
+    for p in &mut last.items {
+        if p.atom == 0 && matches!(rest[0], Atom::Text { .. }) {
+            p.range = p.range.start + at..p.range.end + at;
+        }
+        p.atom += from;
+    }
+    // Right-set lines all end at the box's edge, where the cut line's mirror image ends.
+    let shift = width - laid.flush;
+    for line in laid.lines.iter_mut().filter(|l| l.right) {
+        for p in &mut line.items {
+            p.x += shift;
+        }
+    }
+    laid.lines.truncate(n - 1);
+    let top = laid.lines.last().map_or(0., |l| l.top + l.height);
+    last.top += top;
+    last.baseline += top;
+    laid.size = size(px(width), px(last.top + last.height));
+    laid.lines.push(last);
+    laid.ellipsis = tail.ellipsis.take().map(|(x, atom)| (x, atom + from));
+    laid.flush = width;
+    laid.width = Some(width);
+    laid
+}
+
+/// One line at most `width` wide, cut at a grapheme with `…` after; also when the text goes on
+/// past it (`more`).
+fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, more: bool, window: &Window) -> Laid {
     let mut laid = layout(atoms, base, f32::INFINITY, ltr, window);
     laid.lines.truncate(1);
     let Some(line) = laid.lines.first_mut() else {
@@ -868,7 +1016,7 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         .last()
         .map(|p| p.x + p.lead + p.width + p.tail)
         .unwrap_or(0.);
-    if end <= width {
+    if end <= width && !more {
         laid.width = Some(width);
         laid.size.width = px(end.min(width).ceil());
         return laid;
@@ -894,14 +1042,15 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         }
         if let Atom::Text { text, .. } = &atoms[p.atom] {
             let line = shape(text, &look, look.color, window);
-            let base_x = f32::from(line.x_for_index(p.range.start));
+            let mut xs = Xs::new(&line);
+            let base_x = xs.at(p.range.start);
             // Right-to-left text is laid out visually on the whole line: measure each cut alone.
             let rtl = has_rtl(text);
-            let upto = |e: usize| {
+            let mut upto = |e: usize| {
                 if rtl {
                     f32::from(shape(&text[p.range.start..e], &look, look.color, window).width)
                 } else {
-                    f32::from(line.x_for_index(e)) - base_x
+                    xs.at(e) - base_x
                 }
             };
             let mut end = p.range.start;
@@ -914,7 +1063,11 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
             }
             let trimmed = text[p.range.start..end].trim_end().len() + p.range.start;
             if trimmed > p.range.start {
-                let w = upto(trimmed);
+                let w = if rtl {
+                    f32::from(shape(&text[p.range.start..trimmed], &look, look.color, window).width)
+                } else {
+                    Xs::new(&line).at(trimmed) - base_x
+                };
                 let x = p.x;
                 let lead = p.lead;
                 keep.push(Placed {
@@ -933,12 +1086,9 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         cut_at = Some((p.x, p.atom));
         break;
     }
-    let cut = cut_at.unwrap_or((
-        keep.last()
-            .map(|p| p.x + p.lead + p.width + p.tail)
-            .unwrap_or(0.),
-        0,
-    ));
+    let cut = cut_at.unwrap_or_else(|| {
+        keep.last().map_or((0., 0), |p| (p.x + p.lead + p.width + p.tail, p.atom))
+    });
     let cut = if rtl_line {
         mirror_items(&mut keep, width);
         let look = look_of(cut.1);
@@ -1033,7 +1183,7 @@ impl Element for Inline {
             self.atoms.clone(),
             self.base.clone(),
             laid.clone(),
-            self.ellipsis,
+            self.clamp,
             self.nowrap,
             self.ltr,
         );
@@ -1050,11 +1200,7 @@ impl Element for Inline {
                 };
                 let mut s = state.borrow_mut();
                 if s.width != Some(width) {
-                    *s = if cut {
-                        layout_cut(&atoms, &base, width, ltr, window)
-                    } else {
-                        layout(&atoms, &base, width, ltr, window)
-                    };
+                    *s = layout_clamped(&atoms, &base, width, cut, ltr, window);
                 }
                 s.size
             });
@@ -1074,18 +1220,24 @@ impl Element for Inline {
             let w = f32::from(bounds.size.width);
             let mut s = laid.borrow_mut();
             if !self.nowrap && s.width.is_none_or(|lw| {
-                (lw - w).abs() > 0.5 && (self.ellipsis || f32::from(s.size.width) > w)
+                (lw - w).abs() > 0.5 && (self.clamp > 0 || f32::from(s.size.width) > w)
             }) {
-                *s = if self.ellipsis {
-                    layout_cut(&self.atoms, &self.base, w, self.ltr, window)
-                } else {
-                    layout(&self.atoms, &self.base, w, self.ltr, window)
-                };
+                *s = layout_clamped(&self.atoms, &self.base, w, self.clamp, self.ltr, window);
             }
             if !self.dir_auto && window.mirrored() {
                 to_start(&mut s);
             }
             flush_to(&mut s, w);
+            if self.centre {
+                let ell = s.ellipsis.map(|(_, atom)| {
+                    let look = match &self.atoms[atom] {
+                        Atom::Text { look, .. } => look,
+                        _ => &self.base,
+                    };
+                    f32::from(shape("…", look, look.color, window).width)
+                });
+                centre_lines(&mut s, w, ell.unwrap_or(0.));
+            }
         }
         if let Some(key) = &self.select {
             crate::select::place(key, &self.atoms, laid, bounds);
@@ -1099,6 +1251,11 @@ impl Element for Inline {
         {
             window.request_animation_frame();
         }
+        let mask = window.content_mask().bounds;
+        let shown = |line: &Line| {
+            let top = bounds.origin.y + px(line.top);
+            top + px(line.height) >= mask.top() && top <= mask.bottom()
+        };
         let mut hits = Vec::new();
         let mut images = Vec::new();
         let mut under = Vec::new();
@@ -1114,7 +1271,11 @@ impl Element for Inline {
             }
             h.finish()
         };
-        for line in &s.lines {
+        for (li, line) in s.lines.iter().enumerate() {
+            // A line off screen gets no hit areas or boxes: a long message lays out many.
+            if !shown(line) {
+                continue;
+            }
             // A box run (a chip) is one hit area per line.
             let mut k = 0;
             while k < line.items.len() {
@@ -1142,7 +1303,7 @@ impl Element for Inline {
                             let mut el = gpui::StyledImage::object_fit(img(gpui::ImageSource::Render(sheen())), gpui::ObjectFit::Fill)
                                 .size_full()
                                 .rounded(px(3.))
-                                .id(ElementId::Name(format!("inline-{salt}-sheen-{}", images.len()).into()))
+                                .id(ElementId::Name(format!("inline-{salt}-sheen-{li}-{k}").into()))
                                 .into_any_element();
                             el.prepaint_as_root(rect.origin, rect.size.map(Into::into), window, cx);
                             images.push(el);
@@ -1158,7 +1319,7 @@ impl Element for Inline {
                         if lift || hint.is_some() {
                             let sz = size(rect.size.width, rect.size.height - px(2.));
                             let mut el = div()
-                                .id(ElementId::Name(format!("inline-{salt}-{}", under.len()).into()))
+                                .id(ElementId::Name(format!("inline-{salt}-{li}-{k}").into()))
                                 .w(sz.width)
                                 .h(sz.height)
                                 .rounded(px(4.))
@@ -1191,7 +1352,7 @@ impl Element for Inline {
                         let pic = gpui::StyledImage::object_fit(pic.size(px(*sz)).aspect_ratio(1.), gpui::ObjectFit::Contain);
                         let mut el = match tip.clone() {
                             Some(tip) => div()
-                                .id(ElementId::Name(format!("inline-{salt}-tip-{}", images.len()).into()))
+                                .id(ElementId::Name(format!("inline-{salt}-tip-{li}-{k}").into()))
                                 .size(px(*sz))
                                 .opacity(0.4)
                                 .hover(|s| s.opacity(1.))
@@ -1240,7 +1401,7 @@ impl Element for Inline {
                             pill.target.clone(),
                         ));
                         let mut el = pill.element(
-                            ElementId::Name(format!("inline-{salt}-pill-{}", images.len()).into()),
+                            ElementId::Name(format!("inline-{salt}-pill-{li}-{k}").into()),
                             h,
                         );
                         el.prepaint_as_root(origin, sz.map(Into::into), window, cx);
@@ -1265,6 +1426,11 @@ impl Element for Inline {
         cx: &mut App,
     ) {
         let s = laid.borrow();
+        let mask = window.content_mask().bounds;
+        let shown = |line: &Line| {
+            let top = bounds.origin.y + px(line.top);
+            top + px(line.height) >= mask.top() && top <= mask.bottom()
+        };
         for el in &mut pre.under {
             el.paint(window, cx);
         }
@@ -1276,7 +1442,7 @@ impl Element for Inline {
                 window.paint_quad(fill(Bounds::new(bounds.origin + r.origin, r.size), ca(89, 252, 179, 0.28)));
             }
         }
-        for line in &s.lines {
+        for line in s.lines.iter().filter(|l| shown(l)) {
             // Boxes first, so text paints over them.
             let mut k = 0;
             while k < line.items.len() {
@@ -1385,7 +1551,7 @@ impl Element for Inline {
                 }
             }
         }
-        if let (Some((x, atom)), Some(line)) = (s.ellipsis, s.lines.first()) {
+        if let (Some((x, atom)), Some(line)) = (s.ellipsis, s.lines.last()) {
             let look = match &self.atoms[atom] {
                 Atom::Text { look, .. } => look.clone(),
                 _ => self.base.clone(),
@@ -1436,9 +1602,10 @@ impl Element for Inline {
             if !phase.bubble() || e.button != MouseButton::Left {
                 return;
             }
-            let Some(i) = pressed.take() else { return };
-            if hits[i].0.is_hovered(window) {
-                on_click(hits[i].1.clone(), window, cx);
+            // The press may have landed in an earlier frame, whose hit areas this one need not have.
+            let Some((hitbox, target)) = pressed.take().and_then(|i| hits.get(i)) else { return };
+            if hitbox.is_hovered(window) {
+                on_click(target.clone(), window, cx);
             }
         });
     }
@@ -1519,12 +1686,13 @@ fn spoiler_cover(line: &ShapedLine, piece: &str, look: &Look, origin: gpui::Poin
     let blur = px(fs * 0.24);
     let shadow = |color: Hsla| gpui::BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: blur, spread_radius: px(0.), inset: false };
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let mut xs = Xs::new(line);
     for (i, ch) in piece.char_indices() {
         if ch.is_whitespace() {
             continue;
         }
-        let x0 = f32::from(origin.x + line.x_for_index(i));
-        let x1 = f32::from(origin.x + line.x_for_index(i + ch.len_utf8()));
+        let x0 = f32::from(origin.x) + xs.at(i);
+        let x1 = f32::from(origin.x) + xs.at(i + ch.len_utf8());
         if x1 <= x0 {
             continue;
         }

@@ -128,10 +128,9 @@ impl From<RawInvite> for Invite {
         let b: Bundle = serde_json::from_str(&r.bundle_json).unwrap_or_default();
         Self {
             community_id: r.community_id,
-            name: if b.name.is_empty() {
-                t::community_unnamed().into()
-            } else {
-                b.name
+            name: match crate::kit::one_line(&b.name) {
+                n if n.is_empty() => t::community_unnamed().into(),
+                n => n.into_owned(),
             },
             inviter: r.inviter_npub,
             owner: b.owner,
@@ -148,6 +147,7 @@ impl From<RawInvite> for Invite {
 #[serde(default)]
 pub struct Community {
     pub community_id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
     pub description: String,
     pub is_owner: bool,
@@ -174,6 +174,7 @@ pub struct Community {
 #[serde(default)]
 pub struct Channel {
     pub channel_id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
     pub private: bool,
     #[serde(default = "yes")]
@@ -238,8 +239,10 @@ impl Channel {
 #[serde(default)]
 pub struct Category {
     pub category_id: String,
+    #[serde(deserialize_with = "crate::kit::one_line_de")]
     pub name: String,
 }
+
 
 impl Community {
     pub fn channel(&self, id: &str) -> Option<&Channel> {
@@ -787,7 +790,7 @@ impl Store {
 
     pub fn now_ms(&self) -> u64 {
         self.frozen_now_ms
-            .unwrap_or_else(|| Local::now().timestamp_millis() as u64)
+            .unwrap_or_else(vector_core::clock::now_ms)
     }
 
     pub fn chat(&self, id: &str) -> Option<&SerializableChat> {
@@ -886,11 +889,12 @@ impl Store {
             .and_then(|c| self.nicknames.get(c))
             .and_then(|n| n.get(npub))
             .filter(|n| !n.is_empty());
+        let line = |n: &str| crate::kit::one_line(n).into_owned();
         match self.profiles.get(npub) {
-            Some(p) if !p.nickname.is_empty() => p.nickname.clone(),
-            _ if nick.is_some() => nick.cloned().unwrap_or_default(),
-            Some(p) if !p.name.is_empty() => p.name.clone(),
-            Some(p) if !p.display_name.is_empty() => p.display_name.clone(),
+            Some(p) if !p.nickname.is_empty() => line(&p.nickname),
+            _ if nick.is_some() => nick.map(|n| line(n)).unwrap_or_default(),
+            Some(p) if !p.name.is_empty() => line(&p.name),
+            Some(p) if !p.display_name.is_empty() => line(&p.display_name),
             _ => format!("{}…", &npub[..npub.len().min(12)]),
         }
     }
@@ -1145,6 +1149,7 @@ pub fn local(ms: u64) -> DateTime<Local> {
     Local
         .timestamp_millis_opt(ms as i64)
         .single()
+        // device-clock: only for a time chrono can't hold.
         .unwrap_or_else(Local::now)
 }
 
@@ -1600,15 +1605,16 @@ pub fn find_bech_people(text: &str) -> Vec<(usize, usize, Option<String>)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        let (hrp, profile) = if lower[i..].starts_with("npub1") {
+        let (hrp, profile) = if b[i..].starts_with(b"npub1") {
             (5, false)
-        } else if lower[i..].starts_with("nprofile1") {
+        } else if b[i..].starts_with(b"nprofile1") {
             (9, true)
         } else {
             i += 1;
             continue;
         };
-        let len = b[i + hrp..].iter().take_while(|&&c| body(c)).count();
+        // Far past any real nprofile; an endless run would be rescanned from every match in it.
+        let len = b[i + hrp..].iter().take(4096).take_while(|&&c| body(c)).count();
         let end = i + hrp + len;
         let npub = if profile {
             (len > 0).then_some(()).and_then(|_| Nip19Profile::from_bech32(&lower[i..end]).ok())
@@ -1649,6 +1655,15 @@ mod tests {
         assert_eq!(&text[found[0].0..found[0].1], format!("nostr:{npub}"));
         assert_eq!(found[1].2.as_deref(), Some(npub));
         assert_eq!(&text[found[1].0..found[1].1], nprofile);
+    }
+
+    #[test]
+    fn bech_people_in_text_beyond_ascii() {
+        let npub = "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6";
+        let text = format!("東京で café 👍🏽 @{npub} ｗ");
+        let found = find_bech_people(&text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].0..found[0].1], format!("@{npub}"));
     }
 }
 

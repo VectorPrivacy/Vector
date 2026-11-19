@@ -117,7 +117,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     .audio
                     .tags_read(&att.id)
                     .map_or(att.name.is_empty(), |music| crate::transcript::supported(att, true, music));
-                if transcribable && !m.mine && m.at + 60_000 > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64) {
+                if transcribable && !m.mine && m.at + 60_000 > vector_core::clock::now_ms() {
                     media.audio.want_transcript(&att.id, &input);
                 }
                 let duration = media.audio.duration(&att.id);
@@ -865,9 +865,9 @@ fn file_box_on(
         .flatten()
         .filter(|_| state == FileState::Local);
     let title: SharedString = match &package {
-        Some(p) => if p.name.is_empty() { crate::t::file_type_mini_app() } else { p.name.clone().into() },
+        Some(p) => if p.name.is_empty() { crate::t::file_type_mini_app() } else { crate::kit::one_line(&p.name).into_owned().into() },
         None if att.name.is_empty() => description.clone(),
-        None => att.name.clone().into(),
+        None => crate::kit::one_line(&att.name).into_owned().into(),
     };
     let live = mini.then(|| {
         let key = att.webxdc_topic.clone().unwrap_or_else(|| format!("att:{}", att.id));

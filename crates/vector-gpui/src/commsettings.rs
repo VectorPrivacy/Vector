@@ -1124,7 +1124,7 @@ pub(crate) fn member_row(
 }
 
 pub(crate) fn short_npub(npub: &str) -> String {
-    if npub.len() < 20 {
+    if npub.len() < 20 || !npub.is_ascii() {
         return npub.to_string();
     }
     format!("{}…{}", &npub[..12], &npub[npub.len() - 6..])

@@ -908,6 +908,11 @@ pub fn decode_jpeg_scaled(
     dec.read_info().ok()?;
     let info = dec.info()?;
     let (w, h) = (info.width as u32, info.height as u32);
+    // The image crate's allocation limit, which this decoder lacks: a progressive file keeps
+    // coefficients for every pixel the header claims.
+    if u64::from(w) * u64::from(h) * 4 > 512 << 20 {
+        return None;
+    }
     let orientation = dec
         .exif_data()
         .and_then(Orientation::from_exif_chunk)

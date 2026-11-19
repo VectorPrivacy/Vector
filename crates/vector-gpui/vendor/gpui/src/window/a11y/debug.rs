@@ -210,6 +210,10 @@ fn node_to_json(
         map.insert("synthetic".into(), json!(synthetic));
     }
 
+    if let Some(r) = node.bounds() {
+        map.insert("bounds".into(), json!([r.x0, r.y0, r.x1, r.y1]));
+    }
+
     // Accessibility semantics for this node, grouped together.
     let mut aria = serde_json::Map::new();
     aria.insert("role".into(), json!(format!("{:?}", node.role())));

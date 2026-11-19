@@ -254,6 +254,7 @@ fn punct(c: Option<char>) -> bool {
 }
 
 /// `<[A-Za-z/!?][^<>]*$`: only the last `<` can open it.
+#[cfg(test)]
 fn html_tail(t: &[char]) -> bool {
     t.iter().rposition(|&c| c == '<').is_some_and(|i| {
         t.get(i + 1).is_some_and(|&c| c.is_ascii_alphabetic() || "/!?".contains(c)) && !t[i + 1..].contains(&'>')
@@ -373,19 +374,37 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
         .map(|(s, e)| (byte_to_char[s], byte_to_char[e]))
         .chain(times.iter().copied().filter(|&(_, e)| e <= n))
         .collect();
-    let last_nl = |from: isize| -> isize {
-        let from = from.max(0) as usize;
-        (0..=from.min(n.saturating_sub(1))).rev().find(|&i| t.get(i) == Some(&'\n')).map_or(-1, |i| i as isize)
-    };
+    // Look-backs by position, so walking an edge along a long line stays linear: the last
+    // newline, `](`, `<` and `>` at or before each index, and where its run of quote marks starts.
+    let mut prev_nl = vec![-1isize; n];
+    let mut prev_lp = vec![-1isize; n];
+    let mut prev_lt = vec![-1isize; n];
+    let mut prev_gt = vec![-1isize; n];
+    let mut quoted_from = vec![0usize; n + 1];
+    for i in 0..n {
+        let last = |v: &[isize]| if i == 0 { -1 } else { v[i - 1] };
+        let here = i as isize;
+        prev_nl[i] = if t[i] == '\n' { here } else { last(&prev_nl) };
+        prev_lp[i] = if t[i] == ']' && t.get(i + 1) == Some(&'(') { here } else { last(&prev_lp) };
+        prev_lt[i] = if t[i] == '<' { here } else { last(&prev_lt) };
+        prev_gt[i] = if t[i] == '>' { here } else { last(&prev_gt) };
+        quoted_from[i + 1] = if matches!(t[i], ' ' | '\t' | '>') { quoted_from[i] } else { i + 1 };
+    }
+    let mut next_nl = vec![n; n + 1];
+    for i in (0..n).rev() {
+        next_nl[i] = if t[i] == '\n' { i } else { next_nl[i + 1] };
+    }
+    let last_nl = |from: isize| -> isize { if n == 0 { -1 } else { prev_nl[(from.max(0) as usize).min(n - 1)] } };
     let line_of = |at: usize| -> (usize, usize) {
         let s = if n == 0 { 0 } else { (last_nl(at as isize - 1) + 1) as usize };
-        let e = t[at.min(n)..].iter().position(|&c| c == '\n').map_or(n, |i| at + i);
-        (s, e)
+        (s, next_nl[at.min(n)])
     };
     let in_atom = |at: usize| atomic.iter().any(|&(s, e)| at >= s && at <= e);
     let blank = |c: Option<char>| matches!(c, Some(' ' | '\t'));
     let ws = |c: Option<char>| c.is_some_and(char::is_whitespace);
-    let word = |c: Option<char>| c.is_some_and(|c| !c.is_whitespace()) && !punct(c);
+    // The JS reads UTF-16 units: beside an astral char it sees a surrogate, neither space nor punctuation.
+    let unit_punct = |c: Option<char>| c.is_some_and(|c| c <= '\u{ffff}') && punct(c);
+    let word = |c: Option<char>| c.is_some_and(|c| !c.is_whitespace()) && !unit_punct(c);
     let emphasis = |c: Option<char>| matches!(c, Some('*' | '_'));
     let free = |c: Option<char>| c.is_none() || ws(c);
     let beyond_run = |mut i: isize, step: isize| {
@@ -395,13 +414,6 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
         }
         ch(i)
     };
-    let last_index_of = |pat: &[char], from: isize| -> isize {
-        if from < 0 {
-            return -1;
-        }
-        let from = (from as usize).min(n.saturating_sub(pat.len()));
-        (0..=from).rev().find(|&i| t[i..].starts_with(pat)).map_or(-1, |i| i as isize)
-    };
     let syntax = |at: isize| -> bool {
         let Some(c) = ch(at) else { return false };
         if !"*_~|\\`[]()<>!#".contains(c) {
@@ -410,16 +422,21 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
         match c {
             '!' => ch(at + 1) == Some('[') || ch(at - 1) == Some('<'),
             '(' => ch(at - 1) == Some(']'),
-            ')' => last_index_of(&[']', '('], at) > last_index_of(&['\n'], at),
+            ')' => prev_lp[at as usize] > prev_nl[at as usize],
             '#' => {
                 (at == 0 || ch(at - 1).is_some_and(|p| p.is_whitespace() || p == '#' || p == '-'))
                     && (at + 1 >= n as isize || ch(at + 1).is_some_and(|x| x.is_whitespace() || x == '#'))
             }
             '<' => ch(at + 1).is_some_and(|x| x.is_ascii_alphabetic() || "/!?".contains(x)),
             '>' => {
-                let s = (last_nl(at - 1) + 1) as usize;
-                let before = &t[s..at as usize];
-                before.iter().all(|x| matches!(x, ' ' | '\t' | '>')) || html_tail(before)
+                let (s, at) = ((last_nl(at - 1) + 1) as usize, at as usize);
+                // `html_tail(&t[s..at])`: the line's last `<` before here opens a tag still open.
+                let lt = if at == 0 { -1 } else { prev_lt[at - 1] };
+                quoted_from[at] <= s
+                    || (lt >= s as isize
+                        && (lt as usize + 1) < at
+                        && (t[lt as usize + 1].is_ascii_alphabetic() || "/!?".contains(t[lt as usize + 1]))
+                        && prev_gt[at - 1] < lt)
             }
             _ => true,
         }
@@ -433,12 +450,13 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
         if syntax(at - 1) && !word(next) {
             return true;
         }
-        syntax(at) && !word(prev) && !(emphasis(next) && punct(prev) && free(beyond_run(at, 1)))
+        syntax(at) && !word(prev) && !(emphasis(next) && unit_punct(prev) && free(beyond_run(at, 1)))
     };
     // (zone start, zone end, whole line)
     let zone_of = |at: usize| -> (usize, usize, bool) {
         let (s, e) = line_of(at);
-        let line = &t[s..e];
+        // JS `slice`: a start past the end is empty, as for a line opening on a newline.
+        let line = t.get(s..e).unwrap_or(&[]);
         if is_rule(line) || is_table_row(line) {
             return (s, e, true);
         }
@@ -465,7 +483,7 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
                 return n;
             }
             let (ls, le) = line_of(at);
-            let line: String = t[ls..le].iter().collect();
+            let line: String = t.get(ls..le).unwrap_or(&[]).iter().collect();
             if !line.trim().is_empty() && !zone_of(at).2 {
                 break;
             }
@@ -908,6 +926,14 @@ mod tests {
         assert_eq!(shown("see https://a.io/x now", &[span(4, 10)]), "");
         assert_eq!(shown("**bold** x", &[span(0, 8)]), "**{bold}** x");
         assert_eq!(shown("a\n\n---\n\nb", &[span(0, 9)]), "{a\n\n---\n\nb}");
+    }
+
+    #[test]
+    fn edges_on_text_opening_with_a_newline_or_beside_emoji() {
+        assert_eq!(shown("\nhi there", &[span(0, 9)]), "\n{hi there}");
+        assert_eq!(shown("\n\n# Title", &[span(0, 9)]), "\n\n# {Title}");
+        assert_eq!(shown("\n> quote", &[span(0, 8)]), "\n> {quote}");
+        assert_eq!(shown("\n😀 _x_ 👍🏽", &[span(1, 7)]), "\n{😀 _x_ }👍🏽");
     }
 
     /// Differential check against `tcMarkSpans`: `TC_CASES=<json file> cargo test dump -- --ignored`.

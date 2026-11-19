@@ -163,7 +163,9 @@ fn run(rx: Receiver<Job>, back: Sender<Job>) {
                 let back = back.clone();
                 let ext = ext.to_ascii_lowercase();
                 rayon::spawn(move || {
-                    let scene = src.read().and_then(|b| parse(&b, &ext));
+                    let scene = src.read().and_then(|b| {
+                        std::panic::catch_unwind(|| parse(&b, &ext)).unwrap_or_else(|_| Err("damaged model".into()))
+                    });
                     let _ = back.send(Job::Parsed { id, scene });
                 });
             }
@@ -242,6 +244,24 @@ pub fn fit(radius: f32, aspect: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn embedded_textures_stay_within_bounds() {
+        let png = |w: u32, h: u32| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(image::GrayImage::new(w, h)).write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let mut budget = usize::MAX;
+        assert!(super::scene::Image::decode(&png(16_385, 1), &mut budget).is_none());
+        assert_eq!(super::scene::Image::decode(&png(4_100, 2), &mut budget).map(|i| (i.w, i.h)), Some((4096, 2)));
+        let tex = png(64, 64);
+        let mut budget = 64 * 64 * 4 * 2 + 1;
+        assert!(super::scene::Image::decode(&tex, &mut budget).is_some());
+        assert!(super::scene::Image::decode(&tex, &mut budget).is_some());
+        assert!(super::scene::Image::decode(&tex, &mut budget).is_none());
+        assert_eq!(budget, 1);
+    }
+
     fn footprint_mb() -> f64 {
         #[cfg(target_os = "macos")]
         {
@@ -300,6 +320,126 @@ mod tests {
         mark("model dropped");
         drop(g);
         mark("device dropped");
+    }
+
+    /// Damaged models from anyone: parsing, upload and a posed frame must not panic.
+    /// `MODEL3D_FUZZ_DIR` adds sample files as seeds; `MODEL3D_FUZZ_ITERS` runs longer.
+    #[test]
+    fn no_damaged_model_panics() {
+        let mut stl = vec![0u8; 80];
+        stl.extend_from_slice(&2u32.to_le_bytes());
+        for tri in [[0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1., 0.], [0., 0., 1., 1., 1., 0., 0., 1., 0., 1., 0., 0.]] {
+            for f in tri {
+                stl.extend_from_slice(&f32::to_le_bytes(f));
+            }
+            stl.extend_from_slice(&[0, 0]);
+        }
+        let mut seeds: Vec<(Vec<u8>, String)> = vec![
+            (stl, "stl".into()),
+            (b"solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n".to_vec(), "stl".into()),
+            (b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvn 0 0 1\nf 1/1/1 2/2/1 3/1/1\nf 2 4 3\n".to_vec(), "obj".into()),
+        ];
+        let fox = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("reference/media/fox.glb");
+        seeds.extend(std::fs::read(&fox).ok().map(|b| (b, "glb".to_string())));
+        if let Ok(dir) = std::env::var("MODEL3D_FUZZ_DIR") {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or_default().to_ascii_lowercase();
+                if super::supports(&ext) {
+                    seeds.push((std::fs::read(e.path()).unwrap(), ext));
+                }
+            }
+        }
+        let mut g = super::gpu::Gpu::new().ok();
+        if let Ok(file) = std::env::var("MODEL3D_FUZZ_REPLAY") {
+            let ext = file.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+            if let Ok(scene) = super::parse(&std::fs::read(&file).unwrap(), &ext)
+                && let Some(g) = g.as_mut()
+            {
+                let model = g.upload(scene);
+                let target = g.target(32, 32);
+                let clip = model.scene.clips.first();
+                let pose = clip.map(|c| super::anim::pose(&model.scene.rest(), c, c.duration * 0.3));
+                let morph = clip.map(|c| super::anim::weights(model.scene.nodes.len(), c, c.duration * 0.3));
+                let _ = g.render(&model, &target, &super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose, morph });
+            }
+            return;
+        }
+        let iters: usize = std::env::var("MODEL3D_FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let mut seed: u64 = std::env::var("MODEL3D_FUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x9e37_79b9_7f4a_7c15);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        const NUMS: [&[u8]; 9] = [b"-1", b"0", b"99999999", b"1e39", b"nan", b"-2147483648", b"4294967296", b"-3", b"65535"];
+        // Overflow inside a dependency panics only with debug assertions; release wraps it.
+        static WRAPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+            if msg.contains("with overflow") && at.contains("/.cargo/registry/") {
+                WRAPS.lock().unwrap_or_else(|e| e.into_inner()).push(at);
+            } else {
+                default_hook(info);
+            }
+        }));
+        let mut failed = Vec::new();
+        for i in 0..iters {
+            let (mut b, ext) = seeds[i % seeds.len()].clone();
+            let text = b.iter().take(256).all(|c| c.is_ascii());
+            for _ in 0..1 + next() % 6 {
+                let at = (next() % b.len().max(1) as u64) as usize;
+                match next() % if text { 7 } else { 6 } {
+                    0 => b[at] = next() as u8,
+                    1 => b[at] = 0xff,
+                    2 => b[at] = 0,
+                    3 => b.truncate(at.max(8)),
+                    4 => b[at..].iter_mut().take(4).for_each(|x| *x = 0xff),
+                    5 => b[at] ^= 1 << (next() % 8),
+                    _ => {
+                        let n = NUMS[(next() % NUMS.len() as u64) as usize];
+                        let end = (at..b.len()).find(|&j| !b[j].is_ascii_digit()).unwrap_or(b.len());
+                        b.splice(at..end, n.iter().copied());
+                    }
+                }
+            }
+            let wraps_before = WRAPS.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let t = std::time::Instant::now();
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Ok(scene) = super::parse(&b, &ext) else { return };
+                let Some(g) = g.as_mut() else { return };
+                let model = g.upload(scene);
+                let target = g.target(32, 32);
+                let clip = model.scene.clips.first();
+                let pose = clip.map(|c| super::anim::pose(&model.scene.rest(), c, c.duration * 0.3));
+                let morph = clip.map(|c| super::anim::weights(model.scene.nodes.len(), c, c.duration * 0.3));
+                let shot = super::gpu::Shot { pivot: glam::Quat::IDENTITY, distance: super::fit(model.radius, 1.), pose, morph };
+                let _ = g.render(&model, &target, &shot);
+            }));
+            let wrapped = run.is_err() && WRAPS.lock().unwrap_or_else(|e| e.into_inner()).len() > wraps_before;
+            if (run.is_err() && !wrapped) || t.elapsed() > std::time::Duration::from_secs(5) {
+                eprintln!("case {i} ({ext}, {} bytes): {}", b.len(), if run.is_err() { "panicked" } else { "slow" });
+                failed.push((ext, b));
+                if failed.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        if let Ok(out) = std::env::var("MODEL3D_FUZZ_OUT") {
+            for (i, (ext, b)) in failed.iter().enumerate() {
+                std::fs::write(format!("{out}/bad-{i}.{ext}"), b).unwrap();
+            }
+        }
+        let _ = std::panic::take_hook();
+        let mut wraps = WRAPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        wraps.sort();
+        wraps.dedup();
+        if !wraps.is_empty() {
+            eprintln!("dependency overflow (wraps in release): {wraps:?}");
+        }
+        assert!(failed.is_empty(), "{} damaged models panicked or stalled", failed.len());
     }
 
     /// Renders each model in `MODEL3D_DIR` to `<name>.png` beside it, at the chat's 640 px.

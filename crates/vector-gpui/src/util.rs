@@ -18,7 +18,7 @@ pub fn generate_thumbhash_from_image(img: &image::DynamicImage) -> Option<String
     let (thumb_w, thumb_h) = if width > height {
         (THUMBHASH_SIZE, (THUMBHASH_SIZE * height / width).max(1))
     } else {
-        ((THUMBHASH_SIZE * width / height).max(1), THUMBHASH_SIZE)
+        ((THUMBHASH_SIZE * width / height.max(1)).max(1), THUMBHASH_SIZE)
     };
     let rgba = crate::shared::image::thumbnail(img, thumb_w, thumb_h).to_rgba8();
     let hash = fast_thumbhash::rgba_to_thumb_hash(

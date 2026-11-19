@@ -162,7 +162,7 @@ debug = false
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwind: a panic in a background decoder or task ends that work, not the app.
 strip = true
 
 # Day-to-day optimised builds: every core, incremental, close to release speed.

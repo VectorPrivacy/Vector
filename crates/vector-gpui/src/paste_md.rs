@@ -83,7 +83,13 @@ fn format(tag: &str, node: &NodeRef, parent: &Fmt) -> Fmt {
     f
 }
 
-fn walk(node: &NodeRef, f: &Fmt, chars: &mut Vec<(char, Fmt)>, styled: &mut bool) {
+/// Deeper than anything an editor copies: past it the paste stays plain text.
+const MAX_DEPTH: usize = 256;
+
+fn walk(node: &NodeRef, f: &Fmt, chars: &mut Vec<(char, Fmt)>, styled: &mut bool, depth: usize) -> Option<()> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
     for child in node.children() {
         if child.is_text() {
             chars.extend(child.text().chars().map(|c| (c, f.clone())));
@@ -106,8 +112,9 @@ fn walk(node: &NodeRef, f: &Fmt, chars: &mut Vec<(char, Fmt)>, styled: &mut bool
         }
         let g = format(&tag, &child, f);
         *styled |= g.styled();
-        walk(&child, &g, chars, styled);
+        walk(&child, &g, chars, styled, depth + 1)?;
     }
+    Some(())
 }
 
 /// Markdown for a paste, or None when nothing is styled or the two copies disagree on the text.
@@ -126,7 +133,7 @@ pub fn html_to_markdown(html: &str, plain: &str) -> Option<String> {
     let body = doc.select("body").nodes().first().cloned()?;
     let mut chars = Vec::new();
     let mut styled = false;
-    walk(&body, &Fmt::default(), &mut chars, &mut styled);
+    walk(&body, &Fmt::default(), &mut chars, &mut styled, 0)?;
     if !styled {
         return None;
     }

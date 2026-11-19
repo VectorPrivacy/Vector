@@ -337,6 +337,10 @@ impl Frame {
     }
 }
 
+/// Nesting deeper than any message means to: every level is a frame here and a box on screen,
+/// so a few bytes of `> > > …` would otherwise run the stack out.
+const MAX_NEST: usize = 32;
+
 struct Builder<'a> {
     ctx: &'a Ctx<'a>,
     swaps: &'a [Swap],
@@ -346,6 +350,8 @@ struct Builder<'a> {
     flags: Flags,
     code: Option<(SharedString, String)>,
     quote_depth: u32,
+    /// Quotes, lists and items opened past [`MAX_NEST`], whose content joins the deepest kept.
+    beyond: u32,
     spoilers: u32,
     tc: Option<Tc>,
     /// Inside a `<details>`: the spoiler its body shows as, once its summary closed.
@@ -613,9 +619,8 @@ impl Builder<'_> {
 
     /// Text with its `:shortcode:`s swapped for the custom emoji the message carries.
     fn emoji_text(&mut self, t: &str, kind: Kind) {
-        if let Some(masked) = self.ctx.mask.and_then(|m| m(t)) {
-            return self.emoji_text(&masked, kind);
-        }
+        let masked = self.ctx.mask.and_then(|m| m(t));
+        let t = masked.as_deref().unwrap_or(t);
         let Some(custom) = self.ctx.custom else {
             return self.twemoji_text(t, kind);
         };
@@ -924,6 +929,11 @@ impl Builder<'_> {
     }
 
     fn start(&mut self, tag: Tag) {
+        if matches!(tag, Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) && (self.beyond > 0 || self.stack.len() > MAX_NEST) {
+            self.flush_para();
+            self.beyond += 1;
+            return;
+        }
         match tag {
             Tag::Paragraph => self.open_para(ParaKind::Text),
             Tag::Heading { level, .. } => {
@@ -994,6 +1004,11 @@ impl Builder<'_> {
     }
 
     fn end(&mut self, tag: TagEnd) {
+        if matches!(tag, TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item) && self.beyond > 0 {
+            self.flush_para();
+            self.beyond -= 1;
+            return;
+        }
         match tag {
             TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::HtmlBlock => self.flush_para(),
             TagEnd::BlockQuote(_) => {
@@ -1344,6 +1359,7 @@ pub fn plain(src: &str, ctx: &Ctx) -> Vec<Atom> {
         flags: Flags::default(),
         code: None,
         quote_depth: 0,
+        beyond: 0,
         spoilers: 0,
         details: None,
         tc: None,
@@ -1389,6 +1405,7 @@ pub fn parse(src: &str, ctx: &Ctx) -> Vec<Block> {
         flags: Flags::default(),
         code: None,
         quote_depth: 0,
+        beyond: 0,
         spoilers: 0,
         details: None,
         tc,

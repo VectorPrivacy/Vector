@@ -379,7 +379,7 @@ impl Nexus {
             opened: Instant::now(),
             list_top: None,
             root,
-            now_ms: chrono::Utc::now().timestamp_millis(),
+            now_ms: vector_core::clock::now_ms() as i64,
             spot_armed: None,
             picker: None,
             perms: None,
@@ -492,7 +492,7 @@ impl Nexus {
 
 /// The spotlight's colour for an icon: the mean of its more saturated pixels.
 pub fn wash_of(path: &std::path::Path) -> Option<Hsla> {
-    let img = image::load_from_memory(&crate::pic::read(path).ok()?).ok()?.thumbnail(24, 24).into_rgb8();
+    let img = crate::media::decode_bounded(&crate::pic::read(path).ok()?)?.thumbnail(24, 24).into_rgb8();
     let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
     for p in img.pixels() {
         let [pr, pg, pb] = p.0;
@@ -1302,6 +1302,7 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
                         .line_height(px(21.))
                         .text_color(white_a(0.74))
                         .line_clamp(2)
+                        .text_ellipsis()
                         .child(shown.description.clone()),
                 )
                 .child(tags)

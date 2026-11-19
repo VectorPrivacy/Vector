@@ -221,7 +221,7 @@ pub fn extract_npub(input: &str) -> Option<String> {
         "http://vectorapp.io/profile/",
     ] {
         if let Some(rest) = lower.strip_prefix(scheme) {
-            let id = &rest[..rest.len().min(63)];
+            let id = rest.get(..63).unwrap_or(rest);
             if valid(id) {
                 return Some(id.to_string());
             }
@@ -623,6 +623,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             .line_height(px(21.))
             .text_color(c(0xa8a8a8))
             .line_clamp(4)
+            .text_ellipsis()
             .child(t)
     };
     let card = div()
@@ -730,5 +731,15 @@ mod tests {
         );
         assert!(super::invite_links(&format!("bare {key}")).is_empty());
         assert!(super::invite_links(&format!("https://x.io/other/{key}")).is_empty());
+    }
+
+    #[test]
+    fn profile_links_with_text_beyond_ascii() {
+        let npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"[..63].to_string();
+        let link = format!("https://vectorapp.io/profile/{npub}");
+        assert_eq!(super::extract_npub(&link), Some(npub.clone()));
+        assert_eq!(super::extract_npub(&format!("{link}é")), Some(npub.clone()));
+        assert_eq!(super::extract_npub(&format!("https://vectorapp.io/profile/{}é", &npub[..62])), None);
+        assert_eq!(super::extract_npub("https://vectorapp.io/profile/東京"), None);
     }
 }

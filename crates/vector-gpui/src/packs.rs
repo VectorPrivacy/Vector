@@ -97,10 +97,11 @@ fn is_pack(naddr: &str) -> bool {
 fn scan(text: &str) -> Vec<(usize, usize, String)> {
     let b = text.as_bytes();
     let lower = text.to_ascii_lowercase();
+    let lb = lower.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        let rest = &lower[i..];
+        let rest = &lb[i..];
         let prefix = [
             "https://www.vectorapp.io/emojis/pack/",
             "http://www.vectorapp.io/emojis/pack/",
@@ -109,14 +110,14 @@ fn scan(text: &str) -> Vec<(usize, usize, String)> {
             "nostr:",
         ]
         .iter()
-        .find(|p| rest.starts_with(**p))
+        .find(|p| rest.starts_with(p.as_bytes()))
         .map(|p| p.len());
         if let Some(p) = prefix
             && let Some(len) = naddr_len(&b[i + p..])
         {
             let naddr = lower[i + p..i + p + len].to_string();
             let mut end = i + p + len;
-            if lower[end..].starts_with(".html") {
+            if lb[end..].starts_with(b".html") {
                 end += 5;
             }
             if b.get(end) == Some(&b'/') {
@@ -249,6 +250,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .line_height(px(14.85))
                     .text_color(white_a(0.55))
                     .line_clamp(2)
+                    .text_ellipsis()
                     .child(if err.is_empty() {
                         crate::t::packs_fetch_failed().to_string()
                     } else {
@@ -428,11 +430,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                                 .text_size(px(14.))
                                 .line_height(px(19.6))
                                 .text_color(c(0xffffff))
-                                .child(if pack.title.is_empty() {
-                                    pack.identifier.clone()
-                                } else {
-                                    pack.title.clone()
-                                }),
+                                .child(crate::kit::one_line(if pack.title.is_empty() { &pack.identifier } else { &pack.title }).into_owned()),
                         )
                         .into_any_element(),
                     div()
@@ -448,6 +446,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                                 .line_height(px(14.85))
                                 .text_color(white_a(0.55))
                                 .line_clamp(2)
+                                .text_ellipsis()
                                 .child(pack.description.clone())
                                 .into_any_element()
                         })
@@ -503,5 +502,12 @@ mod tests {
     fn other_kinds_and_foreign_links_are_left() {
         assert!(refs(&format!("nostr:{ARTICLE}")).is_empty());
         assert!(refs(&format!("https://njump.me/{PACK}")).is_empty());
+    }
+
+    #[test]
+    fn packs_among_text_beyond_ascii() {
+        let text = format!("東京で 👍🏽 nostr:{PACK} café");
+        assert_eq!(refs(&text), vec![PACK.to_string()]);
+        assert_eq!(strip(&text), "東京で 👍🏽 café");
     }
 }

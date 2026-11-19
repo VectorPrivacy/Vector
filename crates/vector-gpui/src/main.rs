@@ -29,6 +29,10 @@ mod search;
 mod pickers;
 mod edithistory;
 mod textdiff;
+#[cfg(test)]
+mod textfuzz;
+#[cfg(test)]
+mod tree_audit;
 mod payaddr;
 mod reactpop;
 mod rekey;
@@ -199,7 +203,7 @@ fn main() {
     trim::cap_arenas();
     #[cfg(feature = "dhat-heap")]
     {
-        *DHAT.lock().unwrap() = Some(dhat::Profiler::builder().trim_backtraces(Some(12)).build());
+        *DHAT.lock().unwrap_or_else(|e| e.into_inner()) = Some(dhat::Profiler::builder().trim_backtraces(Some(12)).build());
     }
     #[cfg(target_os = "linux")]
     vkselect::narrow();

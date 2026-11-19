@@ -98,7 +98,7 @@ fn data_image(url: &str) -> Option<Arc<RenderImage>> {
     let bytes = vector_core::simd::base64::STANDARD
         .decode_to_vec(b64)
         .ok()?;
-    let mut buf = image::load_from_memory(&bytes).ok()?.into_rgba8();
+    let mut buf = crate::media::decode_rgba(&bytes, 1024)?;
     for p in buf.chunks_exact_mut(4) {
         p.swap(0, 2);
     }

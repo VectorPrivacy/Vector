@@ -41,6 +41,7 @@ pub fn work_dir() -> PathBuf {
 
 /// A fresh folder under `work_dir` for one send's copy.
 pub fn work_slot() -> std::io::Result<PathBuf> {
+    // device-clock: a folder name, never compared with a time.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

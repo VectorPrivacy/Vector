@@ -1848,10 +1848,12 @@ impl VectorApp {
         app.listen_video(cx);
         crate::callvideo::announce_caps();
         backend::notify::set_focused(window.is_window_active());
+        animation_idle(window.is_window_active());
         let away_since = std::cell::Cell::new(None::<std::time::Instant>);
         cx.observe_window_activation(window, move |_, window, _| {
             let active = window.is_window_active();
             backend::notify::set_focused(active);
+            animation_idle(active);
             // `resume_after_away`: back after a minute or more, the relays are proven, the live
             // subscriptions re-armed and the gap caught up.
             if !active {
@@ -3588,6 +3590,13 @@ impl VectorApp {
                 if self.wallpaper.busy {
                     let pct = payload.get("progress").and_then(Value::as_f64).unwrap_or(0.).clamp(0., 100.).round();
                     self.wallpaper.label = if pct > 0. { t::wallpaper_uploading_percent(pct).into() } else { t::wallpaper_uploading().into() };
+                }
+            }
+            "message_delete_meta_changed" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+                self.delete_meta.borrow_mut().remove(id);
+                if self.hovered.as_deref() == Some(id) {
+                    self.want_delete_meta(id, cx);
                 }
             }
             "message_removed" => {
@@ -6446,6 +6455,12 @@ impl VectorApp {
     }
 }
 
+/// How long animations run without input. A window in the background lets them sleep sooner:
+/// presenting their frames keeps the GPU driver's working memory (some 230 MB on a Mac) held.
+fn animation_idle(active: bool) {
+    gpui::set_animation_idle(std::time::Duration::from_secs(if active { 300 } else { 60 }));
+}
+
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let el = self.render_root(window, cx);
@@ -7964,7 +7979,7 @@ fn rail(
     let parts = navbar.as_ref().map(|n| n.on.clone());
     let me = store.me();
     let my_name = me.map(|p| store.name(&p.id)).unwrap_or_default();
-    let status = me.map(|p| p.status.title.clone()).filter(|t| !t.is_empty());
+    let status = me.map(crate::profile::status_title).filter(|t| !t.is_empty());
 
     div()
         .w(px(mode.width()))
@@ -8667,7 +8682,7 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
         let content = crate::texttime::localize(
             &m.content,
             &m.text_spans,
-            chrono::Local::now().timestamp() as f64,
+            (store.now_ms() / 1000) as f64,
         );
         let content = store.resolve_mentions(&content, store.community_of(&chat.id).map(|c| c.community_id.as_str()));
         let mut atoms = crate::preview::atoms(&crate::embeds::for_preview(&content), usize::MAX, &look);
@@ -8907,7 +8922,7 @@ impl VectorApp {
         } else if store.stream_hidden(&id) {
             String::new()
         } else {
-            store.profiles.get(id.as_ref()).map(|p| p.status.title.clone()).unwrap_or_default()
+            store.profiles.get(id.as_ref()).map(crate::profile::status_title).unwrap_or_default()
         };
         let name_row = div()
             .id("chat-header-info")
@@ -8919,9 +8934,13 @@ impl VectorApp {
             .flex()
             .items_center()
             .gap(px(6.))
+            .min_w_0()
+            .max_w_full()
             .child(if notes { div().into_any_element() } else { avatar(store, &id, 22.).into_any_element() })
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .font_family(RUBIK)
                     .font_weight(FontWeight::BOLD)
                     .text_size(px(18.72))
@@ -8930,6 +8949,8 @@ impl VectorApp {
                     .child(if notes { t::chat_notes().to_string() } else { store.name(&id) }),
             );
         let menu = !notes || store.chat(&id).is_some();
+        // The header's grid: centred while the name fits, else it takes the room up to the buttons.
+        let actions_w = 40. * ((!notes) as u8 + menu as u8) as f32 + 10.;
         div()
             .h(px(61.))
             .flex_shrink_0()
@@ -8939,7 +8960,10 @@ impl VectorApp {
             .justify_center()
             .map(|d| {
                 if subtext.is_empty() {
-                    d.items_center().child(name_row.mt(px(5.)))
+                    d.items_center()
+                        .child(div().flex_1())
+                        .child(div().px(px(10.)).min_w_0().flex().child(name_row.mt(px(5.))))
+                        .child(div().flex_1().min_w(px(actions_w)))
                 } else {
                     d.child(
                         div()
@@ -9139,6 +9163,7 @@ impl VectorApp {
             Some(c) => (c.wallpaper_blur, c.wallpaper_dim),
             None => (DEFAULT_BLUR, recommended),
         };
+        // device-clock: a cache key, never compared with a time.
         let ts = chrono::Utc::now().timestamp_millis() as u64;
         self.wallpaper.preview = Some(Preview { chat, path, blur, dim, ts });
         self.wallpaper.busy = false;
@@ -10198,6 +10223,7 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                 ),
             };
             div()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -10211,6 +10237,8 @@ fn history_edge(store: &Store, chat: &SerializableChat, on: &timeline::OnAct, ed
                 .child(div().motion_live().mb(px(8.)).child(art))
                 .child(
                     div()
+                        .max_w_full()
+                        .text_center()
                         .text_size(px(16.))
                         .font_weight(FontWeight::BOLD)
                         .text_color(white_a(0.9))
@@ -11738,7 +11766,7 @@ impl VectorApp {
         }
         let hint = (me.muted && me.mute_until > 0).then(|| {
             let at = chrono::Local.timestamp_millis_opt(me.mute_until).single();
-            let today = chrono::Local::now().date_naive();
+            let today = crate::data::local(vector_core::clock::now_ms()).date_naive();
             at.map(|t| {
                 use crate::dates::{Clock, DateStyle};
                 let time = if t.date_naive() == today {
@@ -13287,7 +13315,7 @@ impl VectorApp {
                     let data = serde_json::json!({
                         "client": std::env::consts::OS,
                         "version": env!("CARGO_PKG_VERSION"),
-                        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        "at": chrono::DateTime::from_timestamp_millis(vector_core::clock::now_ms() as i64).unwrap_or_default().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                         "community": id.chars().take(12).collect::<String>(),
                         "control": side(control),
                         "epoch": side(epoch),
@@ -14328,6 +14356,7 @@ impl VectorApp {
         chrono::Local
             .timestamp_millis_opt(self.store.borrow().now_ms() as i64)
             .single()
+            // device-clock: only for a time chrono can't hold.
             .unwrap_or_else(chrono::Local::now)
     }
 
@@ -17095,7 +17124,8 @@ impl VectorApp {
         };
         let video = state.starts_with("video");
         self.call.apply_state(&serde_json::json!({ "id": "fixture", "peer": alice, "outgoing": outgoing, "phase": phase, "active_ms": 83_000, "volume": 1.0,
-            "video_mine": { "camera": video, "screen": false }, "video_peer": { "camera": video, "screen": video }, "peer_decodes": if video { vec!["h264"] } else { vec![] } }));
+            "video_mine": { "camera": video, "screen": false }, "video_peer": { "camera": video, "screen": video }, "peer_decodes": if video { vec!["h264"] } else { vec![] },
+            "share_audio_peer": video, "share_volume": 0.8 }));
         if video && std::env::var("VECTOR_CALL_PICS").is_ok() {
             let load = |f: &str| {
                 image::open(format!("reference/media/{f}"))
@@ -20687,6 +20717,7 @@ impl VectorApp {
                 })
             })
             .collect();
+        let top = self.timeline.logical_scroll_top();
         serde_json::json!({
             "screen": screen,
             "open": self.open.as_ref().map(|s| s.to_string()),
@@ -20694,6 +20725,8 @@ impl VectorApp {
                 "id": v.id, "members": v.members.len(), "panel": v.panel,
             })),
             "timeline_items": self.timeline.item_count(),
+            "scroll": [top.item_ix, f32::from(top.offset_in_item)],
+            "following": self.timeline.is_following_tail(),
             "read_anchor": format!("{:?}", self.read_anchor),
             "unread_jump": self.unread_jump.as_ref().map(|j| serde_json::json!({ "anchor": j.anchor, "count": j.count, "status": j.status, "paused": j.paused })),
             "history_done": self.open.as_ref().is_some_and(|o| self.history_done.contains(o.as_ref())),

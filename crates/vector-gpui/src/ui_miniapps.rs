@@ -101,7 +101,7 @@ impl VectorApp {
             for h in history {
                 let icon = crate::miniapp::info(h.src_url.clone()).await.ok().and_then(|i| i.icon);
                 apps.push(GridApp {
-                    name: h.name,
+                    name: crate::kit::one_line(&h.name).into_owned(),
                     src: h.src_url,
                     icon,
                     categories: h.categories,
@@ -768,6 +768,7 @@ impl VectorApp {
 }
 
 fn now_ms() -> u128 {
+    // device-clock: an id, never compared with a time.
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis())

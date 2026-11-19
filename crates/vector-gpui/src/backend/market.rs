@@ -8,9 +8,12 @@ fn handle() -> Result<tauri::AppHandle, String> {
     vector_media::TAURI_APP.get().copied().ok_or_else(|| crate::t::miniapp_store_not_ready().to_string())
 }
 
-/// Tags are relay data: one spelling of each, so every page and count agrees.
+/// Tags are relay data: one spelling of each, so every page and count agrees. Names show on one line.
 fn tidy(mut apps: Vec<MarketplaceApp>) -> Vec<MarketplaceApp> {
     for app in &mut apps {
+        if let std::borrow::Cow::Owned(name) = crate::kit::one_line(&app.name) {
+            app.name = name;
+        }
         let mut seen = Vec::with_capacity(app.categories.len());
         for c in &app.categories {
             let c = c.trim().to_lowercase();
@@ -25,16 +28,15 @@ fn tidy(mut apps: Vec<MarketplaceApp>) -> Vec<MarketplaceApp> {
 
 /// One listing as the catalogue holds it now, for a caller that can't wait on it.
 pub fn find(id: &str) -> Option<MarketplaceApp> {
-    let mut app = MARKETPLACE_STATE.try_read().ok()?.get_app(id).cloned()?;
-    app.categories = tidy(vec![app.clone()]).remove(0).categories;
-    Some(app)
+    let app = MARKETPLACE_STATE.try_read().ok()?.get_app(id).cloned()?;
+    tidy(vec![app]).pop()
 }
 
 /// Every listing's id and whether it's installed, for the start menu's search.
 pub fn ids() -> Vec<(String, String, bool)> {
     MARKETPLACE_STATE
         .try_read()
-        .map(|s| s.get_apps().into_iter().map(|a| (a.id, a.name, a.installed || a.local_path.is_some())).collect())
+        .map(|s| s.get_apps().into_iter().map(|a| (a.id, crate::kit::one_line(&a.name).into_owned(), a.installed || a.local_path.is_some())).collect())
         .unwrap_or_default()
 }
 

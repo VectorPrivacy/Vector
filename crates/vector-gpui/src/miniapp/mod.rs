@@ -705,7 +705,7 @@ pub async fn info(file_path: String) -> Result<Info, String> {
     .map_err(|_| crate::t::miniapp_read_timeout().to_string())?
     .map_err(|e| e.to_string())?;
     tokio::task::spawn_blocking(move || Info {
-        name: package.name.to_string(),
+        name: crate::kit::one_line(&package.name).into_owned(),
         icon: dir.and_then(|d| package.icon_path(&d)),
         uses_realtime: package.uses_realtime,
         hash: package.hash_hex(),

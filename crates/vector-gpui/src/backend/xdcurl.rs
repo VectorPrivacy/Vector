@@ -16,22 +16,26 @@ pub struct Resolved {
     pub name: String,
 }
 
-/// The first `.xdc` link in `text`.
+/// The first `.xdc` link in `text`: from an `http` to the next space, quote or angle bracket.
+/// One pass, whatever the text repeats.
 pub fn find(text: &str) -> Option<&str> {
-    let lower = text.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(i) = lower[from..].find("http") {
-        let start = from + i;
-        let rest = &text[start..];
-        let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>')).unwrap_or(rest.len());
-        let candidate = &rest[..end];
-        let path = candidate.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
-        if (path.starts_with("https://") || path.starts_with("http://")) && path.ends_with(".xdc") && path.len() > "https://.xdc".len() {
-            return Some(candidate);
-        }
-        from = start + 4;
-    }
-    None
+    let ci = |s: &[u8], at: usize, word: &[u8]| s.get(at..at + word.len()).is_some_and(|w| w.eq_ignore_ascii_case(word));
+    text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>')).find_map(|token| {
+        let b = token.as_bytes();
+        // The query or fragment the path at `start` ends at: it only moves on.
+        let mut query = None;
+        (0..b.len()).filter(|&i| ci(b, i, b"http")).find_map(|start| {
+            let q = match query {
+                Some(q) if q >= start => q,
+                _ => *query.insert(b[start..].iter().position(|&c| c == b'?' || c == b'#').map_or(b.len(), |i| start + i)),
+            };
+            let path = &b[start..q];
+            ((ci(path, 0, b"https://") || ci(path, 0, b"http://"))
+                && path.len() > "https://.xdc".len()
+                && ci(path, path.len() - 4, b".xdc"))
+            .then(|| &token[start..])
+        })
+    })
 }
 
 /// The link's file name, for the card before it is fetched.
@@ -155,5 +159,46 @@ mod tests {
         assert_eq!(super::find("https://x.org/a.xdcz"), None);
         assert_eq!(super::find("no link here.xdc"), None);
         assert_eq!(super::file_name("https://x.org/My%20App.xdc#top"), "My App.xdc");
+    }
+
+    /// The scan before it was one pass: it rescanned to the next space from every `http`.
+    fn find_by_rescanning(text: &str) -> Option<&str> {
+        let lower = text.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(i) = lower[from..].find("http") {
+            let start = from + i;
+            let rest = &text[start..];
+            let end = rest.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>')).unwrap_or(rest.len());
+            let candidate = &rest[..end];
+            let path = candidate.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+            if (path.starts_with("https://") || path.starts_with("http://")) && path.ends_with(".xdc") && path.len() > "https://.xdc".len() {
+                return Some(candidate);
+            }
+            from = start + 4;
+        }
+        None
+    }
+
+    #[test]
+    fn one_pass_finds_what_rescanning_found() {
+        let parts = ["http", "HTTPS://", "https://", "http://", "x.org/", "a", ".xdc", ".XDC", "?", "#", " ", "\u{a0}", "\"", "<", ">", "'", "東", "é", "xdc", "."];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..40_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let mut r = seed;
+            let s: String = (0..(r % 12) as usize)
+                .map(|_| {
+                    r = r.rotate_left(5) ^ 0x2545_f491_4f6c_dd1d;
+                    parts[(r % parts.len() as u64) as usize]
+                })
+                .collect();
+            assert_eq!(super::find(&s), find_by_rescanning(&s), "{s:?}");
+        }
+        let long = "https://".repeat(20_000);
+        let t = std::time::Instant::now();
+        assert_eq!(super::find(&long), None);
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
     }
 }

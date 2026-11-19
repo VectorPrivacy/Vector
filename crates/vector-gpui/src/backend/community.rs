@@ -197,10 +197,7 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
             .channel(&ch)
             .ok_or_else(|| crate::t::community_channel_not_found().to_string())?;
         let (_, epoch) = community.channel_secret(channel);
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let ms = vector_core::clock::now_ms();
 
         let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
         let emoji_pairs: Vec<(&str, &str)> = emoji_tags
@@ -871,7 +868,7 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
             };
             return Ok(InvitePreview {
                 community_id,
-                name: local.name.clone(),
+                name: crate::kit::one_line(&local.name).into_owned(),
                 description: local.description.clone().unwrap_or_default(),
                 icon,
             });
@@ -884,7 +881,7 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
         };
         Ok(InvitePreview {
             community_id,
-            name: folded.name.clone(),
+            name: crate::kit::one_line(&folded.name).into_owned(),
             description: folded.description.clone().unwrap_or_default(),
             icon,
         })

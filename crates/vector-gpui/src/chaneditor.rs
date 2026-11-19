@@ -134,7 +134,7 @@ impl Perms {
                 .flatten()
                 .map(|r| Role {
                     id: str_of(&r["role_id"]).unwrap_or_default(),
-                    name: str_of(&r["name"]).unwrap_or_default(),
+                    name: str_of(&r["name"]).map(|n| crate::kit::one_line(&n).into_owned()).unwrap_or_default(),
                     color: r["color"].as_u64().unwrap_or(0) as u32,
                     position: r["position"].as_i64().unwrap_or(0),
                     support: held(&r["support"]),

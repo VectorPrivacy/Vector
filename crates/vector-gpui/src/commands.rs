@@ -145,7 +145,7 @@ pub fn bot_commands(bot: &str, specs: &[vector_core::bot_interface::CommandSpec]
         .map(|c| Cmd {
             bot: bot.into(),
             name: c.name.clone(),
-            description: c.description.clone(),
+            description: crate::kit::one_line(&c.description).into_owned(),
             args: c
                 .args
                 .iter()
@@ -160,7 +160,7 @@ pub fn bot_commands(bot: &str, specs: &[vector_core::bot_interface::CommandSpec]
                         T::Choice => ArgType::Choice,
                     },
                     required: a.required,
-                    description: a.description.clone(),
+                    description: crate::kit::one_line(&a.description).into_owned(),
                     choices: a.choices.clone(),
                 })
                 .collect(),
@@ -780,7 +780,7 @@ pub fn view(
                                     .min_w_0()
                                     .map(|d| {
                                         if narrow {
-                                            d.flex_basis(gpui::relative(1.)).mt(px(-1.)).line_height(px(15.)).line_clamp(2)
+                                            d.flex_basis(gpui::relative(1.)).mt(px(-1.)).line_height(px(15.)).line_clamp(2).text_ellipsis()
                                         } else {
                                             d.flex_1().truncate().text_right()
                                         }

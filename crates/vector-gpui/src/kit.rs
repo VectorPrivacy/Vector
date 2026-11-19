@@ -9,6 +9,39 @@ use crate::theme::*;
 
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
 /// with the spacing after it as CSS adds it (trailing included).
+/// Text as a page lays a name out: each run of spaces, tabs and line breaks one space, none at
+/// either end. A no-break space stays.
+pub fn one_line(text: &str) -> std::borrow::Cow<'_, str> {
+    let gap = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c');
+    let t = text.trim_matches(gap);
+    if t.len() == text.len() && !t.contains(['\t', '\n', '\r', '\x0c']) && !t.contains("  ") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(t.len());
+    let mut open = false;
+    for c in t.chars() {
+        if gap(c) {
+            open = true;
+            continue;
+        }
+        if open {
+            out.push(' ');
+            open = false;
+        }
+        out.push(c);
+    }
+    out.into()
+}
+
+/// A name read as [`one_line`] shows it, as the desktop's stylesheet shows every name.
+pub fn one_line_de<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = <String as serde::Deserialize>::deserialize(d)?;
+    Ok(match one_line(&s) {
+        std::borrow::Cow::Borrowed(_) => s,
+        std::borrow::Cow::Owned(o) => o,
+    })
+}
+
 pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
     let text = text.as_ref();
     // Joined scripts take no letter spacing, as CSS leaves them.
@@ -21,6 +54,130 @@ pub fn spaced(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
         row = row.child(div().mr(px(spacing)).child(SharedString::from(g.to_string())));
     }
     letters(div().flex().flex_shrink_0().spoken(SharedString::from(text.to_string())), row)
+}
+
+/// [`spaced`] that wraps between words, as a block of spaced text does.
+pub fn spaced_wrap(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
+    let text = text.as_ref();
+    if crate::inline::has_rtl(text) {
+        return div().min_w_0().child(SharedString::from(text.to_string()));
+    }
+    let mut row = div().flex().flex_row().flex_wrap().min_w_0().keep_ltr();
+    let mut words = text.split(' ').peekable();
+    while let Some(w) = words.next() {
+        row = row.child(match words.peek() {
+            Some(_) => spaced(format!("{w} "), spacing),
+            None => spaced(w, spacing),
+        });
+    }
+    row.spoken(SharedString::from(text.to_string()))
+}
+
+/// [`spaced`] that shrinks with its row and ends in "…" where it is cut, as `text-overflow: ellipsis`.
+pub fn spaced_cut(text: impl AsRef<str>, spacing: f32) -> gpui::Div {
+    let text = text.as_ref();
+    if crate::inline::has_rtl(text) {
+        return div().min_w_0().truncate().child(SharedString::from(text.to_string()));
+    }
+    div()
+        .flex()
+        .min_w_0()
+        .overflow_hidden()
+        .spoken(SharedString::from(text.to_string()))
+        .child(SpacedCut { text: SharedString::from(text.to_string()), spacing })
+}
+
+struct SpacedCut {
+    text: SharedString,
+    spacing: f32,
+}
+
+pub struct SpacedLetters {
+    letters: Vec<gpui::ShapedLine>,
+    ellipsis: gpui::ShapedLine,
+    height: gpui::Pixels,
+}
+
+impl gpui::Element for SpacedCut {
+    type RequestLayoutState = SpacedLetters;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, SpacedLetters) {
+        let style = window.text_style();
+        let size = style.font_size.to_pixels(window.rem_size());
+        let height = style.line_height_in_pixels(window.rem_size());
+        let shape = |g: &str| window.text_system().shape_line(SharedString::from(g.to_string()), size, &[style.to_run(g.len())], None);
+        let letters: Vec<_> = self.text.graphemes(true).map(shape).collect();
+        let ellipsis = shape("…");
+        let natural: f32 = letters.iter().map(|l| f32::from(l.width).ceil() + self.spacing).sum();
+        let mut layout = gpui::Style::default();
+        layout.size.width = px(natural).into();
+        layout.size.height = height.into();
+        layout.min_size.width = px(0.).into();
+        layout.flex_shrink = 1.;
+        (window.request_layout(layout, [], cx), SpacedLetters { letters, ellipsis, height })
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut SpacedLetters,
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        s: &mut SpacedLetters,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let room = f32::from(bounds.size.width);
+        // Whole-pixel letters, as `spaced` lays each in its own text box.
+        let step = |l: &gpui::ShapedLine| f32::from(l.width).ceil() + self.spacing;
+        let natural: f32 = s.letters.iter().map(step).sum();
+        let (shown, cut) = if natural <= room + 0.5 {
+            (s.letters.len(), false)
+        } else {
+            let room = room - f32::from(s.ellipsis.width);
+            let mut x = 0.;
+            let n = s.letters.iter().take_while(|l| {
+                x += step(l);
+                x <= room
+            });
+            (n.count(), true)
+        };
+        let at = |x: f32| gpui::point(bounds.left() + px(x), bounds.top());
+        let mut x = 0.;
+        for l in &s.letters[..shown] {
+            l.paint(at(x), s.height, gpui::TextAlign::Left, None, window, cx).ok();
+            x += step(l);
+        }
+        if cut {
+            s.ellipsis.paint(at(x), s.height, gpui::TextAlign::Left, None, window, cx).ok();
+        }
+    }
 }
 
 /// How far a sideways scroller has moved from its start, whichever way the layout runs.
@@ -2046,6 +2203,18 @@ pub fn context_menu(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_name_shows_on_one_line_as_a_page_shows_it() {
+        use std::borrow::Cow;
+        assert!(matches!(super::one_line("Ann Lee"), Cow::Borrowed("Ann Lee")));
+        assert_eq!(super::one_line("  line one\nline two\r\n\n\tthree  "), "line one line two three");
+        assert_eq!(super::one_line("a  b"), "a b");
+        assert_eq!(super::one_line("no\u{a0}break"), "no\u{a0}break");
+        assert_eq!(super::one_line("\n\n"), "");
+        let c: crate::data::Community = serde_json::from_str(r#"{"name":"two\nlines","channels":[{"name":"\tgeneral\n"}],"categories":[{"name":"a\r\nb"}]}"#).unwrap();
+        assert_eq!((c.name.as_str(), c.channels[0].name.as_str(), c.categories[0].name.as_str()), ("two lines", "general", "a b"));
+    }
+
     #[test]
     fn a_sentence_of_pieces_shows_in_reading_order() {
         let v = |p: &[(&str, u8)], rtl| {

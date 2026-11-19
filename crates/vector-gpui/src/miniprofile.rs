@@ -112,7 +112,7 @@ pub fn roles(view: &Value, owner: Option<&str>, npub: &str) -> Roles {
             .filter(|r| holds(r, npub))
             .map(|r| Role {
                 id: r["role_id"].as_str().unwrap_or_default().to_string(),
-                name: r["name"].as_str().unwrap_or_default().to_string(),
+                name: crate::kit::one_line(r["name"].as_str().unwrap_or_default()).into_owned(),
                 tint: tint(r["color"].as_u64()),
                 channel: r["channel_id"].as_str().map(channel).unwrap_or_default(),
                 removable: editable && manageable(r),
@@ -171,7 +171,7 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
     } else {
         crate::t::member_loading().into()
     };
-    let status = if veiled { String::new() } else { p.map(|p| p.status.title.trim().to_string()).unwrap_or_default() };
+    let status = if veiled { String::new() } else { p.map(crate::profile::status_title).unwrap_or_default() };
     let about = if veiled { String::new() } else { p.map(|p| p.about.trim().to_string()).unwrap_or_default() };
     let fingerprint = if veiled {
         String::new()
@@ -323,12 +323,11 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 });
             let label = div()
                 .min_w_0()
-                .truncate()
                 .when(!role.channel.is_empty() && role.channel == role.name, |d| {
-                    d.child(div().mr(px(1.)).text_color(white_a(0.4)).child("#"))
+                    d.child(div().flex_none().mr(px(1.)).text_color(white_a(0.4)).child("#"))
                 })
                 .flex()
-                .child(role.name.clone());
+                .child(div().min_w_0().truncate().child(role.name.clone()));
             let row = pill(div().flex().items_center().gap(px(5.)).min_w_0().child(dot).child(label)).group(group);
             list = list.child(if m.busy.as_deref() == Some(role.id.as_str()) {
                 // `miniProfileRolePulse`: 0.45 to 0.25 and back, a second each way.

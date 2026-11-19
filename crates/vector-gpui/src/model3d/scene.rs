@@ -210,6 +210,18 @@ pub struct Image {
     pub rgba: Vec<u8>,
 }
 
+/// Texels one model's textures may hold between them: a few kilobytes of PNG can claim gigabytes.
+pub const TEXTURE_BUDGET: usize = 512 << 20;
+
+impl Image {
+    /// An embedded texture, if it fits what is left of the model's budget.
+    pub fn decode(bytes: &[u8], budget: &mut usize) -> Option<Image> {
+        let i = crate::media::decode_rgba(bytes, 4096)?;
+        *budget = budget.checked_sub(i.as_raw().len())?;
+        Some(Image { w: i.width(), h: i.height(), rgba: i.into_raw() })
+    }
+}
+
 pub struct Skin {
     pub joints: Vec<usize>,
     pub inverse_bind: Vec<Mat4>,

@@ -16,11 +16,11 @@ pub fn init(dir: Option<PathBuf>) {
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| serde_json::from_slice::<Map<String, Value>>(&b).ok())
         .unwrap_or_default();
-    *STORE.lock().unwrap() = Some((path, map));
+    *STORE.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, map));
 }
 
 pub fn get(key: &str) -> Option<String> {
-    let guard = STORE.lock().unwrap();
+    let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .as_ref()?
         .1
@@ -30,7 +30,7 @@ pub fn get(key: &str) -> Option<String> {
 }
 
 pub fn set(key: &str, value: impl Into<String>) {
-    let mut guard = STORE.lock().unwrap();
+    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
     let (path, map) = guard.get_or_insert_with(|| (None, Map::new()));
     map.insert(key.to_string(), Value::String(value.into()));
     if let Some(path) = path {

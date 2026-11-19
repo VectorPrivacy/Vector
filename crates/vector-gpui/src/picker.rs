@@ -172,11 +172,7 @@ pub fn packs_from_core(
             id: p.id.clone(),
             identifier: p.identifier.clone(),
             logo_url: (!p.image_url.is_empty()).then(|| p.image_url.clone()),
-            title: if p.title.is_empty() {
-                p.identifier.clone()
-            } else {
-                p.title.clone()
-            },
+            title: crate::kit::one_line(if p.title.is_empty() { &p.identifier } else { &p.title }).into_owned(),
             logo: (!p.image_url.is_empty()).then(|| src(&p.image_url)),
             own: p.is_own,
             status: p.status,
@@ -1221,7 +1217,7 @@ impl EmojiPicker {
         let q = query.to_lowercase();
         let mut hits: Vec<(Cell, f64)> = emoji::search_scored(query, &score)
             .into_iter()
-            .filter(|(e, _)| !names || e.name.to_lowercase().contains(&q))
+            .filter(|(e, _)| !names || emoji::named(e, &q))
             .map(|(e, s)| (Cell::Stock(e), s))
             .collect();
         let q = q.trim_start_matches(':').trim_end_matches(':');
@@ -1873,9 +1869,9 @@ impl EmojiPicker {
                 div().flex_1().min_w_0().h(px(CELL)).child(
                     div()
                         .id(group.clone())
-                        .aria_label(e.name)
+                        .aria_label(emoji::name_of(e))
                         .tip(if e.shortcode.is_empty() {
-                            SharedString::from(e.name)
+                            emoji::name_of(e)
                         } else {
                             format!(":{}:", e.shortcode).into()
                         })

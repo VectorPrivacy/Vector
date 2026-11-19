@@ -174,7 +174,7 @@ impl Graph {
                 .filter_map(|r| {
                     Some(GraphRole {
                         id: text(&r["role_id"])?,
-                        name: text(&r["name"]).unwrap_or_default(),
+                        name: text(&r["name"]).map(|n| crate::kit::one_line(&n).into_owned()).unwrap_or_default(),
                         position: r["position"].as_i64().unwrap_or(i64::MAX),
                         color: r["color"].as_u64().unwrap_or(0) as u32,
                         channel: text(&r["channel_id"]).map(|c| c.to_ascii_lowercase()),
@@ -601,7 +601,7 @@ pub fn sidebar(
                             .child(drop_half(false, on, move |d: &CategoryDrag| Act::DropCategory(d.id.clone(), below.clone(), false)))
                     })
                     .child(
-                        crate::kit::spaced(cat.name.to_uppercase(), 0.99)
+                        crate::kit::spaced_cut(cat.name.to_uppercase(), 0.99)
                             .font_weight(FontWeight::BOLD)
                             .text_size(px(11.))
                             .line_height(px(24.))
@@ -609,6 +609,7 @@ pub fn sidebar(
                     )
                     .child(
                         div()
+                            .flex_none()
                             .size(px(18.))
                             .flex()
                             .items_center()
@@ -628,6 +629,7 @@ pub fn sidebar(
                     div()
                         .id(SharedString::from(format!("cat-add-{}", cat.category_id)))
                         .tip(t::community_add_channel_to(cat.name.as_str()))
+                        .flex_none()
                         .size(px(22.))
                         .rounded(px(6.))
                         .flex()
@@ -706,11 +708,13 @@ pub fn header(
                     div()
                         .flex()
                         .items_center()
-                        .flex_shrink_0()
+                        .min_w_0()
                         .gap(px(8.))
-                        .child(icon(channel_glyph(ch), 19., white_a(0.45)))
+                        .child(icon(channel_glyph(ch), 19., white_a(0.45)).flex_none())
                         .child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .font_family(RUBIK)
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(18.72))
@@ -731,7 +735,7 @@ pub fn header(
                         .text_size(px(13.5))
                         .line_height(px(18.))
                         .text_color(white_a(0.5))
-                        .child(topic)
+                        .child(crate::kit::one_line(&topic).into_owned())
                 })),
         )
         .child(crate::search::button(click(on, || Act::Search)))
@@ -887,7 +891,7 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
     let status = store
         .profiles
         .get(npub)
-        .map(|p| p.status.title.clone())
+        .map(crate::profile::status_title)
         .filter(|t| !t.is_empty());
     let key = SharedString::from(format!("roster:{npub}"));
     let (tap, k, n) = (on.clone(), key.clone(), npub.to_string());
@@ -1120,7 +1124,7 @@ pub fn roster<E: ParentElement>(
                             }
                         })
                         .child(
-                            crate::kit::spaced(label.to_uppercase(), 0.99)
+                            crate::kit::spaced_cut(label.to_uppercase(), 0.99)
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(11.))
                                 .line_height(px(24.))
@@ -1128,7 +1132,7 @@ pub fn roster<E: ParentElement>(
                         )
                         .child(
                             div()
-                                .flex_1()
+                                .flex_none()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(11.))
                                 .line_height(px(24.))
@@ -1137,6 +1141,8 @@ pub fn roster<E: ParentElement>(
                         )
                         .child(
                             div()
+                                .flex_none()
+                                .ml_auto()
                                 .mt(px(8.))
                                 .size(px(16.))
                                 .flex()

@@ -201,6 +201,8 @@ fn mem() -> serde_json::Value {
     let kb = |key: &str| rollup.lines().filter(|l| l.starts_with(key)).filter_map(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()).sum::<f64>();
     serde_json::json!({
         "private": ((kb("Private_Clean:") + kb("Private_Dirty:")) / 1024. * 10.).round() / 10.,
+        // Clean pages are mostly the binary's code, which a debug build pages in as paths run.
+        "dirty": (kb("Private_Dirty:") / 1024. * 10.).round() / 10.,
         "rss": (kb("Rss:") / 1024. * 10.).round() / 10.,
     })
 }
@@ -407,7 +409,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         }
         // Stops the heap profiler: its report lands in dhat-heap.json in the working directory.
         #[cfg(feature = "dhat-heap")]
-        "dhat" => drop(crate::DHAT.lock().unwrap().take()),
+        "dhat" => drop(crate::DHAT.lock().unwrap_or_else(|e| e.into_inner()).take()),
         "emodump" => emodump(rest.parse().unwrap_or(6), cx),
         "sel" => answer(crate::select::debug()),
         "chatlist" => answer(app.dev_chatlist()),

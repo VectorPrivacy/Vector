@@ -184,7 +184,7 @@ pub fn offenders(src: &Path) -> BTreeMap<String, Vec<(usize, String)>> {
             // Not app text: the developer bridge, code keywords to colour, file-format parsers,
             // test data, the language-name table that packs will replace with CLDR names, and the
             // English that vector-core writes, which `coretext` matches lines against.
-            if matches!(rel.as_str(), "devctl.rs" | "i18n_audit.rs" | "t.rs" | "highlight.rs" | "langnames.rs" | "coretext_table.rs")
+            if matches!(rel.as_str(), "devctl.rs" | "i18n_audit.rs" | "textfuzz.rs" | "t.rs" | "highlight.rs" | "langnames.rs" | "coretext_table.rs")
                 || ["bin/", "model3d/", "testdata/"].iter().any(|d| rel.starts_with(d))
             {
                 continue;
