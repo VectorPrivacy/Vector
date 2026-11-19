@@ -100,10 +100,18 @@ fn taps(len: u32, new_len: u32, kernel: fn(f32) -> f32, support: f32) -> std::rc
 fn row_out<'a, const C: usize>(column: &mut [f32], lines: impl Iterator<Item = (&'a [u8], f32)>, across: &Taps, out: &mut [u8]) {
     column.fill(0.0);
     for (line, wt) in lines {
-        for (acc, &v) in column.iter_mut().zip(line) {
-            *acc += v as f32 * wt;
-        }
+        fold(column, line, wt);
     }
+    across_row::<C>(column, across, out);
+}
+
+fn fold(column: &mut [f32], line: &[u8], wt: f32) {
+    for (acc, &v) in column.iter_mut().zip(line) {
+        *acc += v as f32 * wt;
+    }
+}
+
+fn across_row<const C: usize>(column: &[f32], across: &Taps, out: &mut [u8]) {
     for ((left, ws), px) in across.iter().zip(out.chunks_exact_mut(C)) {
         let mut t = [0f32; C];
         for (i, &wt) in ws.iter().enumerate() {
@@ -113,9 +121,17 @@ fn row_out<'a, const C: usize>(column: &mut [f32], lines: impl Iterator<Item = (
             }
         }
         for c in 0..C {
-            px[c] = t[c].clamp(0.0, 255.0).round() as u8;
+            px[c] = to_u8(t[c]);
         }
     }
+}
+
+/// `v.clamp(0.0, 255.0).round() as u8` without `round`, a library call on SSE2.
+#[inline(always)]
+fn to_u8(v: f32) -> u8 {
+    let v = v.clamp(0.0, 255.0);
+    let whole = v as u32;
+    (whole + u32::from(v - whole as f32 >= 0.5)) as u8
 }
 
 fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(f32) -> f32, support: f32) -> Vec<u8> {
@@ -138,15 +154,17 @@ fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(
 }
 
 /// [`resample`] fed its source a row at a time, top to bottom, so a decoder scales as it goes:
-/// only the rows one output row reaches are held. Bit-identical to [`resample`].
+/// each row folds straight into the output rows it reaches, and nothing else of the source is
+/// held. Bit-identical to [`resample`]: an output row still takes its source rows in order.
 pub struct Rows<const C: usize> {
-    w: usize,
+    n: usize,
     down: std::rc::Rc<Taps>,
     across: std::rc::Rc<Taps>,
-    ring: Vec<u8>,
-    held: usize,
+    /// A float row per output row still taking source rows, by output row modulo `open`.
+    acc: Vec<f32>,
+    open: usize,
+    started: usize,
     next: usize,
-    column: Vec<f32>,
     out: Vec<u8>,
 }
 
@@ -159,31 +177,38 @@ impl<const C: usize> Rows<C> {
         }
         let down = taps(h, nh, kernel, support);
         let across = taps(w, nw, kernel, support);
-        let held = down.spans.iter().map(|s| s.1).max().unwrap_or(1);
-        let w = w as usize;
-        Some(Self {
-            w,
-            ring: vec![0; held * w * C],
-            held,
-            next: 0,
-            column: vec![0.; w * C],
-            out: vec![0; nw as usize * C],
-            down,
-            across,
-        })
+        // The most output rows one source row reaches.
+        let (mut open, mut first) = (1, 0);
+        for (r, &(top, _, _)) in down.spans.iter().enumerate() {
+            while down.spans[first].0 + down.spans[first].1 <= top {
+                first += 1;
+            }
+            open = open.max(r + 1 - first);
+        }
+        let n = w as usize * C;
+        Some(Self { n, acc: vec![0.; open * n], open, started: 0, next: 0, out: vec![0; nw as usize * C], down, across })
     }
 
     /// Source row `y`, which follows row `y - 1`: each output row it completes goes to `emit`.
     pub fn push(&mut self, y: usize, row: &[u8], mut emit: impl FnMut(usize, &[u8])) {
-        let n = self.w * C;
-        self.ring[(y % self.held) * n..][..n].copy_from_slice(&row[..n]);
-        while let Some(&(top, len, at)) = self.down.spans.get(self.next) {
+        let n = self.n;
+        while self.down.spans.get(self.started).is_some_and(|s| s.0 <= y) {
+            self.acc[(self.started % self.open) * n..][..n].fill(0.0);
+            self.started += 1;
+        }
+        let row = &row[..n];
+        for r in self.next..self.started {
+            let (top, len, at) = self.down.spans[r];
+            if y < top + len {
+                fold(&mut self.acc[(r % self.open) * n..][..n], row, self.down.weights[at + y - top]);
+            }
+        }
+        while self.next < self.started {
+            let (top, len, _) = self.down.spans[self.next];
             if top + len > y + 1 {
                 break;
             }
-            let (ring, held) = (&self.ring, self.held);
-            let lines = self.down.weights[at..at + len].iter().enumerate().map(|(j, &wt)| (&ring[((top + j) % held) * n..][..n], wt));
-            row_out::<C>(&mut self.column, lines, &self.across, &mut self.out);
+            across_row::<C>(&self.acc[(self.next % self.open) * n..][..n], &self.across, &mut self.out);
             emit(self.next, &self.out);
             self.next += 1;
         }
