@@ -379,7 +379,7 @@ impl Nexus {
             opened: Instant::now(),
             list_top: None,
             root,
-            now_ms: chrono::Utc::now().timestamp_millis(),
+            now_ms: vector_core::clock::now_ms() as i64,
             spot_armed: None,
             picker: None,
             perms: None,

@@ -3586,6 +3586,13 @@ impl VectorApp {
                     self.wallpaper.label = if pct > 0. { t::wallpaper_uploading_percent(pct).into() } else { t::wallpaper_uploading().into() };
                 }
             }
+            "message_delete_meta_changed" => {
+                let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+                self.delete_meta.borrow_mut().remove(id);
+                if self.hovered.as_deref() == Some(id) {
+                    self.want_delete_meta(id, cx);
+                }
+            }
             "message_removed" => {
                 let id = payload
                     .get("id")
@@ -8654,7 +8661,7 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
         let content = crate::texttime::localize(
             &m.content,
             &m.text_spans,
-            chrono::Local::now().timestamp() as f64,
+            (store.now_ms() / 1000) as f64,
         );
         let content = store.resolve_mentions(&content, store.community_of(&chat.id).map(|c| c.community_id.as_str()));
         let mut atoms = crate::preview::atoms(&crate::embeds::for_preview(&content), usize::MAX, &look);
@@ -9125,6 +9132,7 @@ impl VectorApp {
             Some(c) => (c.wallpaper_blur, c.wallpaper_dim),
             None => (DEFAULT_BLUR, recommended),
         };
+        // device-clock: a cache key, never compared with a time.
         let ts = chrono::Utc::now().timestamp_millis() as u64;
         self.wallpaper.preview = Some(Preview { chat, path, blur, dim, ts });
         self.wallpaper.busy = false;
@@ -11721,7 +11729,7 @@ impl VectorApp {
         }
         let hint = (me.muted && me.mute_until > 0).then(|| {
             let at = chrono::Local.timestamp_millis_opt(me.mute_until).single();
-            let today = chrono::Local::now().date_naive();
+            let today = crate::data::local(vector_core::clock::now_ms()).date_naive();
             at.map(|t| {
                 use crate::dates::{Clock, DateStyle};
                 let time = if t.date_naive() == today {
@@ -13270,7 +13278,7 @@ impl VectorApp {
                     let data = serde_json::json!({
                         "client": std::env::consts::OS,
                         "version": env!("CARGO_PKG_VERSION"),
-                        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        "at": chrono::DateTime::from_timestamp_millis(vector_core::clock::now_ms() as i64).unwrap_or_default().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                         "community": id.chars().take(12).collect::<String>(),
                         "control": side(control),
                         "epoch": side(epoch),
@@ -14311,6 +14319,7 @@ impl VectorApp {
         chrono::Local
             .timestamp_millis_opt(self.store.borrow().now_ms() as i64)
             .single()
+            // device-clock: only for a time chrono can't hold.
             .unwrap_or_else(chrono::Local::now)
     }
 

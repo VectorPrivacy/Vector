@@ -127,7 +127,7 @@ impl Tip {
         match self {
             Tip::Text(t) => t.to_string(),
             Tip::Dissolve(at) => {
-                let left = at - chrono::Utc::now().timestamp();
+                let left = at - vector_core::clock::now_secs() as i64;
                 if left > 0 {
                     crate::t::msg_dissolves_in(crate::timeline::countdown(left as u64)).to_string()
                 } else {

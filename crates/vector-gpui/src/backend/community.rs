@@ -197,10 +197,7 @@ pub async fn send(channel_id: String, content: String, replied_to: String, bot: 
             .channel(&ch)
             .ok_or_else(|| crate::t::community_channel_not_found().to_string())?;
         let (_, epoch) = community.channel_secret(channel);
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let ms = vector_core::clock::now_ms();
 
         let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
         let emoji_pairs: Vec<(&str, &str)> = emoji_tags

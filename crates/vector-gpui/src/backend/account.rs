@@ -222,11 +222,7 @@ fn metadata(npub: &str) -> Account {
 }
 
 fn touch_last_active() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let _ = db::set_sql_setting("last_active".into(), now.to_string());
+    let _ = db::set_sql_setting("last_active".into(), vector_core::clock::now_secs().to_string());
 }
 
 pub(super) fn install_client() {

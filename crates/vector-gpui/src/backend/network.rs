@@ -61,10 +61,7 @@ fn log_key(url: &str) -> String {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    vector_core::clock::now_secs()
 }
 
 fn add_relay_log(url: &str, level: &str, message: &str) {

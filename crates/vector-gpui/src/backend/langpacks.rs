@@ -48,7 +48,7 @@ struct Cached {
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    vector_core::clock::now_secs()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

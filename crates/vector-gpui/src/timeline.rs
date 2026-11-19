@@ -408,7 +408,7 @@ pub fn message_row(ctx: &Ctx, index: usize, first: bool, run: u32, shown: u32, g
                             .opacity(0.4)
                             .hover(|s| s.opacity(1.))
                             .tooltip(move |w, cx| {
-                                let left = at as i64 - chrono::Utc::now().timestamp();
+                                let left = at as i64 - vector_core::clock::now_secs() as i64;
                                 let text = if left > 0 {
                                     crate::t::msg_dissolves_in(countdown(left as u64))
                                 } else {

@@ -30,6 +30,8 @@ mod edithistory;
 mod textdiff;
 #[cfg(test)]
 mod textfuzz;
+#[cfg(test)]
+mod tree_audit;
 mod payaddr;
 mod reactpop;
 mod rekey;

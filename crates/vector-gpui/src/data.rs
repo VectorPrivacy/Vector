@@ -787,7 +787,7 @@ impl Store {
 
     pub fn now_ms(&self) -> u64 {
         self.frozen_now_ms
-            .unwrap_or_else(|| Local::now().timestamp_millis() as u64)
+            .unwrap_or_else(vector_core::clock::now_ms)
     }
 
     pub fn chat(&self, id: &str) -> Option<&SerializableChat> {
@@ -1145,6 +1145,7 @@ pub fn local(ms: u64) -> DateTime<Local> {
     Local
         .timestamp_millis_opt(ms as i64)
         .single()
+        // device-clock: only for a time chrono can't hold.
         .unwrap_or_else(Local::now)
 }
 

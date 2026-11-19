@@ -117,7 +117,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                     .audio
                     .tags_read(&att.id)
                     .map_or(att.name.is_empty(), |music| crate::transcript::supported(att, true, music));
-                if transcribable && !m.mine && m.at + 60_000 > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64) {
+                if transcribable && !m.mine && m.at + 60_000 > vector_core::clock::now_ms() {
                     media.audio.want_transcript(&att.id, &input);
                 }
                 let duration = media.audio.duration(&att.id);

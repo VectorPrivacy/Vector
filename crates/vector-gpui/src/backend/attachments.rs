@@ -294,7 +294,7 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
     let in_memory = ram.admits(bytes.len() as u64);
     let keep = !in_memory || vector_core::media::keep_media();
     let bytes = if keep {
-        let kept = tokio::task::spawn_blocking(move || {
+        let kept = vector_core::db::blocking_bound(move || {
             let r = vector_core::media::store::keep_sealed(
                 &bytes,
                 hash32,
@@ -307,7 +307,7 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
         match kept {
             Ok((bytes, Ok(()))) => bytes,
             Ok((_, Err(e))) => return fail(&chat, &msg_id, &attachment_id, &e),
-            Err(e) => return fail(&chat, &msg_id, &attachment_id, &e.to_string()),
+            Err(e) => return fail(&chat, &msg_id, &attachment_id, &e),
         }
     } else {
         bytes

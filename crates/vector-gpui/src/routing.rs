@@ -1628,7 +1628,7 @@ pub fn start_stuck(v: &Value) -> bool {
     }
     let driven = if kind == "tor" { v.get("detail").map(|d| s(d, "status")) == Some("bootstrapping") } else { !steps(v).is_empty() };
     let since = v.get("since").and_then(Value::as_u64).unwrap_or(0);
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = vector_core::clock::now_secs();
     !driven || now.saturating_sub(since) > if kind == "tor" { 120 } else { 180 }
 }
 
