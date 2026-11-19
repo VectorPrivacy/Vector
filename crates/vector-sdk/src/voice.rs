@@ -1,8 +1,9 @@
 //! Voice Channels: hear what members say and speak into the call. A bot may be in as many
 //! calls at once as it likes, each its own [`VoiceCall`].
 //!
-//! Audio is 48 kHz mono PCM (`i16`). What you hear arrives one 20 ms frame per speaker at a
-//! time; what you say is queued and sent in real time, so a long clip plays at its own pace.
+//! Audio is 48 kHz PCM (`i16`), mono unless a name says stereo. What you hear arrives one 20 ms
+//! mono frame per speaker at a time; what you say, mono or stereo, is queued and sent in real
+//! time, so a long clip plays at its own pace.
 //!
 //! ```no_run
 //! # async fn f(bot: vector_sdk::VectorBot, channel_id: &str) -> vector_sdk::Result<()> {
@@ -25,8 +26,9 @@ use crate::{Channel, ChannelKind, Result, VectorError};
 pub use vector_core::calls::voice::{InCall, VoicePeer, VoiceState};
 /// Samples per second of everything heard and said.
 pub const SAMPLE_RATE: u32 = vector_media::ENGINE_RATE;
-/// Samples in one frame: 20 ms.
+/// Samples in one 20 ms frame, per channel: stereo has twice as many, interleaved.
 pub const FRAME: usize = vector_media::FRAME;
+pub use vector_media::{DEFAULT_KBPS, MAX_KBPS, MIN_KBPS};
 
 /// One 20 ms frame someone said.
 #[derive(Debug, Clone)]
@@ -144,6 +146,31 @@ impl VoiceCall {
     /// first.
     pub async fn say_and_wait(&self, pcm: &[i16]) -> bool {
         self.engine.say(pcm) && self.engine.finished().await
+    }
+
+    /// [`say`](Self::say) for stereo: samples interleaved left then right, heard in stereo. A
+    /// stream can be queued in chunks of any length, even one ending between a left and its right.
+    pub fn say_stereo(&self, interleaved: &[i16]) -> bool {
+        self.engine.say_stereo(interleaved)
+    }
+
+    /// [`say_stereo`](Self::say_stereo), then wait until all of it has been said: false when
+    /// the call ended first.
+    pub async fn say_stereo_and_wait(&self, interleaved: &[i16]) -> bool {
+        self.engine.say_stereo(interleaved) && self.engine.finished().await
+    }
+
+    /// Set the Opus bitrate of what this call says, in kbit/s, from the next frame on: mono and
+    /// stereo alike, [`DEFAULT_KBPS`] until set. Clamped to [`MIN_KBPS`]..=[`MAX_KBPS`];
+    /// returns the rate set. Every listener gets their own copy, so upload is this times the
+    /// people in the call. It is this call's: one joined after a move starts at the default.
+    pub fn set_bitrate(&self, kbps: u32) -> u32 {
+        self.engine.set_bitrate(kbps)
+    }
+
+    /// The Opus bitrate of what this call says, in kbit/s.
+    pub fn bitrate(&self) -> u32 {
+        self.engine.bitrate()
     }
 
     /// Wait until everything queued has been said: false when the call ended first.
@@ -431,11 +458,21 @@ pub fn level(pcm: &[i16]) -> f32 {
 /// Read any audio file `ffmpeg` can, as 48 kHz mono PCM. Needs `ffmpeg` on the PATH.
 /// Only local files: a URL would reach the network outside the bot's transport.
 pub async fn decode_with_ffmpeg(path: impl AsRef<std::path::Path>) -> Result<Vec<i16>> {
+    ffmpeg_pcm(path.as_ref(), "1").await
+}
+
+/// [`decode_with_ffmpeg`] as 48 kHz stereo, interleaved, for [`VoiceCall::say_stereo`]. A mono
+/// file comes out the same on both sides.
+pub async fn decode_stereo_with_ffmpeg(path: impl AsRef<std::path::Path>) -> Result<Vec<i16>> {
+    ffmpeg_pcm(path.as_ref(), "2").await
+}
+
+async fn ffmpeg_pcm(path: &std::path::Path, channels: &str) -> Result<Vec<i16>> {
     let out = tokio::process::Command::new("ffmpeg")
         .kill_on_drop(true)
         .args(["-nostdin", "-v", "error", "-protocol_whitelist", "file", "-i"])
-        .arg(path.as_ref())
-        .args(["-f", "s16le", "-ac", "1", "-ar", "48000", "-"])
+        .arg(path)
+        .args(["-f", "s16le", "-ac", channels, "-ar", "48000", "-"])
         .output()
         .await
         .map_err(|e| VectorError::Other(format!("couldn't run ffmpeg: {e}")))?;
