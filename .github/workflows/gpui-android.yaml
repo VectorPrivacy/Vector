@@ -98,6 +98,19 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
+
       - name: Compile
         run: ./gradlew --no-daemon :app:compileDebugKotlin :app:compileReleaseKotlin
 
@@ -123,6 +136,19 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
+
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -164,6 +190,19 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
+
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
 
       - uses: Swatinem/rust-cache@v2
         with:
