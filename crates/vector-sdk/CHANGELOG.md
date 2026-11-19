@@ -3,6 +3,51 @@
 All notable changes to `vector-sdk` are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## 0.14.0 (2026-11-19)
+
+Requires `vector-core` 0.13.0, and with `voice` `vector-media` 0.3.0.
+
+### Added
+
+- **Stereo in voice Channels.** `VoiceCall::say_stereo(interleaved)` and `say_stereo_and_wait`
+  send 48 kHz stereo, samples interleaved left then right; `voice::decode_stereo_with_ffmpeg`
+  reads a file that way. A frame whose two sides match still goes out mono. Vector after
+  v0.5.2-2 plays it in stereo; older clients hear it downmixed. The `voice_radio_bot` example
+  plays in stereo.
+- **A bot chooses its voice bitrate.** `VoiceCall::set_bitrate(kbps)` sets the Opus rate from
+  the next frame, mono and stereo alike, clamped to `voice::MIN_KBPS`..=`voice::MAX_KBPS` (8 to
+  320); `bitrate()` reads it. Every listener gets their own copy, so upload is the rate times
+  the people in the call. The radio example takes `RADIO_KBPS`.
+- `Community::system_channel` / `set_system_channel`: where Join and Leave lines go, or off.
+  `landing_channel` / `set_landing_channel`: the Channel new members open first.
+- `Channel::duplicate(name)`: a new Channel with the same privacy, topic, view, Category and
+  rules, without the messages.
+- `Channel::synced_to()`: the Category whose rules a synced Channel follows.
+
+### Changed
+
+- Voice is sent at 64 kbit/s by default, up from 48.
+- `Channel::set_overwrite`, `clear_overwrite` and `set_read_only` on a Channel synced to its
+  Category return an error naming the Category. They succeeded and changed nothing.
+- `BotEvent::MemberJoin` and `MemberLeave` carry the Channel the line goes to: the System
+  Messages channel, or the default one while those are off.
+- Joining a Community takes well under a second.
+- `vector_core`: `InboundEventHandler::on_community_presence` takes one `&Presence`, and
+  `community::v2::service::discard_unconfirmed` says whether it removed anything.
+
+## 0.13.0 (2026-11-17)
+
+Requires `vector-core` 0.12.0, and with `voice` `vector-media` 0.2.0.
+
+### Changed
+
+- A bot handing out Roles keys its members in about a second: a private Channel's key in about
+  a second and its history in under two. A member who leaves and returns is served again.
+- A listening bot no longer misses posts made while its live subscription is swapped, as every
+  grant that rotates a Channel does.
+- Locked Channels, Add Reactions enforced, a Channel's history readable by every member whenever
+  they joined, and invite links shared across an account's devices.
+
 ## 0.12.0 (2026-11-11)
 
 Requires `vector-core` 0.11.0, and with `voice` the new `vector-media` 0.1.0. `vector-core` 0.11

@@ -1,6 +1,6 @@
 [package]
 name = "vector_sdk"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "Ergonomic Rust SDK for building Vector bots and clients on top of vector-core."
 license = "MIT"
@@ -21,8 +21,8 @@ features = ["voice", "whisper", "xdc", "i2p"]
 # (vector-core's `tor` feature is off by default) so the SDK's dep tree is light.
 # `version` is set so the crate is publishable once vector-core ships to crates.io;
 # until then the `path` wins for local builds.
-vector-core = { path = "../vector-core", version = "0.12.0", default-features = false }
-vector-media = { path = "../vector-media", version = "0.2.0", optional = true }
+vector-core = { path = "../vector-core", version = "0.13.0", default-features = false }
+vector-media = { path = "../vector-media", version = "0.3.0", optional = true }
 # Caret, as vector-core declares it: one nostr-sdk 0.45 in the tree.
 nostr-sdk = "0.45.6"
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "time", "signal", "process"] }
