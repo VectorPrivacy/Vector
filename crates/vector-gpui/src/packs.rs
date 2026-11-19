@@ -429,11 +429,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                                 .text_size(px(14.))
                                 .line_height(px(19.6))
                                 .text_color(c(0xffffff))
-                                .child(if pack.title.is_empty() {
-                                    pack.identifier.clone()
-                                } else {
-                                    pack.title.clone()
-                                }),
+                                .child(crate::kit::one_line(if pack.title.is_empty() { &pack.identifier } else { &pack.title }).into_owned()),
                         )
                         .into_any_element(),
                     div()

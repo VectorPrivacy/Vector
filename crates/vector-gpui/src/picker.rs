@@ -172,11 +172,7 @@ pub fn packs_from_core(
             id: p.id.clone(),
             identifier: p.identifier.clone(),
             logo_url: (!p.image_url.is_empty()).then(|| p.image_url.clone()),
-            title: if p.title.is_empty() {
-                p.identifier.clone()
-            } else {
-                p.title.clone()
-            },
+            title: crate::kit::one_line(if p.title.is_empty() { &p.identifier } else { &p.title }).into_owned(),
             logo: (!p.image_url.is_empty()).then(|| src(&p.image_url)),
             own: p.is_own,
             status: p.status,

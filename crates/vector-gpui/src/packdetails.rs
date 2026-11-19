@@ -98,7 +98,7 @@ pub fn view(
             let title = [&pack.title, &pack.identifier]
                 .into_iter()
                 .find(|t| !t.is_empty())
-                .cloned()
+                .map(|t| crate::kit::one_line(t).into_owned())
                 .unwrap_or_else(|| crate::t::packs_untitled().into());
             let letter = title
                 .trim()
