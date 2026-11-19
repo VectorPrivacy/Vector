@@ -287,9 +287,6 @@ try:
         else:
             check("memory", mb <= base[key] * MEM_SLACK, f"{mb} MB, baseline {base[key]} MB")
 finally:
-    if args.lang:
-        # The choice persists like the user's own: put the default back.
-        dev("lang:en-GB", wait=False)
     app.terminate()
     try:
         app.wait(5)
