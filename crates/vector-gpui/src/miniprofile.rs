@@ -323,12 +323,11 @@ pub fn render(m: &Mini, store: &Store, window: Size<Pixels>, anchors: &crate::ki
                 });
             let label = div()
                 .min_w_0()
-                .truncate()
                 .when(!role.channel.is_empty() && role.channel == role.name, |d| {
-                    d.child(div().mr(px(1.)).text_color(white_a(0.4)).child("#"))
+                    d.child(div().flex_none().mr(px(1.)).text_color(white_a(0.4)).child("#"))
                 })
                 .flex()
-                .child(role.name.clone());
+                .child(div().min_w_0().truncate().child(role.name.clone()));
             let row = pill(div().flex().items_center().gap(px(5.)).min_w_0().child(dot).child(label)).group(group);
             list = list.child(if m.busy.as_deref() == Some(role.id.as_str()) {
                 // `miniProfileRolePulse`: 0.45 to 0.25 and back, a second each way.
