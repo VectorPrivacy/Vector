@@ -263,7 +263,6 @@ jobs:
         if: startsWith(matrix.platform, 'macos')
         run: |
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
-          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       # Whisper transcribes on Vulkan on x64 Windows, as the desktop client does.
       - name: Cache Vulkan (Windows x64)

@@ -10,6 +10,10 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn main() {
+    // ScreenCaptureKit arrives in macOS 12.3: weakly linked, 12.0-12.2 open without native screen audio.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    }
     // libjxl, statically linked, for sending JPEG XL. A docs-only check links nothing.
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     if std::env::var_os("DOCS_RS").is_none() {

@@ -11,6 +11,7 @@ out="$2"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tauri="$here/../../src-tauri"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$here/Cargo.toml" | head -1)
+minos=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET = "\(.*\)"/\1/p' "$here/.cargo/config.toml")
 if [ "${VECTOR_RELEASE:-}" = 1 ]; then
   name="Vector" exe="Vector" prefix="Vector"
 else
@@ -38,7 +39,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>$minos</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.social-networking</string>
   <key>CFBundleURLTypes</key>
