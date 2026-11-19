@@ -101,7 +101,7 @@ impl VectorApp {
             for h in history {
                 let icon = crate::miniapp::info(h.src_url.clone()).await.ok().and_then(|i| i.icon);
                 apps.push(GridApp {
-                    name: h.name,
+                    name: crate::kit::one_line(&h.name).into_owned(),
                     src: h.src_url,
                     icon,
                     categories: h.categories,
