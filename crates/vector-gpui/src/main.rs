@@ -30,6 +30,8 @@ mod pickers;
 mod edithistory;
 mod textdiff;
 #[cfg(test)]
+mod atlas_border;
+#[cfg(test)]
 mod textfuzz;
 #[cfg(test)]
 mod tree_audit;

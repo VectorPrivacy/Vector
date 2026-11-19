@@ -1834,6 +1834,14 @@ pub trait PlatformAtlas {
         key: AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
+    /// As [`Self::get_or_insert_with`], with a one-texel border around the pixels repeating
+    /// their own edges, so a linear sampler at the tile's edge never reads a neighbour. The
+    /// tile returned covers the pixels alone.
+    fn get_or_insert_padded_with<'a>(
+        &self,
+        key: AtlasKey,
+        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
@@ -1851,7 +1859,93 @@ pub trait AtlasBackend {
         bytes: &[u8],
     ) -> Result<AtlasTile>;
 
+    /// Inserts `size` texels of `bytes` inside a one-texel border repeating the nearest edge
+    /// texel, returning the whole padded tile.
+    fn insert_padded(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<AtlasTile> {
+        let mut padded = Vec::new();
+        edge_padded_into(&mut padded, bytes, size, texel_bytes(kind));
+        self.insert(kind, padded_size(size), &padded)
+    }
+
     fn remove(&mut self, tile: AtlasTile);
+}
+
+/// Bytes per texel in a texture of `kind`.
+#[doc(hidden)]
+pub fn texel_bytes(kind: AtlasTextureKind) -> usize {
+    match kind {
+        AtlasTextureKind::Monochrome => 1,
+        AtlasTextureKind::Polychrome | AtlasTextureKind::Subpixel => 4,
+    }
+}
+
+/// `size` with its one-texel border.
+#[doc(hidden)]
+pub fn padded_size(size: Size<DevicePixels>) -> Size<DevicePixels> {
+    Size {
+        width: DevicePixels(size.width.0 + 2),
+        height: DevicePixels(size.height.0 + 2),
+    }
+}
+
+/// Appends `size` texels of `bytes` to `out` inside a one-texel border repeating the nearest
+/// edge texel.
+#[doc(hidden)]
+pub fn edge_padded_into(out: &mut Vec<u8>, bytes: &[u8], size: Size<DevicePixels>, bpp: usize) {
+    let (w, h) = (size.width.0 as usize, size.height.0 as usize);
+    let row = w * bpp;
+    out.reserve_exact((w + 2) * (h + 2) * bpp);
+    for y in 0..h + 2 {
+        let src = &bytes[y.saturating_sub(1).min(h - 1) * row..][..row];
+        out.extend_from_slice(&src[..bpp]);
+        out.extend_from_slice(src);
+        out.extend_from_slice(&src[row - bpp..]);
+    }
+}
+
+/// Up to this many padded bytes, a tile is padded in scratch and written once; past it the
+/// copy costs more than the four extra writes.
+#[doc(hidden)]
+pub const PADDED_IN_SCRATCH: usize = 64 << 10;
+
+/// Writes `size` texels of `bytes` inside a one-texel border repeating the nearest edge texel,
+/// through `write(offset in the padded tile, size, tightly packed rows)`. A large tile goes as
+/// five writes straight from `bytes`, gathering only its two border columns into `scratch`, so
+/// no write reads past the end of `bytes`.
+#[doc(hidden)]
+pub fn write_edge_padded(
+    bytes: &[u8],
+    size: Size<DevicePixels>,
+    bpp: usize,
+    scratch: &mut Vec<u8>,
+    mut write: impl FnMut(Point<DevicePixels>, Size<DevicePixels>, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let (w, h) = (size.width.0 as usize, size.height.0 as usize);
+    let row = w * bpp;
+    let at = |x: usize, y: usize| Point { x: DevicePixels(x as i32), y: DevicePixels(y as i32) };
+    let span = |w: usize, h: usize| Size { width: DevicePixels(w as i32), height: DevicePixels(h as i32) };
+    scratch.clear();
+    if (w + 2) * (h + 2) * bpp <= PADDED_IN_SCRATCH {
+        edge_padded_into(scratch, bytes, size, bpp);
+        return write(at(0, 0), padded_size(size), scratch);
+    }
+    write(at(1, 1), size, &bytes[..h * row])?;
+    write(at(1, 0), span(w, 1), &bytes[..row])?;
+    write(at(1, h + 1), span(w, 1), &bytes[(h - 1) * row..h * row])?;
+    for (x, from) in [(0, 0), (w + 1, row - bpp)] {
+        scratch.clear();
+        scratch.reserve_exact((h + 2) * bpp);
+        for y in 0..h + 2 {
+            scratch.extend_from_slice(&bytes[y.saturating_sub(1).min(h - 1) * row + from..][..bpp]);
+        }
+        write(at(x, 0), span(1, h + 2), scratch)?;
+    }
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -1906,6 +2000,37 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
         }
     }
 
+    /// See [`PlatformAtlas::get_or_insert_padded_with`]. Pixels too few for their size go in
+    /// unpadded, for the backend to refuse as it would any other.
+    pub fn get_or_insert_padded_with<'a>(
+        &mut self,
+        key: AtlasKey,
+        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> Result<Option<AtlasTile>> {
+        match self.tiles_by_key.entry(key) {
+            Entry::Occupied(entry) => Ok(Some(*entry.get())),
+            Entry::Vacant(entry) => {
+                profiling::scope!("new tile");
+                let Some((size, bytes)) = build()? else {
+                    return Ok(None);
+                };
+                let kind = entry.key().texture_kind();
+                let (w, h) = (size.width.0.max(0) as usize, size.height.0.max(0) as usize);
+                let tile = if w > 0 && h > 0 && bytes.len() >= w * h * texel_bytes(kind) {
+                    let mut tile = self.backend.insert_padded(kind, size, &bytes)?;
+                    tile.bounds.origin.x.0 += 1;
+                    tile.bounds.origin.y.0 += 1;
+                    tile.bounds.size = size;
+                    tile
+                } else {
+                    self.backend.insert(kind, size, &bytes)?
+                };
+                entry.insert(tile);
+                Ok(Some(tile))
+            }
+        }
+    }
+
     pub fn remove(&mut self, key: &AtlasKey) {
         if let Some(tile) = self.tiles_by_key.remove(key) {
             self.backend.remove(tile);
@@ -1950,6 +2075,15 @@ impl AtlasBackend for HeadlessAtlasBackend {
         })
     }
 
+    fn insert_padded(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<AtlasTile> {
+        self.insert(kind, padded_size(size), bytes)
+    }
+
     fn remove(&mut self, _tile: AtlasTile) {}
 }
 
@@ -1960,6 +2094,14 @@ impl PlatformAtlas for HeadlessAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
         self.0.lock().get_or_insert_with(key, build)
+    }
+
+    fn get_or_insert_padded_with<'a>(
+        &self,
+        key: AtlasKey,
+        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> Result<Option<AtlasTile>> {
+        self.0.lock().get_or_insert_padded_with(key, build)
     }
 
     fn remove(&self, key: &AtlasKey) {

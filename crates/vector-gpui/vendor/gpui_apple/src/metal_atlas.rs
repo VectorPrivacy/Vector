@@ -2,7 +2,8 @@ use anyhow::{Context as _, Result, ensure};
 use etagere::BucketedAtlasAllocator;
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size, padded_size, texel_bytes,
+    write_edge_padded,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
@@ -24,6 +25,7 @@ impl MetalAtlas {
             supports_shared_storage,
             monochrome_textures: AtlasTextureList::default(),
             polychrome_textures: AtlasTextureList::default(),
+            scratch: Vec::new(),
         })))
     }
 
@@ -44,6 +46,8 @@ struct MetalAtlasTextures {
     supports_shared_storage: bool,
     monochrome_textures: AtlasTextureList<MetalAtlasTexture>,
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
+    /// A small tile padded whole, or a large one's border columns.
+    scratch: Vec<u8>,
 }
 
 impl PlatformAtlas for MetalAtlas {
@@ -53,6 +57,14 @@ impl PlatformAtlas for MetalAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
         self.0.lock().get_or_insert_with(key, build)
+    }
+
+    fn get_or_insert_padded_with<'a>(
+        &self,
+        key: AtlasKey,
+        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> Result<Option<AtlasTile>> {
+        self.0.lock().get_or_insert_padded_with(key, build)
     }
 
     fn remove(&self, key: &AtlasKey) {
@@ -74,6 +86,29 @@ impl AtlasBackend for MetalAtlasTextures {
             .context("looking up allocated atlas texture")?;
         texture.upload(tile.bounds.origin, &upload)?;
         Ok(tile)
+    }
+
+    fn insert_padded(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<AtlasTile> {
+        AtlasUpload::new(kind, size, bytes)?;
+        let tile = self.allocate(padded_size(size), kind)?;
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let written = match self.texture(tile.texture_id) {
+            Some(texture) => write_edge_padded(bytes, size, texel_bytes(kind), &mut scratch, |at, part, src| {
+                let origin = Point {
+                    x: tile.bounds.origin.x + at.x,
+                    y: tile.bounds.origin.y + at.y,
+                };
+                texture.upload(origin, &AtlasUpload::new(kind, part, src)?)
+            }),
+            None => Err(anyhow::anyhow!("looking up allocated atlas texture")),
+        };
+        self.scratch = scratch;
+        written.map(|()| tile)
     }
 
     fn remove(&mut self, tile: AtlasTile) {

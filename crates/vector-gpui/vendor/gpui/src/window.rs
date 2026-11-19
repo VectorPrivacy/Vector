@@ -11205,44 +11205,13 @@ mod inspector_tests {
     }
 }
 
-/// An image frame's tile, inserted with a one-texel border copied from its own edges: the
-/// linear sampler at the edge of a scaled sprite then reads the image, never a neighbouring
-/// tile or the leftovers of a freed one. The tile returned covers the image alone.
+/// An image frame's tile, bordered by its own edges: the linear sampler at the edge of a scaled
+/// sprite then reads the image, never a neighbouring tile or the leftovers of a freed one.
 fn image_tile(atlas: &dyn PlatformAtlas, data: &RenderImage, ix: usize) -> Result<Option<AtlasTile>> {
     let params = RenderImageParams { image_id: data.id, frame_index: ix };
-    let tile = atlas.get_or_insert_with(params.into(), &mut || {
-        let Some(bytes) = data.as_bytes(ix) else { return Ok(None) };
-        let size = data.size(ix);
-        let (w, h) = (size.width.0.max(0) as usize, size.height.0.max(0) as usize);
-        if w == 0 || h == 0 || bytes.len() < w * h * 4 {
-            return Ok(Some((size, Cow::Borrowed(bytes))));
-        }
-        Ok(Some((Size { width: DevicePixels(w as i32 + 2), height: DevicePixels(h as i32 + 2) }, Cow::Owned(edge_padded(bytes, w, h)))))
-    })?;
-    Ok(tile.map(|mut t| {
-        if t.bounds.size.width.0 > 2 && t.bounds.size.height.0 > 2 {
-            t.bounds.origin.x.0 += 1;
-            t.bounds.origin.y.0 += 1;
-            t.bounds.size.width.0 -= 2;
-            t.bounds.size.height.0 -= 2;
-        }
-        t
-    }))
-}
-
-/// `w`×`h` four-byte pixels with a one-pixel border repeating the nearest edge pixel.
-fn edge_padded(bytes: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let row = (w + 2) * 4;
-    let mut out = vec![0u8; row * (h + 2)];
-    for y in 0..h + 2 {
-        let sy = y.saturating_sub(1).min(h - 1);
-        let src = &bytes[sy * w * 4..(sy + 1) * w * 4];
-        let dst = &mut out[y * row..(y + 1) * row];
-        dst[4..4 + w * 4].copy_from_slice(src);
-        dst[..4].copy_from_slice(&src[..4]);
-        dst[row - 4..].copy_from_slice(&src[(w - 1) * 4..]);
-    }
-    out
+    atlas.get_or_insert_padded_with(params.into(), &mut || {
+        Ok(data.as_bytes(ix).map(|bytes| (data.size(ix), Cow::Borrowed(bytes))))
+    })
 }
 
 /// The part of `tile` that shows when an image laid out at `image_bounds` is cut to `visible_bounds`.

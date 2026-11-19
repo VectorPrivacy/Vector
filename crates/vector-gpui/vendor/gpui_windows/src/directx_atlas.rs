@@ -10,7 +10,8 @@ use windows::Win32::Graphics::{
 
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size, padded_size, texel_bytes,
+    write_edge_padded,
 };
 
 pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
@@ -21,6 +22,8 @@ struct DirectXAtlasTextures {
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
+    /// A small tile padded whole, or a large one's border columns.
+    scratch: Vec<u8>,
 }
 
 struct DirectXAtlasTexture {
@@ -40,6 +43,7 @@ impl DirectXAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
+            scratch: Vec::new(),
         })))
     }
 
@@ -83,6 +87,16 @@ impl PlatformAtlas for DirectXAtlas {
         self.0.lock().get_or_insert_with(key, build)
     }
 
+    fn get_or_insert_padded_with<'a>(
+        &self,
+        key: AtlasKey,
+        build: &mut dyn FnMut() -> anyhow::Result<
+            Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
+        >,
+    ) -> anyhow::Result<Option<AtlasTile>> {
+        self.0.lock().get_or_insert_padded_with(key, build)
+    }
+
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
@@ -103,6 +117,31 @@ impl AtlasBackend for DirectXAtlasTextures {
             .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
         texture.upload(&self.device_context, tile.bounds, bytes);
         Ok(tile)
+    }
+
+    fn insert_padded(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> anyhow::Result<AtlasTile> {
+        let tile = self
+            .allocate(padded_size(size), kind)
+            .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let written = match self.texture(tile.texture_id) {
+            Some(texture) => write_edge_padded(bytes, size, texel_bytes(kind), &mut scratch, |at, part, src| {
+                let origin = Point {
+                    x: tile.bounds.origin.x + at.x,
+                    y: tile.bounds.origin.y + at.y,
+                };
+                texture.upload(&self.device_context, Bounds { origin, size: part }, src);
+                Ok(())
+            }),
+            None => Err(anyhow::anyhow!("allocated tile refers to a missing texture")),
+        };
+        self.scratch = scratch;
+        written.map(|()| tile)
     }
 
     fn remove(&mut self, tile: AtlasTile) {

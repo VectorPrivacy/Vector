@@ -2,7 +2,8 @@ use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size, edge_padded_into, padded_size,
+    texel_bytes,
 };
 use parking_lot::Mutex;
 use std::{borrow::Cow, ops, sync::Arc};
@@ -119,6 +120,14 @@ impl PlatformAtlas for WgpuAtlas {
         self.0.lock().get_or_insert_with(key, build)
     }
 
+    fn get_or_insert_padded_with<'a>(
+        &self,
+        key: AtlasKey,
+        build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> Result<Option<AtlasTile>> {
+        self.0.lock().get_or_insert_padded_with(key, build)
+    }
+
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
@@ -133,6 +142,23 @@ impl AtlasBackend for WgpuAtlasTextures {
     ) -> Result<AtlasTile> {
         let tile = self.allocate(size, kind).context("failed to allocate")?;
         self.upload_texture(tile.texture_id, tile.bounds, bytes);
+        Ok(tile)
+    }
+
+    fn insert_padded(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<AtlasTile> {
+        let tile = self.allocate(padded_size(size), kind).context("failed to allocate")?;
+        let format = self.storage.get(tile.texture_id).map(|texture| texture.format);
+        let mut data = Vec::new();
+        edge_padded_into(&mut data, bytes, size, texel_bytes(kind));
+        if format == Some(wgpu::TextureFormat::Rgba8Unorm) {
+            swap_red_blue(&mut data);
+        }
+        self.pending_uploads.push(PendingUpload { id: tile.texture_id, bounds: tile.bounds, data });
         Ok(tile)
     }
 
@@ -379,15 +405,16 @@ impl WgpuAtlasTexture {
 }
 
 fn swizzle_upload_data(bytes: &[u8], format: wgpu::TextureFormat) -> Vec<u8> {
-    match format {
-        wgpu::TextureFormat::Rgba8Unorm => {
-            let mut data = bytes.to_vec();
-            for pixel in data.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            data
-        }
-        _ => bytes.to_vec(),
+    let mut data = bytes.to_vec();
+    if format == wgpu::TextureFormat::Rgba8Unorm {
+        swap_red_blue(&mut data);
+    }
+    data
+}
+
+fn swap_red_blue(data: &mut [u8]) {
+    for pixel in data.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
 }
 
