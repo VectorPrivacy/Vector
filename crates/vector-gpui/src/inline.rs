@@ -457,6 +457,35 @@ fn shape(text: &str, look: &Look, color: Hsla, window: &Window) -> ShapedLine {
     )
 }
 
+/// [`ShapedLine::x_for_index`] for indices asked in rising order, in one pass over the glyphs:
+/// asked afresh, each lookup rescans from the line's start, quadratic over a long message.
+struct Xs<'a> {
+    line: &'a ShapedLine,
+    run: usize,
+    glyph: usize,
+}
+
+impl<'a> Xs<'a> {
+    fn new(line: &'a ShapedLine) -> Self {
+        Self { line, run: 0, glyph: 0 }
+    }
+
+    /// No lower than the index asked last: the glyphs before it can't answer a later one.
+    fn at(&mut self, index: usize) -> f32 {
+        while let Some(run) = self.line.runs.get(self.run) {
+            while let Some(g) = run.glyphs.get(self.glyph) {
+                if g.index >= index {
+                    return g.position.x.into();
+                }
+                self.glyph += 1;
+            }
+            self.run += 1;
+            self.glyph = 0;
+        }
+        self.line.width.into()
+    }
+}
+
 fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
     let mut segs = Vec::new();
     for (i, atom) in atoms.iter().enumerate() {
@@ -542,6 +571,7 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                     continue;
                 }
                 let line = shape(text, look, look.color, window);
+                let mut xs = Xs::new(&line);
                 // The shaper lays right-to-left runs out visually, so offsets into the whole
                 // line don't measure a piece of one: such text is measured piece by piece.
                 let rtl = has_rtl(text);
@@ -561,10 +591,9 @@ fn segments(atoms: &[Atom], window: &Window) -> Vec<Seg> {
                         let body = if trimmed.len() == piece.len() { full } else { f32::from(shape(trimmed, look, look.color, window).width) };
                         (full, body)
                     } else {
-                        (
-                            f32::from(line.x_for_index(end) - line.x_for_index(start)),
-                            f32::from(line.x_for_index(start + trimmed.len()) - line.x_for_index(start)),
-                        )
+                        let x0 = xs.at(start);
+                        let body = xs.at(start + trimmed.len()) - x0;
+                        (xs.at(end) - x0, body)
                     };
                     let at_end = end == text.len();
                     segs.push(Seg {
@@ -604,7 +633,8 @@ fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<u
         return None;
     };
     let line = shape(text, look, look.color, window);
-    let base = f32::from(line.x_for_index(seg.range.start));
+    let mut xs = Xs::new(&line);
+    let base = xs.at(seg.range.start);
     let rtl = has_rtl(text);
     let mut cut = None;
     for (off, g) in text[seg.range.clone()].grapheme_indices(true) {
@@ -615,7 +645,7 @@ fn split_word(atoms: &[Atom], seg: &Seg, room: f32, window: &Window) -> Option<u
         let w = if rtl {
             f32::from(shape(&text[seg.range.start..end], look, look.color, window).width)
         } else {
-            f32::from(line.x_for_index(end)) - base
+            xs.at(end) - base
         };
         if w + seg.lead <= room {
             cut = Some(end);
@@ -641,7 +671,9 @@ fn piece_width(atoms: &[Atom], atom: usize, range: Range<usize>, window: &Window
         return text.get(range).map_or(0., |t| f32::from(shape(t, look, look.color, window).width));
     }
     let line = shape(text, look, look.color, window);
-    f32::from(line.x_for_index(range.end) - line.x_for_index(range.start))
+    let mut xs = Xs::new(&line);
+    let x0 = xs.at(range.start);
+    xs.at(range.end) - x0
 }
 
 pub fn has_rtl(text: &str) -> bool {
@@ -894,14 +926,15 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
         }
         if let Atom::Text { text, .. } = &atoms[p.atom] {
             let line = shape(text, &look, look.color, window);
-            let base_x = f32::from(line.x_for_index(p.range.start));
+            let mut xs = Xs::new(&line);
+            let base_x = xs.at(p.range.start);
             // Right-to-left text is laid out visually on the whole line: measure each cut alone.
             let rtl = has_rtl(text);
-            let upto = |e: usize| {
+            let mut upto = |e: usize| {
                 if rtl {
                     f32::from(shape(&text[p.range.start..e], &look, look.color, window).width)
                 } else {
-                    f32::from(line.x_for_index(e)) - base_x
+                    xs.at(e) - base_x
                 }
             };
             let mut end = p.range.start;
@@ -914,7 +947,11 @@ fn layout_cut(atoms: &[Atom], base: &Look, width: f32, ltr: bool, window: &Windo
             }
             let trimmed = text[p.range.start..end].trim_end().len() + p.range.start;
             if trimmed > p.range.start {
-                let w = upto(trimmed);
+                let w = if rtl {
+                    f32::from(shape(&text[p.range.start..trimmed], &look, look.color, window).width)
+                } else {
+                    Xs::new(&line).at(trimmed) - base_x
+                };
                 let x = p.x;
                 let lead = p.lead;
                 keep.push(Placed {
@@ -1519,12 +1556,13 @@ fn spoiler_cover(line: &ShapedLine, piece: &str, look: &Look, origin: gpui::Poin
     let blur = px(fs * 0.24);
     let shadow = |color: Hsla| gpui::BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: blur, spread_radius: px(0.), inset: false };
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    let mut xs = Xs::new(line);
     for (i, ch) in piece.char_indices() {
         if ch.is_whitespace() {
             continue;
         }
-        let x0 = f32::from(origin.x + line.x_for_index(i));
-        let x1 = f32::from(origin.x + line.x_for_index(i + ch.len_utf8()));
+        let x0 = f32::from(origin.x) + xs.at(i);
+        let x1 = f32::from(origin.x) + xs.at(i + ch.len_utf8());
         if x1 <= x0 {
             continue;
         }
