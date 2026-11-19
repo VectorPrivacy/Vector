@@ -81,7 +81,7 @@ fn run(name: &str, f: impl Fn() -> Vec<u8>) -> Vec<u8> {
 }
 
 fn main() {
-    for path in std::env::args().skip(1) {
+    for path in std::env::args().skip(1).filter(|a| !a.starts_with('-')) {
         let bytes = std::fs::read(&path).unwrap();
         for to in [Some((1200u32, 1200u32)), None] {
             println!("{path} {to:?}");

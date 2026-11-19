@@ -13,7 +13,20 @@ struct UpsamplerComponent {
     upsampler: Box<dyn Upsample + Sync>,
     width: usize,
     height: usize,
-    row_stride: usize,
+}
+
+/// A component's decoded lines from line `first` on, `stride` bytes apart.
+#[derive(Clone, Copy)]
+pub struct Lines<'a> {
+    pub data: &'a [u8],
+    pub stride: usize,
+    pub first: usize,
+}
+
+impl<'a> Lines<'a> {
+    pub fn line(&self, row: usize) -> &'a [u8] {
+        &self.data[(row - self.first) * self.stride..]
+    }
 }
 
 impl Upsampler {
@@ -32,7 +45,6 @@ impl Upsampler {
                 upsampler,
                 width: component.size.width as usize,
                 height: component.size.height as usize,
-                row_stride: component.block_size.width as usize * component.dct_scale,
             });
         }
 
@@ -49,14 +61,13 @@ impl Upsampler {
         vec![vec![0u8; self.line_buffer_size]; self.components.len()]
     }
 
-    pub fn upsample_and_interleave_row(&self, component_data: &[Vec<u8>], row: usize, output_width: usize, output: &mut [u8], color_convert: fn(&[Vec<u8>], &mut [u8]), line_buffers: &mut [Vec<u8>]) {
+    pub fn upsample_and_interleave_row(&self, component_data: &[Lines], row: usize, output_width: usize, output: &mut [u8], color_convert: fn(&[Vec<u8>], &mut [u8]), line_buffers: &mut [Vec<u8>]) {
         debug_assert_eq!(component_data.len(), self.components.len());
 
         for (i, component) in self.components.iter().enumerate() {
-            component.upsampler.upsample_row(&component_data[i],
+            component.upsampler.upsample_row(component_data[i],
                                              component.width,
                                              component.height,
-                                             component.row_stride,
                                              row,
                                              output_width,
                                              &mut line_buffers[i]);
@@ -109,10 +120,9 @@ fn choose_upsampler(sampling_factors: (u8, u8),
 #[allow(clippy::too_many_arguments)]
 trait Upsample {
     fn upsample_row(&self,
-                    input: &[u8],
+                    input: Lines,
                     input_width: usize,
                     input_height: usize,
-                    row_stride: usize,
                     row: usize,
                     output_width: usize,
                     output: &mut [u8]);
@@ -120,14 +130,13 @@ trait Upsample {
 
 impl Upsample for UpsamplerH1V1 {
     fn upsample_row(&self,
-                    input: &[u8],
+                    input: Lines,
                     _input_width: usize,
                     _input_height: usize,
-                    row_stride: usize,
                     row: usize,
                     output_width: usize,
                     output: &mut [u8]) {
-        let input = &input[row * row_stride ..];
+        let input = input.line(row);
 
         output[..output_width].copy_from_slice(&input[..output_width]);
     }
@@ -135,14 +144,13 @@ impl Upsample for UpsamplerH1V1 {
 
 impl Upsample for UpsamplerH2V1 {
     fn upsample_row(&self,
-                    input: &[u8],
+                    input: Lines,
                     input_width: usize,
                     _input_height: usize,
-                    row_stride: usize,
                     row: usize,
                     _output_width: usize,
                     output: &mut [u8]) {
-        let input = &input[row * row_stride ..];
+        let input = input.line(row);
 
         if input_width == 1 {
             output[0] = input[0];
@@ -166,10 +174,9 @@ impl Upsample for UpsamplerH2V1 {
 
 impl Upsample for UpsamplerH1V2 {
     fn upsample_row(&self,
-                    input: &[u8],
+                    input: Lines,
                     _input_width: usize,
                     input_height: usize,
-                    row_stride: usize,
                     row: usize,
                     output_width: usize,
                     output: &mut [u8]) {
@@ -178,8 +185,8 @@ impl Upsample for UpsamplerH1V2 {
         // want it to be the next row.
         let row_far = (row_near + row_near.fract() * 3.0 - 0.25).min((input_height - 1) as f32);
 
-        let input_near = &input[row_near as usize * row_stride ..];
-        let input_far = &input[row_far as usize * row_stride ..];
+        let input_near = input.line(row_near as usize);
+        let input_far = input.line(row_far as usize);
 
         let output = &mut output[..output_width];
         let input_near = &input_near[..output_width];
@@ -192,10 +199,9 @@ impl Upsample for UpsamplerH1V2 {
 
 impl Upsample for UpsamplerH2V2 {
     fn upsample_row(&self,
-                    input: &[u8],
+                    input: Lines,
                     input_width: usize,
                     input_height: usize,
-                    row_stride: usize,
                     row: usize,
                     _output_width: usize,
                     output: &mut [u8]) {
@@ -204,8 +210,8 @@ impl Upsample for UpsamplerH2V2 {
         // want it to be the next row.
         let row_far = (row_near + row_near.fract() * 3.0 - 0.25).min((input_height - 1) as f32);
 
-        let input_near = &input[row_near as usize * row_stride ..];
-        let input_far = &input[row_far as usize * row_stride ..];
+        let input_near = input.line(row_near as usize);
+        let input_far = input.line(row_far as usize);
 
         if input_width == 1 {
             let value = ((3 * input_near[0] as u32 + input_far[0] as u32 + 2) >> 2) as u8;
@@ -232,16 +238,14 @@ impl Upsample for UpsamplerH2V2 {
 impl Upsample for UpsamplerGeneric {
     // Uses nearest neighbor sampling
     fn upsample_row(&self,
-                    input: &[u8],
+                    input: Lines,
                     input_width: usize,
                     _input_height: usize,
-                    row_stride: usize,
                     row: usize,
                     _output_width: usize,
                     output: &mut [u8]) {
         let mut index = 0;
-        let start = (row / self.vertical_scaling_factor as usize) * row_stride;
-        let input = &input[start..(start + input_width)];
+        let input = &input.line(row / self.vertical_scaling_factor as usize)[..input_width];
         for val in input {
             for _ in 0..self.horizontal_scaling_factor {
                 output[index] = *val;

@@ -7,7 +7,7 @@ use crate::parser::{
     IccChunk, ScanInfo,
 };
 use crate::read_u8;
-use crate::upsampler::Upsampler;
+use crate::upsampler::{Lines, Upsampler};
 use crate::worker::{ImmediateWorker, RowData};
 use alloc::borrow::ToOwned;
 use alloc::sync::Arc;
@@ -250,7 +250,7 @@ impl<'a> Decoder<'a> {
     ///
     /// If successful, the metadata can be obtained using the `info` method.
     pub fn read_info(&mut self) -> Result<()> {
-        self.decode_internal(true).map(|_| ())
+        self.decode_internal(true, None).map(|_| ())
     }
 
     /// Configure the decoder to scale the image during decoding.
@@ -285,16 +285,17 @@ impl<'a> Decoder<'a> {
 
     /// Decodes the image a row at a time, top to bottom, in the layout [`Decoder::decode`]
     /// returns: the whole picture never sits in one buffer.
-    pub fn decode_rows(&mut self, row: impl FnMut(usize, &[u8])) -> Result<()> {
+    pub fn decode_rows(&mut self, mut row: impl FnMut(usize, &[u8])) -> Result<()> {
         let mut worker = ImmediateWorker::default();
-        match self.decode_internal(false)? {
-            Some((planes, planes_u16)) => self.decode_planes(&mut worker, planes, planes_u16, row),
-            None => Ok(()),
+        match self.decode_internal(false, Some(&mut row))? {
+            Some(Decoded::Planes(planes, planes_u16)) => self.decode_planes(&mut worker, planes, planes_u16, &mut row),
+            Some(Decoded::Streamed) | None => Ok(()),
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn decode_internal(&mut self, stop_after_metadata: bool) -> Result<Option<(Vec<Vec<u8>>, Vec<Vec<u16>>)>> {
+    /// A sequential scan of every component hands its rows to `sink` as it decodes, so no
+    /// component is held whole.
+    fn decode_internal(&mut self, stop_after_metadata: bool, mut sink: Option<&mut dyn FnMut(usize, &[u8])>) -> Result<Option<Decoded>> {
         let mut worker = ImmediateWorker::default();
         if stop_after_metadata && self.frame.is_some() {
             // The metadata has already been read.
@@ -311,6 +312,7 @@ impl<'a> Decoder<'a> {
         let mut previous_marker = Marker::SOI;
         let mut pending_marker = None;
         let mut scans_processed = 0;
+        let mut streamed = false;
         let mut planes = vec![
             Vec::<u8>::new();
             self.frame
@@ -455,11 +457,21 @@ impl<'a> Decoder<'a> {
                             || (frame.coding_process == CodingProcess::DctProgressive
                                 && scan.spectral_selection.start > 0
                                 && self.frozen[scan.component_indices[0]].is_some());
+                        let whole = frame.coding_process != CodingProcess::DctProgressive
+                            && scan.component_indices.iter().copied().eq(0..frame.components.len())
+                            && finished[..frame.components.len()].iter().all(|&f| f);
                         let (marker, data) = if skip {
                             self.check_tables(&scan)?;
                             (skip_entropy_coded_data(&mut self.reader)?, None)
+                        } else if let Some(sink) = sink.as_deref_mut().filter(|_| whole) {
+                            self.check_size(&frame)?;
+                            let mut out = Assembler::new(&frame.components, frame.output_size, self.determine_color_transform(), sink)?;
+                            let decoded = self.decode_scan(&frame, &scan, &mut worker, &finished, Some(&mut out))?;
+                            out.done()?;
+                            streamed = true;
+                            decoded
                         } else {
-                            self.decode_scan(&frame, &scan, &mut worker, &finished)?
+                            self.decode_scan(&frame, &scan, &mut worker, &finished, None)?
                         };
                         if frame.coding_process == CodingProcess::DctProgressive {
                             for (&i, &done) in scan.component_indices.iter().zip(&finished) {
@@ -614,24 +626,10 @@ impl<'a> Decoder<'a> {
             ));
         }
 
-        Ok(Some((planes, planes_u16)))
+        Ok(Some(if streamed { Decoded::Streamed } else { Decoded::Planes(planes, planes_u16) }))
     }
 
-    fn decode_planes(
-        &mut self,
-        worker: &mut ImmediateWorker,
-        mut planes: Vec<Vec<u8>>,
-        planes_u16: Vec<Vec<u16>>,
-        row: impl FnMut(usize, &[u8]),
-    ) -> Result<()> {
-        if self.frame.is_none() {
-            return Err(Error::Format(
-                "end of image encountered before frame".to_owned(),
-            ));
-        }
-
-        let frame = self.frame.as_ref().unwrap();
-
+    fn check_size(&self, frame: &FrameInfo) -> Result<()> {
         if frame
             .components
             .len()
@@ -643,31 +641,53 @@ impl<'a> Decoder<'a> {
                 "size of decoded image exceeds maximum allowed size".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    fn decode_planes(
+        &mut self,
+        worker: &mut ImmediateWorker,
+        planes: Vec<Vec<u8>>,
+        planes_u16: Vec<Vec<u16>>,
+        mut row: impl FnMut(usize, &[u8]),
+    ) -> Result<()> {
+        if self.frame.is_none() {
+            return Err(Error::Format(
+                "end of image encountered before frame".to_owned(),
+            ));
+        }
+
+        let frame = self.frame.as_ref().unwrap();
+        self.check_size(frame)?;
 
         if frame.coding_process == CodingProcess::DctProgressive
             && self.coefficients.len() == frame.components.len()
         {
+            let mut out = Assembler::new(&frame.components, frame.output_size, self.determine_color_transform(), &mut row)?;
             for (i, component) in frame.components.iter().enumerate() {
-                let quantization_table = match self.frozen[i]
+                let quantization_table = self.frozen[i]
                     .clone()
                     .or_else(|| self.quantization_tables[component.quantization_table_index].clone())
-                {
-                    Some(quantization_table) => quantization_table,
-                    None => continue,
-                };
-                worker.start(RowData {
+                    .ok_or_else(|| Error::Format("not all components have data".to_owned()))?;
+                worker.start_lines(RowData {
                     index: i,
                     component: component.clone(),
                     quantization_table,
                 });
-                let per_row = self.coefficients[i].per_block
-                    * usize::from(component.block_size.width)
-                    * usize::from(component.vertical_sampling_factor);
-                for mcu_y in 0..usize::from(frame.mcu_size.height) {
+            }
+            for mcu_y in 0..usize::from(frame.mcu_size.height) {
+                for (i, component) in frame.components.iter().enumerate() {
+                    let per_row = self.coefficients[i].per_block
+                        * usize::from(component.block_size.width)
+                        * usize::from(component.vertical_sampling_factor);
                     worker.append_row(i, &self.coefficients[i].values[mcu_y * per_row..][..per_row]);
                 }
-                planes[i] = worker.get_result(i);
+                out.take(worker);
             }
+            for i in 0..frame.components.len() {
+                worker.get_result(i);
+            }
+            return out.done();
         }
 
         if frame.coding_process == CodingProcess::Lossless {
@@ -812,6 +832,7 @@ impl<'a> Decoder<'a> {
         scan: &ScanInfo,
         worker: &mut ImmediateWorker,
         finished: &[bool; MAX_COMPONENTS],
+        mut out: Option<&mut Assembler>,
     ) -> Result<(Option<Marker>, Option<Vec<Vec<u8>>>)> {
         assert!(scan.component_indices.len() <= MAX_COMPONENTS);
 
@@ -832,14 +853,19 @@ impl<'a> Decoder<'a> {
         let mut mcu_row_coefficients: [Vec<i16>; MAX_COMPONENTS] = Default::default();
         for (i, component) in components.iter().enumerate() {
             if finished[i] && !is_progressive {
-                worker.start(RowData {
+                let data = RowData {
                     index: i,
                     component: component.clone(),
                     quantization_table: self.quantization_tables
                         [component.quantization_table_index]
                         .clone()
                         .unwrap(),
-                });
+                };
+                if out.is_some() {
+                    worker.start_lines(data);
+                } else {
+                    worker.start(data);
+                }
                 mcu_row_coefficients[i] = vec![
                     0i16;
                     component.block_size.width as usize
@@ -1010,6 +1036,9 @@ impl<'a> Decoder<'a> {
                     mcu_row_coefficients[i].fill(0);
                 }
             }
+            if let Some(out) = out.as_deref_mut() {
+                out.take(worker);
+            }
         }
 
         let mut marker = huffman.take_marker(&mut self.reader)?;
@@ -1017,7 +1046,12 @@ impl<'a> Decoder<'a> {
             marker = self.read_marker().ok();
         }
 
-        if !is_progressive && finished.iter().any(|&c| c) {
+        if out.is_some() {
+            for i in 0..components.len() {
+                worker.get_result(i);
+            }
+            Ok((marker, None))
+        } else if !is_progressive && finished.iter().any(|&c| c) {
             // Retrieve all the data from the worker thread.
             let mut data = vec![Vec::new(); frame.components.len()];
 
@@ -1460,32 +1494,121 @@ fn compute_image(
         return Err(Error::Format("not all components have data".to_owned()));
     }
 
-    if components.len() == 1 {
-        let component = &components[0];
-        let width = component.size.width as usize;
-        let height = component.size.height as usize;
-        let line_stride = component.block_size.width as usize * component.dct_scale;
-        for y in 0..height {
-            row(y, &data[0][y * line_stride..][..width]);
+    let mut out = Assembler::new(components, output_size, color_transform, &mut row)?;
+    let mut lines = [Lines { data: &[], stride: 1, first: 0 }; MAX_COMPONENTS];
+    let mut filled = [0; MAX_COMPONENTS];
+    for (i, (component, plane)) in components.iter().zip(&data).enumerate() {
+        let stride = usize::from(component.block_size.width) * component.dct_scale;
+        lines[i] = Lines { data: plane, stride, first: 0 };
+        filled[i] = plane.len() / stride;
+    }
+    out.emit(&lines[..components.len()], &filled[..components.len()]);
+    out.done()
+}
+
+enum Decoded {
+    Planes(Vec<Vec<u8>>, Vec<Vec<u16>>),
+    Streamed,
+}
+
+/// Makes output rows from component lines, each row as soon as every line it reads is in.
+struct Assembler<'r> {
+    upsampler: Option<(Upsampler, fn(&[Vec<u8>], &mut [u8]))>,
+    ratio: [usize; MAX_COMPONENTS],
+    heights: [usize; MAX_COMPONENTS],
+    count: usize,
+    width: usize,
+    height: usize,
+    buffers: Vec<Vec<u8>>,
+    line: Vec<u8>,
+    next: usize,
+    row: &'r mut dyn FnMut(usize, &[u8]),
+}
+
+impl<'r> Assembler<'r> {
+    fn new(
+        components: &[Component],
+        output_size: Dimensions,
+        color_transform: ColorTransform,
+        row: &'r mut dyn FnMut(usize, &[u8]),
+    ) -> Result<Self> {
+        let count = components.len();
+        let v_max = components.iter().map(|c| c.vertical_sampling_factor).max().unwrap();
+        let mut ratio = [1; MAX_COMPONENTS];
+        let mut heights = [1; MAX_COMPONENTS];
+        for (i, c) in components.iter().enumerate() {
+            ratio[i] = usize::from(v_max / c.vertical_sampling_factor);
+            heights[i] = usize::from(c.size.height).max(1);
         }
-        Ok(())
-    } else {
-        let color_convert_func = choose_color_convert_func(components.len(), color_transform)?;
-        let upsampler = Upsampler::new(components, output_size.width, output_size.height)?;
-        let mut line_buffers = upsampler.line_buffers();
-        let mut line = vec![0u8; output_size.width as usize * components.len()];
-        for y in 0..output_size.height as usize {
-            upsampler.upsample_and_interleave_row(
-                &data,
-                y,
-                output_size.width as usize,
-                &mut line,
-                color_convert_func,
-                &mut line_buffers,
-            );
-            row(y, &line);
+        let (upsampler, width, height) = if count == 1 {
+            (None, usize::from(components[0].size.width), usize::from(components[0].size.height))
+        } else {
+            let convert = choose_color_convert_func(count, color_transform)?;
+            let upsampler = Upsampler::new(components, output_size.width, output_size.height)?;
+            (Some((upsampler, convert)), usize::from(output_size.width), usize::from(output_size.height))
+        };
+        Ok(Assembler {
+            buffers: upsampler.as_ref().map_or_else(Vec::new, |(u, _)| u.line_buffers()),
+            line: vec![0u8; if count == 1 { 0 } else { width * count }],
+            upsampler,
+            ratio,
+            heights,
+            count,
+            width,
+            height,
+            next: 0,
+            row,
+        })
+    }
+
+    // The upsamplers read a component's nearest line and, when stretching it, one either side.
+    fn reach(&self, c: usize, y: usize) -> (usize, usize) {
+        let near = y / self.ratio[c];
+        let side = usize::from(self.ratio[c] > 1);
+        (near.saturating_sub(side), (near + side).min(self.heights[c] - 1))
+    }
+
+    /// Hands on every row whose lines are all among the first `filled[c]` lines of each
+    /// component, and returns each component's first line a later row still reads.
+    fn emit(&mut self, lines: &[Lines], filled: &[usize]) -> [usize; MAX_COMPONENTS] {
+        while self.next < self.height && (0..self.count).all(|c| self.reach(c, self.next).1 < filled[c]) {
+            let y = self.next;
+            match &self.upsampler {
+                None => (self.row)(y, &lines[0].line(y)[..self.width]),
+                Some((upsampler, convert)) => {
+                    upsampler.upsample_and_interleave_row(lines, y, self.width, &mut self.line, *convert, &mut self.buffers);
+                    (self.row)(y, &self.line);
+                }
+            }
+            self.next += 1;
         }
-        Ok(())
+        let mut keep = [0; MAX_COMPONENTS];
+        for c in 0..self.count {
+            keep[c] = if self.next < self.height { self.reach(c, self.next).0 } else { filled[c] };
+        }
+        keep
+    }
+
+    /// Emits what the worker's lines allow, then lets it drop the lines no row reads again.
+    fn take(&mut self, worker: &mut ImmediateWorker) {
+        let mut lines = [Lines { data: &[], stride: 1, first: 0 }; MAX_COMPONENTS];
+        let mut filled = [0; MAX_COMPONENTS];
+        for i in 0..self.count {
+            lines[i] = worker.lines(i);
+            filled[i] = worker.filled(i);
+        }
+        let keep = self.emit(&lines[..self.count], &filled[..self.count]);
+        for (i, &line) in keep[..self.count].iter().enumerate() {
+            worker.release(i, line);
+        }
+    }
+
+    fn done(&self) -> Result<()> {
+        if self.next == self.height {
+            Ok(())
+        } else {
+            Err(Error::Format("not all components have data".to_owned()))
+        }
     }
 }
 
