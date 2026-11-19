@@ -1,0 +1,6 @@
+Third preview of 0.5.2.
+- Calls play in stereo when the sender is stereo
+- Undo and redo in the message box: Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z
+- The Jump to present bar is back
+- A themed (Material You) launcher icon
+- Voice Channels play at your speaker volume, not lower
