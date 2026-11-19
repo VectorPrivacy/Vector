@@ -308,7 +308,12 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     }) {
         return None;
     }
-    let title = meta.title.clone().or(meta.og_title.clone());
+    let title = [&meta.title, &meta.og_title]
+        .into_iter()
+        .flatten()
+        .map(|t| crate::kit::one_line(t))
+        .find(|t| !t.is_empty())
+        .map(std::borrow::Cow::into_owned);
     let description = meta
         .og_description
         .clone()
@@ -418,17 +423,18 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 ),
         );
     if !description.is_empty() {
-        let mut d = div()
-            .mt(px(4.))
-            .text_size(px(13.))
-            .line_height(px(18.2))
-            .text_color(white_a(0.7))
-            .flex()
-            .flex_col();
-        for l in lines {
-            d = d.child(div().min_h(px(18.2)).child(l));
+        use crate::inline::{Atom, Kind, Look};
+        let look = Look::new(crate::theme::RUBIK, 13., 18.2, white_a(0.7));
+        let mut atoms = Vec::with_capacity(lines.len() * 2);
+        for (i, l) in lines.into_iter().enumerate() {
+            if i > 0 {
+                atoms.push(Atom::Break);
+            }
+            if !l.is_empty() {
+                atoms.push(Atom::Text { text: l.into(), look: look.clone(), kind: Kind::Plain });
+            }
         }
-        card = card.child(d);
+        card = card.child(div().mt(px(4.)).child(crate::inline::inline(atoms, look).clamp(3)));
     }
     if let Some(v) = &video {
         let mut frame = div()
