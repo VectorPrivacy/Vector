@@ -298,9 +298,13 @@ jobs:
           workspaces: crates/vector-gpui -> ${{ startsWith(matrix.platform, 'windows') && '../../../../t' || 'target' }}
           key: package-${{ matrix.target }}
 
+      # In a developer prompt (the FFmpeg build's) rustc takes link.exe from PATH, where bash puts
+      # Git's coreutils link first; outside one it finds MSVC's itself.
       - name: Build
         shell: bash
-        run: cargo build --release --locked ${{ matrix.features }}
+        run: |
+          unset VCINSTALLDIR
+          cargo build --release --locked ${{ matrix.features }}
 
       - name: Bundle (macOS)
         if: startsWith(matrix.platform, 'macos')
