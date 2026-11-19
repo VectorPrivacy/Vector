@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{LocaleData, Pack};
 
 /// Bumped when a field changes meaning; an older app refuses a newer pack.
-const FORMAT: u32 = 1;
+pub const PACK_FORMAT: u32 = 1;
 /// Inflated packs are tens of KB; anything near this is not one.
 const MAX_INFLATED: u64 = 16 << 20;
 
@@ -18,6 +18,8 @@ struct Wire {
     format: u32,
     tag: String,
     name: String,
+    #[serde(default)]
+    english_name: String,
     rtl: bool,
     english: String,
     coverage: u32,
@@ -38,12 +40,18 @@ pub fn english_revision() -> String {
     format!("{h:016x}")
 }
 
+/// A tag a pack may carry: never the built-in English, never a path.
+pub(crate) fn is_language_tag(tag: &str) -> bool {
+    !tag.is_empty() && tag.len() <= 35 && tag != crate::BUILT_IN && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 impl Pack {
     pub fn to_bytes(&self) -> Vec<u8> {
         let wire = Wire {
-            format: FORMAT,
+            format: PACK_FORMAT,
             tag: self.tag.clone(),
             name: self.name.clone(),
+            english_name: self.english_name.clone(),
             rtl: self.rtl,
             english: self.english.clone(),
             coverage: self.coverage,
@@ -63,15 +71,16 @@ impl Pack {
             .read_to_end(&mut json)
             .map_err(|e| format!("not a language pack: {e}"))?;
         let w: Wire = serde_json::from_slice(&json).map_err(|e| format!("not a language pack: {e}"))?;
-        if w.format > FORMAT {
+        if w.format > PACK_FORMAT {
             return Err(format!("pack format {} needs a newer Vector", w.format));
         }
-        if w.tag.is_empty() || w.tag == crate::BUILT_IN || !w.tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        if !is_language_tag(&w.tag) {
             return Err(format!("pack tag {:?} is not a language", w.tag));
         }
         Ok(Self {
             tag: w.tag,
             name: w.name,
+            english_name: w.english_name,
             rtl: w.rtl,
             english: w.english,
             coverage: w.coverage.min(100),

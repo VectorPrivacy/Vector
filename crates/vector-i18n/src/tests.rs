@@ -7,6 +7,7 @@ fn pack(tag: &str, src: &str) -> Pack {
     Pack {
         tag: tag.into(),
         name: tag.into(),
+        english_name: String::new(),
         rtl: false,
         files: vec![("chat.ftl".into(), src.into())],
         data: LocaleData::default(),
@@ -193,7 +194,10 @@ fn a_pack_survives_its_trip_and_refuses_what_isnt_one() {
 fn the_built_in_english_names_itself() {
     let _g = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
     let langs = languages();
-    assert_eq!(langs[0], Language { tag: BUILT_IN.into(), name: "English (UK)".into(), coverage: 100 });
+    assert_eq!(
+        langs[0],
+        Language { tag: BUILT_IN.into(), name: "English (UK)".into(), english_name: "English (UK)".into(), coverage: 100 }
+    );
 }
 
 #[test]
@@ -219,4 +223,46 @@ fn a_right_to_left_sentence_opening_in_latin_still_reads_right_to_left() {
     assert_eq!(&*t::typing_dm(), "Vector", "no right-to-left letters: left as written");
     assert_eq!(&*t::hidden_blocked(), "Blocked message", "English keeps its own direction");
     set_language(BUILT_IN);
+}
+
+#[test]
+fn an_index_lists_only_what_this_build_can_install() {
+    let entry = |tag: &str, format: u32, sha: &str| index::Entry {
+        tag: tag.into(),
+        name: tag.into(),
+        english_name: String::new(),
+        rtl: false,
+        coverage: 90,
+        format,
+        size: 10,
+        sha256: sha.into(),
+        english: String::new(),
+    };
+    let good = "ab".repeat(32);
+    let i = index::Index {
+        format: index::INDEX_FORMAT,
+        packs: vec![
+            entry("es", PACK_FORMAT, &good),
+            entry("de", PACK_FORMAT + 1, &good),
+            entry("en-GB", PACK_FORMAT, &good),
+            entry("../fr", PACK_FORMAT, &good),
+            entry("ja", PACK_FORMAT, "AB"),
+        ],
+        next: None,
+    };
+    let back = index::Index::parse(&i.to_json()).unwrap();
+    assert_eq!(back.usable().map(|e| e.tag.as_str()).collect::<Vec<_>>(), ["es"]);
+    assert!(back.entry("de").is_none(), "a newer pack format waits for a newer app");
+    let newer = index::Index { format: index::INDEX_FORMAT + 1, ..back };
+    assert!(index::Index::parse(&newer.to_json()).is_err());
+}
+
+#[test]
+fn an_english_variant_counts_what_it_inherits() {
+    let r = check(&[("chat.ftl".into(), "day-today = Today\n".into())]);
+    assert!(r.coverage() < 5);
+    assert_eq!(r.coverage_for("en-US"), 100);
+    assert_eq!(r.coverage_for("es"), r.coverage());
+    let us = OFFERED.iter().find(|o| o.tag == "en-US").expect("the repository's en-US is offered");
+    assert_eq!((us.name, us.english_name, us.coverage), ("English (US)", "English (US)", 100));
 }

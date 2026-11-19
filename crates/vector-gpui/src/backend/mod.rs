@@ -40,6 +40,7 @@ pub mod transfer;
 pub mod transport;
 pub mod unfurl;
 pub mod install;
+pub mod langpacks;
 pub mod updates;
 pub mod upload;
 

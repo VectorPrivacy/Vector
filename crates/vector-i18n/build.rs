@@ -9,8 +9,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 fn main() {
-    let dir = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("locales/en-GB");
-    println!("cargo:rerun-if-changed={}", dir.display());
+    let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("locales");
+    println!("cargo:rerun-if-changed={}", root.display());
+    let dir = root.join("en-GB");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .expect("locales/en-GB")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -58,6 +59,7 @@ fn main() {
         writeln!(out, "    {},", u.vars.is_empty()).unwrap();
     }
     writeln!(out, "];\n").unwrap();
+    offered(&root, &units, &mut out);
 
     writeln!(out, "/// One function per en-GB message, returning `$ty` (`From<Arc<str>> + From<String>`).").unwrap();
     writeln!(out, "#[macro_export]\nmacro_rules! define_t {{ ($ty:ty) => {{").unwrap();
@@ -111,4 +113,42 @@ fn main() {
     }
     writeln!(out, "}} }}").unwrap();
     std::fs::write(Path::new(&std::env::var("OUT_DIR").unwrap()).join("catalog.rs"), out).unwrap();
+}
+
+/// The other languages in the repository: names and a rough coverage, never their text.
+fn offered(root: &Path, en: &[scan::Unit], out: &mut String) {
+    let ids: std::collections::HashSet<&str> = en.iter().map(|u| u.id.as_str()).collect();
+    let mut dirs: Vec<_> = std::fs::read_dir(root)
+        .expect("locales")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != "en-GB"))
+        .collect();
+    dirs.sort();
+    writeln!(out, "/// The languages the repository translates, as this build saw them.").unwrap();
+    writeln!(out, "pub const OFFERED: &[Offered] = &[").unwrap();
+    for d in dirs {
+        let tag = d.file_name().unwrap().to_string_lossy().to_string();
+        let mut units = vec![];
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "ftl") {
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                units.extend(scan::scan(&p.file_name().unwrap().to_string_lossy(), &text).units);
+            }
+        }
+        let text = |id: &str| units.iter().find(|u| u.id == id).map(|u| u.text.trim().to_string()).unwrap_or_default();
+        let name = text("language-name");
+        if name.is_empty() {
+            continue;
+        }
+        let done = units.iter().filter(|u| ids.contains(u.id.as_str())).count();
+        let coverage = if tag.split('-').next() == Some("en") { 100 } else { done * 100 / ids.len().max(1) };
+        writeln!(
+            out,
+            "    Offered {{ tag: {tag:?}, name: {name:?}, english_name: {:?}, coverage: {coverage} }},",
+            text("language-name-english")
+        )
+        .unwrap();
+    }
+    writeln!(out, "];\n").unwrap();
 }

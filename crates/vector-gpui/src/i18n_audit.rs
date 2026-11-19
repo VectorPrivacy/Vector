@@ -277,7 +277,7 @@ mod tests {
         let unused: Vec<&str> = vector_i18n::ids()
             .iter()
             .copied()
-            .filter(|id| *id != vector_i18n::NAME_ID && !used(&vector_i18n::function_name(id)))
+            .filter(|id| *id != vector_i18n::NAME_ID && *id != vector_i18n::ENGLISH_NAME_ID && !used(&vector_i18n::function_name(id)))
             .collect();
         assert!(unused.is_empty(), "en-GB messages nothing calls: {unused:?}");
     }

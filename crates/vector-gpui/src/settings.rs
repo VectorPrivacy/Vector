@@ -82,7 +82,10 @@ pub fn categories(offers: &Offers) -> Vec<Category> {
     let mut out = vec![
         cat(
 "appearance", t::settings_page_appearance, "palette",
-            vec![anchor("display", t::settings_section_display, t::settings_section_display_keys)],
+            vec![
+                anchor("display", t::settings_section_display, t::settings_section_display_keys),
+                fresh("language", t::settings_section_language, "0.6", t::settings_section_language_keys),
+            ],
         ),
         cat(
 "audio", t::settings_page_audio, "volume-max", audio),
@@ -436,6 +439,18 @@ pub struct Settings {
     /// 520px or less: hero cards stack.
     pub phone: bool,
     pub slim_geo: Rc<std::cell::RefCell<SlimGeo>>,
+    pub langs: LangView,
+}
+
+/// The Language section's own state; the list itself is the index and the installed packs.
+#[derive(Default)]
+pub struct LangView {
+    pub checking: bool,
+    pub error: Option<String>,
+    /// The language downloading, and how far, 0 to 1000.
+    pub busy: Option<(String, std::sync::Arc<std::sync::atomic::AtomicU32>)>,
+    /// A download that failed: its tag and why.
+    pub failed: Option<(String, String)>,
 }
 
 /// Where the phone list's rows and open bodies landed last frame, so a fold can hold the
@@ -536,6 +551,10 @@ pub enum Act {
     /// The reader scrolled the page: the spy takes over from a jump.
     Scrolled,
     Net(crate::routing::NetAct),
+    /// Switch to a language, downloading it first when it isn't here yet.
+    Language(String),
+    LanguagesRetry,
+    HelpTranslate,
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -797,51 +816,161 @@ fn row(s: &Settings, key: &'static str, on: &OnAct, grouped: bool) -> AnyElement
     .into_any_element()
 }
 
-/// Every installed language, each named in itself, with how far along an unfinished one is.
-fn languages() -> &'static [crate::kit::Choice] {
-    crate::kit::choices("languages", || {
-        vector_i18n::languages()
-            .into_iter()
-            .map(|l| {
-                let label = if l.coverage < 100 { t::settings_language_partial(l.coverage, &l.name) } else { l.name.as_str().into() };
-                crate::kit::Choice { value: crate::kit::interned(&l.tag), label: crate::kit::interned(&label) }
-            })
-            .collect()
-    })
+/// A language the section lists: built in, downloaded, or in the index to download.
+pub struct LangRow {
+    pub tag: String,
+    pub name: String,
+    pub english_name: String,
+    pub coverage: u32,
+    /// Bytes to download; `None` once it is here.
+    pub size: Option<u64>,
 }
 
-fn language_row(s: &Settings, on: &OnAct) -> AnyElement {
+/// English (UK) first, then every other language by its own name.
+pub fn lang_rows() -> Vec<LangRow> {
+    let mut rows: Vec<LangRow> = vector_i18n::languages()
+        .into_iter()
+        .map(|l| LangRow { tag: l.tag, name: l.name, english_name: l.english_name, coverage: l.coverage, size: None })
+        .collect();
+    if let Some(index) = crate::backend::langpacks::index() {
+        for e in index.usable() {
+            match rows.iter_mut().find(|r| r.tag == e.tag) {
+                Some(r) if r.english_name.is_empty() => r.english_name = e.english_name.clone(),
+                Some(_) => {}
+                None => rows.push(LangRow {
+                    tag: e.tag.clone(),
+                    name: e.name.clone(),
+                    english_name: e.english_name.clone(),
+                    coverage: e.coverage,
+                    size: Some(e.size),
+                }),
+            }
+        }
+    }
+    rows[1..].sort_by_key(|r| r.name.to_lowercase());
+    rows
+}
+
+fn spinner(id: &'static str) -> impl IntoElement {
+    svg()
+        .path("icons/loading.svg")
+        .size(px(16.))
+        .flex_shrink_0()
+        .text_color(c(PRIMARY))
+        .with_animation(id, gpui::Animation::new(std::time::Duration::from_millis(800)).repeat(), |s, t| {
+            s.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
+        })
+}
+
+fn language_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let active = vector_i18n::language();
+    let l = &s.langs;
+    let mut list = div().flex().flex_col().gap(px(2.));
+    for row in lang_rows() {
+        let is_active = row.tag == active;
+        let busy = l.busy.as_ref().filter(|(t, _)| *t == row.tag).map(|(_, p)| p.load(std::sync::atomic::Ordering::Relaxed).min(1000));
+        // A name English writes the same way isn't repeated under itself.
+        let english = Some(&row.english_name).filter(|e| !e.is_empty() && **e != row.name);
+        let size = row.size.map(|n| crate::media::format_bytes_with(n as f64, 0, false));
+        let detail: SharedString = if let Some(p) = busy {
+            t::language_downloading(p / 10)
+        } else if row.tag == vector_i18n::BUILT_IN {
+            t::language_built_in()
+        } else {
+            match (english, size) {
+                (Some(e), Some(size)) => t::language_detail(row.coverage, e.as_str(), size),
+                (Some(e), None) => t::language_detail_installed(row.coverage, e.as_str()),
+                (None, Some(size)) => t::language_detail_unnamed(row.coverage, size),
+                (None, None) => t::language_detail_coverage(row.coverage),
+            }
+        };
+        let trailing: AnyElement = if let Some(p) = busy {
+            div()
+                .w(px(64.))
+                .h(px(4.))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(white_a(0.1))
+                .child(div().h_full().rounded_full().bg(c(ACCENT)).w(px(64. * p as f32 / 1000.)))
+                .into_any_element()
+        } else if is_active {
+            svg().path("icons/check.svg").size(px(18.)).flex_shrink_0().text_color(c(ACCENT)).into_any_element()
+        } else if row.size.is_some() {
+            svg().path("icons/download.svg").size(px(18.)).flex_shrink_0().text_color(c(0x8a8a8a)).into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        let tag = row.tag.clone();
+        list = list.child(
+            div()
+                .id(SharedString::from(format!("lang-{}", row.tag)))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(9.))
+                .rounded(px(8.))
+                .when(is_active, |d| d.bg(c(0x1b1b1b)))
+                .when(!is_active, |d| d.hover(|d| d.bg(c(0x151515))).cursor_pointer())
+                .on_click(click(on, move || Act::Language(tag.clone())))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(div().text_size(px(16.)).line_height(px(19.)).text_color(c(0xffffff)).child(row.name))
+                        .child(div().text_size(px(13.)).line_height(px(16.)).text_color(c(0x8a8a8a)).child(detail)),
+                )
+                .child(trailing),
+        );
+    }
+    let warn = |text: SharedString| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_color(c(0xb2b2b2))
+            .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(c(0xFCA559)))
+            .child(text)
+    };
+    let status: Option<AnyElement> = if l.checking {
+        Some(div().flex().items_center().gap(px(8.)).text_color(c(0xb2b2b2)).child(spinner("lang-check")).child(t::language_checking()).into_any_element())
+    } else if let Some(e) = &l.error {
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .child(warn(t::language_check_failed(e.as_str())))
+                .child(small_button("lang-retry", t::language_retry(), || Act::LanguagesRetry, on))
+                .into_any_element(),
+        )
+    } else {
+        l.failed.as_ref().map(|(_, e)| warn(t::language_download_failed(e.as_str())).into_any_element())
+    };
     div()
-        .min_h(px(36.))
-        .mb(px(5.))
         .flex()
-        .items_center()
-        .gap(px(12.))
+        .flex_col()
+        .child(list)
+        .children(status.map(|st| div().mt(px(12.)).text_size(px(14.)).line_height(px(20.)).child(st)))
         .child(
             div()
-                .flex_1()
-                .text_size(px(16.))
-                .line_height(px(19.))
-                .text_color(c(0xffffff))
-                .child(t::settings_language()),
+                .id("lang-help-translate")
+                .mt(px(16.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(14.))
+                .text_color(c(PRIMARY))
+                .cursor_pointer()
+                .hover(|d| d.text_color(c(ACCENT)))
+                .on_click(click(on, || Act::HelpTranslate))
+                .child(svg().path("icons/globe.svg").size(px(16.)).flex_shrink_0().text_color(c(PRIMARY)))
+                .child(t::language_help_translate()),
         )
-        .child(crate::kit::select_with(
-            "language-picker",
-            230.,
-            16.,
-            languages(),
-            &[],
-            &vector_i18n::language(),
-            s.open_select == Some("language"),
-            {
-                let on = on.clone();
-                move |w, cx| on(Act::Select("language"), w, cx)
-            },
-            {
-                let on = on.clone();
-                move |v, w, cx| on(Act::Pick("language", v), w, cx)
-            },
-        ))
         .into_any_element()
 }
 
@@ -867,7 +996,7 @@ fn display_block(s: &Settings, on: &OnAct) -> AnyElement {
                 )
                 .child(theme_picker(s, on)),
         )
-        .when(vector_i18n::languages().len() > 1, |d| d.child(language_row(s, on)));
+;
     let mut last = "";
     let rows: Vec<&Toggle> = if s.slim {
         std::iter::once(&RAIL_HIDDEN).chain(DISPLAY.iter().filter(|t| t.key != "ws_nav")).collect()
@@ -3546,6 +3675,7 @@ fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
         "calls" => calls_block(s, on),
         "voice" => voice_block(s, on),
         "display" => display_block(s, on),
+        "language" => language_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),
         "storage" => storage_block(s, on),

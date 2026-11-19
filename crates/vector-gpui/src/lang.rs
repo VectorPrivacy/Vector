@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::device;
 
 const KEY: &str = "ui_language";
+const OFFERED_KEY: &str = "language_offered";
 
 /// Icons that point along the reading direction, flipped when it runs right to left. Media
 /// controls keep their direction: time runs left to right in every language.
@@ -18,6 +19,8 @@ const MIRRORED_ICONS: &[&str] = &[
     "ui/notice-go.svg",
 ];
 const PACK_EXT: &str = "vpack";
+/// Where translating Vector starts, until the translation project has a home of its own.
+pub const TRANSLATE_URL: &str = "https://github.com/VectorPrivacy/Vector/blob/gpui/crates/vector-i18n/TRANSLATING.md";
 
 /// A count shown on its own (a badge, a tally) in the language's digits.
 pub fn num(n: impl std::fmt::Display) -> gpui::SharedString {
@@ -32,6 +35,10 @@ pub fn digits(s: String) -> String {
 /// Where downloaded packs live, beside the device settings.
 pub fn packs_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("languages")
+}
+
+pub fn pack_path(packs: &Path, tag: &str) -> PathBuf {
+    packs.join(format!("{tag}.{PACK_EXT}"))
 }
 
 /// The saved language, after the packs downloaded to `packs` and any a translator points the
@@ -49,13 +56,16 @@ pub fn init(packs: Option<PathBuf>) {
     };
     vector_i18n::set_system_locale(&locale, hour12);
     gpui::set_mirrored_icons(MIRRORED_ICONS);
-    for e in packs.and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
+    for e in packs.as_ref().and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
         if e.path().extension().is_some_and(|x| x == PACK_EXT)
-            && let Some(p) = std::fs::read(e.path()).ok().and_then(|b| vector_i18n::Pack::from_bytes(&b).ok())
+            && let Ok(bytes) = std::fs::read(e.path())
+            && let Ok(p) = vector_i18n::Pack::from_bytes(&bytes)
         {
+            crate::backend::langpacks::note_installed(&p.tag, &bytes);
             vector_i18n::install(p);
         }
     }
+    crate::backend::langpacks::init(packs);
     if let Some(root) = std::env::var_os("VECTOR_LANG_DIR") {
         for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             let tag = e.file_name().to_string_lossy().into_owned();
@@ -76,6 +86,43 @@ pub fn set(tag: &str, cx: &mut gpui::App) {
     gpui::set_layout_rtl(vector_i18n::is_rtl());
     device::set(KEY, vector_i18n::language());
     cx.refresh_windows();
+}
+
+/// A pack just downloaded: listed at once, and in use at once when it is the language on screen
+/// or `switch` asks for it.
+pub fn install(pack: vector_i18n::Pack, switch: bool, cx: &mut gpui::App) {
+    let tag = pack.tag.clone();
+    vector_i18n::install(pack);
+    if switch || vector_i18n::language() == tag {
+        set(&tag, cx);
+    } else {
+        cx.refresh_windows();
+    }
+}
+
+/// The system's language as a tag (`de-DE`), from `de_DE.UTF-8` or `de-DE`.
+pub fn system_tag() -> String {
+    let raw = std::env::var("VECTOR_LOCALE").ok().map(|v| v.split(':').next().unwrap_or("").to_string()).or_else(sys_locale::get_locale).unwrap_or_default();
+    raw.split(['.', '@']).next().unwrap_or("").replace('_', "-")
+}
+
+/// What a first launch offers: the system's language, when this build knows the repository
+/// translates most of it and nothing has been chosen or offered yet.
+pub fn offer() -> Option<&'static vector_i18n::Offered> {
+    const MIN_OFFERED: u32 = 60;
+    if device::get(KEY).is_some() || device::get(OFFERED_KEY).is_some() || std::env::var_os("VECTOR_LANG").is_some() {
+        return None;
+    }
+    let system = system_tag();
+    let primary = system.split('-').next().unwrap_or("");
+    let fits = |o: &&vector_i18n::Offered| o.coverage >= MIN_OFFERED;
+    let exact = vector_i18n::OFFERED.iter().filter(fits).find(|o| o.tag.eq_ignore_ascii_case(&system));
+    exact.or_else(|| vector_i18n::OFFERED.iter().filter(fits).find(|o| !primary.is_empty() && o.tag.eq_ignore_ascii_case(primary)))
+}
+
+/// The offer was taken or turned down: it isn't made again.
+pub fn offered(tag: &str) {
+    device::set(OFFERED_KEY, tag);
 }
 
 /// The clock the system asks for, where it lets people choose one apart from their region.

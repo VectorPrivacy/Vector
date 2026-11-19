@@ -1879,7 +1879,10 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             loop {
                 if this
-                    .update(cx, |this, cx| this.check_updates(true, cx))
+                    .update(cx, |this, cx| {
+                        this.check_updates(true, cx);
+                        this.check_languages(cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -16509,6 +16512,7 @@ impl VectorApp {
             narrow: false,
             phone: false,
             slim_geo: Default::default(),
+            langs: Default::default(),
             slim_shut: Vec::new(),
             slim_scroll: gpui::ScrollHandle::new(),
         });
@@ -16518,6 +16522,9 @@ impl VectorApp {
         self.load_voice(cx);
         self.load_storage(cx);
         self.load_network(cx);
+        if self.settings.as_ref().is_some_and(|s| s.cat == "appearance") {
+            self.load_languages(false, cx);
+        }
         self.mark_settings_seen(None);
         cx.notify();
     }
@@ -17909,10 +17916,133 @@ impl VectorApp {
             act,
             crate::settings::Act::Category("network") | crate::settings::Act::Anchor("network", _)
         ) && self.settings.as_ref().is_some_and(|s| s.cat != "network");
+        let into_language = matches!(
+            act,
+            crate::settings::Act::Category("appearance") | crate::settings::Act::Anchor("appearance", _) | crate::settings::Act::Fold("appearance")
+        );
         self.settings_act(act, window, cx);
         if into_network {
             self.load_network(cx);
         }
+        if into_language {
+            self.load_languages(false, cx);
+        }
+    }
+
+    /// The Language section's list, fetched as the section opens unless fetched lately.
+    fn load_languages(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(s) = self.settings.as_mut().filter(|_| self.live) else { return };
+        if s.langs.checking || (!force && backend::langpacks::fresh(10 * 60)) {
+            return;
+        }
+        s.langs.checking = true;
+        s.langs.error = None;
+        let rx = backend::run(backend::langpacks::refresh());
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err(t::language_index_invalid().to_string()));
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.settings.as_mut() {
+                    s.langs.checking = false;
+                    s.langs.error = res.as_ref().err().cloned();
+                }
+                if res.is_ok() {
+                    this.update_languages(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The daily look for newer builds of the installed packs.
+    fn check_languages(&mut self, cx: &mut Context<Self>) {
+        if !self.live || !backend::langpacks::due() {
+            return;
+        }
+        let rx = backend::run(backend::langpacks::refresh());
+        cx.spawn(async move |this, cx| {
+            if rx.await.is_ok_and(|r| r.is_ok()) {
+                this.update(cx, |this, cx| this.update_languages(cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Newer builds of the installed packs, fetched quietly and swapped in live.
+    fn update_languages(&mut self, cx: &mut Context<Self>) {
+        let updates = backend::langpacks::updates();
+        if updates.is_empty() || !backend::langpacks::begin_updates() {
+            return;
+        }
+        let rx = backend::run(async move {
+            let mut packs = vec![];
+            for e in updates {
+                if let Ok(p) = backend::langpacks::download(e, Default::default()).await {
+                    packs.push(p);
+                }
+            }
+            packs
+        });
+        cx.spawn(async move |this, cx| {
+            let packs = rx.await.unwrap_or_default();
+            backend::langpacks::end_updates();
+            this.update(cx, |_, cx| {
+                for p in packs {
+                    crate::lang::install(p, false, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Picking a language not here yet: download it, then switch to it.
+    fn download_language(&mut self, tag: String, cx: &mut Context<Self>) {
+        let Some(s) = self.settings.as_mut() else { return };
+        let Some(entry) = backend::langpacks::index().and_then(|i| i.entry(&tag).cloned()) else { return };
+        if s.langs.busy.is_some() {
+            return;
+        }
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        s.langs.busy = Some((tag.clone(), progress.clone()));
+        s.langs.failed = None;
+        let rx = backend::run(backend::langpacks::download(entry, progress));
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err(t::language_pack_unsaved().to_string()));
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.settings.as_mut() {
+                    s.langs.busy = None;
+                }
+                match res {
+                    Ok(pack) => crate::lang::install(pack, true, cx),
+                    Err(e) => {
+                        if let Some(s) = this.settings.as_mut() {
+                            s.langs.failed = Some((tag, e));
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            let going = this
+                .update(cx, |this, cx| {
+                    let on = this.settings.as_ref().is_some_and(|s| s.langs.busy.is_some());
+                    if on {
+                        cx.notify();
+                    }
+                    on
+                })
+                .unwrap_or(false);
+            if !going {
+                break;
+            }
+        })
+        .detach();
     }
 
     fn settings_act(
@@ -18140,7 +18270,6 @@ impl VectorApp {
                             pack_reload = true;
                         }
                     }
-                    "language" => crate::lang::set(value, cx),
                     "notif-privacy" => {
                         s.notif_privacy = value.to_string();
                         if self.live {
@@ -18400,6 +18529,16 @@ impl VectorApp {
                 popup.cancel = Some(t::dialog_cancel());
                 self.popup = Some((popup, PopupAct::Logout));
             }
+            Act::Language(tag) => {
+                if tag == vector_i18n::language() {
+                } else if vector_i18n::languages().iter().any(|l| l.tag == tag) {
+                    crate::lang::set(&tag, cx);
+                } else {
+                    self.download_language(tag, cx);
+                }
+            }
+            Act::LanguagesRetry => self.load_languages(true, cx),
+            Act::HelpTranslate => self.open_web(crate::lang::TRANSLATE_URL, cx),
             Act::Link(key) => self.open_web(match key {
                 "donate" => "https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations",
                 "gitbook" => "https://docs.vectorapp.io",

@@ -7,6 +7,7 @@
 
 mod check;
 mod dates;
+pub mod index;
 mod numbers;
 mod pack;
 mod pseudo;
@@ -24,7 +25,7 @@ use unic_langid::LanguageIdentifier;
 pub use check::{Report, check};
 pub use dates::{Civil, Clock, DateStyle, Dates};
 pub use numbers::LocaleData;
-pub use pack::english_revision;
+pub use pack::{PACK_FORMAT, english_revision};
 
 include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
 
@@ -41,6 +42,17 @@ pub const PSEUDO_IDS: &str = "en-XI";
 /// English laid out right to left, for checking mirrored screens before a real RTL language.
 pub const PSEUDO_MIRRORED: &str = "ar-XB";
 
+/// A language this build knows the repository translates, for offering it before anything is
+/// downloaded. The download is what's checked; this is only a name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Offered {
+    pub tag: &'static str,
+    pub name: &'static str,
+    pub english_name: &'static str,
+    /// Roughly, when this build was made.
+    pub coverage: u32,
+}
+
 /// A language added at run time.
 #[derive(Clone, Debug)]
 pub struct Pack {
@@ -48,6 +60,8 @@ pub struct Pack {
     pub tag: String,
     /// In its own language: `Español`.
     pub name: String,
+    /// In English: `Spanish`. Empty when the pack doesn't say.
+    pub english_name: String,
     pub rtl: bool,
     /// `(file name, source)`, mirroring the en-GB files.
     pub files: Vec<(String, String)>,
@@ -76,8 +90,9 @@ impl Pack {
         };
         let lang = Lang::new(tag, &files, LocaleData::default(), false);
         let name = lang.format(NAME_ID, None).unwrap_or_else(|| tag.to_string());
-        let coverage = check(&files).coverage();
-        Ok(Self { tag: tag.to_string(), name, rtl: is_rtl_tag(tag), files, data, english: english_revision(), coverage })
+        let english_name = lang.format(ENGLISH_NAME_ID, None).unwrap_or_default();
+        let coverage = check(&files).coverage_for(tag);
+        Ok(Self { tag: tag.to_string(), name, english_name, rtl: is_rtl_tag(tag), files, data, english: english_revision(), coverage })
     }
 }
 
@@ -262,6 +277,13 @@ fn with_active<R>(f: impl FnOnce(&Active) -> R) -> R {
 
 /// The message a language names itself with, which the language list reads.
 pub const NAME_ID: &str = "language-name";
+/// Its name in English, for someone looking for it in a list they can't read.
+pub const ENGLISH_NAME_ID: &str = "language-name-english";
+
+/// English variants inherit en-GB: a message they leave out already reads right.
+pub fn inherits_english(tag: &str) -> bool {
+    tag.split('-').next() == Some("en")
+}
 
 /// Adds or replaces a pack. Takes effect on the next [`set_language`] for its tag; the
 /// generation moves so a cached language list is rebuilt.
@@ -279,6 +301,8 @@ pub struct Language {
     pub tag: String,
     /// In its own language.
     pub name: String,
+    /// In English; empty when the pack doesn't say.
+    pub english_name: String,
     pub coverage: u32,
 }
 
@@ -286,10 +310,14 @@ pub struct Language {
 pub fn languages() -> Vec<Language> {
     let r = REGISTRY.read().unwrap();
     let english = EN_GB_LANG.format(NAME_ID, None).unwrap_or_else(|| BUILT_IN.to_string());
-    let mut packs: Vec<Language> =
-        r.packs.iter().map(|p| Language { tag: p.tag.clone(), name: p.name.clone(), coverage: p.coverage }).collect();
+    let english_name = EN_GB_LANG.format(ENGLISH_NAME_ID, None).unwrap_or_else(|| english.clone());
+    let mut packs: Vec<Language> = r
+        .packs
+        .iter()
+        .map(|p| Language { tag: p.tag.clone(), name: p.name.clone(), english_name: p.english_name.clone(), coverage: p.coverage })
+        .collect();
     packs.sort_by(|a, b| a.name.cmp(&b.name));
-    std::iter::once(Language { tag: BUILT_IN.to_string(), name: english, coverage: 100 }).chain(packs).collect()
+    std::iter::once(Language { tag: BUILT_IN.to_string(), name: english, english_name, coverage: 100 }).chain(packs).collect()
 }
 
 fn lang(r: &mut Registry, tag: &str) -> Option<Arc<Lang>> {

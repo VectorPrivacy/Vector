@@ -23,6 +23,16 @@ impl Report {
     pub fn coverage(&self) -> u32 {
         if self.total == 0 { 100 } else { (self.translated * 100 / self.total) as u32 }
     }
+
+    /// [`coverage`](Self::coverage), except that an English variant counts what it leaves to
+    /// en-GB as done.
+    pub fn coverage_for(&self, tag: &str) -> u32 {
+        if !crate::inherits_english(tag) || self.total == 0 {
+            return self.coverage();
+        }
+        let broken = self.broken.iter().filter(|(id, _)| !id.ends_with(".ftl")).count();
+        (self.total.saturating_sub(broken) * 100 / self.total) as u32
+    }
 }
 
 fn english() -> Vec<Unit> {

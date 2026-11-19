@@ -21,8 +21,12 @@ language's tag: `es`, `de`, `pt-BR`, `zh-Hans`. A regional language falls back t
 (`pt-BR` to `pt`), then to English, one message at a time, so a language that is only half done
 still works.
 
-Translate `language-name` in `language.ftl` first: it is your language's name in itself
-("Español", "Deutsch"), as the Language setting lists it.
+Translate `language.ftl` first: `language-name` is your language's name in itself ("Español",
+"Deutsch"), and `language-name-english` its name in English ("Spanish", "German"). The Language
+setting lists both.
+
+An English variant (`en-US`, `en-AU`) translates only what it spells or says differently: every
+message it leaves out is en-GB's, and counts as done.
 
 ## What a message looks like
 
@@ -115,4 +119,24 @@ cargo run --bin vector-i18n -- pack es        # writes es.vpack
 ```
 
 and put the file in the `languages` folder inside Vector's data folder. It then shows under
-Settings > Display > Language.
+Settings > Appearance > Language.
+
+## Publishing
+
+Once a translation merges, CI (`.github/workflows/languages.yaml`) builds every language at 10%
+or more, signs an index of them with Vector's language key, and publishes the packs and the index
+to the `languages` release and the packs to Blossom. The app checks the signature against the key
+it has built in, and each pack against the hash the index gives, so any mirror is safe.
+
+The key signs nothing but language indexes. Whoever holds it makes it once, from
+`crates/vector-i18n`:
+
+```bash
+cargo run --features sign --bin vector-i18n -- keygen languages.key && gh secret set VECTOR_LANGUAGES_KEY -R VectorPrivacy/Vector < languages.key
+```
+
+That prints the public half, which goes in `SIGNER` in
+`crates/vector-gpui/src/backend/langpacks.rs`. Keep `languages.key` offline as the backup.
+
+To move to a new key, CI holds both for one run: the old one in `VECTOR_LANGUAGES_OLD_KEY` signs
+an index naming the new one, and apps that see both trust the new key from then on.

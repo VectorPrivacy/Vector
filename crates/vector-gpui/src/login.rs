@@ -134,6 +134,16 @@ pub struct LoginView {
     /// The open popup offers that re-pair.
     popup_reauth: bool,
     live: bool,
+    /// The system's language, offered once before anything else is chosen.
+    offer: Option<LangOffer>,
+}
+
+struct LangOffer {
+    tag: &'static str,
+    name: &'static str,
+    /// Downloading, 0 to 1000.
+    busy: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    error: Option<String>,
 }
 
 impl LoginView {
@@ -204,6 +214,7 @@ impl LoginView {
             reauth_from: Step::Start,
             popup_reauth: false,
             live: false,
+            offer: crate::lang::offer().map(|o| LangOffer { tag: o.tag, name: o.name, busy: None, error: None }),
         };
         if let Some(security) = unlock {
             view.unlock = true;
@@ -226,6 +237,134 @@ impl LoginView {
         let mut view = Self::new(None, window, cx);
         view.adding = Some(false);
         view
+    }
+
+    /// Switch: the index names the pack, the pack is checked against it, then everything reads in it.
+    fn offer_switch(&mut self, cx: &mut Context<Self>) {
+        let Some(o) = self.offer.as_mut().filter(|o| o.busy.is_none()) else { return };
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        o.busy = Some(progress.clone());
+        o.error = None;
+        let tag = o.tag;
+        let rx = backend::run(async move {
+            let index = backend::langpacks::refresh().await?;
+            let entry = index.entry(tag).cloned().ok_or_else(|| t::language_not_listed().to_string())?;
+            backend::langpacks::download(entry, progress).await
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await.unwrap_or_else(|_| Err(t::language_pack_unsaved().to_string()));
+            this.update(cx, |this, cx| {
+                match res {
+                    Ok(pack) => {
+                        crate::lang::offered(tag);
+                        this.offer = None;
+                        crate::lang::install(pack, true, cx);
+                    }
+                    Err(e) => {
+                        if let Some(o) = this.offer.as_mut() {
+                            o.busy = None;
+                            o.error = Some(e);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            let going = this
+                .update(cx, |this, cx| {
+                    let on = this.offer.as_ref().is_some_and(|o| o.busy.is_some());
+                    if on {
+                        cx.notify();
+                    }
+                    on
+                })
+                .unwrap_or(false);
+            if !going {
+                break;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// `.lg-offer`: one line above the footer, gone for good once answered.
+    fn offer_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let o = self.offer.as_ref().filter(|_| self.adding.is_none() && (self.live || std::env::var_os("VECTOR_LANG_OFFER").is_some()))?;
+        let text: AnyElement = if let Some(p) = &o.busy {
+            div().child(t::language_downloading(p.load(std::sync::atomic::Ordering::Relaxed).min(1000) / 10)).into_any_element()
+        } else if let Some(e) = &o.error {
+            div().text_color(c(0xFCA559)).child(t::language_download_failed(e.as_str())).into_any_element()
+        } else {
+            let strong = gpui::HighlightStyle { color: Some(c(0xffffff)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+            div().child(kit::run_text(&t::language_offer(kit::escape(o.name)), strong)).into_any_element()
+        };
+        let busy = o.busy.is_some();
+        let tag = o.tag;
+        Some(
+            div()
+                .id("lang-offer")
+                .max_w(px(560.))
+                .min_w_0()
+                .min_h(px(38.))
+                .pl(px(14.))
+                .pr(px(5.))
+                .py(px(5.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .rounded(px(19.))
+                .bg(c(0x141414))
+                .border_1()
+                .border_color(c(0x262626))
+                .text_size(px(13.))
+                .line_height(px(16.))
+                .text_color(c(0xc8c8c8))
+                .child(svg().path("icons/globe.svg").size(px(16.)).flex_shrink_0().text_color(c(PRIMARY)))
+                .child(div().min_w_0().flex_shrink(1.).child(text))
+                .when(!busy, |d| {
+                    d.child(
+                        div()
+                            .id("lang-offer-switch")
+                            .flex_shrink_0()
+                            .h(px(26.))
+                            .px(px(12.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(13.))
+                            .bg(c(PRIMARY))
+                            .hover(|d| d.bg(c(ACCENT)))
+                            .text_color(c(0x052b1e))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.offer_switch(cx)))
+                            .child(t::language_offer_switch()),
+                    )
+                    .child(
+                        div()
+                            .id("lang-offer-dismiss")
+                            .flex_shrink_0()
+                            .size(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .hover(|d| d.bg(c(0x262626)))
+                            .cursor_pointer()
+                            .tip(t::language_offer_dismiss())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                crate::lang::offered(tag);
+                                this.offer = None;
+                                cx.notify();
+                            }))
+                            .child(svg().path("icons/x.svg").size(px(14.)).text_color(c(0x8a8a8a))),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     /// The device's accounts, for the pill: it shows only when there is a choice to make.
@@ -1396,6 +1535,10 @@ impl Render for LoginView {
         .children(self.net_modal(vw <= 480., cx))
         .children(self.signer_qr(cx))
         .children(self.pill(cx).map(|pill| div().absolute().top(px(51. + lock_h + 23.)).left_0().right_0().px(px(24.)).flex().justify_center().child(pill)))
+        // Above the footer's credit and links, clear of the window's own controls.
+        .children(self.offer_pill(cx).map(|pill| {
+            div().absolute().bottom(px(if stacked { toggle_row + 6. } else { 25. } + 72.)).left_0().right_0().px(px(16.)).flex().justify_center().child(pill)
+        }))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();
             root.child(kit::popup(&p, move |yes, window, cx| {
