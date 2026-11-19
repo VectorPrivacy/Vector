@@ -242,6 +242,12 @@ impl LoginView {
     /// Switch: the index names the pack, the pack is checked against it, then everything reads in it.
     fn offer_switch(&mut self, cx: &mut Context<Self>) {
         let Some(o) = self.offer.as_mut().filter(|o| o.busy.is_none()) else { return };
+        // Nothing leaves before a network is chosen; the welcome screen asks for one.
+        if self.live && vector_core::transport::state() == vector_core::transport::TransportState::Unknown {
+            o.error = Some(t::routing_choose().to_string());
+            cx.notify();
+            return;
+        }
         let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         o.busy = Some(progress.clone());
         o.error = None;
