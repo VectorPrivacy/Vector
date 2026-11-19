@@ -5,10 +5,10 @@
     DISPLAY=:99 python3 scripts/onscreen.py [--bin PATH] [--fixtures FILE] [--only NAME] [--update]
 
 Each check opens a screen from the fixtures and reads the app's own counters: a screen at rest must
-draw nothing, a menu must close on Escape and fit the window when opened in a corner, a chat at its
-newest message must follow arrivals while one scrolled up holds still, a window in the background
-must stop presenting, and memory at rest must stay near the recorded baseline (`--update` records
-it). Linux needs `xdotool` for focus and `xterm` for the background check; macOS brings Finder
+draw nothing, hover and toast fades must end, a menu must close on Escape and fit the window when
+opened in a corner, a chat at its newest message must follow arrivals while one scrolled up holds
+still, a window in the background must stop presenting, and memory at rest must stay near the
+recorded baseline (`--update` records it). Linux needs `xdotool` for focus and `xterm` for the background check; macOS brings Finder
 forward for it.
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile, time
@@ -115,6 +115,16 @@ def inside(node):
     return b is not None and b[0] >= -0.5 and b[1] >= -0.5 and b[2] <= W + 0.5 and b[3] <= H + 0.5
 
 
+def last_text():
+    """A point on the lowest, rightmost text above the composer, or None."""
+    texts = [n["bounds"] for n in a11y()["nodes"].values()
+             if n.get("bounds") and n["aria"].get("role") == "Label" and n["bounds"][3] < H - 60 and n["bounds"][0] > W / 2]
+    if not texts:
+        return None
+    b = max(texts, key=lambda b: b[2] + b[3])
+    return round(b[2] - 3), round((b[1] + b[3]) / 2)
+
+
 def arrive(chat, n=1):
     """`n` incoming messages in `chat`, as the core would announce them."""
     for _ in range(n):
@@ -159,6 +169,29 @@ try:
             draws, presents = at_rest()
             check(name, draws == 0, f"draws={draws} presents={presents}")
 
+    if wanted("fade:hover") and chats:
+        # A hover fades in once and then holds still: the pointer resting over a row draws nothing.
+        dev("chat:" + chats[0], wait=False)
+        time.sleep(1.5)
+        at = last_text()
+        frames()
+        if at:
+            dev(f"move:{at[0]},{at[1]}", wait=False)
+        time.sleep(0.6)
+        moved = frames()["draws"]
+        draws, presents = at_rest()
+        dev("move:5,5", wait=False)
+        check("fade:hover", moved > 0 and draws == 0, f"at {at}: while fading={moved} then draws={draws} presents={presents}")
+
+    if wanted("fade:toast"):
+        # Held ~1.6 s, then faded out over 320 ms; the window is still once it has gone.
+        frames()
+        dev("emit:show_toast:" + json.dumps("On-screen check"), wait=False)
+        time.sleep(0.6)
+        shown = frames()["draws"]
+        draws, presents = at_rest(settle=3)
+        check("fade:toast", shown > 0 and draws == 0, f"while showing={shown} then draws={draws} presents={presents}")
+
     if wanted("menu:escape") and chats:
         dev("chat:" + chats[0], wait=False)
         time.sleep(1.5)
@@ -172,11 +205,9 @@ try:
 
     if wanted("menu:clamp") and chats:
         # Opened on the lowest, rightmost text above the composer, a menu must still fit the window.
-        texts = [n["bounds"] for n in a11y()["nodes"].values()
-                 if n.get("bounds") and n["aria"].get("role") == "Label" and n["bounds"][3] < H - 60 and n["bounds"][0] > W / 2]
-        if texts:
-            b = max(texts, key=lambda b: b[2] + b[3])
-            x, y = round(b[2] - 3), round((b[1] + b[3]) / 2)
+        at = last_text()
+        if at:
+            x, y = at
             dev(f"rclick:{x},{y}", wait=False)
             time.sleep(0.8)
             found = menus(a11y())
