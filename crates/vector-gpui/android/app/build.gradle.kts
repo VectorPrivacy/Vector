@@ -143,17 +143,17 @@ abstract class CargoBuild @Inject constructor(private val exec: ExecOperations) 
 }
 
 // `-PvectorAbis=arm64-v8a,armeabi-v7a,x86_64`; a phone is arm64 unless told otherwise.
-val abis = (findProperty("vectorAbis") as String? ?: "arm64-v8a").split(',').map { it.trim() }
-val features = findProperty("vectorFeatures") as String? ?: "tor,i2p"
+val wantedAbis = (findProperty("vectorAbis") as String? ?: "arm64-v8a").split(',').map { it.trim() }
+val wantedFeatures = findProperty("vectorFeatures") as String? ?: "tor,i2p"
 
 androidComponents {
     onVariants { variant ->
         val name = variant.name.replaceFirstChar { it.uppercase() }
         val cargo = tasks.register<CargoBuild>("cargoBuild$name") {
-            this.abis.set(abis)
+            abis.set(wantedAbis)
             // Debug APKs still run optimised: the unoptimised client is too slow on a phone.
             profile.set(if (variant.buildType == "release") "release" else "fastrel")
-            this.features.set(features)
+            features.set(wantedFeatures)
             crateDir.set(rootProject.layout.projectDirectory.dir(".."))
             ndkDir.set(androidComponents.sdkComponents.ndkDirectory)
             jniLibs.set(layout.buildDirectory.dir("rustJniLibs/${variant.name}"))
