@@ -1843,10 +1843,16 @@ impl VectorApp {
         app.listen_video(cx);
         crate::callvideo::announce_caps();
         backend::notify::set_focused(window.is_window_active());
+        animation_idle(window.is_window_active());
         let away_since = std::cell::Cell::new(None::<std::time::Instant>);
         cx.observe_window_activation(window, move |_, window, _| {
             let active = window.is_window_active();
             backend::notify::set_focused(active);
+            let asleep = gpui::animations_asleep();
+            animation_idle(active);
+            if active && asleep {
+                window.refresh();
+            }
             // `resume_after_away`: back after a minute or more, the relays are proven, the live
             // subscriptions re-armed and the gap caught up.
             if !active {
@@ -6438,6 +6444,12 @@ impl VectorApp {
             (None, None) => {}
         }
     }
+}
+
+/// How long animations run without input. A window in the background lets them sleep sooner:
+/// presenting their frames keeps the GPU driver's working memory (some 230 MB on a Mac) held.
+fn animation_idle(active: bool) {
+    gpui::set_animation_idle(std::time::Duration::from_secs(if active { 300 } else { 60 }));
 }
 
 impl Render for VectorApp {
