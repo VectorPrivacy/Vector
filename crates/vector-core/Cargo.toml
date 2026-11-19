@@ -82,6 +82,7 @@ ghash = "0.6"
 argon2 = "0.5.3"
 sha2 = "0.10.9"
 unicode-normalization = "0.1"
+memchr = "2"
 # HKDF-SHA256 for the Community protocol's frozen key-derivation convention
 # (GROUP_PROTOCOL.md §14). Audited RustCrypto crate rather than a hand-rolled
 # construction, since the derivation is wire-immutable.

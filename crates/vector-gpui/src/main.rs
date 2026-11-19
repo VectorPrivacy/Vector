@@ -24,6 +24,7 @@ mod voice;
 mod miniprofile;
 mod pings;
 mod pins;
+mod search;
 mod pickers;
 mod edithistory;
 mod textdiff;

@@ -52,6 +52,8 @@ pub enum Act {
     ChannelsMenu(gpui::Point<gpui::Pixels>),
     /// The open channel's ⋯.
     ChatMenu,
+    /// Search this channel.
+    Search,
     EditChannel(String),
     /// A member tapped: their mini profile, beside what was painted under the key.
     Member(String, SharedString),
@@ -728,6 +730,7 @@ pub fn header(
                         .child(topic)
                 })),
         )
+        .child(crate::search::button(click(on, || Act::Search)))
         .children(pins.map(crate::pins::button))
         .child(
             div()

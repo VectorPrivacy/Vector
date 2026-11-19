@@ -297,6 +297,7 @@ pub struct VectorApp {
     switcher_up: bool,
     badge_card: Option<crate::badgecard::Card>,
     new_chat: Option<crate::newchat::NewChat>,
+    search: Option<crate::search::Search>,
     create_community: Option<crate::createcommunity::CreateCommunity>,
     invite: Option<crate::invite::Invite>,
     comm_settings: Option<crate::commsettings::CommSettings>,
@@ -433,6 +434,7 @@ enum Mode {
 /// What a context menu row does.
 enum MenuAct {
     FoldRail,
+    SearchHere,
     /// The Messages door's catch-up: every unread DM.
     ReadAllDms,
     AddFriend,
@@ -692,6 +694,8 @@ mod ui_scrollbar;
 mod ui_routing;
 #[path = "ui_pins.rs"]
 mod pins_ops;
+#[path = "ui_search.rs"]
+mod search_ops;
 #[path = "ui_msgmenu.rs"]
 mod msgmenu_ops;
 #[path = "ui_timeouts.rs"]
@@ -1090,6 +1094,7 @@ impl VectorApp {
             switcher_up: false,
             badge_card: None,
             new_chat: None,
+            search: None,
             create_community: None,
             invite: None,
             comm_settings: None,
@@ -2012,6 +2017,7 @@ impl VectorApp {
                 self.show_toast(&t::copied_link(), cx);
             }
             MenuAct::NewMessage => self.open_new_chat(window, cx),
+            MenuAct::SearchHere => self.open_search(true, window, cx),
             MenuAct::AddFriend => {
                 let me = self.store.borrow().my_npub.clone();
                 self.show_profile_qr(&me, window, cx);
@@ -6675,6 +6681,20 @@ impl VectorApp {
                     cx.stop_propagation();
                     return;
                 }
+                if e.keystroke.key == "escape" && app.search.is_some() {
+                    app.on_search(crate::search::Act::Close, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Cmd/Ctrl+K searches every chat, Cmd/Ctrl+F the open one.
+                let m = &e.keystroke.modifiers;
+                let primary = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
+                if primary && !m.alt && !m.shift && matches!(e.keystroke.key.as_str(), "k" | "f") && matches!(app.screen, Screen::Main) {
+                    let here = e.keystroke.key == "f" && app.open.is_some();
+                    app.open_search(here, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if e.keystroke.key == "escape"
                     && (app.escape_overlay() || app.escape_panel(window, cx) || app.nexus_escape(window, cx))
                 {
@@ -7039,6 +7059,7 @@ impl VectorApp {
             .children(self.status_view(&store, window, cx))
             .children(self.qr_view(window, cx))
             .children(self.qr_scanner_view(window, cx))
+            .children(self.search_view(window, cx))
             .children(self.badge_card.as_ref().map(|card| {
                 if card.opened.elapsed().as_secs_f32() < 0.45 {
                     window.request_animation_frame();
@@ -8968,6 +8989,7 @@ impl VectorApp {
                                 ),
                         )
                     })
+                    .when(!self.is_slim, |d| d.child(crate::search::button(cx.listener(|app, _, window, cx| app.open_search(true, window, cx)))))
                     .when(menu, |d| d.child({
                         let probe = self.chat_menu_btn.clone();
                         let chat = id.to_string();
@@ -9222,8 +9244,8 @@ impl VectorApp {
 
     /// `buildChatMenuItems`: what the open chat's ⋯ offers.
     fn open_chat_menu(&mut self, chat: String, cx: &mut Context<Self>) {
-        let mut items = vec![kit::MenuItem::new(t::chat_menu_self_destruct(), "clock")];
-        let mut acts = vec![MenuAct::SelfDestruct(chat.clone())];
+        let mut items = vec![kit::MenuItem::new(t::search_in_chat(), "search"), kit::MenuItem::new(t::chat_menu_self_destruct(), "clock")];
+        let mut acts = vec![MenuAct::SearchHere, MenuAct::SelfDestruct(chat.clone())];
         let community = self.store.borrow().community_of(&chat).map(|c| c.community_id.clone());
         if let Some(community) = community
             && self.community_caps(&community).contains("manage_channels")
@@ -11542,6 +11564,7 @@ impl VectorApp {
             }
             Act::DropChannel(moved, at) => self.drop_channel(moved, at, cx),
             Act::DropCategory(moved, target, before) => self.drop_category(moved, target, before, cx),
+            Act::Search => self.open_search(true, window, cx),
             Act::ChatMenu => {
                 if let Some(chat) = self.open.clone() {
                     self.open_chat_menu(chat.to_string(), cx);
