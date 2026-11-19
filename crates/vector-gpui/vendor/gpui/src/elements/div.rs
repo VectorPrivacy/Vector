@@ -3730,6 +3730,7 @@ impl Interactivity {
         style.refine(&self.base_style);
         let mut element_state = element_state;
         let (mut group_on, mut hover_on) = (false, false);
+        let mut group_hit = false;
 
         if let Some(focus_handle) = self.tracked_focus_handle.as_ref() {
             if let Some(in_focus_style) = self.in_focus_style.as_ref()
@@ -3756,6 +3757,7 @@ impl Interactivity {
             if let Some(group_hover) = self.group_hover_style.as_ref() {
                 let is_group_hovered =
                     if let Some(group_hitbox_id) = GroupHitboxes::get(&group_hover.group, cx) {
+                        group_hit = true;
                         !window.last_input_was_touch() && group_hitbox_id.is_hovered(window)
                     } else if let Some(element_state) = element_state.as_ref() {
                         !window.last_input_was_touch()
@@ -3786,6 +3788,17 @@ impl Interactivity {
                 };
 
                 hover_on = is_hovered;
+            }
+        }
+        // The hit test is the truth. A pointer that never moves sends no event to correct the copy
+        // layout reads, and the two disagreeing would flip the hover fade every frame.
+        if let Some(state) = element_state.as_ref().and_then(|s| s.hover_state.as_ref()) {
+            let mut state = state.borrow_mut();
+            if hitbox.is_some() && self.hover_style.is_some() {
+                state.element = hover_on;
+            }
+            if group_hit && self.group_hover_style.is_some() {
+                state.group = group_on;
             }
         }
         let refine = |base: &Style, group: bool, hover: bool| {
