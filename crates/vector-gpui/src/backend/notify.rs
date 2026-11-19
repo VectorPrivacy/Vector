@@ -8,7 +8,7 @@ use serde_json::json;
 use vector_core::notify::{self, MessageClass};
 use vector_core::{Message, STATE, VectorCore, db};
 use vector_media::services::native_notify;
-use vector_media::services::{NotificationData, show_notification_generic, strip_content_for_preview};
+use vector_media::services::{NotificationData, strip_content_for_preview};
 
 static FOCUSED: AtomicBool = AtomicBool::new(true);
 
@@ -51,13 +51,7 @@ pub fn install() {
                 json!({ "action_type": "chat", "target": chat, "message": message, "account": account }),
             )
         },
-        sound: || {
-            if super::prefs::sql("notif_global_mute").as_deref() == Some("true") {
-                return;
-            }
-            let sound = super::prefs::sql("notif_sound").unwrap_or_default();
-            super::sound::play(super::sound::Sound::parse(&sound));
-        },
+        sound: ring,
     });
     #[cfg(not(target_os = "linux"))]
     init();
@@ -105,12 +99,37 @@ async fn reply(chat_id: String, text: String) -> Result<String, String> {
     Ok(String::new())
 }
 
-fn show(data: NotificationData) {
+fn ring() {
+    if super::prefs::sql("notif_global_mute").as_deref() == Some("true") {
+        return;
+    }
+    let sound = super::prefs::sql("notif_sound").unwrap_or_default();
+    super::sound::play(super::sound::Sound::parse(&sound));
+}
+
+/// Core's privacy transform, with its English placeholders said in the reader's language.
+fn hide(data: &mut NotificationData, privacy: notify::ContentPrivacy) {
+    use notify::ContentPrivacy as P;
+    data.apply_content_privacy(privacy);
+    match privacy {
+        P::Full => {}
+        P::HideSender if data.group_name.is_some() => {}
+        P::HideSender => data.title = crate::coretext::say(&data.title).into_owned(),
+        P::HideContent | P::HideAll => data.body = crate::coretext::say(&data.body).into_owned(),
+    }
+}
+
+/// The desktop notifier's path, applying privacy here: it would apply it again in English.
+fn show(mut data: NotificationData) {
     if FOCUSED.load(Ordering::Relaxed) {
         return;
     }
     ready();
-    show_notification_generic(data);
+    hide(&mut data, notify::ContentPrivacy::load());
+    ring();
+    if let Err(e) = native_notify::show(&data) {
+        log::warn!("notification: {e}");
+    }
 }
 
 fn file_body(msg: &Message) -> String {
@@ -250,6 +269,45 @@ pub fn account_gone(npub: &str) {
 /// A reply typed into a notification before its account was logged in.
 pub fn logged_in() {
     native_notify::flush_pending_reply();
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use vector_core::notify::ContentPrivacy as P;
+
+    fn dm() -> NotificationData {
+        // i18n-exempt: test fixture
+        NotificationData::direct_message("Alice".into(), "see you at 8".into(), None, "npub1x".into())
+    }
+
+    fn group() -> NotificationData {
+        // i18n-exempt: test fixture
+        NotificationData::community_message("Alice".into(), "Book Club".into(), "see you at 8".into(), None, None, "chan".into())
+    }
+
+    /// In English it says exactly what core's own transform says, and every placeholder it
+    /// puts on screen has a translation.
+    #[test]
+    fn hidden_previews_match_core_and_are_translated() {
+        for privacy in [P::Full, P::HideContent, P::HideSender, P::HideAll] {
+            for make in [dm, group] {
+                let (mut ours, mut core) = (make(), make());
+                hide(&mut ours, privacy);
+                core.apply_content_privacy(privacy);
+                assert_eq!((&ours.title, &ours.body, &ours.sender_name), (&core.title, &core.body, &core.sender_name));
+                let placeholder = match privacy {
+                    P::Full => None,
+                    P::HideSender if core.group_name.is_some() => None,
+                    P::HideSender => Some(core.title.clone()),
+                    P::HideContent | P::HideAll => Some(core.body.clone()),
+                };
+                if let Some(p) = placeholder {
+                    assert!(matches!(crate::coretext::say(&p), std::borrow::Cow::Owned(_)), "no translation for {p:?}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
