@@ -14,4 +14,7 @@ pub mod call_service;
 #[path = "../../../../../src-tauri/src/android/incoming_call.rs"]
 #[allow(dead_code)]
 pub mod incoming_call;
+#[path = "../../../../../src-tauri/src/android/storage.rs"]
+#[allow(dead_code)]
+pub mod storage;
 pub mod background_sync;

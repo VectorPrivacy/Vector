@@ -119,8 +119,20 @@ pub fn start(data_dir: PathBuf) -> mpsc::UnboundedReceiver<UiEvent> {
     vector_core::transport::strict_boot();
     vector_core::net::set_app_version(env!("CARGO_PKG_VERSION"));
     vector_core::db::set_app_version(env!("CARGO_PKG_VERSION").to_string());
+    #[cfg(not(target_os = "android"))]
     if let Some(dl) = dirs::download_dir() {
         vector_core::db::set_download_dir(dl.join("vector"));
+    }
+    // The Tauri client's folders: the app's media folder, and Download/Vector from Android 11.
+    #[cfg(target_os = "android")]
+    {
+        use vector_media::android::storage;
+        if let Some(dir) = storage::external_media_dir() {
+            vector_core::db::set_download_dir(dir.into());
+        }
+        if let Some(dir) = storage::public_dir() {
+            vector_core::db::set_public_dir(dir.into());
+        }
     }
     let _ = std::fs::create_dir_all(&data_dir);
     device::init(Some(data_dir.clone()));

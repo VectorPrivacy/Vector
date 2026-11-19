@@ -55,6 +55,8 @@ msg-react-not-sent = Reaction not sent: { $error }
 msg-not-sent = Not sent: { $error }
 msg-accept-to-download = Accept the request to download files
 msg-save-failed = Save Failed
+# $folder: where a phone put the saved file, as its file manager names it (Download/Vector)
+msg-saved-to = Saved to { $folder }
 msg-file-gone = This file isn't on this device any more
 # Jumping to a message, by link or from Pins, that can't be reached.
 msg-jump-unshown = That message can't be shown

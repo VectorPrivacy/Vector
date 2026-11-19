@@ -5656,26 +5656,43 @@ impl VectorApp {
         let Some(hash) = vector_core::simd::hex::hex_to_bytes_32_checked(&id) else {
             return;
         };
-        let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
-        let pick = cx.prompt_for_new_path(&dir, Some(&name));
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(dest))) = pick.await else {
-                return;
-            };
-            let rx = backend::run(async move {
-                let bytes = backend::attachments::bytes(Some(hash), String::new())
-                    .await
-                    .ok_or(t::msg_file_gone().to_string())?;
-                tokio::fs::write(&dest, bytes)
-                    .await
-                    .map_err(|e| e.to_string())
-            });
-            if let Ok(Err(e)) = rx.await {
-                this.update(cx, |this, cx| this.notice(&t::msg_save_failed(), e.to_string(), cx))
-                    .ok();
-            }
-        })
-        .detach();
+        // A phone has no save dialog to point anywhere else.
+        #[cfg(target_os = "android")]
+        {
+            let rx = backend::run(backend::mediaport::save_public(hash, name));
+            cx.spawn(async move |this, cx| {
+                let Ok(result) = rx.await else { return };
+                this.update(cx, |this, cx| match result {
+                    Ok(folder) => this.show_toast(&t::msg_saved_to(folder), cx),
+                    Err(e) => this.notice(&t::msg_save_failed(), e, cx),
+                })
+                .ok();
+            })
+            .detach();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+            let pick = cx.prompt_for_new_path(&dir, Some(&name));
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(Some(dest))) = pick.await else {
+                    return;
+                };
+                let rx = backend::run(async move {
+                    let bytes = backend::attachments::bytes(Some(hash), String::new())
+                        .await
+                        .ok_or(t::msg_file_gone().to_string())?;
+                    tokio::fs::write(&dest, bytes)
+                        .await
+                        .map_err(|e| e.to_string())
+                });
+                if let Ok(Err(e)) = rx.await {
+                    this.update(cx, |this, cx| this.notice(&t::msg_save_failed(), e.to_string(), cx))
+                        .ok();
+                }
+            })
+            .detach();
+        }
     }
 
     /// Mini App cards' names and icons, read from their packages.

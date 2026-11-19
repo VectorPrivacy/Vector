@@ -89,6 +89,9 @@ object Bridge {
         }
     }
 
+    /** A file in the app that takes its type, through the app's FileProvider. */
+    @JvmStatic fun openFile(path: String) = ui { io.vectorapp.VectorFiles.openFile(it, path) }
+
     @JvmStatic fun setClipboard(text: String) {
         main.post {
             context.getSystemService(ClipboardManager::class.java)

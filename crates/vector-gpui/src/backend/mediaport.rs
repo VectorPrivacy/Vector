@@ -246,6 +246,20 @@ async fn move_out(stopped: &impl Fn() -> bool) {
     progress(kept.len(), kept.len(), true);
 }
 
+/// A Save on a phone: a plain copy in Vector's public folder, where the gallery and file managers
+/// find it. Answers that folder as a file manager names it.
+#[cfg(target_os = "android")]
+pub async fn save_public(hash: [u8; 32], name: String) -> Result<String, String> {
+    let dir = vector_core::db::get_public_dir();
+    let at = dir.clone();
+    let path = vector_core::db::blocking_bound(move || place_plain(&hash, &name, &at)).await??.0;
+    let spelled = path.to_string_lossy().into_owned();
+    vector_core::db::saved::mark(&spelled)?;
+    vector_media::android::storage::scan_file(&spelled);
+    let dir = dir.to_string_lossy();
+    Ok(["/Download", "/Android"].iter().find_map(|s| dir.find(s)).map_or(dir.to_string(), |i| dir[i + 1..].to_string()))
+}
+
 /// A kept file made plain in the public folder: its rows point at that copy, then the store lets
 /// go of its own.
 fn unseal(hash: &[u8; 32], name: &str) -> Result<PathBuf, String> {

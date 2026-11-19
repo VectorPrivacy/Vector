@@ -374,6 +374,14 @@ pub(crate) fn open_url(url: &str) {
     });
 }
 
+pub(crate) fn open_file(path: &std::path::Path) {
+    with_env(|env, class| {
+        let path = env.new_string(path.to_string_lossy())?;
+        env.call_static_method(class, "openFile", "(Ljava/lang/String;)V", &[(&path).into()])
+            .map(drop)
+    });
+}
+
 pub(crate) fn set_clipboard(text: &str) {
     with_env(|env, class| {
         let text = env.new_string(text)?;

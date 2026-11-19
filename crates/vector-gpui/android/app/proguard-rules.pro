@@ -11,3 +11,4 @@
 -keep class io.vectorapp.NotificationActionReceiver { *; }
 -keep class io.vectorapp.VectorNotificationService { *; }
 -keep class io.vectorapp.VectorBatteryHelper { *; }
+-keep class io.vectorapp.VectorFiles { *; }

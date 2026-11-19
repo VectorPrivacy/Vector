@@ -66,6 +66,10 @@ impl PathResolver {
     pub fn app_local_data_dir(&self) -> Result<PathBuf, Error> {
         LOCAL_DATA.get().cloned().ok_or_else(|| Error("app data directory not set".into()))
     }
+    /// The host sets the download folder in core itself, so a module asking here has none.
+    pub fn download_dir(&self) -> Result<PathBuf, Error> {
+        Err(Error("no download directory here".into()))
+    }
 }
 
 pub trait Manager<R: Runtime> {

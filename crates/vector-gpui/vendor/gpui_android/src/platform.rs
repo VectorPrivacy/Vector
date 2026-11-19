@@ -422,9 +422,14 @@ impl Platform for AndroidPlatform {
         false
     }
 
-    fn reveal_path(&self, _path: &Path) {}
+    // A phone has no file manager to reveal a file in: it opens in the app that takes its type.
+    fn reveal_path(&self, path: &Path) {
+        bridge::open_file(path);
+    }
 
-    fn open_with_system(&self, _path: &Path) {}
+    fn open_with_system(&self, path: &Path) {
+        bridge::open_file(path);
+    }
 
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.quit.set(callback);
