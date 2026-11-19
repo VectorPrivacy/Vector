@@ -273,7 +273,7 @@ fn share(m: &CreateCommunity, narrow: bool, on: &OnAct) -> impl IntoElement {
                 .child(crate::kit::spaced(t::create_community_link().to_uppercase(), 0.99).font_weight(FontWeight::BOLD).text_size(px(11.)).line_height(px(24.)).text_color(c(0x8a8a8a)))
                 .child(match (&m.link, &m.link_error) {
                     (Some(link), _) => share_in("cg-share-url-in", div().id("cg-share-url").tip(link.to_string()).mt(px(10.)).map(|d| if narrow { d.flex_none().whitespace_nowrap() } else { d.truncate() }).font_weight(FontWeight::MEDIUM).text_size(px(15.)).line_height(px(24.)).text_color(c(0xffffff)).child(pretty(link))),
-                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(t::create_community_link_failed(e)).into_any_element(),
+                    (None, Some(e)) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(18.)).text_color(c(crate::timeline::DANGER)).child(t::create_community_link_failed(&*crate::coretext::say(e))).into_any_element(),
                     (None, None) => div().id("cg-share-status").mt(px(10.)).text_size(px(13.)).line_height(px(24.)).text_color(white_a(0.55)).child(match &m.progress {
                         Some((label, pct)) => crate::kit::stage_progress(label.clone(), *pct, 16.),
                         None => crate::kit::stage_progress(t::create_community_link_preparing(), 0., 16.),
@@ -721,7 +721,7 @@ pub fn view(m: &CreateCommunity, store: &Store, width: f32, on: &OnAct, cx: &App
                 .into_any_element()
         })
     } else {
-        m.error.clone().map(|e| div().child(e).into_any_element())
+        m.error.as_deref().map(|e| div().child(crate::coretext::say(e).into_owned()).into_any_element())
     };
     // The steps and their buttons stay together, centred in the pane; a friend list to pick
     // from takes the height it's given.

@@ -1066,8 +1066,8 @@ fn save_bar(m: &ChannelEditor, on: &OnAct, cx: &App) -> Option<AnyElement> {
             },
             true,
         )
-    } else if let Some(e) = m.error.clone() {
-        (e.into(), true)
+    } else if let Some(e) = m.error.as_deref() {
+        (crate::coretext::say(e).into_owned().into(), true)
     } else {
         (t::channel_editor_unsaved(), false)
     };

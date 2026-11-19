@@ -23,7 +23,7 @@ fn label(kind: &str) -> SharedString {
 }
 
 fn json<T: serde::Serialize>(v: T) -> Value {
-    serde_json::to_value(v).unwrap_or(Value::Null)
+    crate::coretext::say_json(serde_json::to_value(v).unwrap_or(Value::Null), crate::coretext::STATUS_KEYS)
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {

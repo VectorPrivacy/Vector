@@ -555,8 +555,12 @@ pub struct Popup {
 
 impl Popup {
     pub fn notice(title: impl Into<SharedString>) -> Self {
+        let title: SharedString = title.into();
         Self {
-            title: title.into(),
+            title: match crate::coretext::say(&title) {
+                std::borrow::Cow::Owned(said) => said.into(),
+                std::borrow::Cow::Borrowed(_) => title,
+            },
             text: None,
             icon: Some("icons/vector_warning.svg"),
             confirm: crate::t::dialog_okay(),
@@ -588,6 +592,10 @@ pub fn popup(
             .child(p.title.clone()),
     );
     if let Some(text) = &p.text {
+        let text = &match crate::coretext::say(text) {
+            std::borrow::Cow::Owned(said) => SharedString::from(said),
+            std::borrow::Cow::Borrowed(_) => text.clone(),
+        };
         let body: AnyElement = if text.contains('<') || text.contains('&') {
             rich(text).into_any_element()
         } else {

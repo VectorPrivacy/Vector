@@ -21,7 +21,7 @@ const WATCH: Duration = Duration::from_secs(5);
 use crate::netinfo::LINKS;
 
 fn json<T: serde::Serialize>(v: T) -> Value {
-    serde_json::to_value(v).unwrap_or(Value::Null)
+    crate::coretext::say_json(serde_json::to_value(v).unwrap_or(Value::Null), crate::coretext::STATUS_KEYS)
 }
 
 fn port_look() -> crate::composer::Look {
@@ -747,7 +747,7 @@ impl VectorApp {
                     if toggled.is_some() {
                         r.bridges.enabled = !enabled;
                     }
-                    r.bridges.status = Some((t::routing_circuit_failed(&e).into(), true));
+                    r.bridges.status = Some((t::routing_circuit_failed(&*crate::coretext::say(&e)).into(), true));
                 }
             }
         });
@@ -815,7 +815,7 @@ impl VectorApp {
                 r.saving = false;
                 match &res {
                     Ok(_) => r.note = None,
-                    Err(e) => r.note = Some((e.clone(), false)),
+                    Err(e) => r.note = Some((crate::coretext::say(e).into_owned(), false)),
                 }
             }
             if let Ok(v) = res {
@@ -841,7 +841,7 @@ impl VectorApp {
                 match &res {
                     Ok(_) if saving => r.auth = None,
                     Ok(_) => {}
-                    Err(e) => r.auth_error = e.clone(),
+                    Err(e) => r.auth_error = crate::coretext::say(e).into_owned(),
                 }
             }
             if let Ok(v) = res {
@@ -1093,7 +1093,7 @@ impl VectorApp {
                 backend::run(async move { net::transport_set_alias(host, kind, address).await.map(|_| Done::Saved) })
             }
             AliasAct::Remove => backend::run(async move { net::transport_set_alias(host, kind, None).await.map(|_| Done::Saved) }),
-            AliasAct::Find => backend::run(async move { net::transport_find_alias(url).await.map(Done::Found) }),
+            AliasAct::Find => backend::run(async move { net::transport_find_alias(url).await.map(|v| Done::Found(crate::coretext::say_json(v, crate::coretext::STATUS_KEYS))) }),
             AliasAct::Check => backend::run(async move { net::transport_check_alias(host).await.map(|_| Done::Checked) }),
             AliasAct::Help(_) => return,
         };
@@ -1107,7 +1107,7 @@ impl VectorApp {
                 let Some(a) = s.dialog.as_mut().and_then(|d| d.alias()) else { return };
                 a.busy = false;
                 match res {
-                    Err(e) => a.note = Some((e, Tone::Error)),
+                    Err(e) => a.note = Some((crate::coretext::say(&e).into_owned(), Tone::Error)),
                     Ok(Done::Saved) => {
                         a.editing = false;
                         a.sync(&book, cx);

@@ -18,6 +18,7 @@ mod badgecard;
 mod call;
 mod chaneditor;
 mod commsettings;
+mod coretext;
 mod community;
 mod rail;
 mod voice;

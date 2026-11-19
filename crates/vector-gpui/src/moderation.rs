@@ -561,7 +561,7 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
     let group = SharedString::from(format!("mod-row-{npub}"));
     div()
         .id(group.clone())
-        .when(locked, |d| d.tip(reasons.first().map_or_else(t::moderation_protected, |r| SharedString::from(r.to_string()))))
+        .when(locked, |d| d.tip(reasons.first().map_or_else(t::moderation_protected, |r| SharedString::from(crate::coretext::say(r).into_owned()))))
         .group(group.clone())
         .relative()
         .flex()
@@ -669,7 +669,7 @@ fn row(m: &Moderation, store: &Store, x: &Value, on: &OnAct) -> impl IntoElement
                             .text_size(px(11.5))
                             .line_height(px(16.))
                             .text_color(white_a(0.5))
-                            .child(why.join(" · ")),
+                            .child(why.iter().map(|r| crate::coretext::say(r)).collect::<Vec<_>>().join(" · ")),
                     )
                 }),
         )
@@ -702,7 +702,7 @@ fn list(m: &Moderation, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
             .into_any_element();
     }
     if let Some(e) = &m.error {
-        return empty(e.clone());
+        return empty(crate::coretext::say(e).into_owned());
     }
     let q = m.query.read(cx).text().trim().to_lowercase();
     let rows: Vec<&Value> = m

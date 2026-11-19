@@ -155,7 +155,7 @@ impl Cache {
     pub fn settle(&mut self, entity: &str, res: Result<Embed, String>) {
         let state = match res {
             Ok(e) => State::Ready(Arc::new(e)),
-            Err(e) => State::Failed(e, Instant::now()),
+            Err(e) => State::Failed(crate::coretext::say(&e).into_owned(), Instant::now()),
         };
         self.states.insert(entity.to_ascii_lowercase(), state);
     }
@@ -1109,7 +1109,7 @@ fn video_state(env: &Env, v: &Media) -> (Option<i64>, Option<crate::audio::Audio
     match media.embed_videos.get(&v.url) {
         Some(VideoState::Loading(p)) => (Some(*p), None, None),
         Some(VideoState::Ready(spec)) => (None, Some(spec.clone()), None),
-        Some(VideoState::Failed(e)) => (None, None, Some(e.clone())),
+        Some(VideoState::Failed(e)) => (None, None, Some(crate::coretext::say(e).into_owned())),
         None => (None, None, None),
     }
 }

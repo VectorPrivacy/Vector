@@ -1049,7 +1049,7 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                 .child(list)
                 .when(editable, |d| {
                     d.child(add_row("cs-relay-add", &m.relay_input, m.relays.len() >= RELAYS_MAX, relay_text, click(on, || Act::AddRelay)))
-                        .children(m.relay_error.clone().map(|e| hint(e).mt(px(10.)).text_color(c(crate::timeline::DANGER))))
+                        .children(m.relay_error.as_deref().map(|e| hint(crate::coretext::say(e).into_owned()).mt(px(10.)).text_color(c(crate::timeline::DANGER))))
                         .child(hint(t::community_settings_relays_hint()).mt(px(10.)))
                 }),
         ))
@@ -1061,7 +1061,7 @@ fn relays(m: &CommSettings, on: &OnAct, cx: &App) -> AnyElement {
                 .child(voice)
                 .when(editable, |d| {
                     d.child(add_row("cs-voice-add", &m.voice_input, m.voice.len() >= VOICE_RELAYS_MAX, voice_text, click(on, || Act::AddVoice)))
-                        .children(m.voice_error.clone().map(|e| hint(e).mt(px(10.)).text_color(c(crate::timeline::DANGER))))
+                        .children(m.voice_error.as_deref().map(|e| hint(crate::coretext::say(e).into_owned()).mt(px(10.)).text_color(c(crate::timeline::DANGER))))
                 }),
         ))
         .into_any_element()
@@ -1276,8 +1276,8 @@ fn audit(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
     let toggle = on.clone();
     let list: AnyElement = if a.loading && a.entries.is_empty() {
         audit_empty(t::community_settings_audit_reading()).into_any_element()
-    } else if let Some(e) = a.error.clone().filter(|_| a.entries.is_empty()) {
-        hint(e)
+    } else if let Some(e) = a.error.as_deref().filter(|_| a.entries.is_empty()) {
+        hint(crate::coretext::say(e).into_owned())
             .my(px(18.))
             .text_center()
             .text_color(c(crate::timeline::DANGER))
@@ -2062,7 +2062,7 @@ fn sync_report(r: &Report, on: &OnAct) -> AnyElement {
     if r.loading {
         body = body.child(div().p(px(2.)).mb(px(11.)).text_size(px(12.5)).line_height(px(18.)).text_color(white_a(0.4)).child(t::community_settings_report_reading()));
     } else if let Some(err) = &r.error {
-        body = body.child(div().text_size(px(13.)).text_color(c(crate::timeline::DANGER)).child(err.clone()));
+        body = body.child(div().text_size(px(13.)).text_color(c(crate::timeline::DANGER)).child(crate::coretext::say(err).into_owned()));
     } else if let Some(d) = &r.data {
         let ctl = &d["control"];
         let ep = &d["epoch"];

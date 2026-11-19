@@ -3156,7 +3156,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .into_any_element(),
         )
     } else if !v.error.is_empty() {
-        Some(warn(v.error.clone().into()))
+        Some(warn(crate::coretext::say(&v.error).into_owned().into()))
     } else if current.is_some_and(|m| m.downloaded) {
         Some(div().text_color(c(0x59FCB3)).child(t::settings_voice_ready()).into_any_element())
     } else if current.is_some() {

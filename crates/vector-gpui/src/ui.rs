@@ -3525,7 +3525,7 @@ impl VectorApp {
             "community_relay_move" => {
                 if let Some(r) = self.rekey.as_mut() {
                     let pct = payload.get("pct").and_then(Value::as_f64).unwrap_or(0.) as f32;
-                    let label = payload.get("label").and_then(Value::as_str).map(str::to_string);
+                    let label = payload.get("label").and_then(Value::as_str).map(|l| crate::coretext::say(l).into_owned());
                     r.set(pct, label);
                 }
             }
@@ -3615,7 +3615,7 @@ impl VectorApp {
                 ) {
                     self.fail_reasons
                         .borrow_mut()
-                        .insert(id.to_string(), reason.to_string());
+                        .insert(id.to_string(), crate::coretext::say(reason).into_owned());
                 }
                 let Some(msg) = payload
                     .get("message")
@@ -13822,7 +13822,7 @@ impl VectorApp {
                 if let Some(bad) = checks.iter().find(|c| !c.ok) {
                     let mut popup = kit::Popup::notice(t::community_settings_relay_refused());
                     let why = bad.reason.clone().unwrap_or_else(|| t::community_settings_relay_cant_hold(bad.relay.as_str()).into());
-                    popup.text = Some(kit::escape(&why).into());
+                    popup.text = Some(kit::escape(&crate::coretext::say(&why)).into());
                     this.popup = Some((popup, PopupAct::Notice));
                     return;
                 }
@@ -19665,6 +19665,7 @@ impl VectorApp {
     }
 
     fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = &*crate::coretext::say(text);
         let at = std::time::Instant::now();
         self.toast = Some((text.to_string().into(), at));
         let hold = (1500 + text.chars().count() as u64 * 40).min(6000);

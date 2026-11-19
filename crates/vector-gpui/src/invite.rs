@@ -531,7 +531,7 @@ pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &
                         } else {
                             c(ACCENT)
                         })
-                        .child(text)
+                        .child(crate::coretext::say(&text).into_owned())
                 }))
                 .child(
                     div()
