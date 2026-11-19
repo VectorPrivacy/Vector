@@ -31,6 +31,7 @@ pub fn scan() {
                 at: 1_800_000_000_000 - i as u64 * 1000,
                 text,
                 files,
+                ..Default::default()
             }
         })
         .collect();

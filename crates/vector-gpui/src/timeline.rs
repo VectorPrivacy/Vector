@@ -595,6 +595,48 @@ fn jumbo(ctx: &Ctx, m: &Message, text: &str) -> Option<Vec<Jumbo>> {
     (!out.is_empty()).then_some(out)
 }
 
+/// A message's text with its colour spans marked for `markdown::parse` and its times as codes,
+/// and the colours the marks index: none when nothing is coloured.
+pub fn effects<'a>(content: &'a str, spans: &[vector_core::text_spans::TextSpan]) -> (std::borrow::Cow<'a, str>, Vec<vector_core::text_color::ColorSpan>) {
+    use vector_core::text_spans::TextSpan;
+    let colors: Vec<vector_core::text_color::ColorSpan> = spans
+        .iter()
+        .filter_map(|s| match s {
+            TextSpan::Color(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    let times: Vec<(usize, usize)> = spans
+        .iter()
+        .filter_map(|s| match s {
+            TextSpan::Time(t) => Some((t.from as usize, t.to as usize)),
+            _ => None,
+        })
+        .collect();
+    let marked = crate::textcolor::mark(content, &colors, &times);
+    let content = match &marked {
+        Some((text, at)) => {
+            let moved = |x: u32, inclusive: bool| {
+                x + at.iter().filter(|&&a| if inclusive { a <= x as usize } else { a < x as usize }).count() as u32
+            };
+            let spans: Vec<TextSpan> = spans
+                .iter()
+                .filter_map(|s| match s {
+                    TextSpan::Time(t) => Some(TextSpan::Time(vector_core::text_time::TimeSpan {
+                        from: moved(t.from, true),
+                        to: moved(t.to, false),
+                        ..t.clone()
+                    })),
+                    _ => None,
+                })
+                .collect();
+            std::borrow::Cow::Owned(crate::texttime::spans_to_codes(text, &spans).into_owned())
+        }
+        None => crate::texttime::spans_to_codes(content, spans),
+    };
+    (content, if marked.is_some() { colors } else { Vec::new() })
+}
+
 /// A message's NIP-30 tags as the renderer asks for them: a web URL through the emoji cache,
 /// a fixture's path from beside its file.
 pub fn custom_emoji<'a>(
@@ -700,45 +742,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
     let act = ctx.on_act.clone();
     let click: OnClick = Rc::new(move |t, w, cx| act(&id, Act::Text(t), w, cx));
     let _selectable = crate::select::Scope::enter(m.at, &m.id);
-    use vector_core::text_spans::TextSpan;
-    let colors: Vec<vector_core::text_color::ColorSpan> = m
-        .text_spans
-        .iter()
-        .filter_map(|s| match s {
-            TextSpan::Color(c) => Some(c.clone()),
-            _ => None,
-        })
-        .collect();
-    let times: Vec<(usize, usize)> = m
-        .text_spans
-        .iter()
-        .filter_map(|s| match s {
-            TextSpan::Time(t) => Some((t.from as usize, t.to as usize)),
-            _ => None,
-        })
-        .collect();
-    let marked = crate::textcolor::mark(&m.content, &colors, &times);
-    let content = match &marked {
-        Some((text, at)) => {
-            let moved = |x: u32, inclusive: bool| {
-                x + at.iter().filter(|&&a| if inclusive { a <= x as usize } else { a < x as usize }).count() as u32
-            };
-            let spans: Vec<TextSpan> = m
-                .text_spans
-                .iter()
-                .filter_map(|s| match s {
-                    TextSpan::Time(t) => Some(TextSpan::Time(vector_core::text_time::TimeSpan {
-                        from: moved(t.from, true),
-                        to: moved(t.to, false),
-                        ..t.clone()
-                    })),
-                    _ => None,
-                })
-                .collect();
-            std::borrow::Cow::Owned(crate::texttime::spans_to_codes(text, &spans).into_owned())
-        }
-        None => crate::texttime::spans_to_codes(&m.content, &m.text_spans),
-    };
+    let (content, colors) = effects(&m.content, &m.text_spans);
     let mut text = crate::newchat::replace_invite_links(&content, "");
     if let std::borrow::Cow::Owned(s) = crate::packs::strip(&text) {
         text = s.into();
@@ -755,7 +759,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         t.starts_with("-# ")
             || (t.starts_with('#') && t.trim_start_matches('#').starts_with([' ', '\t']))
     });
-    let bare: std::borrow::Cow<str> = if marked.is_some() {
+    let bare: std::borrow::Cow<str> = if !colors.is_empty() {
         text.chars().filter(|&c| !crate::textcolor::is_sentinel(c)).collect::<String>().into()
     } else {
         text.as_ref().into()
@@ -793,7 +797,7 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
             mention: Some(&|npub: &str| ctx.store.chat_name(npub, &ctx.chat.id)),
             tags: &chips,
             mask: Some(&|t: &str| ctx.store.stream_mask(t)),
-            colors: if marked.is_some() { &colors } else { &[] },
+            colors: &colors,
             go: Some(&|url: &str, look: &crate::inline::Look| crate::golinks::pill(ctx.store, url, here.as_deref(), look)),
             custom: custom
                 .as_ref()

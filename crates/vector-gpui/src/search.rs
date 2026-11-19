@@ -13,6 +13,8 @@ use gpui::{AnyElement, App, Entity, FontWeight, HighlightStyle, SharedString, St
 use vector_core::search::{Corpus, Filter, Found, Has, Query, Record};
 
 use crate::composer::TextInput;
+use crate::inline::{Atom, Kind, Look};
+use crate::markdown::Block;
 use crate::data::Store;
 use crate::t;
 use crate::theme::*;
@@ -458,6 +460,8 @@ pub fn fixture_corpus(store: &Store) -> Corpus {
                 at: m.at,
                 text: m.content.clone(),
                 files: m.attachments.iter().map(|a| (a.extension.clone(), a.name.clone())).collect(),
+                emoji: m.emoji_tags.clone(),
+                spans: m.text_spans.clone(),
             });
         }
     }
@@ -511,6 +515,8 @@ pub struct Search {
     /// The chats searched when no `in:` names one; empty is every chat.
     pub scope: Vec<String>,
     pub loading: bool,
+    /// Drawn snippets by corpus doc, for the query on screen.
+    drawn: std::cell::RefCell<std::collections::HashMap<u32, Rc<[Atom]>>>,
 }
 
 impl Search {
@@ -529,6 +535,7 @@ impl Search {
             took: 0,
             scope: Vec::new(),
             loading: false,
+            drawn: Default::default(),
         }
     }
 
@@ -549,8 +556,24 @@ impl Search {
             None => Found::default(),
         };
         self.took = t0.elapsed().as_micros();
+        self.drawn.borrow_mut().clear();
         self.sel = 0;
         self.scroll.scroll_to_item(0);
+    }
+
+    /// `hit`'s snippet drawn as its message is, or `None` for the plain one.
+    fn drawn(&self, hit: &vector_core::search::Hit, store: &Store, look: &Look) -> Option<Rc<[Atom]>> {
+        if let Some(atoms) = self.drawn.borrow().get(&hit.doc) {
+            return Some(atoms.clone());
+        }
+        let source = self.corpus.as_ref()?.source(hit.doc)?;
+        let pending = std::cell::Cell::new(false);
+        let atoms: Rc<[Atom]> = drawn(source, Query::parse(&self.parsed.words).terms(), look, store, &hit.chat, &pending)?.into();
+        // A custom emoji still loading draws again once it lands.
+        if !pending.get() {
+            self.drawn.borrow_mut().insert(hit.doc, atoms.clone());
+        }
+        Some(atoms)
     }
 
     pub fn showing_suggestions(&self) -> bool {
@@ -633,6 +656,176 @@ fn when(ms: u64, now_ms: u64) -> String {
         return crate::dates::time(&d, Clock::default());
     }
     crate::dates::date_time(&d, DateStyle::Medium, Clock::default())
+}
+
+/// Characters of a snippet before its first match; twice as many follow it.
+const CONTEXT: usize = 60;
+
+/// A message drawn as the timeline draws it, with headers in bold and its blocks run into one
+/// paragraph, cut to about [`CONTEXT`] characters around its first match and every match marked.
+/// `None` when it shows nothing, as a file's message.
+fn drawn(source: vector_core::search::Source, terms: &[String], look: &Look, store: &Store, chat: &str, pending: &std::cell::Cell<bool>) -> Option<Vec<Atom>> {
+    let (text, colors) = crate::timeline::effects(source.text, source.spans);
+    let text = demote_headers(&text);
+    let media = crate::media::shared();
+    let custom = crate::timeline::custom_emoji(store, &media, source.emoji);
+    let custom = custom.as_ref().map(|f| {
+        move |code: &str| {
+            let got = f(code);
+            pending.set(pending.get() || matches!(got, Some(crate::media::Custom::Pending)));
+            got
+        }
+    });
+    let revealed = std::collections::HashSet::new();
+    let blocks = crate::markdown::parse(
+        text.trim(),
+        &crate::markdown::Ctx {
+            base: look.clone(),
+            revealed: &revealed,
+            custom: custom.as_ref().map(|f| f as &dyn Fn(&str) -> Option<crate::media::Custom>),
+            now: store.now_ms() as f64 / 1000.,
+            mention: Some(&|npub: &str| store.chat_name(npub, chat)),
+            tags: &[],
+            mask: Some(&|t: &str| store.stream_mask(t)),
+            colors: &colors,
+            go: None,
+        },
+    );
+    let mut atoms = Vec::new();
+    flatten(&blocks, look, &mut atoms);
+    (!atoms.is_empty()).then(|| window(atoms, terms, look, !colors.is_empty()))
+}
+
+/// Headers as bold lines and subtext as plain ones, as a chat's preview shows them. Colour marks
+/// before a line's `#` stay where they are.
+fn demote_headers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let rest = line.trim_start_matches(|c: char| crate::textcolor::is_sentinel(c) || c == ' ' || c == '\t');
+        let lead = &line[..line.len() - rest.len()];
+        let hashes = rest.chars().take_while(|&c| c == '#').count();
+        if let Some(sub) = rest.strip_prefix("-# ") {
+            out.push_str(lead);
+            out.push_str(sub);
+        } else if (1..=6).contains(&hashes) && rest[hashes..].starts_with([' ', '\t']) && !rest[hashes..].trim().is_empty() {
+            out.push_str(lead);
+            out.push_str("**");
+            out.push_str(rest[hashes..].trim());
+            out.push_str("**");
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Blocks as one run of inline atoms: paragraphs, list items, quotes and table cells a space
+/// apart, a code block as a code chip.
+fn flatten(blocks: &[Block], look: &Look, out: &mut Vec<Atom>) {
+    let gap = |out: &mut Vec<Atom>| {
+        if !out.is_empty() {
+            out.push(Atom::Text { text: " ".into(), look: look.clone(), kind: Kind::Plain });
+        }
+    };
+    let para = |p: &crate::markdown::Para, out: &mut Vec<Atom>| {
+        gap(out);
+        out.extend(p.atoms.iter().map(|a| match a {
+            Atom::Break => Atom::Text { text: " ".into(), look: look.clone(), kind: Kind::Plain },
+            a => a.clone(),
+        }));
+    };
+    for b in blocks {
+        match b {
+            Block::Para(p) => para(p, out),
+            Block::Code { text, .. } => {
+                let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !one.is_empty() {
+                    gap(out);
+                    out.push(Atom::Text { text: one.into(), look: look.clone(), kind: Kind::Code });
+                }
+            }
+            Block::Quote(inner) => flatten(inner, look, out),
+            Block::List { items, .. } => items.iter().for_each(|item| flatten(item, look, out)),
+            Block::Table { head, rows, .. } => head.iter().chain(rows.iter().flatten()).for_each(|p| para(p, out)),
+            Block::Rule => {}
+        }
+    }
+}
+
+/// `atoms` cut to the window around the first match of `terms` in what they show, matches
+/// marked: in the accent where the text is uncoloured, and bold.
+fn window(atoms: Vec<Atom>, terms: &[String], look: &Look, coloured: bool) -> Vec<Atom> {
+    // What each atom shows, end to end; a picture is one character that matches nothing.
+    let mut shown = String::new();
+    let mut at: Vec<Range<usize>> = Vec::with_capacity(atoms.len());
+    for a in &atoms {
+        let start = shown.len();
+        match a {
+            Atom::Text { text, .. } => shown.push_str(text),
+            Atom::Image { .. } | Atom::Pill(_) => shown.push('\u{FFFC}'),
+            _ => {}
+        }
+        at.push(start..shown.len());
+    }
+    let marks = vector_core::search::marks(&shown, terms);
+    let (start, stop) = match marks.first() {
+        Some(m) => (word_before(&shown, m.start, CONTEXT), chars_after(&shown, m.end, CONTEXT * 2)),
+        None => (0, chars_after(&shown, 0, CONTEXT * 3)),
+    };
+    let ellipsis = |out: &mut Vec<Atom>| out.push(Atom::Text { text: "…".into(), look: look.clone(), kind: Kind::Plain });
+    let mut out = Vec::with_capacity(atoms.len() + 2 * marks.len() + 2);
+    if start > 0 {
+        ellipsis(&mut out);
+    }
+    for (a, r) in atoms.into_iter().zip(at) {
+        let (lo, hi) = (r.start.max(start), r.end.min(stop));
+        if lo >= hi && !(r.is_empty() && r.start > start && r.start < stop) {
+            continue;
+        }
+        let Atom::Text { text, look: l, kind } = a else {
+            out.push(a);
+            continue;
+        };
+        let mut cut = lo;
+        for m in marks.iter().filter(|m| m.end > lo && m.start < hi) {
+            let (ms, me) = (m.start.max(lo), m.end.min(hi));
+            if ms > cut {
+                out.push(Atom::Text { text: text[cut - r.start..ms - r.start].to_string().into(), look: l.clone(), kind: kind.clone() });
+            }
+            let mut hl = l.clone();
+            hl.weight = FontWeight::SEMIBOLD;
+            let effect = coloured && kind == Kind::Plain && hl.color != look.color;
+            if !effect {
+                hl.color = c(ACCENT);
+            }
+            out.push(Atom::Text { text: text[ms - r.start..me - r.start].to_string().into(), look: hl, kind: kind.clone() });
+            cut = me;
+        }
+        if cut < hi {
+            out.push(Atom::Text { text: text[cut - r.start..hi - r.start].to_string().into(), look: l, kind });
+        }
+    }
+    if stop < shown.len() {
+        ellipsis(&mut out);
+    }
+    out
+}
+
+/// About `n` characters before byte `at` of `text`, starting on a word when one starts nearby.
+fn word_before(text: &str, at: usize, n: usize) -> usize {
+    let head = &text[..at];
+    let cut = head.char_indices().rev().nth(n.saturating_sub(1)).map_or(0, |(i, _)| i);
+    if cut == 0 {
+        return 0;
+    }
+    head[cut..].find(char::is_whitespace).filter(|&w| w < 16).map_or(cut, |w| cut + w + 1).min(at)
+}
+
+fn chars_after(text: &str, at: usize, n: usize) -> usize {
+    text[at..].char_indices().nth(n).map_or(text.len(), |(i, _)| at + i)
 }
 
 fn snippet(text: &str, marks: &[Range<usize>]) -> StyledText {
@@ -785,7 +978,15 @@ fn header(store: &Store, chat: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn result_row(i: usize, hit: &vector_core::search::Hit, sel: bool, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
+fn row_look() -> Look {
+    Look::new(RUBIK, 14., 20., white_a(0.82))
+}
+
+fn mini_look() -> Look {
+    Look::new(RUBIK, 12.5, 17., white_a(0.82))
+}
+
+fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>>, sel: bool, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
     let who = if hit.mine { store.my_npub.clone() } else { hit.author.clone().unwrap_or_else(|| hit.chat.clone()) };
     let name = if hit.mine { t::search_you().to_string() } else { store.chat_name(&who, &hit.chat) };
     let badges: Vec<&str> = [(Has::IMAGE, "icons/image.svg"), (Has::VIDEO, "icons/video.svg"), (Has::AUDIO, "icons/volume-max.svg")]
@@ -834,6 +1035,8 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, sel: bool, store: &Store
                     if hit.snippet.is_empty() {
                         let kind = [Has::IMAGE, Has::VIDEO, Has::AUDIO, Has::FILE].into_iter().find(|h| hit.has.contains(*h)).unwrap_or(Has::FILE);
                         d.child(div().text_size(px(14.)).line_height(px(20.)).italic().text_color(c(LIST_TIME)).child(has_label(kind)))
+                    } else if let Some(atoms) = drawn {
+                        d.child(crate::inline::inline(atoms, row_look()).held())
                     } else {
                         d.child(div().text_size(px(14.)).line_height(px(20.)).text_color(white_a(0.82)).child(snippet(&hit.snippet, &hit.marks)))
                     }
@@ -857,7 +1060,7 @@ fn mini_label(text: SharedString, count: Option<usize>) -> AnyElement {
         .into_any_element()
 }
 
-fn mini_row(i: usize, hit: &vector_core::search::Hit, sel: bool, open: &str, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
+fn mini_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>>, sel: bool, open: &str, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
     let who = if hit.mine { store.my_npub.clone() } else { hit.author.clone().unwrap_or_else(|| hit.chat.clone()) };
     let name = if hit.mine { t::search_you().to_string() } else { store.chat_name(&who, &hit.chat) };
     let channel = (hit.chat != open)
@@ -894,6 +1097,8 @@ fn mini_row(i: usize, hit: &vector_core::search::Hit, sel: bool, open: &str, sto
             if hit.snippet.is_empty() {
                 let kind = [Has::IMAGE, Has::VIDEO, Has::AUDIO, Has::FILE].into_iter().find(|h| hit.has.contains(*h)).unwrap_or(Has::FILE);
                 d.child(div().pl(px(24.)).text_size(px(12.5)).line_height(px(17.)).italic().text_color(c(LIST_TIME)).child(has_label(kind)))
+            } else if let Some(atoms) = drawn {
+                d.child(div().pl(px(24.)).child(crate::inline::inline(atoms, mini_look()).clamp(3).held()))
             } else {
                 d.child(div().pl(px(24.)).text_size(px(12.5)).line_height(px(17.)).line_clamp(3).text_color(white_a(0.82)).child(snippet(&hit.snippet, &hit.marks)))
             }
@@ -920,7 +1125,7 @@ pub fn mini(s: &Search, store: &Store, open: &str, members: Vec<AnyElement>, mat
     } else if s.found.hits.is_empty() {
         out.push(div().px(px(8.)).py(px(6.)).text_size(px(12.5)).italic().text_color(c(LIST_TIME)).child(t::search_none()).into_any_element());
     } else {
-        out.extend(s.found.hits.iter().enumerate().map(|(i, hit)| mini_row(i, hit, i == s.sel, open, store, now, on)));
+        out.extend(s.found.hits.iter().enumerate().map(|(i, hit)| mini_row(i, hit, s.drawn(hit, store, &mini_look()), i == s.sel, open, store, now, on)));
     }
     out
 }
@@ -1020,7 +1225,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
             if i == 0 || hits[i - 1].chat != hit.chat {
                 rows.push(header(store, &hit.chat));
             }
-            rows.push(result_row(i, hit, i == s.sel, store, now, on));
+            rows.push(result_row(i, hit, s.drawn(hit, store, &row_look()), i == s.sel, store, now, on));
         }
         list = list.children(rows);
     }
@@ -1182,5 +1387,79 @@ mod tests {
         assert_eq!(s.len(), 1);
         // Ordinary words offer nothing.
         assert!(suggestions("hello", 5, &d, 0).1.is_empty());
+    }
+
+    #[test]
+    fn headers_show_bold_and_subtext_plain() {
+        assert_eq!(demote_headers("# Release notes\nbody"), "**Release notes**\nbody");
+        assert_eq!(demote_headers("###   spaced  \n-# small print"), "**spaced**\nsmall print");
+        assert_eq!(demote_headers("#hashtag\n# \n####### seven"), "#hashtag\n# \n####### seven");
+        let mark = char::from_u32(0xF0000).unwrap();
+        assert_eq!(demote_headers(&format!("{mark}# Coloured")), format!("{mark}**Coloured**"));
+    }
+
+    fn text(a: &[Atom]) -> String {
+        a.iter()
+            .map(|a| match a {
+                Atom::Text { text, .. } => text.to_string(),
+                Atom::Image { .. } => "<img>".into(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    fn plain(t: &str, look: &Look) -> Atom {
+        Atom::Text { text: t.to_string().into(), look: look.clone(), kind: Kind::Plain }
+    }
+
+    #[test]
+    fn windows_the_first_match_and_marks_every_one() {
+        let look = row_look();
+        let long = format!("{}needle here and Needle again{}", "lorem ipsum ".repeat(20), " dolor".repeat(40));
+        let atoms = window(vec![plain(&long, &look)], &["needle".into()], &look, false);
+        let shown = text(&atoms);
+        assert!(shown.starts_with('…') && shown.ends_with('…'), "{shown}");
+        assert!(shown.contains("needle here and Needle again"));
+        let marked: Vec<String> = atoms
+            .iter()
+            .filter_map(|a| match a {
+                Atom::Text { text, look: l, .. } if l.weight == FontWeight::SEMIBOLD => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(marked, ["needle", "Needle"]);
+    }
+
+    #[test]
+    fn a_match_across_atoms_is_marked_in_each() {
+        let look = row_look();
+        let mut bold = look.clone();
+        bold.weight = FontWeight::BOLD;
+        let atoms = vec![
+            plain("say ", &look),
+            Atom::Text { text: "hel".into(), look: bold, kind: Kind::Plain },
+            plain("lo world", &look),
+            Atom::Image { src: gpui::ImageSource::from(std::path::PathBuf::from("x.png")), size: 14., drop: 2., tip: None, alt: ":x:".into() },
+        ];
+        let out = window(atoms, &["hello".into()], &look, false);
+        assert_eq!(text(&out), "say hello world<img>");
+        let accent: String = out
+            .iter()
+            .filter_map(|a| match a {
+                Atom::Text { text, look: l, .. } if l.color == c(ACCENT) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(accent, "hello");
+    }
+
+    #[test]
+    fn coloured_matches_keep_their_colour() {
+        let look = row_look();
+        let mut red = look.clone();
+        red.color = gpui::red();
+        let out = window(vec![Atom::Text { text: "rainbow".into(), look: red, kind: Kind::Plain }], &["rain".into()], &look, true);
+        let Atom::Text { look: l, .. } = &out[0] else { panic!() };
+        assert_eq!((l.color, l.weight), (gpui::red(), FontWeight::SEMIBOLD));
     }
 }

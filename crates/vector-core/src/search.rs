@@ -16,10 +16,33 @@ struct Doc {
     at: u64,
     has: Has,
     mentions: Box<[Box<str>]>,
-    /// Span in `Corpus::text`.
+    /// Span in `Corpus::text`: the message, then its file names.
     text: Range<u32>,
+    /// Where the message ends in `Corpus::text`, before its file names.
+    body: u32,
+    /// What renders the message as the timeline does, for the few that carry it.
+    look: Option<Box<Look>>,
     /// Span in `Corpus::folded`.
     folded: Range<u32>,
+}
+
+/// A message's custom emoji and text spans, with the text the spans count in when that is not
+/// the searched text.
+#[derive(Debug)]
+struct Look {
+    written: Option<Box<str>>,
+    emoji: Box<[crate::types::EmojiTag]>,
+    spans: Box<[crate::text_spans::TextSpan]>,
+}
+
+/// A hit's message as it was written, for drawing it as the timeline would.
+#[derive(Debug, Clone, Copy)]
+pub struct Source<'a> {
+    /// The message, with mentions named unless `spans` count in the text as sent.
+    pub text: &'a str,
+    pub emoji: &'a [crate::types::EmojiTag],
+    /// Color and time spans, in bytes of `text`.
+    pub spans: &'a [crate::text_spans::TextSpan],
 }
 
 /// Messages to search, newest first.
@@ -49,6 +72,8 @@ pub struct Hit {
     pub mine: bool,
     pub at: u64,
     pub has: Has,
+    /// The message's place in the corpus, for [`Corpus::source`].
+    pub doc: u32,
     /// A window of the message around its first match, on one line.
     pub snippet: String,
     /// Each term's occurrences within `snippet`, in order.
@@ -150,6 +175,9 @@ pub struct Record {
     pub text: String,
     /// Attachments' `(extension, file name)`.
     pub files: Vec<(String, String)>,
+    pub emoji: Vec<crate::types::EmojiTag>,
+    /// Color and time spans, in bytes of `text`.
+    pub spans: Vec<crate::text_spans::TextSpan>,
 }
 
 /// A parsed query: whitespace-separated terms that must all appear, `"quoted phrases"` kept whole.
@@ -159,6 +187,11 @@ pub struct Query {
 }
 
 impl Query {
+    /// The terms, folded.
+    pub fn terms(&self) -> &[String] {
+        &self.terms
+    }
+
     pub fn parse(input: &str) -> Self {
         let mut terms = Vec::new();
         let mut rest = input;
@@ -250,6 +283,7 @@ impl Corpus {
         };
         let t0 = self.text.len() as u32;
         self.text.push_str(shown.trim());
+        let body = self.text.len() as u32;
         for name in names {
             if self.text.len() as u32 > t0 {
                 self.text.push('\n');
@@ -271,6 +305,14 @@ impl Corpus {
             has,
             mentions: mentions.into_boxed_slice(),
             text: t0..t1,
+            body,
+            look: (!record.emoji.is_empty() || !record.spans.is_empty()).then(|| {
+                Box::new(Look {
+                    written: (!record.spans.is_empty()).then(|| record.text.as_str().into()),
+                    emoji: record.emoji.clone().into_boxed_slice(),
+                    spans: record.spans.clone().into_boxed_slice(),
+                })
+            }),
             folded: f0..f1,
         });
     }
@@ -352,14 +394,26 @@ impl Corpus {
             matched.drain(..skip);
             matched.reverse();
         }
-        found.hits = matched.into_iter().map(|ix| self.hit(&self.docs[ix as usize], query)).collect();
+        found.hits = matched.into_iter().map(|ix| self.hit(ix, query)).collect();
         found
     }
 
-    fn hit(&self, doc: &Doc, query: &Query) -> Hit {
+    /// The message `doc` names, as written.
+    pub fn source(&self, doc: u32) -> Option<Source<'_>> {
+        let d = self.docs.get(doc as usize)?;
+        let body = &self.text[d.text.start as usize..d.body as usize];
+        Some(match d.look.as_deref() {
+            Some(l) => Source { text: l.written.as_deref().unwrap_or(body), emoji: &l.emoji, spans: &l.spans },
+            None => Source { text: body, emoji: &[], spans: &[] },
+        })
+    }
+
+    fn hit(&self, ix: u32, query: &Query) -> Hit {
+        let doc = &self.docs[ix as usize];
         let text = &self.text[doc.text.start as usize..doc.text.end as usize];
         let (snippet, marks) = snippet(text, &query.terms, 60);
         Hit {
+            doc: ix,
             id: doc.id.to_string(),
             chat: self.chats[doc.chat as usize].to_string(),
             author: doc.author.as_deref().map(str::to_string),
@@ -375,26 +429,7 @@ impl Corpus {
 /// `text` cut to about `context` characters either side of its first match, whitespace runs
 /// collapsed, with every term's occurrences marked in the result.
 fn snippet(text: &str, terms: &[String], context: usize) -> (String, Vec<Range<usize>>) {
-    let mut folded = String::with_capacity(text.len());
-    let mut map = Vec::with_capacity(text.len() + 1);
-    fold_into(text, &mut folded, Some(&mut map));
-    let mut spans: Vec<Range<usize>> = Vec::new();
-    for term in terms {
-        let mut from = 0;
-        while let Some(at) = memmem::find(&folded.as_bytes()[from..], term.as_bytes()).map(|p| p + from) {
-            let end = at + term.len();
-            spans.push(map[at] as usize..source_end(&map, end, text));
-            from = end;
-        }
-    }
-    spans.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
-    let mut merged: Vec<Range<usize>> = Vec::with_capacity(spans.len());
-    for s in spans {
-        match merged.last_mut() {
-            Some(last) if s.start <= last.end => last.end = last.end.max(s.end),
-            _ => merged.push(s),
-        }
-    }
+    let merged = marks(text, terms);
     let first = merged.first().map_or(0, |r| r.start);
     let start = back_chars(text, first, context);
     let end = merged.first().map_or(0, |r| r.end);
@@ -441,6 +476,31 @@ fn snippet(text: &str, terms: &[String], context: usize) -> (String, Vec<Range<u
         out.push('…');
     }
     (out, marks)
+}
+
+/// Every occurrence of each folded term in `text`, as byte ranges of `text`, overlaps merged.
+pub fn marks(text: &str, terms: &[String]) -> Vec<Range<usize>> {
+    let mut folded = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(text.len() + 1);
+    fold_into(text, &mut folded, Some(&mut map));
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    for term in terms.iter().filter(|t| !t.is_empty()) {
+        let mut from = 0;
+        while let Some(at) = memmem::find(&folded.as_bytes()[from..], term.as_bytes()).map(|p| p + from) {
+            let end = at + term.len();
+            spans.push(map[at] as usize..source_end(&map, end, text));
+            from = end;
+        }
+    }
+    spans.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(spans.len());
+    for s in spans {
+        match merged.last_mut() {
+            Some(last) if s.start <= last.end => last.end = last.end.max(s.end),
+            _ => merged.push(s),
+        }
+    }
+    merged
 }
 
 /// The source byte after folded byte `end - 1`: the end of the character it came from.
@@ -515,6 +575,9 @@ pub fn load() -> Result<Vec<Record>, String> {
         at: u64,
         mine: bool,
         npub: Option<String>,
+        emoji: Vec<crate::types::EmojiTag>,
+        /// Color and time span tags, checked against the content once it is open.
+        span_tags: Vec<Vec<String>>,
     }
 
     let (rows, communities, files) = {
@@ -527,6 +590,7 @@ pub fn load() -> Result<Vec<Record>, String> {
                  ORDER BY e.created_at DESC, e.received_at DESC",
             )
             .map_err(|e| format!("Failed to prepare search query: {e}"))?;
+        let styled = ["emoji", crate::text_color::TAG, crate::text_time::TAG].map(|n| format!("[\"{n}\""));
         let rows: Vec<Row> = stmt
             .query_map(
                 rusqlite::params![
@@ -538,6 +602,17 @@ pub fn load() -> Result<Vec<Record>, String> {
                 |r| {
                     let tags: String = r.get(6)?;
                     let secs = r.get::<_, i64>(5)? as u64;
+                    // Only the few rows naming emoji or spans pay for parsing their tags.
+                    let parsed: Vec<Vec<String>> = if styled.iter().any(|n| tags.contains(n.as_str())) {
+                        serde_json::from_str(&tags).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let emoji = crate::types::EmojiTag::extract_from_stored(&parsed);
+                    let span_tags = parsed
+                        .into_iter()
+                        .filter(|t| matches!(t.first().map(String::as_str), Some(crate::text_color::TAG | crate::text_time::TAG)))
+                        .collect();
                     Ok(Row {
                         id: r.get(0)?,
                         kind: r.get::<_, i32>(1)? as u16,
@@ -547,6 +622,8 @@ pub fn load() -> Result<Vec<Record>, String> {
                         at: secs * 1000 + ms_of(&tags),
                         mine: r.get::<_, i32>(7)? != 0,
                         npub: r.get(8)?,
+                        emoji,
+                        span_tags,
                     })
                 },
             )
@@ -587,12 +664,12 @@ pub fn load() -> Result<Vec<Record>, String> {
             by_event.entry(event).or_default().push((ext, at_rest.open_or_keep(name)));
         }
         // Newest edit per message: rows arrive newest first, so the first seen wins.
-        let mut edits: HashMap<String, String> = HashMap::new();
+        let mut edits: HashMap<String, (String, Vec<crate::types::EmojiTag>, Vec<Vec<String>>)> = HashMap::new();
         for row in rows.iter().filter(|r| r.kind == event_kind::MESSAGE_EDIT) {
             let Some(target) = &row.reference else { continue };
             if !edits.contains_key(target) {
                 if let Ok(text) = at_rest.open(row.content.clone()) {
-                    edits.insert(target.clone(), text);
+                    edits.insert(target.clone(), (text, row.emoji.clone(), row.span_tags.clone()));
                 }
             }
         }
@@ -606,16 +683,17 @@ pub fn load() -> Result<Vec<Record>, String> {
                 continue;
             }
             let files = by_event.remove(&row.id).unwrap_or_default();
-            let text = match edits.remove(&row.id) {
+            let (text, emoji, span_tags) = match edits.remove(&row.id) {
                 Some(edited) => edited,
                 // A file event's content is its URL, not words.
-                None if row.kind == event_kind::FILE_ATTACHMENT => String::new(),
+                None if row.kind == event_kind::FILE_ATTACHMENT => Default::default(),
                 None => match at_rest.open(row.content) {
-                    Ok(t) => t,
+                    Ok(t) => (t, row.emoji, row.span_tags),
                     Err(_) => continue,
                 },
             };
-            out.push(Record { chat: row.chat, id: row.id, author: row.npub, mine: row.mine, at: row.at, text, files });
+            let spans = if span_tags.is_empty() { Vec::new() } else { crate::text_spans::from_stored(&span_tags, &text) };
+            out.push(Record { chat: row.chat, id: row.id, author: row.npub, mine: row.mine, at: row.at, text, files, emoji, spans });
         }
         Ok(out)
     })
@@ -634,7 +712,7 @@ mod tests {
     use super::*;
 
     fn rec(chat: &str, id: &str, author: Option<&str>, mine: bool, at: u64, text: &str) -> Record {
-        Record { chat: chat.into(), id: id.into(), author: author.map(Into::into), mine, at, text: text.into(), files: Vec::new() }
+        Record { chat: chat.into(), id: id.into(), author: author.map(Into::into), mine, at, text: text.into(), ..Default::default() }
     }
 
     fn add(c: &mut Corpus, r: Record) {
@@ -674,6 +752,35 @@ mod tests {
         let c = corpus();
         assert_eq!(ids(&find(&c, "folder blueprints")), ["m3"]);
         assert!(find(&c, "folder café").hits.is_empty());
+    }
+
+    #[test]
+    fn a_hit_names_its_source() {
+        let mut c = corpus();
+        let mut styled = rec("chan", "m5", Some("npub1b"), false, 5000, "  rainbow :grin: here ");
+        styled.emoji.push(crate::types::EmojiTag { shortcode: "grin".into(), url: "https://x.io/g.png".into() });
+        styled.spans.push(crate::text_spans::TextSpan::Color(crate::text_color::ColorSpan {
+            from: 2,
+            to: 9,
+            effect: crate::text_color::Effect::Rainbow,
+            colors: Vec::new(),
+        }));
+        add(&mut c, styled);
+        let hit = &find(&c, "rainbow").hits[0];
+        let src = c.source(hit.doc).unwrap();
+        assert_eq!((src.text, src.emoji.len(), src.spans.len()), ("  rainbow :grin: here ", 1, 1));
+        let hit = &find(&c, "harbour").hits[0];
+        let src = c.source(hit.doc).unwrap();
+        assert_eq!((src.text, src.emoji.len()), ("", 0));
+        let hit = &find(&c, "folder").hits[0];
+        assert_eq!(c.source(hit.doc).unwrap().text, "the blueprints are in the shared folder");
+    }
+
+    #[test]
+    fn marks_fold_and_merge() {
+        let terms = vec!["cafe".to_string(), "fe a".to_string()];
+        assert_eq!(marks("Café at nine, CAFE", &terms), [0..7, 15..19]);
+        assert!(marks("nothing", &["".to_string()]).is_empty());
     }
 
     #[test]
