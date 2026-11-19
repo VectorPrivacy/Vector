@@ -425,7 +425,7 @@ fn later(window: &mut Window, cx: &mut Context<VectorApp>, f: impl FnOnce(&mut W
     .detach();
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn shot() -> serde_json::Value {
     let me = std::process::id();
     let path = std::env::temp_dir().join("vector-devctl.png");

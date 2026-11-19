@@ -19,8 +19,12 @@ mod wire;
 #[cfg(target_os = "macos")]
 mod pointer_lock;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 #[path = "host_view.rs"]
+mod host;
+
+#[cfg(target_os = "android")]
+#[path = "host_android.rs"]
 mod host;
 
 #[cfg(target_os = "linux")]

@@ -28,7 +28,11 @@ const SKIP: &[&str] = &[
 
 /// The clipboard's HTML, read beside GPUI's own clipboard, which carries no HTML.
 pub fn clipboard_html() -> Option<String> {
-    arboard::Clipboard::new().ok()?.get().html().ok()
+    #[cfg(not(target_os = "android"))]
+    return arboard::Clipboard::new().ok()?.get().html().ok();
+    // Android's clipboard reaches GPUI as text only.
+    #[cfg(target_os = "android")]
+    None
 }
 
 fn style_props(style: &str) -> impl Iterator<Item = (String, String)> + '_ {

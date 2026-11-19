@@ -8,6 +8,7 @@ miniapp-load-timeout = The Mini App took too long to load
 miniapp-read-timeout = The Mini App took too long to read
 miniapp-no-isolation = Network isolation unavailable for Mini Apps
 miniapp-not-ready = The app isn't ready yet
+miniapp-unsupported = Mini Apps can't open on this device yet
 miniapp-no-cache = No cache folder
 # $error is why.
 miniapp-prepare-failed = Couldn't prepare the app: { $error }

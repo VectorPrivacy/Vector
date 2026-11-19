@@ -1,6 +1,6 @@
 //! The screen as a picture source: what can be shared (every monitor, every window), a
 //! thumbnail of each for the picker, and a capture thread for the one chosen. X11 is read
-//! straight off the server; macOS and Windows go through `xcap`.
+//! straight off the server; macOS and Windows go through `xcap`; Android lists none yet.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -153,7 +153,28 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "android")]
+mod imp {
+    use super::{Grab, Target};
+
+    pub struct Session;
+
+    impl Session {
+        pub fn open() -> Result<Self, String> {
+            Err(crate::t::call_share_unavailable().to_string())
+        }
+
+        pub fn list(&self) -> Vec<(Target, String)> {
+            Vec::new()
+        }
+
+        pub fn grab(&self, _t: Target) -> Result<Grab, String> {
+            Err(crate::t::call_share_unavailable().to_string())
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 mod imp {
     use super::{Grab, Target};
 

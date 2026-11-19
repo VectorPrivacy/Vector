@@ -81,7 +81,7 @@ jobs:
 
       - name: Check
         if: matrix.name == 'client'
-        run: cargo check --locked --lib --target aarch64-linux-android --no-default-features --features tor,i2p --message-format short
+        run: cargo check --locked --keep-going --lib --target aarch64-linux-android --no-default-features --features tor,i2p --message-format short
 
   # The app around the client: Kotlin, manifest and resources, which need no Rust to compile.
   shell:

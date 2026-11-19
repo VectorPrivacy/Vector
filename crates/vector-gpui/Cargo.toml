@@ -105,12 +105,14 @@ pollster = "0.4"
 openh264 = "0.9"
 bytes = "1"
 nokhwa = { version = "0.10", features = ["input-native"] }
-arboard = { version = "3.7", default-features = false }
 dom_query = "0.28"
 
 # Screen sharing: X11 read directly; macOS and Windows through xcap.
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
 xcap = "0.9"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = { version = "3.7", default-features = false }
 
 # The same wgpu GPUI draws with on Linux; elsewhere its default backends (Metal, DX12).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
@@ -140,7 +142,7 @@ raw-window-handle = "0.6"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere wry lays the OS webview into a GPUI window of the app's own.
-[target.'cfg(not(target_os = "linux"))'.dependencies.wry]
+[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies.wry]
 version = "=0.57.0"
 default-features = false
 features = ["os-webview"]
