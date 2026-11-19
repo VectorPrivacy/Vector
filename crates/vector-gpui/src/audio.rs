@@ -806,9 +806,9 @@ fn tags_from(m: vector_media::tags::Meta) -> Tags {
         .as_ref()
         .map(|_| small.as_ref().and_then(art_accent).unwrap_or(gpui::hsla(0., 0., 0.949, 1.)));
     Tags {
-        title: m.title.filter(|t| !t.is_empty()),
-        artist: m.artist.filter(|t| !t.is_empty()),
-        album: m.album.filter(|t| !t.is_empty()),
+        title: m.title.map(|t| crate::kit::one_line(&t).into_owned()).filter(|t| !t.is_empty()),
+        artist: m.artist.map(|t| crate::kit::one_line(&t).into_owned()).filter(|t| !t.is_empty()),
+        album: m.album.map(|t| crate::kit::one_line(&t).into_owned()).filter(|t| !t.is_empty()),
         year: m.year,
         cover,
         glow,
@@ -1133,7 +1133,7 @@ fn album_view(
     let art_px = if narrow { 64. } else { 128. };
     let id = &att.id;
     let line = |d: gpui::Div| d.overflow_hidden().text_ellipsis().whitespace_nowrap();
-    let full = t.album.clone().or(t.title.clone()).unwrap_or_else(|| att.name.clone());
+    let full = t.album.clone().or(t.title.clone()).unwrap_or_else(|| crate::kit::one_line(&att.name).into_owned());
     let (main, note) = split_title(&full);
     let byline = [t.artist.clone(), t.year.map(|y| y.to_string())]
         .into_iter()
@@ -1702,9 +1702,9 @@ pub fn view(
             Some(artist) => format!("{artist} \u{2014} {track}"), // i18n-exempt: two names
             None => track.to_string(),
         },
-        None => att.name.clone(),
+        None => crate::kit::one_line(&att.name).into_owned(),
     };
-    let now_title = chapters.map(|ch| split_title(&ch[track_idx.max(0) as usize].title).0);
+    let now_title = chapters.and_then(|ch| ch.get(track_idx.max(0) as usize)).map(|c| split_title(&c.title).0);
     let title = now_title.unwrap_or(title);
     let transcript = transcripts.and_then(|t| t.get(&att.id));
     let downloading = transcripts
@@ -1815,7 +1815,7 @@ pub fn view(
         .child(controls)
         .into_any_element(),
         (Some(t), Some(art)) => {
-            let track = t.title.clone().unwrap_or_else(|| att.name.clone());
+            let track = t.title.clone().unwrap_or_else(|| crate::kit::one_line(&att.name).into_owned());
             let byline = [
                 t.artist.clone(),
                 t.album.clone().filter(|a| Some(a) != t.title.as_ref()),
