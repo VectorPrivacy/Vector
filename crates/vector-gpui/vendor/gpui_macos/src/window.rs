@@ -649,6 +649,7 @@ enum FrameSource {
 
 struct MacWindowState {
     handle: AnyWindowHandle,
+    path_release_pending: bool,
     foreground_executor: ForegroundExecutor,
     background_executor: BackgroundExecutor,
     native_window: *mut AnyObject,
@@ -1111,6 +1112,7 @@ impl MacWindow {
             let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
+                path_release_pending: false,
                 foreground_executor,
                 background_executor,
                 native_window,
@@ -2146,6 +2148,26 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+        if !this.path_release_pending && this.renderer.release_idle_path_textures() {
+            this.path_release_pending = true;
+            let window_state = Rc::downgrade(&self.0);
+            let executor = this.background_executor.clone();
+            this.foreground_executor
+                .spawn(async move {
+                    loop {
+                        executor.timer(gpui_apple::metal_renderer::PATH_TEXTURE_IDLE).await;
+                        let Some(window_state) = window_state.upgrade() else {
+                            break;
+                        };
+                        let mut lock = window_state.lock();
+                        if !lock.renderer.release_idle_path_textures() {
+                            lock.path_release_pending = false;
+                            break;
+                        }
+                    }
+                })
+                .detach();
+        }
     }
 
     // GPUI calls this without waking the frame waker when a window only needs

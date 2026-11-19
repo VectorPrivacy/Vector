@@ -43,9 +43,9 @@ const SHADERS_SOURCE_FILE: &str = include_str!(concat!(env!("OUT_DIR"), "/stitch
 // Use 4x MSAA, all devices support it.
 // https://developer.apple.com/documentation/metal/mtldevice/1433355-supportstexturesamplecount
 const PATH_SAMPLE_COUNT: u32 = 4;
-/// Path textures are window-sized and most frames draw no paths, so they go after this many
-/// frames without one; a spinner that comes and goes keeps them.
-const PATH_TEXTURE_IDLE_FRAMES: u32 = 60;
+/// Path textures are window-sized and most frames draw no paths, so they go once no frame has
+/// drawn one for this long; a spinner that comes and goes keeps them.
+pub const PATH_TEXTURE_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
@@ -153,7 +153,7 @@ pub struct MetalRenderer {
     path_intermediate_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_intermediate_msaa_texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     path_sample_count: u32,
-    pathless_frames: u32,
+    last_path_frame: Option<std::time::Instant>,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -442,7 +442,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
-            pathless_frames: 0,
+            last_path_frame: None,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         })
@@ -495,6 +495,20 @@ impl MetalRenderer {
 
     /// Record whether a `CAMetalDisplayLink` drives the layer. While one
     /// does, frames are drawn only into the drawables it hands out.
+    /// Frees the path textures once no frame has drawn paths for [`PATH_TEXTURE_IDLE`]. An idle
+    /// window draws no frames, so its platform calls this on a timer too; true while still held.
+    pub fn release_idle_path_textures(&mut self) -> bool {
+        if self.path_intermediate_texture.is_none() {
+            return false;
+        }
+        if self.last_path_frame.is_some_and(|at| at.elapsed() < PATH_TEXTURE_IDLE) {
+            return true;
+        }
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
+        false
+    }
+
     pub fn set_display_link_attached(&mut self, attached: bool) {
         self.display_link_mode = if attached {
             DisplayLinkMode::Attached { drawable: None }
@@ -660,13 +674,9 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
         if scene.paths.is_empty() {
-            self.pathless_frames = self.pathless_frames.saturating_add(1);
-            if self.pathless_frames >= PATH_TEXTURE_IDLE_FRAMES {
-                self.path_intermediate_texture = None;
-                self.path_intermediate_msaa_texture = None;
-            }
+            self.release_idle_path_textures();
         } else {
-            self.pathless_frames = 0;
+            self.last_path_frame = Some(std::time::Instant::now());
             if self.path_intermediate_texture.is_none() {
                 self.update_path_intermediate_textures(viewport_size)?;
             }
