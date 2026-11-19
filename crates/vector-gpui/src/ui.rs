@@ -4119,6 +4119,11 @@ impl VectorApp {
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         if self.open.as_ref() != Some(&id) {
             self.store.borrow_mut().unveiled.clear();
+            self.revealed.borrow_mut().clear();
+            let mut media = self.media.borrow_mut();
+            media.revealed.clear();
+            media.embeds.revealed.clear();
+            drop(media);
             crate::select::reset();
         }
         // A channel of another Community (or one opened from DMs) brings its whole view; a DM
