@@ -31,6 +31,8 @@ video = ["dep:ffmpeg-next"]
 video-static = ["video", "ffmpeg-next/static", "ffmpeg-next/software-resampling"]
 # Dev builds: `dev:` commands from a second launch drive and measure the window (src/devctl.rs).
 devctl = []
+# The F-Droid flavour: its store installs every update, so no in-app installer.
+fdroid = ["vector-media/fdroid"]
 
 [dependencies]
 dhat = { version = "0.3", optional = true }

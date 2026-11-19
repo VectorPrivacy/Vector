@@ -81,6 +81,10 @@ pub fn newer(latest: Version, current: Version, preview_channel: bool) -> bool {
 
 /// Whether this device follows previews: its own choice, else the channel of the build.
 pub fn beta() -> bool {
+    // A store only ever carries releases.
+    if super::install::store().is_some() {
+        return false;
+    }
     match super::device::get("beta_updates").as_deref() {
         Some("true") => true,
         Some("false") => false,
@@ -133,13 +137,23 @@ pub async fn check(preview_channel: bool) -> Result<Option<Release>, String> {
     Ok(Some(Release { version, notes, asset }))
 }
 
-/// Where a release is installed from when this copy can't update itself.
-pub fn release_page(version: Version) -> String {
+/// The release's tag: `v0.4.2`, or `v0.4.2-1` for a preview.
+fn tag(version: Version) -> String {
     let [a, b, c] = version.core;
     match version.preview {
-        Some(n) => format!("https://github.com/VectorPrivacy/Vector/releases/tag/v{a}.{b}.{c}-{n}"),
-        None => format!("https://github.com/VectorPrivacy/Vector/releases/tag/v{a}.{b}.{c}"),
+        Some(n) => format!("v{a}.{b}.{c}-{n}"),
+        None => format!("v{a}.{b}.{c}"),
     }
+}
+
+/// Where a release is installed from when this copy can't update itself.
+pub fn release_page(version: Version) -> String {
+    format!("https://github.com/VectorPrivacy/Vector/releases/tag/{}", tag(version))
+}
+
+/// One file the release carries.
+pub fn release_file(version: Version, name: &str) -> String {
+    format!("https://github.com/VectorPrivacy/Vector/releases/download/{}/{name}", tag(version))
 }
 
 #[cfg(test)]
@@ -172,5 +186,11 @@ mod tests {
             assert!(Version::parse(s).is_none(), "{s}");
         }
         assert_eq!(v("v0.5.1-2").display(), "v0.5.1 Preview 2");
+    }
+
+    #[test]
+    fn release_files_sit_under_their_own_tag() {
+        assert_eq!(release_file(v("0.6.0"), "a.apk"), "https://github.com/VectorPrivacy/Vector/releases/download/v0.6.0/a.apk");
+        assert_eq!(release_page(v("0.6.0-2")), "https://github.com/VectorPrivacy/Vector/releases/tag/v0.6.0-2");
     }
 }

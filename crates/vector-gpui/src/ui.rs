@@ -2801,6 +2801,10 @@ impl VectorApp {
                     Ok(path) => {
                         this.update_bundle = Some(path);
                         this.set_updates(|u| u.phase = UpdPhase::Ready);
+                        // Android's own installer asks next, so nothing waits on a second tap.
+                        if cfg!(target_os = "android") {
+                            this.restart_update(cx);
+                        }
                     }
                     Err(e) => this.set_updates(|u| u.phase = UpdPhase::Error(e)),
                 }
@@ -2814,20 +2818,49 @@ impl VectorApp {
 
     /// The verified bundle into place, then this copy makes way for it.
     fn restart_update(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::UpdPhase;
+        use backend::install::Installed;
         let Some(bundle) = self.update_bundle.clone() else { return };
-        match backend::install::install(&bundle).and_then(|_| backend::install::relaunch()) {
-            Ok(()) => cx.quit(),
-            Err(e) => {
-                self.update_bundle = None;
-                self.set_updates(|u| u.phase = crate::settings::UpdPhase::Error(e));
-                cx.notify();
-            }
+        if self.updates.phase == UpdPhase::Installing {
+            return;
         }
+        self.set_updates(|u| u.phase = UpdPhase::Installing);
+        // Unpacking a bundle or reading an APK's certificate takes a while.
+        let rx = backend::run(async move {
+            tokio::task::spawn_blocking(move || {
+                backend::install::install(&bundle).and_then(|done| match done {
+                    Installed::Restart => backend::install::relaunch().map(|()| None),
+                    Installed::Handed(note) => Ok(Some(note)),
+                })
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        });
+        cx.spawn(async move |this, cx| {
+            let out = rx.await.unwrap_or_else(|_| Err(t::settings_update_download_stopped().into()));
+            this.update(cx, |this, cx| {
+                match out {
+                    Ok(None) => cx.quit(),
+                    Ok(Some(note)) => this.set_updates(|u| {
+                        u.phase = UpdPhase::Ready;
+                        u.note = Some(note);
+                    }),
+                    Err(e) => {
+                        this.update_bundle = None;
+                        this.set_updates(|u| u.phase = UpdPhase::Error(e));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     fn check_updates(&mut self, silent: bool, cx: &mut Context<Self>) {
         use crate::settings::UpdPhase;
-        if matches!(self.updates.phase, UpdPhase::Checking | UpdPhase::Downloading(_) | UpdPhase::Ready) {
+        if matches!(self.updates.phase, UpdPhase::Checking | UpdPhase::Downloading(_) | UpdPhase::Ready | UpdPhase::Installing) {
             return;
         }
         if !silent {
@@ -18672,6 +18705,11 @@ impl VectorApp {
                 if self.updates.phase == crate::settings::UpdPhase::Available {
                     if let Some(asset) = self.update_asset.clone() {
                         self.download_update(asset, cx);
+                    } else if backend::install::store().is_some() {
+                        // The website carries every build and links out to each store.
+                        if !backend::install::open_store() {
+                            self.open_web("https://vectorapp.io", cx);
+                        }
                     } else if let Some(url) = self.update_url.clone() {
                         self.open_web(&url, cx);
                     }

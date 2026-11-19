@@ -14,3 +14,4 @@
 -keep class io.vectorapp.VectorFiles { *; }
 -keep class io.vectorapp.BiometricUnlock { *; }
 -keep class io.vectorapp.ExternalSigner { *; }
+-keep class io.vectorapp.VectorUpdates { *; }

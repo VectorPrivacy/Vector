@@ -21,4 +21,8 @@ pub mod storage;
 pub mod biometric;
 #[path = "../../../../../src-tauri/src/android/external_signer.rs"]
 pub mod external_signer;
+#[path = "../../../../../src-tauri/src/android/updates.rs"]
+pub mod updates;
 pub mod background_sync;
+
+use utils::with_android_context;

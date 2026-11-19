@@ -48,6 +48,8 @@ http-body-util = "0.1"
 [features]
 default = ["whisper"]
 whisper = ["dep:whisper-rs"]
+# The F-Droid flavour: its store installs every update, so no in-app installer.
+fdroid = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

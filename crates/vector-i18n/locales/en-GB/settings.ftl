@@ -293,6 +293,14 @@ settings-update-checking = Checking for updates...
 settings-update-ready = Update ready! Restart to apply.
 settings-update-no-newer = No newer build yet. You'll be offered the official build as soon as it releases.
 settings-update-restart = Restart Now
+# The button that hands an Android update to the app store that installed Vector. $store is that store's own name, such as Google Play.
+settings-update-via = Update via { $store }
+# Stands in for a store's name when it has none.
+settings-update-your-store = your app store
+settings-update-download-install = Download & Install
+settings-update-install = Install Update
+settings-update-allow-installs = Allow installs from Vector, then tap again
+settings-update-confirm-install = Confirm the install to finish
 # A badge on something just added. Shown in capitals.
 settings-new-badge = New
 settings-update-check-failed = Failed to check for updates
@@ -447,6 +455,10 @@ settings-update-empty = The update holds no app
 settings-update-installer-failed = Couldn't start the installer: { $error }
 settings-update-unsupported = No in-app updates on this platform
 settings-update-nothing-to-start = Nothing to start
+settings-update-other-key = This update is signed by a different key than the installed app. Reinstall from where you first got Vector.
+settings-update-unverifiable = Couldn't verify the update's signature, so it wasn't installed
+# $status is the system's answer, for a bug report.
+settings-update-install-failed = The update couldn't be installed ({ $status })
 
 ## Why a storage change was refused
 

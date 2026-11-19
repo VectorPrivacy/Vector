@@ -82,6 +82,9 @@ settings-help-transfer = Sign in on Another Device
     .text = Bring this account to a phone, computer or browser by scanning a code or typing it in. Both devices check a number together and you approve on this device, so your keys never leave it in a form anyone else can read. This device stays signed in.
 settings-help-updates = Updates
     .text = This copy of Vector checks for new releases by itself: Check for Updates finds the newest one, then Download Update takes you to it.<br><br>We recommend always running the latest version: every release carries security, privacy and stability fixes.
+settings-help-updates-self = This copy of Vector <b>updates itself</b>: Check for Updates finds the newest release, then downloads and installs it for you.<br><br>We recommend always running the latest version: every release carries security, privacy and stability fixes.
+# $store is the app store that installed Vector, such as Google Play.
+settings-help-updates-store = This copy of Vector came from <b>{ $store }</b>, so only { $store } can update it. Vector still checks for new releases and tells you when one is out, then hands you to { $store } to install it.<br><br>We recommend always running the latest version: every release carries security, privacy and stability fixes.
 settings-help-beta = Beta Updates
     .text = Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you'll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there.
 settings-help-auto-gain = Automatic Gain

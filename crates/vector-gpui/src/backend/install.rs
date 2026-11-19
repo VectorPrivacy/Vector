@@ -9,8 +9,24 @@ const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQwRU
 #[derive(Clone, Debug)]
 pub struct Asset {
     pub url: String,
+    pub check: Check,
+}
+
+/// What vouches for the downloaded bundle.
+#[derive(Clone, Debug)]
+pub enum Check {
     /// Base64 of the minisign `.sig` file, as the manifest carries it.
-    pub signature: String,
+    Minisign(String),
+    /// Android installs it only over a copy signed by the same certificate.
+    SigningCertificate,
+}
+
+/// What came of an install.
+pub enum Installed {
+    /// In place: start it, and make way.
+    Restart,
+    /// The system has it and asks the user; this copy carries on meanwhile.
+    Handed(String),
 }
 
 /// How this copy was installed, as the Tauri updater names it in a manifest key: an update
@@ -23,6 +39,7 @@ pub enum Kind {
     Rpm,
     Nsis,
     Msi,
+    Apk,
 }
 
 impl Kind {
@@ -34,6 +51,7 @@ impl Kind {
             Kind::Rpm => "rpm",
             Kind::Nsis => "nsis",
             Kind::Msi => "msi",
+            Kind::Apk => "apk",
         }
     }
 }
@@ -54,7 +72,29 @@ fn keys_for(kind: Kind) -> Vec<String> {
 }
 
 pub fn asset(manifest: &serde_json::Value) -> Option<Asset> {
-    asset_for(manifest, kind()?)
+    match kind()? {
+        Kind::Apk => apk_for(manifest),
+        kind => asset_for(manifest, kind),
+    }
+}
+
+/// The release's APK for this build's ABI: installing another ABI's would fail or ship dead code.
+fn apk_name() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "Vector-arm64-v8a.apk",
+        "arm" => "Vector-armeabi-v7a.apk",
+        "x86_64" => "Vector-x86_64.apk",
+        _ => "Vector.apk",
+    }
+}
+
+/// Under the tag of the version the manifest names, so the APK is the release that was offered.
+fn apk_for(manifest: &serde_json::Value) -> Option<Asset> {
+    let version = super::updates::Version::parse(manifest.get("version")?.as_str()?)?;
+    Some(Asset {
+        url: super::updates::release_file(version, apk_name()),
+        check: Check::SigningCertificate,
+    })
 }
 
 fn asset_for(manifest: &serde_json::Value, kind: Kind) -> Option<Asset> {
@@ -63,7 +103,7 @@ fn asset_for(manifest: &serde_json::Value, kind: Kind) -> Option<Asset> {
         let p = platforms.get(key)?;
         Some(Asset {
             url: p.get("url")?.as_str()?.to_string(),
-            signature: p.get("signature")?.as_str()?.to_string(),
+            check: Check::Minisign(p.get("signature")?.as_str()?.to_string()),
         })
     })
 }
@@ -77,8 +117,56 @@ fn kind() -> Option<Kind> {
     target().map(|(kind, _)| kind)
 }
 
+/// The store that installed this copy, by its own name, when it can open Vector's page: a copy
+/// a store signed only ever updates from that store. Previews never come from one.
+pub fn store() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        static STORE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        STORE
+            .get_or_init(|| {
+                use crate::android::updates as up;
+                if super::updates::Version::current().preview.is_some() {
+                    return None;
+                }
+                let pkg = up::get_installer_package().ok().flatten()?;
+                if !up::resolves_market_link(&pkg).unwrap_or(false) {
+                    return None;
+                }
+                Some(match pkg.as_str() {
+                    "com.android.vending" => "Google Play".to_string(), // i18n-exempt: brand
+                    _ => up::get_app_label(&pkg)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| crate::t::settings_update_your_store().to_string()),
+                })
+            })
+            .clone()
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// Vector's page in the store that installed this copy, on its own Update control; `false` when
+/// the store can't take it.
+pub fn open_store() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        use crate::android::updates as up;
+        let Ok(Some(pkg)) = up::get_installer_package() else { return false };
+        up::open_url_in_app(&pkg, "market://details?id=io.vectorapp").unwrap_or(false) // i18n-exempt: URI
+    }
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
 /// What the update replaces: the `.app` bundle, the AppImage, or the install folder.
 fn target() -> Option<(Kind, PathBuf)> {
+    if cfg!(target_os = "android") {
+        // A sideload carries the release key, so the next release installs over it.
+        let sideload = !cfg!(feature = "fdroid") && store().is_none();
+        return sideload.then(|| (Kind::Apk, std::env::temp_dir()));
+    }
     let exe = std::env::current_exe().ok()?;
     if cfg!(target_os = "macos") {
         return exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(|p| (Kind::App, p.to_path_buf()));
@@ -141,34 +229,80 @@ pub async fn download(asset: Asset, progress: impl Fn(u64, u64)) -> Result<PathB
         return Err(crate::t::settings_update_download_http(resp.status().to_string()).to_string());
     }
     let total = resp.content_length().unwrap_or(0);
-    let mut bytes = Vec::with_capacity(total as usize);
-    let mut shown = 0u64;
+    let name = asset.url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("update").to_string();
+    let dir = std::env::temp_dir().join("io.vectorapp.gpui-update");
+    std::fs::create_dir_all(&dir).map_err(|e| crate::t::settings_update_folder_failed(e.to_string()).to_string())?;
+    let path = dir.join(name);
+    let file_failed = |e: std::io::Error| crate::t::settings_update_file_failed(e.to_string()).to_string();
+    // A minisign check needs the whole bundle; an APK streams to a part file, never handed on
+    // half written.
+    let part = path.with_extension("part");
+    let (mut bytes, mut file) = match asset.check {
+        Check::Minisign(_) => (Vec::with_capacity(total as usize), None),
+        Check::SigningCertificate => (Vec::new(), Some(std::fs::File::create(&part).map_err(file_failed)?)),
+    };
+    let (mut got, mut shown) = (0u64, 0u64);
     while let Some(chunk) = resp.chunk().await.map_err(|e| crate::t::settings_update_download_interrupted(e.to_string()).to_string())? {
-        bytes.extend_from_slice(&chunk);
-        let got = bytes.len() as u64;
+        match file.as_mut() {
+            Some(f) => std::io::Write::write_all(f, &chunk).map_err(file_failed)?,
+            None => bytes.extend_from_slice(&chunk),
+        }
+        got += chunk.len() as u64;
         if got - shown >= 256 * 1024 || got == total {
             shown = got;
             progress(got, total);
         }
     }
-    verify(&bytes, &asset.signature)?;
-    let name = asset.url.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("update").to_string();
-    let dir = std::env::temp_dir().join("io.vectorapp.gpui-update");
-    std::fs::create_dir_all(&dir).map_err(|e| crate::t::settings_update_folder_failed(e.to_string()).to_string())?;
-    let path = dir.join(name);
-    std::fs::write(&path, &bytes).map_err(|e| crate::t::settings_update_file_failed(e.to_string()).to_string())?;
+    match (&asset.check, file) {
+        (Check::Minisign(signature), _) => {
+            verify(&bytes, signature)?;
+            std::fs::write(&path, &bytes).map_err(file_failed)?;
+        }
+        (Check::SigningCertificate, Some(f)) => {
+            f.sync_all().map_err(file_failed)?;
+            drop(f);
+            std::fs::rename(&part, &path).map_err(file_failed)?;
+        }
+        (Check::SigningCertificate, None) => unreachable!(),
+    }
     Ok(path)
 }
 
 /// Put the verified bundle in place. On Windows the installer takes over and the app must quit.
-pub fn install(bundle: &Path) -> Result<(), String> {
+pub fn install(bundle: &Path) -> Result<Installed, String> {
     let (kind, target) = target().ok_or_else(|| crate::t::settings_update_manual().to_string())?;
     match kind {
         Kind::Deb => install_package(bundle, &target, "dpkg", "-i"),
         Kind::Rpm => install_package(bundle, &target, "rpm", "-U"),
         Kind::Msi => install_msi(bundle),
         Kind::App | Kind::AppImage | Kind::Nsis => install_at(bundle, &target),
+        Kind::Apk => return install_apk(bundle).map(Installed::Handed),
     }
+    .map(|()| Installed::Restart)
+}
+
+/// The system installer, once the APK's signing certificate matches this copy's.
+#[cfg(all(target_os = "android", not(feature = "fdroid")))]
+fn install_apk(apk: &Path) -> Result<String, String> {
+    let status = crate::android::updates::install_update(&apk.to_string_lossy())?;
+    match status.as_str() {
+        "ok" => Ok(crate::t::settings_update_confirm_install().into()),
+        "needs-permission" => Ok(crate::t::settings_update_allow_installs().into()),
+        "signature-mismatch" => {
+            let _ = std::fs::remove_file(apk);
+            Err(crate::t::settings_update_other_key().into())
+        }
+        "unverifiable" => {
+            let _ = std::fs::remove_file(apk);
+            Err(crate::t::settings_update_unverifiable().into())
+        }
+        other => Err(crate::t::settings_update_install_failed(other).into()),
+    }
+}
+
+#[cfg(not(all(target_os = "android", not(feature = "fdroid"))))]
+fn install_apk(_: &Path) -> Result<String, String> {
+    Err(crate::t::settings_update_unsupported().into())
 }
 
 /// The package manager runs as root once this process has gone, through polkit's prompt, then

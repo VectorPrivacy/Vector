@@ -286,7 +286,14 @@ pub fn help(key: &str) -> Option<(SharedString, String)> {
         "changePassword" => (t::settings_help_change_password(), t::settings_help_change_password_text()),
         "exportAccount" => (t::settings_help_export_account(), t::settings_help_export_account_text()),
         "transfer" => (t::settings_help_transfer(), t::settings_help_transfer_text()),
-        "updates" => (t::settings_help_updates(), t::settings_help_updates_text()),
+        "updates" => (
+            t::settings_help_updates(),
+            match crate::backend::install::store() {
+                Some(store) => t::settings_help_updates_store(store),
+                None if crate::backend::install::supported() => t::settings_help_updates_self(),
+                None => t::settings_help_updates_text(),
+            },
+        ),
         "beta" => (t::settings_help_beta(), t::settings_help_beta_text()),
         "autoGain" => (t::settings_help_auto_gain(), t::settings_help_auto_gain_text()),
         "echoCancel" => (t::settings_help_echo_cancel(), t::settings_help_echo_cancel_text()),
@@ -2735,6 +2742,8 @@ pub enum UpdPhase {
     Downloading(u8),
     /// Downloaded and verified: Restart Now puts it in place.
     Ready,
+    /// Going into place.
+    Installing,
     Error(String),
 }
 
@@ -2745,6 +2754,8 @@ pub struct Updates {
     pub latest: bool,
     pub found: Option<(String, String)>,
     pub beta: bool,
+    /// What the system installer wants of the user, while it holds the update.
+    pub note: Option<String>,
 }
 
 /// `.upd-card`: the standing, its lead coloured.
@@ -2903,7 +2914,9 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
         );
     }
     let beta = u.beta;
-    col = col.child(
+    let store = crate::backend::install::store();
+    // A store only ever carries releases.
+    col = col.when(store.is_none(), |col| col.child(
         // `.form-group`'s 15px under the row, which brings its own 10.
         div().w_full().mb(px(5.)).child(toggle_row(
             "beta",
@@ -2917,14 +2930,20 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
             ),
             false,
         )),
-    );
+    ));
+    let android = cfg!(target_os = "android");
     let (label, enabled) = match u.phase {
         UpdPhase::Checking => (t::settings_update_button_checking(), false),
-        UpdPhase::Available => (t::settings_update_download(), true),
+        UpdPhase::Available => match store {
+            Some(store) => (t::settings_update_via(store), true),
+            None if android => (t::settings_update_download_install(), true),
+            None => (t::settings_update_download(), true),
+        },
         UpdPhase::Downloading(_) => (t::settings_update_downloading(), false),
         _ => (t::settings_update_check(), true),
     };
-    col = col.when(u.phase != UpdPhase::Ready, |col| col.child(
+    let placed = matches!(u.phase, UpdPhase::Ready | UpdPhase::Installing);
+    col = col.when(!placed, |col| col.child(
         div()
             .id("check-updates-btn")
             .h(px(37.))
@@ -2946,7 +2965,10 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
     ));
     let status = match &u.phase {
         UpdPhase::Checking => Some((t::settings_update_checking(), white_a(0.8))),
-        UpdPhase::Ready => Some((t::settings_update_ready(), white_a(0.8))),
+        UpdPhase::Ready | UpdPhase::Installing => Some((
+            u.note.clone().map_or_else(t::settings_update_ready, Into::into),
+            white_a(0.8),
+        )),
         UpdPhase::Error(e) => Some((e.clone().into(), c(0xff5252))),
         UpdPhase::NoUpdates if current.preview.is_some() => Some((t::settings_update_no_newer(), c(ACCENT))),
         _ => None,
@@ -2965,7 +2987,8 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
     if let UpdPhase::Downloading(pct) = u.phase {
         col = col.child(div().mt(px(20.)).w_full().child(progress_bar(pct)));
     }
-    if u.phase == UpdPhase::Ready {
+    if placed {
+        let going = u.phase == UpdPhase::Installing;
         col = col.child(
             div()
                 .id("restart-update-btn")
@@ -2983,9 +3006,9 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .text_size(px(16.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(c(0xffffff))
-                .cursor_pointer()
-                .on_click(click(on, || Act::RestartUpdate))
-                .child(t::settings_update_restart()),
+                .when(going, |d| d.opacity(0.5))
+                .when(!going, |d| d.cursor_pointer().on_click(click(on, || Act::RestartUpdate)))
+                .child(if android { t::settings_update_install() } else { t::settings_update_restart() }),
         );
     }
     col.into_any_element()
