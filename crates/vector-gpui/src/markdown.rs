@@ -613,9 +613,8 @@ impl Builder<'_> {
 
     /// Text with its `:shortcode:`s swapped for the custom emoji the message carries.
     fn emoji_text(&mut self, t: &str, kind: Kind) {
-        if let Some(masked) = self.ctx.mask.and_then(|m| m(t)) {
-            return self.emoji_text(&masked, kind);
-        }
+        let masked = self.ctx.mask.and_then(|m| m(t));
+        let t = masked.as_deref().unwrap_or(t);
         let Some(custom) = self.ctx.custom else {
             return self.twemoji_text(t, kind);
         };

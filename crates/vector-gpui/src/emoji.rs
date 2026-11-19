@@ -205,7 +205,7 @@ pub fn search_scored(query: &str, used: impl Fn(&str) -> f64) -> Vec<(&'static E
                     }
                 }
             }
-            if qlen >= 5 && levenshtein(word, &q) == 2 && wlen.abs_diff(qlen) <= 1 {
+            if qlen >= 5 && wlen.abs_diff(qlen) <= 1 && levenshtein(word, &q) == 2 {
                 consider(0.8 + pos, word, i);
             }
         }

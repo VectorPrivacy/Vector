@@ -385,7 +385,9 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
     let in_atom = |at: usize| atomic.iter().any(|&(s, e)| at >= s && at <= e);
     let blank = |c: Option<char>| matches!(c, Some(' ' | '\t'));
     let ws = |c: Option<char>| c.is_some_and(char::is_whitespace);
-    let word = |c: Option<char>| c.is_some_and(|c| !c.is_whitespace()) && !punct(c);
+    // The JS reads UTF-16 units: beside an astral char it sees a surrogate, neither space nor punctuation.
+    let unit_punct = |c: Option<char>| c.is_some_and(|c| c <= '\u{ffff}') && punct(c);
+    let word = |c: Option<char>| c.is_some_and(|c| !c.is_whitespace()) && !unit_punct(c);
     let emphasis = |c: Option<char>| matches!(c, Some('*' | '_'));
     let free = |c: Option<char>| c.is_none() || ws(c);
     let beyond_run = |mut i: isize, step: isize| {
@@ -433,12 +435,13 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
         if syntax(at - 1) && !word(next) {
             return true;
         }
-        syntax(at) && !word(prev) && !(emphasis(next) && punct(prev) && free(beyond_run(at, 1)))
+        syntax(at) && !word(prev) && !(emphasis(next) && unit_punct(prev) && free(beyond_run(at, 1)))
     };
     // (zone start, zone end, whole line)
     let zone_of = |at: usize| -> (usize, usize, bool) {
         let (s, e) = line_of(at);
-        let line = &t[s..e];
+        // JS `slice`: a start past the end is empty, as for a line opening on a newline.
+        let line = t.get(s..e).unwrap_or(&[]);
         if is_rule(line) || is_table_row(line) {
             return (s, e, true);
         }
@@ -465,7 +468,7 @@ pub fn mark(text: &str, spans: &[ColorSpan], times: &[(usize, usize)]) -> Option
                 return n;
             }
             let (ls, le) = line_of(at);
-            let line: String = t[ls..le].iter().collect();
+            let line: String = t.get(ls..le).unwrap_or(&[]).iter().collect();
             if !line.trim().is_empty() && !zone_of(at).2 {
                 break;
             }
@@ -908,6 +911,14 @@ mod tests {
         assert_eq!(shown("see https://a.io/x now", &[span(4, 10)]), "");
         assert_eq!(shown("**bold** x", &[span(0, 8)]), "**{bold}** x");
         assert_eq!(shown("a\n\n---\n\nb", &[span(0, 9)]), "{a\n\n---\n\nb}");
+    }
+
+    #[test]
+    fn edges_on_text_opening_with_a_newline_or_beside_emoji() {
+        assert_eq!(shown("\nhi there", &[span(0, 9)]), "\n{hi there}");
+        assert_eq!(shown("\n\n# Title", &[span(0, 9)]), "\n\n# {Title}");
+        assert_eq!(shown("\n> quote", &[span(0, 8)]), "\n> {quote}");
+        assert_eq!(shown("\n😀 _x_ 👍🏽", &[span(1, 7)]), "\n{😀 _x_ }👍🏽");
     }
 
     /// Differential check against `tcMarkSpans`: `TC_CASES=<json file> cargo test dump -- --ignored`.

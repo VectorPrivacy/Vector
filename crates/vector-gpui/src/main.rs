@@ -28,6 +28,8 @@ mod pins;
 mod pickers;
 mod edithistory;
 mod textdiff;
+#[cfg(test)]
+mod textfuzz;
 mod payaddr;
 mod reactpop;
 mod rekey;

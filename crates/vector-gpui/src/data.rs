@@ -1600,9 +1600,9 @@ pub fn find_bech_people(text: &str) -> Vec<(usize, usize, Option<String>)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        let (hrp, profile) = if lower[i..].starts_with("npub1") {
+        let (hrp, profile) = if b[i..].starts_with(b"npub1") {
             (5, false)
-        } else if lower[i..].starts_with("nprofile1") {
+        } else if b[i..].starts_with(b"nprofile1") {
             (9, true)
         } else {
             i += 1;
@@ -1649,6 +1649,15 @@ mod tests {
         assert_eq!(&text[found[0].0..found[0].1], format!("nostr:{npub}"));
         assert_eq!(found[1].2.as_deref(), Some(npub));
         assert_eq!(&text[found[1].0..found[1].1], nprofile);
+    }
+
+    #[test]
+    fn bech_people_in_text_beyond_ascii() {
+        let npub = "npub1v84qsqlcs56j8dmh6s22eccnpn2d87fdutxhl7rftseh67wzamhqfv9ft6";
+        let text = format!("東京で café 👍🏽 @{npub} ｗ");
+        let found = find_bech_people(&text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].0..found[0].1], format!("@{npub}"));
     }
 }
 
