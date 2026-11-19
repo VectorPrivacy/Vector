@@ -299,7 +299,7 @@ async function sendComposed(messageText) {
         }
 
         // Clear input and show editing state
-        domChatMessageInput.value = '';
+        domChatMessageInput.load('');
         composerSendPending = null;
         resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
         resetChatInputSize();
@@ -378,7 +378,7 @@ async function sendComposed(messageText) {
     }
 
     // Clear input and show sending state
-    domChatMessageInput.value = '';
+    domChatMessageInput.load('');
     composerSendPending = null;
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
     resetChatInputSize();
@@ -408,7 +408,7 @@ async function sendComposed(messageText) {
         if (!ownUnsent(sendChat).some(id => !unsentBefore.has(id))) {
             showToast('Not sent: ' + String(e));
             if (strOpenChat === sendTo && !domChatMessageInput.value) {
-                domChatMessageInput.value = messageText;
+                domChatMessageInput.load(messageText);
                 VectorSvelte.setDraftEmpty(false, false);
                 autoResizeChatInput();
             }
@@ -798,7 +798,7 @@ async function initComposerVoice() {
             VectorSvelte.setComposerStatus('');
         } else if (newState === 'recording' || newState === 'locked') {
             // Clear input and show recording status
-            domChatMessageInput.value = '';
+            domChatMessageInput.load('');
             resetChatInputSize();
         }
     };

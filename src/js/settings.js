@@ -580,7 +580,7 @@ function openStatusDialog(cProfile) {
         },
     };
 
-    input.value = strCurrent;
+    input.load(strCurrent);
     input.oninput = updatePreview;
     // Enter saves: statuses have no second line to go to.
     input.onkeydown = (e) => {

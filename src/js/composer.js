@@ -451,6 +451,46 @@ function cmpShortcutMark(e) {
     return null;
 }
 
+/** Undo steps kept per composer. */
+const CMP_UNDO_LIMIT = 200;
+/** Typing after a pause this long starts a new undo step. */
+const CMP_UNDO_PAUSE_MS = 1000;
+
+/** Undo/redo shortcut, by the key's letter where it has one: Z sits elsewhere on German and French layouts. */
+function cmpHistoryKey(e) {
+    if (e.altKey || (CMP_MAC ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey)) return null;
+    const k = /^[a-z]$/i.test(e.key) ? e.key.toLowerCase() : { KeyZ: 'z', KeyY: 'y' }[e.code];
+    if (k === 'z') return e.shiftKey ? 'redo' : 'undo';
+    if (k === 'y' && !CMP_MAC && !e.shiftKey) return 'redo';
+    return null;
+}
+
+/**
+ * Where `a` became `b`: [from, oldTo) of `a` was replaced by [from, to) of `b`. Typing into a
+ * run of one character could have landed anywhere in it; `caret`, where the edit left the
+ * caret, says where. Never splits a surrogate pair.
+ */
+function cmpDiff(a, b, caret) {
+    const grew = b.length - a.length;
+    if (caret != null && grew > 0 && caret >= grew && caret <= b.length
+        && a.slice(0, caret - grew) === b.slice(0, caret - grew) && a.slice(caret - grew) === b.slice(caret)) {
+        return { from: caret - grew, oldTo: caret - grew, to: caret };
+    }
+    if (caret != null && grew < 0 && caret <= b.length
+        && a.slice(0, caret) === b.slice(0, caret) && a.slice(caret - grew) === b.slice(caret)) {
+        return { from: caret, oldTo: caret - grew, to: caret };
+    }
+    const low = (str, i) => { const c = str.charCodeAt(i); return c >= 0xDC00 && c <= 0xDFFF; };
+    const n = Math.min(a.length, b.length);
+    let p = 0;
+    while (p < n && a.charCodeAt(p) === b.charCodeAt(p)) p++;
+    while (p > 0 && (low(a, p) || low(b, p))) p--;
+    let q = 0;
+    while (q < n - p && a.charCodeAt(a.length - 1 - q) === b.charCodeAt(b.length - 1 - q)) q++;
+    while (q > 0 && (low(a, a.length - q) || low(b, b.length - q))) q--;
+    return { from: p, oldTo: a.length - q, to: b.length - q };
+}
+
 /**
  * Whether `mark` already wraps src[from, to), around it or as the selection's own
  * ends. Stars are counted as a run, so `***x***` is both bold and italic and
@@ -1209,6 +1249,84 @@ function createRichComposer(host, opts = {}) {
         if (caret !== null && caret !== undefined) setCaret(caret);
     }
 
+    // ---- undo -------------------------------------------------------------------
+    // Kept on the model: the DOM is rebuilt whenever its formatting changes, which leaves the
+    // browser's own history pointing at nodes that are gone. Each entry is the text before a step.
+    const steps = { undo: [], redo: [], at: src, group: null };
+    /** Set by an edit the model makes itself (paste, cut, a format, a `value` write): a step of its own. */
+    let editKind = null;
+
+    /** Note the edit that brought the model to `src`, joined to the open step or starting one. */
+    function record() {
+        const kind0 = editKind;
+        editKind = null;
+        if (src === steps.at) return;
+        // An editable's trailing space is a no-break space until something follows it, when the
+        // browser swaps it for a plain one: the same character, as far as steps go.
+        const plain = (t) => t.replace(/\u00A0/g, ' ');
+        const prev = plain(steps.at);
+        const next = plain(src);
+        if (prev === next) {
+            steps.at = src;
+            return;
+        }
+        const d = cmpDiff(prev, next, caretOffset());
+        const removed = d.oldTo > d.from;
+        const inserted = next.slice(d.from, d.to);
+        const kind = kind0 || (removed && !inserted ? 'delete' : 'type');
+        const g = steps.group;
+        const now = Date.now();
+        // Typing joins while it runs on from the same spot, until a space after a word; deleting
+        // joins while it eats on from where it was.
+        const joins = !!g && g.kind === kind && now - g.time < CMP_UNDO_PAUSE_MS && (kind === 'type'
+            ? !removed && d.from === g.end && !(/^\s/.test(inserted) && !/\s$/.test(g.text))
+            : !inserted && (d.oldTo === g.from || d.from === g.from));
+        if (!joins) {
+            steps.undo.push(steps.at);
+            if (steps.undo.length > CMP_UNDO_LIMIT) steps.undo.shift();
+        }
+        steps.redo.length = 0;
+        steps.at = src;
+        steps.group = kind === 'type' || kind === 'delete' ? { kind, from: d.from, end: d.to, time: now, text: inserted } : null;
+    }
+
+    function clearHistory() {
+        steps.undo.length = 0;
+        steps.redo.length = 0;
+        steps.at = src;
+        steps.group = null;
+    }
+
+    /** Undo (`back`) or redo one step; the caret lands at the end of what changed. */
+    function stepHistory(back) {
+        if (composing) return;
+        record();
+        const from = back ? steps.undo : steps.redo;
+        if (!from.length) return;
+        const next = from.pop();
+        (back ? steps.redo : steps.undo).push(src);
+        const d = cmpDiff(src, next);
+        src = next;
+        steps.at = src;
+        steps.group = null;
+        rerender(d.to);
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: back ? 'historyUndo' : 'historyRedo' }));
+    }
+
+    el.addEventListener('keydown', (e) => {
+        if (composing || e.isComposing) return;
+        const step = cmpHistoryKey(e);
+        if (!step) return;
+        e.preventDefault();
+        stepHistory(step === 'undo');
+    });
+    // The Edit menu's Undo and Redo, and a keyboard's own.
+    el.addEventListener('beforeinput', (e) => {
+        if (e.inputType !== 'historyUndo' && e.inputType !== 'historyRedo') return;
+        e.preventDefault();
+        stepHistory(e.inputType === 'historyUndo');
+    });
+
     // Own the line break rather than reading it back out of the DOM. WebKit adds
     // its filler <br> LAZILY, so "how many trailing <br>s mean a newline" has no
     // stable answer — the same keypress lands differently depending on whether the
@@ -1354,6 +1472,7 @@ function createRichComposer(host, opts = {}) {
         const sel = selectionRange() || { start: src.length, end: src.length };
         const next = cmpToggleMark(src, sel.start, sel.end, mark);
         src = next.src;
+        editKind = 'format';
         rerender(next.end);
         if (next.start !== next.end) selectRange(next.start, next.end);
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1385,6 +1504,7 @@ function createRichComposer(host, opts = {}) {
         composing = false;
         // One reconcile after the IME is finished, never during.
         syncFromDom();
+        record();
     });
     el.addEventListener('input', () => {
         if (composing) {
@@ -1397,6 +1517,7 @@ function createRichComposer(host, opts = {}) {
             return;
         }
         syncFromDom();
+        record();
     });
     // Paste as plain text, applied to the MODEL. `execCommand('insertText')` drops
     // the newlines out of multi-line clipboard text, collapsing a pasted list into
@@ -1415,6 +1536,7 @@ function createRichComposer(host, opts = {}) {
         if (!opts.emojiOnly) text = cmpHtmlToMarkdown(dt.getData('text/html'), text) ?? text;
         const sel = selectionRange() || { start: src.length, end: src.length };
         src = src.slice(0, sel.start) + text + src.slice(sel.end);
+        editKind = 'paste';
         rerender(sel.start + text.length);
         el.dispatchEvent(new Event('input', { bubbles: true }));
     });
@@ -1433,32 +1555,43 @@ function createRichComposer(host, opts = {}) {
         e.preventDefault();
         e.clipboardData.setData('text/plain', src.slice(r.start, r.end));
         src = src.slice(0, r.start) + src.slice(r.end);
+        editKind = 'cut';
         rerender(r.start);
         el.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
     // ---- the textarea-shaped face -------------------------------------------
 
+    /** A write from outside: an undo step of its own. */
+    function setValue(v) {
+        src = String(v == null ? '' : v);
+        // A caret placed in an unfocused editor focuses it, opening a phone's keyboard,
+        // so it waits for the next focus().
+        const focused = document.activeElement === el;
+        rerender(focused ? src.length : null);
+        caretOwed = !focused;
+        if (caretOwed) lastSelection = { start: src.length, end: src.length };
+        // A write under an IME composition replaces it without a compositionend, and some
+        // keyboards (AOSP, Samsung) keep the old word to re-type on Backspace: refocusing
+        // restarts them.
+        if (composing) {
+            composing = false;
+            el.blur();
+            el.focus();
+            setCaret(src.length);
+        }
+        editKind = 'set';
+        record();
+    }
+
     const api = {
         el,
         get value() { return src; },
-        set value(v) {
-            src = String(v == null ? '' : v);
-            // A caret placed in an unfocused editor focuses it, opening a phone's keyboard,
-            // so it waits for the next focus().
-            const focused = document.activeElement === el;
-            rerender(focused ? src.length : null);
-            caretOwed = !focused;
-            if (caretOwed) lastSelection = { start: src.length, end: src.length };
-            // A write under an IME composition replaces it without a compositionend, and some
-            // keyboards (AOSP, Samsung) keep the old word to re-type on Backspace: refocusing
-            // restarts them.
-            if (composing) {
-                composing = false;
-                el.blur();
-                el.focus();
-                setCaret(src.length);
-            }
+        set value(v) { setValue(v); },
+        /** Replace the whole text as a fresh start (another chat's draft, a message to edit): nothing before it can be undone back to. */
+        load(v) {
+            setValue(v);
+            clearHistory();
         },
         get selectionStart() { const r = selectionRange(); return r ? r.start : src.length; },
         set selectionStart(v) { setCaret(v); },
