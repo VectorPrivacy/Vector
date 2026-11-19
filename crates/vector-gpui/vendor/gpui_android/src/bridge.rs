@@ -423,3 +423,63 @@ pub(crate) fn set_text_state(text: &str, selection: (i32, i32), composing: (i32,
 pub(crate) fn set_input_options(options: jint) {
     call_void("setInputOptions", "(I)V", &[options.into()]);
 }
+
+type Picked = futures::channel::oneshot::Sender<anyhow::Result<Option<Vec<std::path::PathBuf>>>>;
+
+/// Pickers still open, by the id the bridge was handed.
+static PICKS: Mutex<Vec<(jint, Picked)>> = Mutex::new(Vec::new());
+
+/// The system's document picker. The chosen files arrive as copies in the app's cache, since
+/// GPUI's callers read paths; `extensions` empty takes any file.
+pub(crate) fn pick_files(multiple: bool, extensions: &[String], answer: Picked) {
+    static NEXT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PICKS.lock().unwrap_or_else(|e| e.into_inner()).push((id, answer));
+    let asked = with_env(|env, class| {
+        let list = env.new_object_array(extensions.len() as jint, "java/lang/String", JObject::null())?;
+        for (i, ext) in extensions.iter().enumerate() {
+            let ext = env.new_string(ext)?;
+            env.set_object_array_element(&list, i as jint, ext)?;
+        }
+        env.call_static_method(
+            class,
+            "pickFiles",
+            "(IZ[Ljava/lang/String;)V",
+            &[id.into(), jni::objects::JValue::Bool(multiple.into()), (&list).into()],
+        )
+        .map(drop)
+    });
+    if asked.is_none() {
+        answer_pick(id, Err(anyhow::anyhow!("The file picker could not open")));
+    }
+}
+
+fn answer_pick(id: jint, result: anyhow::Result<Option<Vec<std::path::PathBuf>>>) {
+    let mut picks = PICKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = picks.iter().position(|(i, _)| *i == id) {
+        let _ = picks.swap_remove(at).1.send(result);
+    }
+}
+
+/// The picker closed: `paths` null when cancelled.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_vectorapp_gpui_Bridge_nativePicked<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    id: jint,
+    paths: jni::objects::JObjectArray<'l>,
+) {
+    if paths.is_null() {
+        answer_pick(id, Ok(None));
+        return;
+    }
+    let count = env.get_array_length(&paths).unwrap_or(0);
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let Ok(path) = env.get_object_array_element(&paths, i) else { continue };
+        if let Ok(path) = env.get_string(&JString::from(path)) {
+            out.push(std::path::PathBuf::from(String::from(path)));
+        }
+    }
+    answer_pick(id, Ok(Some(out)));
+}

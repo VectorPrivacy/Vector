@@ -62,6 +62,8 @@ object Bridge {
     /** The keyboard's copy of the focused field after its edit number `serial`; -1 is no composing region. */
     @JvmStatic external fun nativeImeState(text: String, selStart: Int, selEnd: Int, compStart: Int, compEnd: Int, serial: Int)
     @JvmStatic external fun nativeImeAction(action: Int)
+    /** The picker for `id` closed: its files' cached copies, or null when cancelled. */
+    @JvmStatic external fun nativePicked(id: Int, paths: Array<String>?)
 
     @JvmStatic fun showKeyboard() = ui { it.view.showKeyboard() }
 
@@ -72,6 +74,13 @@ object Bridge {
     }
 
     @JvmStatic fun finish() = ui { it.finish() }
+
+    @JvmStatic fun pickFiles(id: Int, multiple: Boolean, extensions: Array<String>) {
+        main.post {
+            val activity = activity.get()
+            if (activity == null) nativePicked(id, null) else activity.pickFiles(id, multiple, extensions)
+        }
+    }
 
     @JvmStatic fun openUrl(url: String) = ui {
         try {

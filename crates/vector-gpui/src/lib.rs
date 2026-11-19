@@ -353,6 +353,8 @@ pub fn gpui_android_main() {
     if let Some(cache) = android::cache_dir() {
         // SAFETY: before the client starts a thread of its own.
         unsafe { std::env::set_var("TMPDIR", cache) };
+        // Copies of what the picker chose: nothing reads them after the run that picked them.
+        let _ = std::fs::remove_dir_all(cache.join("picked"));
     }
     run();
 }

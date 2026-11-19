@@ -7,11 +7,13 @@ import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import io.vectorapp.gpui.Bridge
 import io.vectorapp.gpui.GpuiView
+import io.vectorapp.gpui.Picked
 
 /** The whole app: GPUI draws every pixel of [view] and hears the activity's life through [Bridge]. */
 class MainActivity : ComponentActivity() {
@@ -19,6 +21,42 @@ class MainActivity : ComponentActivity() {
         private set
 
     private val NOTIFICATION_PERMISSION_REQUEST = 1001
+
+    /** The picker GPUI has open, by the id its answer goes back with; 0 is none. */
+    private var pickId = 0
+    private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val id = pickId
+        pickId = 0
+        val data = result.data.takeIf { result.resultCode == RESULT_OK }
+        val uris = buildList {
+            data?.clipData?.let { clip -> for (i in 0 until clip.itemCount) add(clip.getItemAt(i).uri) }
+            if (isEmpty()) data?.data?.let(::add)
+        }
+        if (uris.isEmpty()) {
+            Bridge.nativePicked(id, null)
+        } else {
+            Thread { Bridge.nativePicked(id, Picked.copy(applicationContext, uris)) }.start()
+        }
+    }
+
+    fun pickFiles(id: Int, multiple: Boolean, extensions: Array<String>) {
+        // One picker at a time: one still open answers as cancelled.
+        if (pickId != 0) Bridge.nativePicked(pickId, null)
+        pickId = id
+        val types = Picked.mimeTypes(extensions)
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = types.singleOrNull() ?: "*/*"
+            if (types.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, types.toTypedArray())
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple)
+        }
+        try {
+            picker.launch(intent)
+        } catch (_: android.content.ActivityNotFoundException) {
+            pickId = 0
+            Bridge.nativePicked(id, null)
+        }
+    }
 
     companion object {
         /** The ring's notification was tapped (`answer` false) or answered. */

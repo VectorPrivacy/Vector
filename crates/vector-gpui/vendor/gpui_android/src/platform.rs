@@ -391,10 +391,20 @@ impl Platform for AndroidPlatform {
 
     fn prompt_for_paths(
         &self,
-        _options: PathPromptOptions,
+        options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = tx.send(Err(anyhow!("The Android file picker is not wired yet")));
+        if options.directories && !options.files {
+            let _ = tx.send(Err(anyhow!("Folders can't be picked on Android")));
+            return rx;
+        }
+        let extensions: Vec<String> = options
+            .filters
+            .iter()
+            .flatten()
+            .flat_map(|(_, exts)| exts.iter().map(|e| e.to_string()))
+            .collect();
+        bridge::pick_files(options.multiple, &extensions, tx);
         rx
     }
 
