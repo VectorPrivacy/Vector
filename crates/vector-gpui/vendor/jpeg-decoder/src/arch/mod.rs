@@ -20,7 +20,7 @@ pub fn get_color_convert_line_ycbcr() -> Option<unsafe fn(&[u8], &[u8], &[u8], &
         }
     }
     // Runtime detection is not needed on aarch64.
-    #[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         return Some(neon::color_convert_line_ycbcr);
     }
@@ -44,7 +44,7 @@ pub fn get_dequantize_and_idct_block_8x8(
         }
     }
     // Runtime detection is not needed on aarch64.
-    #[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     {
         return Some(neon::dequantize_and_idct_block_8x8);
     }

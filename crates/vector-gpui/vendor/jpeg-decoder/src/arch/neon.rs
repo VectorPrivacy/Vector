@@ -1,7 +1,7 @@
-#[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 use core::arch::aarch64::*;
 
-#[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn idct8(data: &mut [int16x8_t; 8]) {
     // The fixed-point constants here are obtained by taking the fractional part of the constants
@@ -81,7 +81,7 @@ unsafe fn idct8(data: &mut [int16x8_t; 8]) {
     data[4] = vqsubq_s16(x3, t0);
 }
 
-#[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn transpose8(data: &mut [int16x8_t; 8]) {
     // Use NEON's 2x2 matrix transposes (vtrn) to do the transposition in each 4x4 block, then
@@ -108,7 +108,7 @@ unsafe fn transpose8(data: &mut [int16x8_t; 8]) {
     data[7] = vreinterpretq_s16_s32(vcombine_s32(vget_high_s32(four1.1), vget_high_s32(four3.1)));
 }
 
-#[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn dequantize_and_idct_block_8x8(
     coefficients: &[i16; 64],
@@ -166,7 +166,7 @@ pub unsafe fn dequantize_and_idct_block_8x8(
     }
 }
 
-#[cfg(all(feature = "nightly_aarch64_neon", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn color_convert_line_ycbcr(y: &[u8], cb: &[u8], cr: &[u8], output: &mut [u8]) -> usize {
     assert!(output.len() % 3 == 0);
