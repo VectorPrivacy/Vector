@@ -608,7 +608,6 @@ fn when(ms: u64, now_ms: u64) -> String {
 fn snippet(text: &str, marks: &[Range<usize>]) -> StyledText {
     let mark = HighlightStyle {
         color: Some(c(ACCENT)),
-        background_color: Some(ca(51, 219, 152, 0.16)),
         font_weight: Some(FontWeight::SEMIBOLD),
         ..Default::default()
     };
@@ -638,11 +637,11 @@ fn chip(tok: &Token, store: &Store, dir: &Directory, on: &OnAct) -> AnyElement {
         .pl(px(10.))
         .pr(px(4.))
         .rounded(px(13.))
-        .bg(ca(51, 219, 152, 0.12))
+        .bg(white_a(0.06))
         .border_1()
-        .border_color(ca(51, 219, 152, 0.35))
+        .border_color(white_a(0.12))
         .text_size(px(13.))
-        .child(div().text_color(c(PRIMARY)).font_weight(FontWeight::SEMIBOLD).child(format!("{}:", tok.key.word())))
+        .child(div().text_color(c(ICON_MUTED)).font_weight(FontWeight::SEMIBOLD).child(format!("{}:", tok.key.word())))
         .child(div().text_color(c(TEXT)).max_w(px(180.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(shown))
         .child(
             div()
@@ -671,7 +670,7 @@ fn suggestion_row(i: usize, s: &Suggest, sel: bool, store: &Store, on: &OnAct) -
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(svg().path(k.icon()).size(px(15.)).text_color(c(PRIMARY)))
+                .child(svg().path(k.icon()).size(px(15.)).text_color(c(ICON_MUTED)))
                 .into_any_element(),
             format!("{}:", k.word()).into(),
             Some(k.label()),
@@ -691,7 +690,7 @@ fn suggestion_row(i: usize, s: &Suggest, sel: bool, store: &Store, on: &OnAct) -
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(svg().path(path).size(px(15.)).text_color(c(PRIMARY)))
+                        .child(svg().path(path).size(px(15.)).text_color(c(ICON_MUTED)))
                         .into_any_element()
                 }
             };
@@ -774,7 +773,7 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, sel: bool, store: &Store
         .rounded(px(8.))
         .cursor_pointer()
         .border_1()
-        .border_color(if sel { ca(51, 219, 152, 0.4) } else { gpui::transparent_black() })
+        .border_color(if sel { white_a(0.14) } else { gpui::transparent_black() })
         .bg(if sel { white_a(0.06) } else { white_a(0.025) })
         .hover(|d| d.bg(white_a(0.05)))
         .on_mouse_move({
@@ -822,7 +821,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
         .gap(px(10.))
         .h(px(52.))
         .px(px(16.))
-        .child(svg().path("icons/search.svg").size(px(18.)).text_color(c(PRIMARY)))
+        .child(svg().path("icons/search.svg").size(px(18.)).text_color(c(ICON_MUTED)))
         .child(div().flex_1().min_w_0().child(s.input.clone()))
         .child(
             div()
@@ -931,20 +930,6 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
             .child(label)
             .child(div().text_color(white_a(0.3)).child(format!("{:.1} ms", s.took as f32 / 1000.))) // i18n-exempt: unit
     });
-    let foot = div()
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .px(px(20.))
-        .py(px(9.))
-        .border_t_1()
-        .border_color(c(DIVIDER))
-        .text_size(px(11.5))
-        .text_color(white_a(0.38))
-        .child(svg().path("icons/lock.svg").size(px(11.)).text_color(white_a(0.38)))
-        .child(div().flex_1().child(t::search_private()))
-        .when(!slim, |d| d.child(div().child(t::search_shortcut_hint())));
-
     let body = div()
         .flex()
         .flex_col()
@@ -953,8 +938,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
         .child(div().h(px(1.)).bg(c(DIVIDER)).mb(px(if chips.is_some() { 12. } else { 0. })))
         .children(chips)
         .child(div().flex_1().min_h_0().flex().flex_col().children(status).child(list))
-        .children(count)
-        .child(foot);
+        .children(count);
 
     let (w, h) = vp;
     let card = if slim {
@@ -970,13 +954,13 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
             .h(px(height))
             .rounded(px(12.))
             .border_1()
-            .border_color(ca(51, 219, 152, 0.45))
+            .border_color(c(0x262626))
             .bg(c(APP_BG))
             .overflow_hidden()
             .shadow(vec![gpui::BoxShadow {
-                color: ca(51, 219, 152, 0.16),
-                offset: gpui::point(px(0.), px(0.)),
-                blur_radius: px(28.),
+                color: ca(0, 0, 0, 0.6),
+                offset: gpui::point(px(0.), px(8.)),
+                blur_radius: px(32.),
                 spread_radius: px(0.),
                 inset: false,
             }])

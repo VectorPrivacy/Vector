@@ -19,8 +19,6 @@ search-newest = Newest
 search-oldest = Oldest
 search-sort = Sort order
 search-close = Close search
-search-private = Searched on this device only. Nothing leaves it.
-search-shortcut-hint = Up and Down to move, Enter to open, Esc to close
 
 ## Filters. The words before the colon in the search field (from:, in:, ...) stay English, as
 ## they do in every language; these are the labels shown beside them.
