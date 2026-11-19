@@ -995,6 +995,10 @@ impl FrameSource for GifCanvas<'_> {
         let f = self.reader.next_frame_info().ok()??;
         let (left, top, fw, fh) = (f.left as usize, f.top as usize, f.width as usize, f.height as usize);
         let (dispose, delay) = (f.dispose, u32::from(f.delay) * 10);
+        // A frame's own header claims its size; the buffer is sized before the crate checks it.
+        if !canvas_fits(fw as u32, fh as u32) {
+            return None;
+        }
         self.raw.resize(self.reader.buffer_size(), 0);
         self.reader.read_into_buffer(&mut self.raw).ok()?;
         let cw = self.canvas.width() as usize;
@@ -1209,6 +1213,17 @@ mod tests {
             }
         }
         assert!(super::decode(&gif, "gif", (64, 64)).is_none());
+        // A small canvas whose frame claims to be huge.
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, 2, 2, &[]).unwrap();
+            for _ in 0..2 {
+                enc.write_frame(&gif::Frame::from_rgba(1, 1, &mut [255, 0, 0, 255])).unwrap();
+            }
+        }
+        let at = gif.windows(9).position(|w| w == b"\x2c\0\0\0\0\x01\0\x01\0").unwrap();
+        gif[at + 5..at + 9].fill(0xff);
+        let _ = super::decode(&gif, "gif", (64, 64));
         let mut webp = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\x02\0\0\0".to_vec();
         webp.extend([0xff, 0x3f, 0, 0xff, 0x3f, 0]);
         assert!(super::decode(&webp, "webp", (64, 64)).is_none());

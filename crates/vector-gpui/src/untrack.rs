@@ -315,7 +315,11 @@ pub fn clean(url: &str) -> String {
                 p.keep = referral(&p.name);
             }
             if let Some(i) = path.find("/dp/") {
-                path.truncate((i + 14).min(path.len()));
+                let mut end = (i + 14).min(path.len());
+                while !path.is_char_boundary(end) {
+                    end -= 1;
+                }
+                path.truncate(end);
             }
         }
         drop(&mut pairs, &[
@@ -533,5 +537,11 @@ mod tests {
         assert_eq!(clean("https://x.com/u/status/1?s=20&t=abc"), "https://x.com/u/status/1");
         assert_eq!(clean("https://duckduckgo.com/?q=rust&t=h_"), "https://duckduckgo.com/?q=rust");
         assert_eq!(clean("https://www.notamazon.evil.com/dp/B0ABCDEFGH?ref=x"), "https://www.notamazon.evil.com/dp/B0ABCDEFGH?ref=x");
+    }
+
+    #[test]
+    fn product_paths_beyond_ascii() {
+        assert_eq!(clean("https://www.amazon.com/dp/Bé東京京京京京"), "https://www.amazon.com/dp/Bé東京");
+        assert_eq!(clean("https://www.amazon.co.jp/dp/B0東京東京東京?tag=x"), "https://www.amazon.co.jp/dp/B0東京?tag=x");
     }
 }

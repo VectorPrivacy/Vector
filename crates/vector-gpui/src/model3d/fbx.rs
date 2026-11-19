@@ -339,7 +339,8 @@ impl Layer {
             Some(ix) => *ix.get(key)? as usize,
             None => key,
         };
-        self.data.get(at * w..at * w + w)
+        let from = at.checked_mul(w)?;
+        self.data.get(from..from.checked_add(w)?)
     }
 }
 

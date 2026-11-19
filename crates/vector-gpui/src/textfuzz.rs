@@ -16,7 +16,14 @@ const TOKENS: &[&str] = &[
     "中文", "한국어", "😀", "👍🏽", "👨\u{200d}👩\u{200d}👧", "🇯🇵", "1\u{fe0f}\u{20e3}", "\u{fe0f}", "\u{200d}", "\u{200b}",
     "\u{200e}", "\u{200f}", "\u{202e}", "\u{2066}", "\u{2069}", "\u{feff}", "\u{2028}", "\u{fffd}", "שלום", "مرحبا", "١٢٣",
     "ไทย", "हिन्दी", "＃", "ｗ", "\u{1f3fb}", "\u{e000}", "\u{10ffff}", "(◕‿◕)", "¯\\_(ツ)_/¯", ":)", ":(", "<3", ":D", "->",
-    "00:00", "12:34:56", "$", "%", "+", "=", "|", "^", "'", "\"",
+    "00:00", "12:34:56", "$", "%", "+", "=", "|", "^", "'", "\"", "https://vectorapp.io/profile/", "<t:", "<t:1700000000>",
+    "<t:-9999999999999:R>", ":R>", ":f>", "@time ", "/time ", "in ", "at ", "on ", "next ", "last ", "this ", "tomorrow", "today",
+    "jan", "Feb", "sept", "décembre", "monday", "fri", "weekend", "pm", "am", "noon", "midnight", "half an ", "a ", "an ",
+    "hour", "hours", "2h", "30m", "1d", "and ", "3rd", "31", "2026", "/", "-", ".", ",",
+    "https://www.amazon.com/dp/", "https://amazon.co.uk/x/dp/", "https://youtu.be/x?si=", "&utm_source=", "?ref=", "=",
+    "https://www.google.com/search?q=", "https://www.ebay.com/itm/", "123456789",
+    "[00:12.34]", "[99:99.999]", "[-1:00]", "<00:01.00>", "[ar:", "[offset:", "[offset:-99999999]", "TRACK 01 AUDIO\n",
+    "INDEX 01 00:00:00\n", "INDEX 01 99:99:99\n", "TITLE \"", "PERFORMER \"", "FILE \"a.flac\" WAVE\n", "REM ",
 ];
 
 struct Rng(u64);
@@ -149,6 +156,20 @@ fn all(s: &str, r: &mut Rng) {
     let _ = roles::parse_hex(s);
     let _ = settings::host(s);
     let _ = filepreview::file_icon(s);
+    let now = chrono::TimeZone::timestamp_opt(&chrono::Local, 1_700_000_000, 0).single().unwrap();
+    let caret = r.boundary(s);
+    let _ = texttime::duration(s);
+    let _ = texttime::parse_full(s, now);
+    let _ = texttime::suggest(s, now);
+    let _ = texttime::codes(s);
+    let _ = texttime::find(s, caret);
+    let _ = texttime::picker(s, caret, now, None);
+    let _ = texttime::localize(s, &[], 1_700_000_000.);
+    let _ = untrack::clean(s);
+    let _ = untrack::text(s);
+    let _ = vector_media::lyrics::parse_text(s);
+    let _ = vector_media::chapters::parse_cue(s);
+    let _ = vector_media::chapters::parse_chap(s.as_bytes(), r.below(2) == 0);
 }
 
 #[test]
