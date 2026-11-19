@@ -128,10 +128,9 @@ impl From<RawInvite> for Invite {
         let b: Bundle = serde_json::from_str(&r.bundle_json).unwrap_or_default();
         Self {
             community_id: r.community_id,
-            name: if b.name.is_empty() {
-                t::community_unnamed().into()
-            } else {
-                b.name
+            name: match crate::kit::one_line(&b.name) {
+                n if n.is_empty() => t::community_unnamed().into(),
+                n => n.into_owned(),
             },
             inviter: r.inviter_npub,
             owner: b.owner,

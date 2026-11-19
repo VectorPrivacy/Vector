@@ -780,7 +780,7 @@ pub fn view(
                                     .min_w_0()
                                     .map(|d| {
                                         if narrow {
-                                            d.flex_basis(gpui::relative(1.)).mt(px(-1.)).line_height(px(15.)).line_clamp(2)
+                                            d.flex_basis(gpui::relative(1.)).mt(px(-1.)).line_height(px(15.)).line_clamp(2).text_ellipsis()
                                         } else {
                                             d.flex_1().truncate().text_right()
                                         }

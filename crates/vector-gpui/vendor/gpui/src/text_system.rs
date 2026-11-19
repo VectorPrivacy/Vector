@@ -788,7 +788,8 @@ impl WindowTextSystem {
                 wrap_width,
                 max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines)),
             );
-            wrapped_lines += layout.wrap_boundaries.len();
+            // A paragraph takes a line besides its wraps: the clamp counts every line shown.
+            wrapped_lines += layout.wrap_boundaries.len() + 1;
 
             lines.push(WrappedLine {
                 layout,
@@ -803,6 +804,7 @@ impl WindowTextSystem {
                     runs.next();
                 }
             }
+            max_wrap_lines.is_none_or(|max| wrapped_lines < max)
         };
 
         let mut split_lines = text.split('\n');
@@ -812,24 +814,28 @@ impl WindowTextSystem {
             && let Some(second_line) = split_lines.next()
         {
             let mut line_start = 0;
-            process_line(
+            if process_line(
                 SharedString::new(first_line),
                 line_start,
                 line_start + first_line.len(),
-            );
-            line_start += first_line.len() + '\n'.len_utf8();
-            process_line(
-                SharedString::new(second_line),
-                line_start,
-                line_start + second_line.len(),
-            );
-            for line_text in split_lines {
-                line_start += line_text.len() + '\n'.len_utf8();
-                process_line(
-                    SharedString::new(line_text),
+            ) {
+                line_start += first_line.len() + '\n'.len_utf8();
+                if process_line(
+                    SharedString::new(second_line),
                     line_start,
-                    line_start + line_text.len(),
-                );
+                    line_start + second_line.len(),
+                ) {
+                    for line_text in split_lines {
+                        line_start += line_text.len() + '\n'.len_utf8();
+                        if !process_line(
+                            SharedString::new(line_text),
+                            line_start,
+                            line_start + line_text.len(),
+                        ) {
+                            break;
+                        }
+                    }
+                }
             }
         } else {
             let end = text.len();

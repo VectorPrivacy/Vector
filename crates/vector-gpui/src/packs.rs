@@ -250,6 +250,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                     .line_height(px(14.85))
                     .text_color(white_a(0.55))
                     .line_clamp(2)
+                    .text_ellipsis()
                     .child(if err.is_empty() {
                         crate::t::packs_fetch_failed().to_string()
                     } else {
@@ -445,6 +446,7 @@ fn card(ctx: &Ctx, m: &Message, naddr: String) -> AnyElement {
                                 .line_height(px(14.85))
                                 .text_color(white_a(0.55))
                                 .line_clamp(2)
+                                .text_ellipsis()
                                 .child(pack.description.clone())
                                 .into_any_element()
                         })

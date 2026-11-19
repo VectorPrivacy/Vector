@@ -796,6 +796,7 @@ fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {
                         .line_height(px(16.8))
                         .text_color(white_a(0.6))
                         .line_clamp(3)
+                        .text_ellipsis()
                         .child(s)
                 })),
         );

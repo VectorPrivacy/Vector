@@ -1950,8 +1950,8 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
         _ => None,
     };
     let (name, desc) = match (state, joined) {
-        (_, Some(c)) => (Some(c.name.clone()), c.description.clone()),
-        (Some(Preview::Ready(i)), None) => (Some(i.name.clone()), i.description.clone()),
+        (_, Some(c)) => (Some(c.name.clone()), crate::kit::one_line(&c.description).into_owned()),
+        (Some(Preview::Ready(i)), None) => (Some(i.name.clone()), crate::kit::one_line(&i.description).into_owned()),
         (Some(Preview::Failed), _) => (
             Some(crate::t::invite_card_unavailable().into()),
             crate::t::invite_card_unavailable_text().into(),
@@ -2059,6 +2059,7 @@ fn invite_card(ctx: &Ctx, m: &Message, key: String) -> AnyElement {
                                             .line_height(px(14.85))
                                             .text_color(white_a(0.55))
                                             .line_clamp(2)
+                                            .text_ellipsis()
                                             .child(desc),
                                     )
                                 }),

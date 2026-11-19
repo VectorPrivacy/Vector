@@ -1302,6 +1302,7 @@ fn spotlight(n: &Nexus, apps: &[&MarketplaceApp], on: &OnAct) -> Option<AnyEleme
                         .line_height(px(21.))
                         .text_color(white_a(0.74))
                         .line_clamp(2)
+                        .text_ellipsis()
                         .child(shown.description.clone()),
                 )
                 .child(tags)

@@ -868,7 +868,7 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
             };
             return Ok(InvitePreview {
                 community_id,
-                name: local.name.clone(),
+                name: crate::kit::one_line(&local.name).into_owned(),
                 description: local.description.clone().unwrap_or_default(),
                 icon,
             });
@@ -881,7 +881,7 @@ pub async fn preview_invite(url: String) -> Result<InvitePreview, String> {
         };
         Ok(InvitePreview {
             community_id,
-            name: folded.name.clone(),
+            name: crate::kit::one_line(&folded.name).into_owned(),
             description: folded.description.clone().unwrap_or_default(),
             icon,
         })

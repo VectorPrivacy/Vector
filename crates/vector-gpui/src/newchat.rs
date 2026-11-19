@@ -623,6 +623,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
             .line_height(px(21.))
             .text_color(c(0xa8a8a8))
             .line_clamp(4)
+            .text_ellipsis()
             .child(t)
     };
     let card = div()
