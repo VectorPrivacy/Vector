@@ -14,17 +14,35 @@ on:
       - 'crates/vector-i18n/locales/**'
       - 'crates/vector-i18n/src/**'
       - '.github/workflows/languages.yaml'
+  pull_request:
+    paths:
+      - 'crates/vector-i18n/locales/**'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Publishes from either branch write the same release, so they take turns.
 concurrency:
-  group: languages
+  group: languages-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
   cancel-in-progress: false
 
 jobs:
+  # Every language against English, in the job summary: a broken message fails the check.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Coverage
+        working-directory: crates/vector-i18n
+        run: |
+          set -o pipefail
+          { echo '```'; cargo run --quiet --locked --bin vector-i18n -- status; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Not gated on the check: a broken language keeps its last good pack, and the rest still ship.
   publish:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       VECTOR_LANGUAGES_KEY: ${{ secrets.VECTOR_LANGUAGES_KEY }}
