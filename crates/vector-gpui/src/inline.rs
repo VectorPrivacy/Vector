@@ -53,7 +53,7 @@ impl Look {
         Font {
             family: self.family.clone(),
             features: Default::default(),
-            fallbacks: None,
+            fallbacks: crate::lang::fallbacks(),
             weight: self.weight,
             style: if self.italic {
                 FontStyle::Italic

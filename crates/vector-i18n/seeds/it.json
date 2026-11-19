@@ -1,0 +1,14 @@
+{
+  "decimal": ",",
+  "group": ".",
+  "list_last": " e ",
+  "list_pair": " e ",
+  "dates": {
+    "months": ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"],
+    "months_short": ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"],
+    "weekdays": ["domenica", "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato"],
+    "weekdays_short": ["dom", "lun", "mar", "mer", "gio", "ven", "sab"],
+    "am_pm": ["AM", "PM"],
+    "patterns": ["dd/MM/y", "dd/MM/y", "d MMM y", "d MMMM y", "EEEE d MMMM y", "d MMM", "E d MMM", "E d MMM y", "ccc"]
+  }
+}

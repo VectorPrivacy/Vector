@@ -66,8 +66,9 @@ unread-jump = { $count ->
 ## Numbers and dates
 
 Numbers, sizes, lists and dates follow your language through an optional `locale.json` in its
-folder. Leave out any field English already gets right. Take the values from
-[CLDR](https://cldr.unicode.org/) for your language:
+folder. Leave out any field English already gets right. For about forty languages `new` writes
+one from [CLDR](https://cldr.unicode.org/) (`seeds/`, made by `scripts/cldr_seeds.py`); check it
+reads naturally. Otherwise take the values from CLDR for your language:
 
 ```json
 {

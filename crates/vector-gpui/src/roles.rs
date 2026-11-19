@@ -3,6 +3,7 @@
 //! edits are drafts under the save bar; membership and deletion act at once.
 
 use crate::kit::Tipped as _;
+use crate::lang::LangFonts as _;
 use std::collections::HashSet;
 
 use gpui::prelude::*;
@@ -311,6 +312,7 @@ impl Render for Ghost {
                 inset: false,
             }])
             .font_family(RUBIK)
+            .lang_fonts()
             .child(dot(tint(self.1)))
             .child(
                 div()

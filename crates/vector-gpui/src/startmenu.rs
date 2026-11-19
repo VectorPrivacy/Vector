@@ -3,6 +3,7 @@
 //! out of your row in the rail.
 
 use crate::kit::Tipped as _;
+use crate::lang::LangFonts as _;
 use std::rc::Rc;
 
 use gpui::AnimationExt;
@@ -106,6 +107,7 @@ impl Render for Ghost {
             .border_color(c(PRIMARY))
             .bg(c(0x222222))
             .opacity(0.9)
+            .lang_fonts()
             .text_size(px(12.))
             .text_color(c(0xffffff))
             .overflow_hidden()

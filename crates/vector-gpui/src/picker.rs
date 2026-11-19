@@ -4,6 +4,7 @@
 //! `GifGrid.svelte` over `gifs.js`.
 
 use crate::kit::Tipped as _;
+use crate::lang::LangFonts as _;
 use crate::t;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -288,6 +289,7 @@ impl Render for TabGhost {
             None => letter_plate(&self.letter, 28. * 0.85, 13. * 0.85),
         };
         div()
+            .lang_fonts()
             .ml(self.grab.x - px(size / 2.))
             .mt(self.grab.y - px(size / 2.))
             .size(px(size))

@@ -266,3 +266,45 @@ fn an_english_variant_counts_what_it_inherits() {
     let us = OFFERED.iter().find(|o| o.tag == "en-US").expect("the repository's en-US is offered");
     assert_eq!((us.name, us.english_name, us.coverage), ("English (US)", "English (US)", 100));
 }
+
+fn seed(tag: &str) -> LocaleData {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds").join(format!("{tag}.json"));
+    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+#[test]
+fn every_seed_reads_and_uses_only_letters_the_formatter_knows() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds");
+    let mut seen = 0;
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        let tag = e.path().file_stem().unwrap().to_string_lossy().into_owned();
+        let d = seed(&tag);
+        for p in d.dates.patterns.iter().chain(&d.dates.times) {
+            let mut quoted = false;
+            for ch in p.chars() {
+                quoted ^= ch == '\'';
+                assert!(quoted || !ch.is_ascii_alphabetic() || "yMLdEchHKkmsa".contains(ch), "{tag}: {p:?} uses {ch:?}");
+            }
+        }
+        assert_eq!(d.digits.chars().count(), 10, "{tag}");
+        seen += 1;
+    }
+    assert!(seen >= 9, "the launch languages have seeds");
+}
+
+#[test]
+fn japanese_and_chinese_seeds_write_their_own_dates() {
+    use crate::dates::{Civil, Clock, DateStyle};
+    let at = Civil { year: 2026, month: 11, day: 8, weekday: 0, hour: 14, minute: 5, second: 9 };
+    let ja = seed("ja");
+    assert_eq!(ja.date(&at, DateStyle::Full), "2026年11月8日日曜日");
+    assert_eq!(ja.date(&at, DateStyle::WeekdayDayMonth), "11月8日(日)");
+    assert_eq!(ja.time(&at, Clock::SHORT), "14:05");
+    let twelve = crate::dates::Dates { hour12: true, ..ja.dates.clone() };
+    assert_eq!(twelve.time(&at, Clock::SHORT), "午後2:05");
+    assert_eq!(ja.list(&["A", "B", "C"]), "A、B、C");
+    let zh = seed("zh-Hans");
+    assert_eq!(zh.date(&at, DateStyle::Medium), "2026年11月8日");
+    assert_eq!(zh.date_time(&at, DateStyle::Weekday, Clock::SHORT), "周日 14:05");
+    assert_eq!(zh.list(&["A", "B", "C"]), "A、B和C");
+}

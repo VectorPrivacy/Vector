@@ -224,7 +224,9 @@ mod win {
 
     impl Backend for Win {
         fn misspelled(&self, text: &str) -> Vec<Range<usize>> {
-            self.errors(text).into_iter().map(|(r, _)| r).collect()
+            // A Latin-script checker has no say over kanji, kana or Hangul.
+            let foreign = |r: &Range<usize>| text.get(r.clone()).is_some_and(|w| w.chars().any(|c| crate::select::word_class(c) >= 3 || ('\u{ac00}'..='\u{d7af}').contains(&c)));
+            self.errors(text).into_iter().map(|(r, _)| r).filter(|r| !foreign(r)).collect()
         }
 
         fn guesses(&self, text: &str, range: Range<usize>) -> Vec<String> {

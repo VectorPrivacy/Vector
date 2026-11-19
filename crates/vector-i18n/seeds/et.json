@@ -1,0 +1,15 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " ja ",
+  "list_pair": " ja ",
+  "dates": {
+    "months": ["jaanuar", "veebruar", "märts", "aprill", "mai", "juuni", "juuli", "august", "september", "oktoober", "november", "detsember"],
+    "months_short": ["jaan", "veebr", "märts", "apr", "mai", "juuni", "juuli", "aug", "sept", "okt", "nov", "dets"],
+    "weekdays": ["pühapäev", "esmaspäev", "teisipäev", "kolmapäev", "neljapäev", "reede", "laupäev"],
+    "weekdays_short": ["P", "E", "T", "K", "N", "R", "L"],
+    "am_pm": ["AM", "PM"],
+    "patterns": ["d.M.y", "dd.MM.y", "d. MMM y", "d. MMMM y", "EEEE, d. MMMM y", "d. MMM", "E, d. MMM", "E, d. MMMM y", "ccc"],
+    "date_time": "{0} {1}"
+  }
+}

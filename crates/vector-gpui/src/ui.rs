@@ -3,6 +3,7 @@
 //! block names the CSS selector it reproduces.
 
 use crate::kit::Tipped as _;
+use crate::lang::LangFonts as _;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -6691,6 +6692,7 @@ impl VectorApp {
             .flex_col()
             .bg(c(APP_BG))
             .font_family(INTER)
+            .lang_fonts()
             .text_color(c(TEXT))
             .text_size(px(16.))
             .line_height(px(24.));

@@ -4,6 +4,7 @@
 use gpui::{AnimationExt, AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::lang::LangFonts as _;
 use crate::theme::*;
 
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
@@ -1207,6 +1208,7 @@ impl gpui::Render for Tip {
             .border_1()
             .border_color(crate::theme::white_a(0.1))
             .font_family(crate::theme::INTER)
+            .lang_fonts()
             .text_size(gpui::px(12.))
             .text_color(crate::theme::white_a(0.9))
             .child(self.0.clone())

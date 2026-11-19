@@ -1,0 +1,16 @@
+{
+  "list_last": " 및 ",
+  "list_pair": " 및 ",
+  "dates": {
+    "months": ["1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"],
+    "months_short": ["1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"],
+    "weekdays": ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"],
+    "weekdays_short": ["일", "월", "화", "수", "목", "금", "토"],
+    "am_pm": ["AM", "PM"],
+    "patterns": ["y. M. d.", "y. MM. dd.", "y년 MMM d일", "y년 MMMM d일", "y년 MMMM d일 EEEE", "MMM d일", "MMM d일 (E)", "y년 MMM d일 (E)", "ccc"],
+    "times": ["a h:mm", "a h:mm:ss", "HH:mm", "H시 m분 s초"],
+    "date_time": "{0} {1}",
+    "hour12": true,
+    "week_start": 0
+  }
+}

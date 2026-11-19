@@ -900,7 +900,7 @@ impl TextInput {
 
     /// The run under `offset`: word characters, punctuation or spaces, as a double-click picks.
     fn word_around(&self, offset: usize) -> Range<usize> {
-        let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+        let class = crate::select::word_class;
         let here = self.content[offset..]
             .chars()
             .next()
@@ -1275,9 +1275,9 @@ impl TextInput {
         let s = &self.content[..offset];
         let mut it = s.char_indices().rev().skip_while(|(_, c)| c.is_whitespace()).peekable();
         let Some(&(mut at, first)) = it.peek() else { return 0 };
-        let word = first.is_alphanumeric() || first == '_';
+        let word = crate::select::word_class(first);
         for (i, c) in it {
-            if c.is_whitespace() || (c.is_alphanumeric() || c == '_') != word {
+            if c.is_whitespace() || crate::select::word_class(c) != word {
                 break;
             }
             at = i;
@@ -1289,10 +1289,10 @@ impl TextInput {
         let s = &self.content[offset..];
         let mut it = s.char_indices().skip_while(|(_, c)| c.is_whitespace()).peekable();
         let Some(&(_, first)) = it.peek() else { return self.content.len() };
-        let word = first.is_alphanumeric() || first == '_';
+        let word = crate::select::word_class(first);
         let mut end = self.content.len();
         for (i, c) in it {
-            if c.is_whitespace() || (c.is_alphanumeric() || c == '_') != word {
+            if c.is_whitespace() || crate::select::word_class(c) != word {
                 end = offset + i;
                 break;
             }
