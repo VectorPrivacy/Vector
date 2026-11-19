@@ -21,10 +21,17 @@ echo "::group::app log"
 if [ -n "$pid" ]; then adb logcat -d --pid="$pid"; else tail -400 "$out/logcat.txt"; fi
 adb logcat -d -b crash || true
 echo "::endgroup::"
-echo "::group::screen.png"
-echo "SCREEN-BEGIN"
-base64 -w0 "$out/screen.png"
-echo
-echo "SCREEN-END"
-echo "::endgroup::"
+# A tap where the login screen's first button sits, to see touches arrive.
+size=$(adb shell wm size | sed 's/.*: //' | tr -d '\r')
+adb shell input tap $((${size%x*} / 2)) $((${size#*x} * 36 / 100))
+sleep 8
+adb exec-out screencap -p > "$out/after-tap.png"
+for shot in screen after-tap; do
+  echo "::group::$shot.png"
+  echo "SCREEN-BEGIN $shot"
+  base64 -w0 "$out/$shot.png"
+  echo
+  echo "SCREEN-END"
+  echo "::endgroup::"
+done
 [ -n "$pid" ]

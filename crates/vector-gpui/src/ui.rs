@@ -6472,8 +6472,29 @@ impl Render for VectorApp {
         if kit::easing() {
             window.request_animation_frame();
         }
-        el
+        safe_area(el, window)
     }
+}
+
+/// Clear of the status and navigation bars, the cutout and the keyboard, which the phone draws
+/// over the window's edges.
+#[cfg(target_os = "android")]
+fn safe_area(el: impl IntoElement, window: &Window) -> gpui::AnyElement {
+    let safe = window.insets().effective();
+    div()
+        .size_full()
+        .bg(c(APP_BG))
+        .pt(safe.top)
+        .pr(safe.right)
+        .pb(safe.bottom)
+        .pl(safe.left)
+        .child(el)
+        .into_any_element()
+}
+
+#[cfg(not(target_os = "android"))]
+fn safe_area<E: IntoElement>(el: E, _: &Window) -> E {
+    el
 }
 
 impl VectorApp {
@@ -7451,8 +7472,12 @@ fn keyboard_step(back: bool, window: &mut Window, cx: &mut gpui::App) {
 
 // ── #window-chrome ──────────────────────────────────────────────────────────────────────
 
-/// The title strip; over the login screens it is only its controls, on the same art.
+/// The title strip; over the login screens it is only its controls, on the same art. A phone's
+/// window has no strip.
 fn chrome(window: &Window, login: bool, mark_only: bool) -> gpui::Div {
+    if cfg!(target_os = "android") {
+        return div();
+    }
     let maximized = window.is_maximized();
     let ctl = |id: &'static str, icon: &'static str, area: WindowControlArea, hover: u32| {
         let tip = match area {
