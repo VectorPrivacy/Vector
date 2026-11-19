@@ -13,6 +13,7 @@ search-results = { $count ->
 }
 # $shown of $count matches are listed.
 search-results-capped = Showing the newest { $shown } of { $count } results
+# $shown of $count matches are listed, the oldest first.
 search-results-capped-oldest = Showing the oldest { $shown } of { $count } results
 search-newest = Newest
 search-oldest = Oldest
