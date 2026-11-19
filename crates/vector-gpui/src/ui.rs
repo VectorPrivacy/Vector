@@ -11275,12 +11275,12 @@ impl VectorApp {
         let cached = self.store.borrow().rosters.get(&id).cloned();
         if self.community.as_ref().is_none_or(|v| v.id != id) {
             let search = cx.new(|cx| {
-                TextInput::new(t::member_search(), cx).with_look(crate::community::member_search_look(self.is_slim))
+                let mut i = TextInput::new(t::search_mini(), cx).with_look(crate::community::member_search_look(self.is_slim));
+                i.set_nav(true);
+                i
             });
-            cx.subscribe(&search, |_, _, _: &crate::composer::InputChanged, cx| {
-                cx.notify()
-            })
-            .detach();
+            cx.subscribe(&search, |app, _, _: &crate::composer::InputChanged, cx| app.pane_find_changed(cx)).detach();
+            cx.subscribe_in(&search, window, |app, _, nav: &crate::composer::Nav, window, cx| app.pane_find_nav(nav, window, cx)).detach();
             let (members, admins, unlisted) = match cached {
                 Some(r) => r,
                 None => (members, Vec::new(), self.store.borrow().fixture_unlisted.get(&id).cloned().unwrap_or_default()),
@@ -11292,6 +11292,7 @@ impl VectorApp {
                 members,
                 admins,
                 panel: !self.live || backend::prefs::sql("ws_members_open").as_deref() != Some("false"),
+                find: crate::search::Search::new(search.clone(), Default::default()),
                 search,
                 folded: folded_sections(&id),
                 scroll: gpui::ScrollHandle::new(),
@@ -11570,6 +11571,7 @@ impl VectorApp {
             Act::DropChannel(moved, at) => self.drop_channel(moved, at, cx),
             Act::DropCategory(moved, target, before) => self.drop_category(moved, target, before, cx),
             Act::Search => self.open_search(true, window, cx),
+            Act::Find(act) => self.on_pane_find(act, window, cx),
             Act::ChatMenu => {
                 if let Some(chat) = self.open.clone() {
                     self.open_chat_menu(chat.to_string(), cx);

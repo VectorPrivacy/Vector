@@ -207,6 +207,28 @@ impl Directory {
         Self { me: store.my_npub.clone(), people, chats }
     }
 
+    /// A Community's members and channels, named as the Community names them.
+    pub fn community(store: &Store, com: &crate::data::Community, members: impl Iterator<Item = String>) -> Self {
+        let named = |id: String, name: String| Named { folded: vector_core::search::fold(&name), id, name };
+        let mut people: Vec<Named> = members
+            .filter(|n| *n != store.my_npub)
+            .map(|n| {
+                let name = store.name_in(&n, Some(&com.community_id));
+                named(n, name)
+            })
+            .collect();
+        people.sort_by(|a, b| a.folded.cmp(&b.folded));
+        people.dedup_by(|a, b| a.id == b.id);
+        let chats = com
+            .channels
+            .iter()
+            .filter(|c| c.view != "voice")
+            // i18n-exempt: channel sigil
+            .map(|ch| named(ch.channel_id.clone(), format!("#{}", ch.name)))
+            .collect();
+        Self { me: store.my_npub.clone(), people, chats }
+    }
+
     /// The best matches for `value`: exact names first, else names starting with it, else
     /// names holding it.
     fn matches<'a>(list: &'a [Named], value: &str) -> Vec<&'a Named> {
@@ -486,6 +508,9 @@ pub struct Search {
     pub scroll: gpui::ScrollHandle,
     /// How long the last scan took, in µs.
     pub took: u128,
+    /// The chats searched when no `in:` names one; empty is every chat.
+    pub scope: Vec<String>,
+    pub loading: bool,
 }
 
 impl Search {
@@ -502,6 +527,8 @@ impl Search {
             oldest: false,
             scroll: gpui::ScrollHandle::new(),
             took: 0,
+            scope: Vec::new(),
+            loading: false,
         }
     }
 
@@ -511,7 +538,10 @@ impl Search {
         let (at, list) = suggestions(text, caret, &self.dir, now_ms);
         self.suggest_at = at;
         self.suggest = list;
-        let filter = filter_of(&self.parsed.tokens, &self.dir, now_ms, self.oldest);
+        let mut filter = filter_of(&self.parsed.tokens, &self.dir, now_ms, self.oldest);
+        if filter.chats.is_empty() {
+            filter.chats = self.scope.clone();
+        }
         let query = Query::parse(&self.parsed.words);
         let t0 = std::time::Instant::now();
         self.found = match &self.corpus {
@@ -660,37 +690,38 @@ fn chip(tok: &Token, store: &Store, dir: &Directory, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
-fn suggestion_row(i: usize, s: &Suggest, sel: bool, store: &Store, on: &OnAct) -> AnyElement {
+fn suggestion_row(i: usize, s: &Suggest, sel: bool, store: &Store, compact: bool, on: &OnAct) -> AnyElement {
+    let (lead_px, glyph) = if compact { (22., 12.) } else { (28., 15.) };
     let (lead, title, hint): (AnyElement, SharedString, Option<SharedString>) = match s {
         Suggest::Key(k) => (
             div()
-                .size(px(28.))
-                .rounded(px(7.))
+                .size(px(lead_px))
+                .rounded(px(lead_px / 4.))
                 .bg(white_a(0.06))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(svg().path(k.icon()).size(px(15.)).text_color(c(ICON_MUTED)))
+                .child(svg().path(k.icon()).size(px(glyph)).text_color(c(ICON_MUTED)))
                 .into_any_element(),
             format!("{}:", k.word()).into(),
             Some(k.label()),
         ),
         Suggest::Value { key, label, npub, .. } => {
             let lead = match (npub, key) {
-                (Some(n), _) => crate::ui::avatar(store, n, 28.),
+                (Some(n), _) => crate::ui::avatar(store, n, lead_px),
                 (None, k) => {
                     let path = match (k, s) {
                         (Key::Has, Suggest::Value { value, .. }) => HAS.iter().find(|(w, _)| w == value).map_or(k.icon(), |(_, h)| has_icon(*h)),
                         _ => k.icon(),
                     };
                     div()
-                        .size(px(28.))
-                        .rounded(px(7.))
+                        .size(px(lead_px))
+                        .rounded(px(lead_px / 4.))
                         .bg(white_a(0.06))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(svg().path(path).size(px(15.)).text_color(c(ICON_MUTED)))
+                        .child(svg().path(path).size(px(glyph)).text_color(c(ICON_MUTED)))
                         .into_any_element()
                 }
             };
@@ -701,11 +732,11 @@ fn suggestion_row(i: usize, s: &Suggest, sel: bool, store: &Store, on: &OnAct) -
         .id(SharedString::from(format!("search-suggest-{i}")))
         .flex()
         .items_center()
-        .gap(px(12.))
-        .h(px(44.))
-        .px(px(12.))
-        .mx(px(8.))
-        .rounded(px(8.))
+        .gap(px(if compact { 8. } else { 12. }))
+        .h(px(if compact { 34. } else { 44. }))
+        .px(px(if compact { 8. } else { 12. }))
+        .when(!compact, |d| d.mx(px(8.)))
+        .rounded(px(if compact { 6. } else { 8. }))
         .cursor_pointer()
         .when(sel, |d| d.bg(white_a(0.07)))
         .hover(|d| d.bg(white_a(0.05)))
@@ -722,8 +753,8 @@ fn suggestion_row(i: usize, s: &Suggest, sel: bool, store: &Store, on: &OnAct) -
                 .flex()
                 .items_baseline()
                 .gap(px(10.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).whitespace_nowrap().child(title))
-                .children(hint.map(|h| div().text_size(px(13.)).text_color(c(LIST_TIME)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(h))),
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(if compact { 13. } else { 15. })).whitespace_nowrap().child(title))
+                .children(hint.filter(|_| !compact).map(|h| div().text_size(px(13.)).text_color(c(LIST_TIME)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(h))),
         )
         .into_any_element()
 }
@@ -811,6 +842,89 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, sel: bool, store: &Store
         .into_any_element()
 }
 
+fn mini_label(text: SharedString, count: Option<usize>) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .h(px(28.))
+        .px(px(8.))
+        .text_size(px(11.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(c(0x8a8a8a))
+        .child(text.to_uppercase())
+        .children(count.map(|n| div().text_color(white_a(0.32)).child(crate::lang::num(n))))
+        .into_any_element()
+}
+
+fn mini_row(i: usize, hit: &vector_core::search::Hit, sel: bool, open: &str, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
+    let who = if hit.mine { store.my_npub.clone() } else { hit.author.clone().unwrap_or_else(|| hit.chat.clone()) };
+    let name = if hit.mine { t::search_you().to_string() } else { store.chat_name(&who, &hit.chat) };
+    let channel = (hit.chat != open)
+        .then(|| store.community_of(&hit.chat).and_then(|com| com.channel(&hit.chat)).map(|ch| format!("#{}", ch.name))) // i18n-exempt: channel sigil
+        .flatten();
+    div()
+        .id(SharedString::from(format!("mini-hit-{i}")))
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .px(px(8.))
+        .py(px(6.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(sel, |d| d.bg(white_a(0.06)))
+        .hover(|d| d.bg(white_a(0.04)))
+        .on_mouse_move({
+            let on = on.clone();
+            move |_, w, cx| on(Act::Hover(i), w, cx)
+        })
+        .on_click(click(on, move || Act::Pick(i)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(crate::ui::avatar(store, &who, 18.))
+                .child(div().flex_shrink(1.).min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
+                .children(channel.map(|ch| div().flex_shrink(1.).min_w_0().text_size(px(11.)).text_color(c(LIST_TIME)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(ch)))
+                .child(div().flex_1())
+                .child(div().flex_shrink_0().text_size(px(11.)).text_color(c(LIST_TIME)).whitespace_nowrap().child(when(hit.at, now_ms))),
+        )
+        .map(|d| {
+            if hit.snippet.is_empty() {
+                let kind = [Has::IMAGE, Has::VIDEO, Has::AUDIO, Has::FILE].into_iter().find(|h| hit.has.contains(*h)).unwrap_or(Has::FILE);
+                d.child(div().pl(px(24.)).text_size(px(12.5)).line_height(px(17.)).italic().text_color(c(LIST_TIME)).child(has_label(kind)))
+            } else {
+                d.child(div().pl(px(24.)).text_size(px(12.5)).line_height(px(17.)).line_clamp(3).text_color(white_a(0.82)).child(snippet(&hit.snippet, &hit.marks)))
+            }
+        })
+        .into_any_element()
+}
+
+/// The compact search in a Community's member pane: suggestions for the filter being typed,
+/// else the members whose names match and the messages that do.
+pub fn mini(s: &Search, store: &Store, open: &str, members: Vec<AnyElement>, matched: usize, on: &OnAct) -> Vec<AnyElement> {
+    if s.showing_suggestions() {
+        return s.suggest.iter().enumerate().map(|(i, sg)| suggestion_row(i, sg, i == s.sel, store, true, on)).collect();
+    }
+    let now = store.now_ms();
+    let mut out = Vec::new();
+    if !members.is_empty() {
+        out.push(mini_label(t::community_section_members(), Some(matched)));
+        out.extend(members);
+    }
+    let messages = (s.corpus.is_some() && !s.loading).then_some(s.found.total);
+    out.push(div().when(!out.is_empty(), |d| d.mt(px(10.))).child(mini_label(t::search_mini_messages(), messages)).into_any_element());
+    if s.corpus.is_none() || s.loading {
+        out.push(div().px(px(8.)).py(px(6.)).child(crate::kit::processing(t::search_indexing())).into_any_element());
+    } else if s.found.hits.is_empty() {
+        out.push(div().px(px(8.)).py(px(6.)).text_size(px(12.5)).italic().text_color(c(LIST_TIME)).child(t::search_none()).into_any_element());
+    } else {
+        out.extend(s.found.hits.iter().enumerate().map(|(i, hit)| mini_row(i, hit, i == s.sel, open, store, now, on)));
+    }
+    out
+}
+
 /// The panel: a centred card on a wide window, the whole window on a slim one.
 pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on: &OnAct) -> AnyElement {
     let now = store.now_ms();
@@ -883,7 +997,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
             .children(title.map(|t| {
                 div().px(px(20.)).pt(px(12.)).pb(px(6.)).text_size(px(12.)).font_weight(FontWeight::BOLD).text_color(c(LIST_TIME)).child(if text_empty { t.to_uppercase() } else { t.to_string() })
             }))
-            .children(s.suggest.iter().enumerate().map(|(i, sg)| suggestion_row(i, sg, i == s.sel, store, on)));
+            .children(s.suggest.iter().enumerate().map(|(i, sg)| suggestion_row(i, sg, i == s.sel, store, false, on)));
     } else if s.corpus.is_none() {
         status = Some(crate::kit::processing(t::search_indexing()).into_any_element());
     } else if s.found.hits.is_empty() {

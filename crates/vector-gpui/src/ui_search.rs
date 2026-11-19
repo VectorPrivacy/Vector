@@ -184,4 +184,122 @@ impl VectorApp {
         let store = self.store.borrow();
         Some(crate::search::view(s, &store, (f32::from(vp.width), f32::from(vp.height)), self.is_slim, cx, &on))
     }
+
+    /// The member pane's field changed: members filter as before, messages scan the Community.
+    pub(super) fn pane_find_changed(&mut self, cx: &mut Context<Self>) {
+        let now = self.store.borrow().now_ms();
+        let Some(v) = self.community.as_mut() else { return };
+        let (text, caret) = {
+            let i = v.search.read(cx);
+            (i.text().to_string(), i.caret())
+        };
+        if text.trim().is_empty() {
+            // Read afresh on the next search, so it sees what arrived meanwhile.
+            v.find.corpus = None;
+            v.find.loading = false;
+            v.find.refresh(&text, caret, now);
+            return cx.notify();
+        }
+        if v.find.corpus.is_none() && !v.find.loading {
+            let store = self.store.borrow();
+            if let Some(com) = store.community(&v.id) {
+                let people = v.members.iter().chain(v.unlisted.keys()).cloned();
+                v.find.dir = Directory::community(&store, com, people);
+                v.find.scope = com.channels.iter().filter(|c| c.view != "voice").map(|c| c.channel_id.clone()).collect();
+            }
+            drop(store);
+            v.find.loading = true;
+            let id = v.id.clone();
+            self.pane_find_load(id, cx);
+        }
+        let Some(v) = self.community.as_mut() else { return };
+        v.find.refresh(&text, caret, now);
+        cx.notify();
+    }
+
+    fn pane_find_load(&mut self, id: String, cx: &mut Context<Self>) {
+        let done = move |this: &mut Self, corpus: Arc<vector_core::search::Corpus>, cx: &mut Context<Self>| {
+            if let Some(v) = this.community.as_mut().filter(|v| v.id == id && v.find.loading) {
+                v.find.corpus = Some(corpus);
+                v.find.loading = false;
+                this.pane_find_changed(cx);
+            }
+        };
+        if !self.live {
+            let corpus = Arc::new(crate::search::fixture_corpus(&self.store.borrow()));
+            return done(self, corpus, cx);
+        }
+        let (names, blocked) = {
+            let store = self.store.borrow();
+            (crate::search::names(&store), crate::search::blocked(&store))
+        };
+        let rx = backend::run(async move {
+            let records = vector_core::search::load()?;
+            Ok::<_, String>(Arc::new(crate::search::build(&records, &names, &blocked)))
+        });
+        cx.spawn(async move |this, cx| {
+            let res = rx.await;
+            this.update(cx, |this, cx| match res {
+                Ok(Ok(corpus)) => done(this, corpus, cx),
+                Ok(Err(e)) => {
+                    if let Some(v) = this.community.as_mut() {
+                        v.find.loading = false;
+                    }
+                    this.show_toast(&e, cx)
+                }
+                Err(_) => {}
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn pane_find_nav(&mut self, nav: &Nav, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(v) = self.community.as_mut() else { return };
+        if v.search.read(cx).text().trim().is_empty() {
+            return;
+        }
+        match nav {
+            Nav::Up => v.find.step(false),
+            Nav::Down => v.find.step(true),
+            Nav::Pick => {
+                let act = if v.find.showing_suggestions() { Act::Suggest(v.find.sel) } else { Act::Pick(v.find.sel) };
+                return self.on_pane_find(act, window, cx);
+            }
+            Nav::Close => return self.on_pane_find(Act::Close, window, cx),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_pane_find(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(v) = self.community.as_mut() else { return };
+        let input = v.search.clone();
+        match act {
+            Act::Close => input.update(cx, |i, cx| i.set_text("", cx)),
+            Act::Hover(i) => {
+                if v.find.sel == i {
+                    return;
+                }
+                v.find.sel = i;
+                return cx.notify();
+            }
+            Act::Suggest(i) => {
+                let Some(sg) = v.find.suggest.get(i).cloned() else { return };
+                let range = v.find.suggest_at.clone();
+                input.update(cx, |inp, cx| inp.replace(range, &crate::search::completion(&sg), window, cx));
+                window.focus(&input.focus_handle(cx), cx);
+            }
+            Act::Pick(i) => {
+                let Some(hit) = v.find.found.hits.get(i).cloned() else { return };
+                if self.is_slim {
+                    self.slim.details = None;
+                }
+                self.open_channel(hit.chat, window, cx);
+                self.jump_or_say(hit.id, t::msg_jump_not_local(), cx);
+                return cx.notify();
+            }
+            Act::Sort | Act::Unfilter(_) => {}
+        }
+        self.pane_find_changed(cx);
+    }
 }

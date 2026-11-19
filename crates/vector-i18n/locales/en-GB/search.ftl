@@ -44,5 +44,9 @@ search-date-hint = A date, like 2026-11-18, 2026-11 or 2026
 search-remove-filter = Remove filter
 search-you = You
 search-in-chat = Search in Chat
+# The heading over message results in a Community's member pane.
+search-mini-messages = Messages
+# The member pane's field, which searches members and messages.
+search-mini = Search
 # The header's search button. $keys is its shortcut, such as Ctrl+F.
 search-button-tip = Search ({ $keys })

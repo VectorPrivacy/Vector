@@ -31,7 +31,6 @@ member-ban-failed = Couldn't ban
 # Hovering the clock by a timed-out member's name. $left is a countdown, like "2h 5m".
 member-timeout-ends = Timeout ends in { $left }
 member-timeout-ending = Timeout ending
-member-search = Search Members...
 
 ## A member's small profile card
 
