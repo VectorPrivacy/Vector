@@ -1153,6 +1153,11 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
             return Some((RenderImage::new(vec![Frame::new(img)]), w, h));
         }
     }
+    if bytes.starts_with(b"\x89PNG")
+        && let Some((img, w, h)) = png_into(bytes, max)
+    {
+        return Some((RenderImage::new(vec![Frame::new(img)]), w, h));
+    }
     let img = if ext == "svg" {
         let png = vector_core::svg::rasterize_png(bytes, 1024).ok()?;
         image::load_from_memory(&png).ok()?
@@ -1182,6 +1187,82 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
         w,
         h,
     ))
+}
+
+/// A still PNG decoded a row at a time into BGRA, resized as the general decode resizes it where
+/// it passes `max`: no full-size copy is made. None for what the image crate decodes instead:
+/// an interlaced, 16-bit or turned file, or one past its allocation limit.
+fn png_into(bytes: &[u8], max: (u32, u32)) -> Option<(image::RgbaImage, u32, u32)> {
+    let mut dec = png::Decoder::new(Cursor::new(bytes));
+    dec.set_transformations(png::Transformations::EXPAND);
+    let mut reader = dec.read_info().ok()?;
+    let info = reader.info();
+    let (w, h) = (info.width, info.height);
+    if info.interlaced || info.bit_depth == png::BitDepth::Sixteen || u64::from(w) * u64::from(h) * 4 > 512 << 20 {
+        return None;
+    }
+    let turned = info.exif_metadata.as_deref().and_then(image::metadata::Orientation::from_exif_chunk);
+    if turned.is_some_and(|o| o != image::metadata::Orientation::NoTransforms) {
+        return None;
+    }
+    let (tw, th) = if w > max.0 || h > max.1 {
+        let (mw, mh) = (max.0.max(1), max.1.max(1));
+        let r = (mw as f64 / w as f64).min(mh as f64 / h as f64);
+        let fit = |len: u32| ((len as f64 * r).round() as u64).clamp(1, u32::MAX as u64) as u32;
+        (fit(w), fit(h))
+    } else {
+        (w, h)
+    };
+    let mut out = vec![0u8; tw as usize * th as usize * 4];
+    let line = tw as usize * 4;
+    let c = match reader.output_color_type().0 {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Indexed => return None,
+    };
+    let put = |src: &[u8], out: &mut [u8]| {
+        for (p, o) in src.chunks_exact(c).zip(out.chunks_exact_mut(4)) {
+            match c {
+                1 => o.copy_from_slice(&[p[0], p[0], p[0], 255]),
+                2 => o.copy_from_slice(&[p[0], p[0], p[0], p[1]]),
+                3 => o.copy_from_slice(&[p[2], p[1], p[0], 255]),
+                _ => o.copy_from_slice(&[p[2], p[1], p[0], p[3]]),
+            }
+        }
+    };
+    if (tw, th) == (w, h) {
+        let mut y = 0;
+        while let Some(row) = reader.next_row().ok()? {
+            put(&row.data()[..w as usize * c], &mut out[y * line..][..line]);
+            y += 1;
+        }
+        (y == h as usize).then_some(())?;
+    } else {
+        fn feed<const C: usize>(
+            reader: &mut png::Reader<Cursor<&[u8]>>,
+            (w, h, tw, th): (u32, u32, u32, u32),
+            mut emit: impl FnMut(usize, &[u8]),
+        ) -> Option<()> {
+            let mut rows = gpui::Rows::<C>::new(w, h, tw, th, FilterType::CatmullRom)?;
+            let mut y = 0;
+            while let Some(row) = reader.next_row().ok()? {
+                rows.push(y, row.data(), &mut emit);
+                y += 1;
+            }
+            (y == h as usize).then_some(())
+        }
+        let sizes = (w, h, tw, th);
+        let mut emit = |r: usize, o: &[u8]| put(o, &mut out[r * line..][..line]);
+        match c {
+            1 => feed::<1>(&mut reader, sizes, &mut emit),
+            2 => feed::<2>(&mut reader, sizes, &mut emit),
+            3 => feed::<3>(&mut reader, sizes, &mut emit),
+            _ => feed::<4>(&mut reader, sizes, &mut emit),
+        }?;
+    }
+    Some((image::RgbaImage::from_raw(tw, th, out)?, w, h))
 }
 
 /// A HEIF file: a sequence or burst plays as an animation, else its primary picture shows.
@@ -1857,6 +1938,90 @@ mod jpeg_tests {
                 }
             }
         }
+    }
+
+    fn png_of(w: u32, h: u32, colour: png::ColorType, depth: png::BitDepth, trns: bool) -> Vec<u8> {
+        let mut seed = w * 31 + h;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let channels = match colour {
+            png::ColorType::Grayscale | png::ColorType::Indexed => 1,
+            png::ColorType::GrayscaleAlpha => 2,
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+        };
+        let bits = depth as usize;
+        let row = (w as usize * channels * bits).div_ceil(8);
+        // Smooth enough to read as a picture, with noise in the low bits.
+        let data: Vec<u8> = (0..h as usize)
+            .flat_map(|y| (0..row).map(move |x| (x * 3 + y * 5) as u8))
+            .map(|v| v ^ (next() as u8 & 7))
+            .collect();
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(colour);
+        enc.set_depth(depth);
+        if colour == png::ColorType::Indexed {
+            let n = 1usize << bits;
+            enc.set_palette((0..n * 3).map(|i| (i * 37) as u8).collect::<Vec<_>>());
+            if trns {
+                enc.set_trns((0..n).map(|i| (i * 91) as u8).collect::<Vec<_>>());
+            }
+        } else if trns && colour == png::ColorType::Rgb {
+            enc.set_trns(vec![0, 3, 0, 6, 0, 9]);
+        }
+        let mut wr = enc.write_header().unwrap();
+        wr.write_image_data(&data).unwrap();
+        drop(wr);
+        out
+    }
+
+    #[test]
+    fn pngs_decoded_a_row_at_a_time_match_the_whole_decode() {
+        use png::{BitDepth as B, ColorType as T};
+        let kinds = [
+            (T::Rgba, B::Eight, false),
+            (T::Rgb, B::Eight, false),
+            (T::Rgb, B::Eight, true),
+            (T::Grayscale, B::Eight, false),
+            (T::Grayscale, B::Two, false),
+            (T::GrayscaleAlpha, B::Eight, false),
+            (T::Indexed, B::Eight, false),
+            (T::Indexed, B::Four, true),
+        ];
+        for (colour, depth, trns) in kinds {
+            for (w, h) in [(333, 199), (97, 65), (1, 40)] {
+                let bytes = png_of(w, h, colour, depth, trns);
+                for max in [(w, h), (w / 3 + 1, h), (w * 2, h / 4 + 1), (5000, 5000)] {
+                    let got = png_into(&bytes, max).map(|(img, ..)| img.into_raw());
+                    let img = image::load_from_memory(&bytes).unwrap();
+                    let img = if w > max.0 || h > max.1 {
+                        gpui::resample_within(&img, max.0, max.1, FilterType::CatmullRom)
+                    } else {
+                        img
+                    };
+                    let want = to_bgra(img.into_rgba8()).into_raw();
+                    assert!(got.as_ref() == Some(&want), "{colour:?} {depth:?} trns {trns} {w}x{h} into {max:?}");
+                }
+            }
+        }
+        // The header's interlace byte set, its CRC redone: refused before any data is read.
+        let mut interlaced = png_of(8, 8, T::Grayscale, B::Eight, false);
+        interlaced[28] = 1;
+        let crc = interlaced[12..29].iter().fold(!0u32, |c, &b| {
+            (0..8).fold(c ^ u32::from(b), |c, _| if c & 1 == 1 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 })
+        });
+        interlaced[29..33].copy_from_slice(&(!crc).to_be_bytes());
+        assert!(png::Decoder::new(Cursor::new(&interlaced[..])).read_info().unwrap().info().interlaced);
+        assert!(png_into(&interlaced, (4, 4)).is_none());
+        assert!(png_into(&png_of(9, 9, T::Rgb, B::Sixteen, false), (4, 4)).is_none());
+        let mut cut = png_of(97, 65, T::Rgb, B::Eight, false);
+        cut.truncate(cut.len() / 2);
+        assert!(png_into(&cut, (40, 40)).is_none());
     }
 
     #[test]
