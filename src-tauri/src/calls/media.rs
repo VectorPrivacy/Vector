@@ -1,11 +1,11 @@
 //! The media engine: microphone to Opus datagrams, datagrams to the speaker.
 //!
-//! Everything runs at `ENGINE_RATE` mono in 20 ms frames. Two rings cross the
-//! audio callbacks: the microphone's samples come in on one, and what the mixer
-//! is about to play goes out on another so the echo canceller has its reference.
+//! Everything runs at `ENGINE_RATE` in 20 ms frames, captured mono and played stereo. Two
+//! rings cross the audio callbacks: the microphone's samples come in on one, and what the
+//! mixer is about to play goes out on another so the echo canceller has its reference.
 
 use super::aec::{EchoCanceller, SpeexAec};
-use super::codec::{Decoder, Encoder, ShareDecoder, ShareEncoder};
+use super::codec::{Decoder, Encoder, ShareEncoder};
 use super::settings::AudioSettings;
 use super::declick::Declicker;
 use super::gate::SpeechGate;
@@ -52,6 +52,46 @@ pub(crate) fn play_ahead(out_rate: u32) -> usize {
     let frame = out_rate * FRAME_MS / 1000;
     let most = out_rate / 2;
     (out_rate * PLAY_AHEAD_MS / 1000).max(crate::audio_engine::output_stride() + frame).min(most) as usize
+}
+
+/// Interleaved stereo frames at the engine rate onto a stereo ring at the device rate.
+pub(crate) struct StereoOut {
+    l: Resampler,
+    r: Resampler,
+    split: ([f32; FRAME], [f32; FRAME]),
+    out: (Vec<f32>, Vec<f32>),
+    interleaved: Vec<f32>,
+}
+
+impl StereoOut {
+    pub(crate) fn new(out_rate: u32) -> Self {
+        Self {
+            l: Resampler::new(ENGINE_RATE, out_rate),
+            r: Resampler::new(ENGINE_RATE, out_rate),
+            split: ([0.0; FRAME], [0.0; FRAME]),
+            out: (Vec::with_capacity(4096), Vec::with_capacity(4096)),
+            interleaved: Vec::with_capacity(8192),
+        }
+    }
+
+    /// One frame of FRAME * 2 interleaved samples in [-1, 1], resampled and pushed to `ring`.
+    pub(crate) fn push(&mut self, frame: &[f32], ring: &SpscRing) {
+        debug_assert_eq!(frame.len(), FRAME * 2);
+        for (i, lr) in frame.chunks_exact(2).enumerate() {
+            self.split.0[i] = lr[0];
+            self.split.1[i] = lr[1];
+        }
+        self.l.process(&self.split.0, &mut self.out.0);
+        self.r.process(&self.split.1, &mut self.out.1);
+        self.interleaved.clear();
+        for (l, r) in self.out.0.iter().zip(self.out.1.iter()) {
+            self.interleaved.push(*l);
+            self.interleaved.push(*r);
+        }
+        ring.push(&self.interleaved);
+        self.out.0.clear();
+        self.out.1.clear();
+    }
 }
 
 /// Where captured frames go: one call's peer, or everyone in a voice Channel's call.
@@ -127,7 +167,7 @@ impl MediaEngine {
         let mixer = AudioEngine::get()?;
         let out_rate = mixer.device_sample_rate()?;
         let link = Arc::new(LiveLink {
-            play: SpscRing::new(out_rate as usize),
+            play: SpscRing::new(out_rate as usize * 2),
             tap: SpscRing::new(out_rate as usize),
             gain: std::sync::atomic::AtomicU32::new(volume.to_bits()),
             share_play: SpscRing::new(out_rate as usize * 2),
@@ -854,19 +894,16 @@ fn share_playout_thread(
     stop: Arc<AtomicBool>,
     stats: Arc<MediaStats>,
 ) {
-    let mut dec = match ShareDecoder::new() {
+    let mut dec = match Decoder::new() {
         Ok(d) => d,
         Err(e) => {
             eprintln!("[Calls] {e}");
             return;
         }
     };
-    let mut rs_l = Resampler::new(ENGINE_RATE, out_rate);
-    let mut rs_r = Resampler::new(ENGINE_RATE, out_rate);
+    let mut out = StereoOut::new(out_rate);
     let mut pcm = [0i16; FRAME * 2];
-    let (mut l, mut r) = ([0f32; FRAME], [0f32; FRAME]);
-    let (mut out_l, mut out_r) = (Vec::with_capacity(4096), Vec::with_capacity(4096));
-    let mut interleaved = Vec::with_capacity(8192);
+    let mut pcm_f32 = [0f32; FRAME * 2];
     let mut plc_run = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
@@ -908,20 +945,10 @@ fn share_playout_thread(
         if !decoded {
             pcm.fill(0);
         }
-        for i in 0..FRAME {
-            l[i] = pcm[i * 2] as f32 / 32768.0;
-            r[i] = pcm[i * 2 + 1] as f32 / 32768.0;
+        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter()) {
+            *dst = *src as f32 / 32768.0;
         }
-        rs_l.process(&l, &mut out_l);
-        rs_r.process(&r, &mut out_r);
-        interleaved.clear();
-        for i in 0..out_l.len().min(out_r.len()) {
-            interleaved.push(out_l[i]);
-            interleaved.push(out_r[i]);
-        }
-        link.share_play.push(&interleaved);
-        out_l.clear();
-        out_r.clear();
+        out.push(&pcm_f32, &link.share_play);
     }
 }
 
@@ -939,21 +966,20 @@ fn playout_thread(
             return;
         }
     };
-    let mut rs = Resampler::new(ENGINE_RATE, out_rate);
-    let mut pcm = [0i16; FRAME];
-    let mut pcm_f32 = [0f32; FRAME];
-    let mut resampled = Vec::with_capacity(4096);
+    let mut out = StereoOut::new(out_rate);
+    let mut pcm = [0i16; FRAME * 2];
+    let mut pcm_f32 = [0f32; FRAME * 2];
     let mut plc_run = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
-        if link.play.len() >= play_ahead(out_rate) {
+        if link.play.len() >= play_ahead(out_rate) * 2 {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
         let next = {
             let mut j = jitter.lock().unwrap_or_else(|e| e.into_inner());
             let next = j.pop(plc_run, now_ms(), &stats);
-            let depth = j.buffered() as u32 * FRAME_MS + (link.play.len() as u32 * 1000 / out_rate);
+            let depth = j.buffered() as u32 * FRAME_MS + (link.play.len() as u32 / 2 * 1000 / out_rate);
             stats.depth_ms.store(depth, Ordering::Relaxed);
             next
         };
@@ -995,9 +1021,28 @@ fn playout_thread(
         for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter()) {
             *dst = *src as f32 / 32768.0;
         }
-        rs.process(&pcm_f32, &mut resampled);
-        link.play.push(&resampled);
-        resampled.clear();
+        out.push(&pcm_f32, &link.play);
+    }
+}
+
+#[cfg(test)]
+mod stereo_out_tests {
+    use super::*;
+
+    #[test]
+    fn each_side_keeps_its_own_sound_through_a_device_rate() {
+        let ring = SpscRing::new(44_100 * 2);
+        let mut out = StereoOut::new(44_100);
+        let frame: Vec<f32> = (0..FRAME).flat_map(|_| [0.5f32, -0.25]).collect();
+        for _ in 0..5 {
+            out.push(&frame, &ring);
+        }
+        let mut got = vec![0f32; ring.len()];
+        let n = ring.pop(&mut got);
+        assert_eq!(n % 2, 0, "whole stereo frames");
+        assert!(((n / 2) as i64 - (5 * 882) as i64).abs() <= 32, "{} frames at 44.1 kHz", n / 2);
+        let tail = &got[n / 4 * 2..n];
+        assert!(tail.chunks_exact(2).all(|lr| (lr[0] - 0.5).abs() < 0.01 && (lr[1] + 0.25).abs() < 0.01));
     }
 }
 

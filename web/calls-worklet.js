@@ -5,7 +5,8 @@
 const RATE = 48000;
 const FRAME = 960;
 
-/** Linear, streaming: enough for a voice. */
+/** Linear, streaming: enough for a voice. Reads every `stride`th sample from `offset`, so one
+ *  side of interleaved stereo resamples in place. */
 class Resampler {
     constructor(from, to) {
         this.step = from / to;
@@ -13,9 +14,9 @@ class Resampler {
         this.last = 0;
     }
 
-    process(input, emit) {
-        const n = input.length;
-        const at = (i) => (i < 0 ? this.last : input[i]);
+    process(input, emit, stride = 1, offset = 0) {
+        const n = Math.floor(input.length / stride);
+        const at = (i) => (i < 0 ? this.last : input[i * stride + offset]);
         let t = this.t;
         while (t < n - 1) {
             const i = Math.floor(t);
@@ -24,7 +25,7 @@ class Resampler {
             t += this.step;
         }
         this.t = t - n;
-        if (n) this.last = input[n - 1];
+        if (n) this.last = input[(n - 1) * stride + offset];
     }
 }
 
@@ -82,6 +83,7 @@ class Speaker extends AudioWorkletProcessor {
         this.buffered = 0;
         this.asked = 0;
         this.rs = null;
+        this.rsR = null;
         this.idleUntil = 0;
         this.done = false;
         this.playing = false;
@@ -98,6 +100,7 @@ class Speaker extends AudioWorkletProcessor {
             }
             if (data.rate && data.rate !== RATE) {
                 this.rs = new Resampler(RATE, data.rate);
+                this.rsR = new Resampler(RATE, data.rate);
             }
             if (data.stop) this.done = true;
         };
@@ -111,30 +114,52 @@ class Speaker extends AudioWorkletProcessor {
             this.idleUntil = currentTime + 0.01;
             return;
         }
+        // Queued as interleaved stereo. A worker started before a deploy sends mono, untagged.
+        if (data.ch !== 2) {
+            const both = new Float32Array(pcm.length * 2);
+            for (let i = 0; i < pcm.length; i++) both[i * 2] = both[i * 2 + 1] = pcm[i];
+            pcm = both;
+        }
         if (this.rs) {
-            const out = [];
-            this.rs.process(pcm, (s) => out.push(s));
-            pcm = Float32Array.from(out);
+            const outL = [], outR = [];
+            this.rs.process(pcm, (s) => outL.push(s), 2, 0);
+            this.rsR.process(pcm, (s) => outR.push(s), 2, 1);
+            const m = Math.min(outL.length, outR.length);
+            pcm = new Float32Array(m * 2);
+            for (let i = 0; i < m; i++) {
+                pcm[i * 2] = outL[i];
+                pcm[i * 2 + 1] = outR[i];
+            }
         }
         this.queue.push(pcm);
-        this.buffered += pcm.length;
+        this.buffered += pcm.length >> 1;
     }
 
     process(_, outputs) {
         if (this.done) return false;
         const out = outputs[0][0];
+        const outR = outputs[0][1] ?? null;
         const target = this.ahead * this.per;
         if (!this.playing && this.buffered >= target) this.playing = true;
         let i = 0;
         if (this.playing) {
             while (i < out.length && this.queue.length) {
                 const q = this.queue[0];
-                const n = Math.min(out.length - i, q.length - this.head);
-                out.set(q.subarray(this.head, this.head + n), i);
+                const frames = q.length >> 1;
+                const n = Math.min(out.length - i, frames - this.head);
+                for (let k = 0; k < n; k++) {
+                    const j = (this.head + k) * 2;
+                    if (outR) {
+                        out[i + k] = q[j];
+                        outR[i + k] = q[j + 1];
+                    } else {
+                        out[i + k] = (q[j] + q[j + 1]) * 0.5;
+                    }
+                }
                 i += n;
                 this.head += n;
                 this.buffered -= n;
-                if (this.head >= q.length) {
+                if (this.head >= frames) {
                     this.queue.shift();
                     this.head = 0;
                 }

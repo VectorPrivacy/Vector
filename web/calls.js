@@ -249,7 +249,7 @@
                 micNode.connect(sink);
                 sink.connect(ctx.destination);
             }
-            const spk = new AudioWorkletNode(ctx, 'vector-speaker', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+            const spk = new AudioWorkletNode(ctx, 'vector-speaker', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
             // A media element that failed to start leaves the context's own output, which still plays.
             spk.connect(out?.playing ? out.dest : ctx.destination);
             const toSpk = new MessageChannel();

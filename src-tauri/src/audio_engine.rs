@@ -228,11 +228,13 @@ unsafe impl Send for AudioEngine {}
 unsafe impl Sync for AudioEngine {}
 
 /// A live call on the mixer: `play` is what the call wants heard, `tap` is what the
-/// speaker actually gets (everything mixed), the echo canceller's reference. A shared
-/// screen's sound is a second source, stereo and with its own volume, and `share_tap`
-/// is the same reference again for the canceller that keeps our own output out of
-/// the sound we capture from the screen.
+/// speaker actually gets (everything mixed, as mono), the echo canceller's reference. A
+/// shared screen's sound is a second source with its own volume, and `share_tap` is the
+/// same mono reference again for the canceller that keeps our own output out of the
+/// sound we capture from the screen.
 pub struct LiveLink {
+    /// Interleaved stereo at the device rate. Pushed and popped in whole frames only: one
+    /// odd sample would swap the sides from there on.
     pub play: crate::calls::ring::SpscRing,
     pub tap: crate::calls::ring::SpscRing,
     /// Listener-side volume for the call, as f32 bits; 1.0 is unity.
@@ -1447,25 +1449,36 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
     // Drop the lock — file sources are mixed
     drop(sources);
 
-    // A live call: its samples onto every channel, then the finished mix back to it.
+    // A live call: its left and right onto the device's channels, then the finished mix back to it.
     // try_read: the callback never waits on the attach/detach writer.
     if let Ok(slot) = shared.live.try_read() {
         if let Some(link) = slot.as_ref() {
             let mut mono = [0f32; 512];
+            let mut voice = [0f32; 1024];
             let mut stereo = [0f32; 1024];
             for block in output.chunks_mut(channels * mono.len()) {
                 let frames = block.len() / channels;
-                let got = link.play.pop(&mut mono[..frames]);
-                mono[got..frames].fill(0.0);
+                let got = link.play.pop(&mut voice[..frames * 2]);
+                debug_assert_eq!(got % 2, 0, "the play ring holds whole stereo frames");
+                voice[got..frames * 2].fill(0.0);
                 let speaker = crate::calls::settings::speaker_gain();
                 let gain = link.gain() * speaker;
                 let got2 = link.share_play.pop(&mut stereo[..frames * 2]);
                 stereo[got2..frames * 2].fill(0.0);
                 let share_gain = link.share_gain() * speaker;
                 for (i, frame) in block.chunks_mut(channels).enumerate() {
-                    for (c, out) in frame.iter_mut().enumerate() {
-                        let side = stereo[i * 2 + c.min(1)];
-                        *out = (*out + mono[i] * gain + side * share_gain).clamp(-1.0, 1.0);
+                    let (l, r) = (voice[i * 2] * gain + stereo[i * 2] * share_gain, voice[i * 2 + 1] * gain + stereo[i * 2 + 1] * share_gain);
+                    if let [only] = frame {
+                        *only = (*only + (l + r) * 0.5).clamp(-1.0, 1.0);
+                    } else {
+                        for (c, out) in frame.iter_mut().enumerate() {
+                            let side = match c {
+                                0 => l,
+                                1 => r,
+                                _ => (l + r) * 0.5,
+                            };
+                            *out = (*out + side).clamp(-1.0, 1.0);
+                        }
                     }
                     mono[i] = frame.iter().sum::<f32>() / channels as f32;
                 }
@@ -2664,6 +2677,63 @@ mod window_tests {
         ctl.nudge();
         worker.join().unwrap();
         let _ = std::fs::remove_file(&wav);
+    }
+}
+
+#[cfg(test)]
+mod live_mix_tests {
+    use super::*;
+
+    fn mix(channels: usize, frames: usize, lr: (f32, f32)) -> (Vec<f32>, Vec<f32>) {
+        let (tx, _rx) = mpsc::channel();
+        let link = Arc::new(LiveLink {
+            play: crate::calls::ring::SpscRing::new(4096),
+            tap: crate::calls::ring::SpscRing::new(4096),
+            gain: AtomicU32::new(1f32.to_bits()),
+            share_play: crate::calls::ring::SpscRing::new(4096),
+            share_tap: crate::calls::ring::SpscRing::new(4096),
+            share_gain: AtomicU32::new(1f32.to_bits()),
+        });
+        let stereo: Vec<f32> = (0..frames).flat_map(|_| [lr.0, lr.1]).collect();
+        link.play.push(&stereo);
+        let shared = SharedState {
+            sources: std::sync::Mutex::new(HashMap::new()),
+            live: std::sync::RwLock::new(Some(Arc::clone(&link))),
+            device_sample_rate: AtomicU32::new(48_000),
+            next_id: AtomicU32::new(1),
+            ended_tx: tx,
+        };
+        let mut out = vec![0f32; frames * channels];
+        mixer_callback(&mut out, &shared, channels);
+        let mut tap = vec![0f32; frames];
+        let n = link.tap.pop(&mut tap);
+        tap.truncate(n);
+        (out, tap)
+    }
+
+    #[test]
+    fn a_calls_left_and_right_land_on_the_devices_channels() {
+        let g = crate::calls::settings::speaker_gain();
+        let (l, r) = (0.4 * g, -0.2 * g);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+
+        let (out, tap) = mix(2, 300, (0.4, -0.2));
+        assert!(out.chunks_exact(2).all(|f| close(f[0], l) && close(f[1], r)), "stereo: each side its own");
+        assert!(tap.len() == 300 && tap.iter().all(|t| close(*t, (l + r) / 2.0)), "the canceller hears the mono mix");
+
+        let (out, tap) = mix(1, 300, (0.4, -0.2));
+        assert!(out.iter().all(|s| close(*s, (l + r) / 2.0)), "a mono device plays both sides");
+        assert!(tap.iter().all(|t| close(*t, (l + r) / 2.0)));
+
+        let (out, _) = mix(6, 300, (0.4, -0.2));
+        for f in out.chunks_exact(6) {
+            assert!(close(f[0], l) && close(f[1], r), "front left and right");
+            assert!(f[2..].iter().all(|s| close(*s, (l + r) / 2.0)), "the rest get both: {f:?}");
+        }
+
+        // More than one block of the callback, so the frame index carries across blocks.
+        let (out, _) = mix(2, 1200, (0.4, -0.2));
+        assert!(out.chunks_exact(2).all(|f| close(f[0], l) && close(f[1], r)));
     }
 }
 
