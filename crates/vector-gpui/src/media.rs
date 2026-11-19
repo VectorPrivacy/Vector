@@ -761,6 +761,14 @@ pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
 
 /// An animation's frames (GIF, animated WebP or APNG, sniffed from the bytes, not the name),
 /// each scaled to `to` when that is smaller. `None` for anything that doesn't animate.
+/// The most pixels an animation's canvas may hold: a header claims its size, and a few bytes
+/// can claim 65535 × 65535. Larger ones fall back to the still decode and its allocation limit.
+const MAX_CANVAS: u64 = 1 << 25;
+
+fn canvas_fits(w: u32, h: u32) -> bool {
+    u64::from(w) * u64::from(h) <= MAX_CANVAS
+}
+
 fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<Frame>, u32, u32)> {
     if bytes.starts_with(b"GIF8") {
         let gif = GifCanvas::new(bytes)?;
@@ -770,6 +778,13 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
         return frames_of(gif, w, h, count, &to);
     }
     if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        // An animation's VP8X chunk names the canvas, which libwebp allocates on opening.
+        if bytes.len() >= 30 && &bytes[12..16] == b"VP8X" {
+            let side = |b: &[u8]| 1 + (u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16);
+            if !canvas_fits(side(&bytes[24..27]), side(&bytes[27..30])) {
+                return None;
+            }
+        }
         // libwebp composites the frames: the image crate's compositor keeps parts of earlier
         // frames a later one should have cleared, which show as trails.
         let dec = crate::shared::animated_webp::Decoder::new(bytes).ok()?;
@@ -807,6 +822,9 @@ fn apng_frames(bytes: &[u8]) -> Option<(Vec<Frame>, u32, u32)> {
     dec.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = dec.read_info().ok()?;
     let (w, h) = (reader.info().width, reader.info().height);
+    if !canvas_fits(w, h) {
+        return None;
+    }
     let count = reader.info().animation_control?.num_frames as usize;
     // The default image is a frame only when its own fcTL comes before it.
     let default_shown = reader.info().frame_control.is_some();
@@ -824,7 +842,7 @@ fn apng_frames(bytes: &[u8]) -> Option<(Vec<Frame>, u32, u32)> {
         let (color, _) = reader.output_color_type();
         let rgba = to_rgba(&buf[..out.buffer_size()], color, out.width, out.height)?;
         let (fx, fy) = (fc.x_offset, fc.y_offset);
-        if fx + out.width > w || fy + out.height > h {
+        if fx.saturating_add(out.width) > w || fy.saturating_add(out.height) > h {
             return None;
         }
         let dispose = if first && fc.dispose_op == DisposeOp::Previous { DisposeOp::Background } else { fc.dispose_op };
@@ -965,6 +983,9 @@ impl<'a> GifCanvas<'a> {
         opts.set_color_output(gif::ColorOutput::RGBA);
         let reader = opts.read_info(Cursor::new(bytes)).ok()?;
         let (w, h) = (u32::from(reader.width()), u32::from(reader.height()));
+        if !canvas_fits(w, h) {
+            return None;
+        }
         Some(Self { reader, canvas: image::RgbaImage::new(w, h), shown: image::RgbaImage::new(w, h), raw: Vec::new() })
     }
 }
@@ -1111,6 +1132,8 @@ pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, 
             .ok()?
             .into_decoder()
             .ok()?;
+        // `from_decoder` skips the allocation limit `ImageReader::decode` checks.
+        image::Limits::default().reserve(dec.total_bytes()).ok()?;
         let orientation = dec.orientation().ok();
         let mut img = DynamicImage::from_decoder(dec).ok()?;
         if let Some(o) = orientation {
@@ -1174,6 +1197,21 @@ mod tests {
 
     fn kept(media: &super::Media, names: &[&str]) -> Vec<String> {
         names.iter().filter(|n| media.custom.contains_key(**n)).map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn animations_claiming_huge_canvases_decode_to_nothing() {
+        let mut gif = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut gif, u16::MAX, u16::MAX, &[]).unwrap();
+            for _ in 0..2 {
+                enc.write_frame(&gif::Frame::from_rgba(1, 1, &mut [255, 0, 0, 255])).unwrap();
+            }
+        }
+        assert!(super::decode(&gif, "gif", (64, 64)).is_none());
+        let mut webp = b"RIFF\x16\0\0\0WEBPVP8X\x0a\0\0\0\x02\0\0\0".to_vec();
+        webp.extend([0xff, 0x3f, 0, 0xff, 0x3f, 0]);
+        assert!(super::decode(&webp, "webp", (64, 64)).is_none());
     }
 
     #[test]
