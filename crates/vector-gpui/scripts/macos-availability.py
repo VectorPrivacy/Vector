@@ -2,8 +2,9 @@
 """What a macOS build of the client reaches that is newer than its floor (MACOSX_DEPLOYMENT_TARGET in
 .cargo/config.toml), judged by the SDK headers' availability macros: strongly linked frameworks and
 C symbols (the app would not open), and Objective-C classes and selectors (a crash when called
-unguarded). Classes and selectors are matched by name in the binary, so each is a lead to check,
-with the source lines that spell it.
+unguarded). Only the libraries the binary loads, and what they re-export, are read. Classes and
+selectors are matched by name in the binary, so each is a lead to check, with the source lines that
+spell it.
   scripts/macos-availability.py <binary> [--floor 12.0] [--deps] [--partial]
 --deps also searches the dependencies' sources; --partial lists selectors only some of whose
 declarations are newer than the floor."""
@@ -39,14 +40,43 @@ for i, l in enumerate(lines):
         name = re.match(r"\s*name (\S+)", lines[i + 2]).group(1)
         (weak if m.group(1).endswith("WEAK_DYLIB") else strong).append(name)
 
-imports = {}  # C symbol -> weak? (a weakly loaded library makes every symbol from it weak)
+imports = {}  # C symbol -> (weak?, library it binds from); a weakly loaded library makes its symbols weak
 weak_libs = {os.path.basename(w).split(".")[0] for w in weak}
 for l in subprocess.check_output(["nm", "-m", "-u", args.binary], text=True).splitlines():
     m = re.match(r"\s*\(undefined\) (weak )?external (\S+)(?: \(from (\S+)\))?", l)
     if m:
-        imports[m.group(2).lstrip("_")] = bool(m.group(1)) or m.group(3) in weak_libs
-wanted = set(imports)
+        imports[m.group(2).lstrip("_")] = (bool(m.group(1)) or m.group(3) in weak_libs, m.group(3))
 class_imports = {s[len("OBJC_CLASS_$_"):] for s in imports if s.startswith("OBJC_CLASS_$_")}
+
+root = os.path.join(sdk, "System", "Library", "Frameworks")
+
+def reexports(fw):
+    """Frameworks whose symbols `fw` re-exports, from its text stub in the SDK."""
+    out = set()
+    for dirpath, _, files in os.walk(os.path.join(root, fw + ".framework")):
+        for f in files:
+            if f == fw + ".tbd":
+                text = open(os.path.join(dirpath, f), errors="replace").read()
+                for section in re.findall(r"^reexported-libraries:\n((?:[ -].*\n)*)", text, re.M):
+                    out |= set(re.findall(r"(\w+)\.framework", section))
+    return out
+
+def closure(names):
+    seen, todo = set(), list(names)
+    while todo:
+        fw = todo.pop()
+        if fw not in seen:
+            seen.add(fw)
+            todo += reexports(fw)
+    return seen
+
+loaded = {re.findall(r"(\w+)\.framework", p)[-1] for p in strong + weak if ".framework/" in p}
+linked = closure(loaded)
+lib_scope = {}
+def scope_of(lib):
+    if lib not in lib_scope:
+        lib_scope[lib] = {"libSystem"} if lib and lib.startswith("libSystem") else closure({lib} if lib else set())
+    return lib_scope[lib]
 
 OLD = [
     r"NS_(?:CLASS_)?AVAILABLE(?:_MAC)?\(\s*(\d+_\d+)",
@@ -73,7 +103,7 @@ def strip_parens(s):
 
 classes = {}                       # class -> version
 selectors = defaultdict(list)      # selector -> [(version or None, container)]
-c_symbols = {}                     # wanted C symbol -> version
+c_decls = defaultdict(list)        # imported C symbol -> [(version or None, framework)]
 framework_min = {}                 # framework -> lowest annotated version
 
 def record_statement(stmt, container, region, fw):
@@ -104,9 +134,32 @@ def record_statement(stmt, container, region, fw):
             setter = re.search(r"setter\s*=\s*(\w+:)", attrs)
             selectors[setter.group(1) if setter else "set" + prop[0].upper() + prop[1:] + ":"].append((v, name))
     else:
-        for ident in set(re.findall(r"[A-Za-z_]\w*", stmt)) & wanted:
-            if v and (ident not in c_symbols or v < c_symbols[ident]):
-                c_symbols[ident] = v
+        name = declared_name(stmt)
+        if name in imports:
+            c_decls[name].append((version_in(stmt) or region, fw))
+
+MACRO_CALL = re.compile(r"\b[A-Z_][A-Z0-9_]*\s*\(")
+
+def declared_name(stmt):
+    """The symbol a C declaration exports: none for inline bodies, types and macros."""
+    if re.match(r"(typedef|struct|enum|union)\b", stmt) or re.search(r"\b(static|inline|__inline__?)\b", stmt):
+        return None
+    out, i = [], 0
+    while (m := MACRO_CALL.search(stmt, i)):
+        out.append(stmt[i:m.start()])
+        depth, j = 0, m.end() - 1
+        while j < len(stmt):
+            depth += {"(": 1, ")": -1}.get(stmt[j], 0)
+            if depth == 0:
+                break
+            j += 1
+        i = j + 1
+    s = "".join(out) + stmt[i:]
+    m = re.search(r"\(\s*\*\s*(\w+)\s*\)", s) or re.search(r"([A-Za-z_]\w*)\s*\(", s)
+    if m:
+        return m.group(1)
+    idents = re.findall(r"[A-Za-z_]\w*", s.split("=")[0].split("[")[0])
+    return idents[-1] if idents else None
 
 def parse_header(path, fw):
     try:
@@ -146,14 +199,21 @@ def parse_header(path, fw):
             record_statement(pending.strip(), container, region, fw)
             pending = ""
 
-root = os.path.join(sdk, "System", "Library", "Frameworks")
+# Only what the binary loads can bind or answer at run time.
 for dirpath, dirnames, files in os.walk(root):
     if os.path.basename(dirpath) != "Headers":
         continue
     fw = re.findall(r"(\w+)\.framework", dirpath)[-1]
+    if fw not in linked:
+        continue
     for f in files:
         if f.endswith(".h"):
             parse_header(os.path.join(dirpath, f), fw)
+if any(os.path.basename(p).startswith("libSystem") for p in strong):
+    for dirpath, dirnames, files in os.walk(os.path.join(sdk, "usr", "include")):
+        for f in files:
+            if f.endswith(".h"):
+                parse_header(os.path.join(dirpath, f), "libSystem")
 
 def newer(v):
     return v is not None and v > floor
@@ -169,8 +229,10 @@ if args.deps:
     src_dirs += [os.path.dirname(p["manifest_path"]) for p in meta["packages"]
                  if p["source"] and not skip.match(p["name"])]
 
-def leads(rust_name):
-    out = subprocess.run(["grep", "-rnw", "--include=*.rs", "-e", rust_name] + src_dirs,
+def leads(rust_name, call=False):
+    # A selector is a method objc2 names after it: a call or a definition, not the bare word.
+    pattern = ["-E", rf"(\.|fn ){rust_name}\(" if call else rf"\b{rust_name}\b"]
+    out = subprocess.run(["grep", "-rn", "--include=*.rs"] + pattern + src_dirs,
                          capture_output=True, text=True).stdout.splitlines()
     return [l.replace(repo + "/", "")[:160] for l in out if "/target/" not in l][:4]
 
@@ -185,12 +247,14 @@ for path in strong:
 print("  weak: " + ", ".join(re.findall(r"(\w+)\.framework", " ".join(weak))) if weak else "  weak: none")
 
 print("\n== C symbols bound strongly that are newer than the floor (the app will not open)")
-for sym, v in sorted(c_symbols.items()):
-    if newer(v) and not imports.get(sym):
+# Newer only when every declaration in the library it binds from is: one without a macro is old.
+for sym, (is_weak, lib) in sorted(imports.items()):
+    vs = [v for v, fw in c_decls.get(sym, []) if fw in scope_of(lib)]
+    if not is_weak and vs and all(newer(v) for v in vs):
         problems += 1
-        print(f"  {sym} (macOS {fmt(v)})")
+        print(f"  {sym} (macOS {fmt(min(vs))}, from {lib})")
 for cls in sorted(class_imports):
-    if newer(classes.get(cls)) and not imports.get("OBJC_CLASS_$_" + cls):
+    if newer(classes.get(cls)) and not imports["OBJC_CLASS_$_" + cls][0]:
         problems += 1
         print(f"  class {cls} (macOS {fmt(classes[cls])})")
 
@@ -213,7 +277,7 @@ for sel, decls in sorted(selectors.items()):
     problems += every
     owners = sorted({f"{d[1]} {fmt(d[0])}" for d in decls if newer(d[0])})[:4]
     print(f"  {sel}{'' if every else ' (some declarations)'}: {', '.join(owners)}")
-    for l in leads(sel.rstrip(":").replace(":", "_")):
+    for l in leads(sel.rstrip(":").replace(":", "_"), call=True):
         print("      " + l)
 
 print(f"\n{problems} to look at")

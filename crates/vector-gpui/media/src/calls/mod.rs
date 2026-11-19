@@ -10,7 +10,34 @@ pub mod media;
 #[path = "../../../../../src-tauri/src/calls/session.rs"]
 pub mod session;
 #[path = "../../../../../src-tauri/src/calls/share_native.rs"]
-pub mod share_native;
+mod share_native_shared;
+/// The desktop's native screen audio, offered only where ScreenCaptureKit captures sound: its
+/// classes arrive in macOS 12.3, audio capture in 13, and this client runs from 12.
+pub mod share_native {
+    use super::share_native_shared as shared;
+    pub use shared::{permitted, stop};
+    use crate::calls::media::ShareInput;
+    use std::sync::Arc;
+
+    pub fn available() -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2::runtime::AnyClass;
+            shared::available()
+                && AnyClass::get(c"SCStreamConfiguration")
+                    .is_some_and(|c| c.instance_method(objc2::sel!(setCapturesAudio:)).is_some())
+        }
+        #[cfg(not(target_os = "macos"))]
+        shared::available()
+    }
+
+    pub async fn start(share: Arc<ShareInput>) -> Result<(), String> {
+        if !available() {
+            return Err("Screen audio needs macOS 13 or later".into());
+        }
+        shared::start(share).await
+    }
+}
 #[path = "../../../../../src-tauri/src/calls/voice.rs"]
 pub mod voice;
 
