@@ -9,3 +9,5 @@
     native <methods>;
 }
 -keep class io.vectorapp.NotificationActionReceiver { *; }
+-keep class io.vectorapp.VectorNotificationService { *; }
+-keep class io.vectorapp.VectorBatteryHelper { *; }

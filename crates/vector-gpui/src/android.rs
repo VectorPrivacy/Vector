@@ -32,3 +32,52 @@ pub fn cache_dir() -> Option<&'static PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| folder("getCacheDir")).as_ref()
 }
+
+/// Calls a static `VectorBatteryHelper` method taking the context and maybe a flag; a void one
+/// reads as false.
+fn battery_helper(method: &str, sig: &str, flag: Option<bool>) -> bool {
+    use jni::objects::{JClass, JValue};
+    utils::with_android_context(|env, ctx| {
+        let err = |e: jni::errors::Error| format!("{e:?}");
+        let loader = env.call_method(ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]).and_then(|v| v.l()).map_err(err)?;
+        let name = env.new_string("io.vectorapp.VectorBatteryHelper").map_err(err)?;
+        let class = env
+            .call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])
+            .and_then(|v| v.l())
+            .map_err(err)?;
+        let mut args = vec![JValue::Object(ctx)];
+        args.extend(flag.map(|f| JValue::Bool(f.into())));
+        let out = env.call_static_method(&JClass::from(class), method, sig, &args);
+        if out.is_err() {
+            let _ = env.exception_clear();
+        }
+        out.map(|v| v.z().unwrap_or(false)).map_err(err)
+    })
+    .unwrap_or(false)
+}
+
+fn battery_flag(method: &str) -> bool {
+    battery_helper(method, "(Landroid/content/Context;)Z", None)
+}
+
+/// Settings' Run in Background: whether the service keeps the client connected while away.
+pub fn background_enabled() -> bool {
+    battery_flag("getBackgroundServiceEnabled")
+}
+
+/// Android may stop a service it is allowed to optimise for battery.
+pub fn battery_exempt() -> bool {
+    battery_flag("isIgnoringBatteryOptimizations")
+}
+
+/// The system's dialog asking to let Vector run unoptimised; the answer shows on return.
+pub fn request_battery_exemption() {
+    battery_helper("requestBatteryOptimization", "(Landroid/content/Context;)V", None);
+}
+
+/// Remembered, and the service started or stopped to match.
+pub fn set_background(on: bool) {
+    battery_helper("setBackgroundServiceEnabled", "(Landroid/content/Context;Z)V", Some(on));
+    let method = if on { "startBackgroundService" } else { "stopBackgroundService" };
+    battery_helper(method, "(Landroid/content/Context;)V", None);
+}

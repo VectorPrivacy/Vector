@@ -1,6 +1,8 @@
 package io.vectorapp
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
@@ -16,10 +18,15 @@ class MainActivity : ComponentActivity() {
     lateinit var view: GpuiView
         private set
 
+    private val NOTIFICATION_PERMISSION_REQUEST = 1001
+
     companion object {
         /** The ring's notification was tapped (`answer` false) or answered. */
         @JvmStatic
         external fun nativeOnCallTap(callId: String, npub: String, answer: Boolean)
+        /** A message notification was tapped. */
+        @JvmStatic
+        external fun nativeOnNotificationTap(chatId: String)
     }
 
     /** The desktop client's glue (calls, permissions) holds this activity while it lives. */
@@ -42,6 +49,13 @@ class MainActivity : ComponentActivity() {
             WindowInsetsCompat.CONSUMED
         }
         onBackPressedDispatcher.addCallback(this, Bridge.back)
+        VectorNotificationService.createChannels(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
+        }
+        if (VectorBatteryHelper.getBackgroundServiceEnabled(this)) VectorBatteryHelper.startBackgroundService(this)
         link(intent)
     }
 
@@ -65,6 +79,11 @@ class MainActivity : ComponentActivity() {
             nativeOnCallTap(callId, callNpub, answer)
             return
         }
+        intent.getStringExtra("chat_id")?.takeIf { it.isNotEmpty() }?.let { chat ->
+            intent.removeExtra("chat_id")
+            nativeOnNotificationTap(chat)
+            return
+        }
         intent.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.let(Bridge::nativeOpenUrl)
     }
 
@@ -86,6 +105,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         nativeForeground(true)
+        VectorNotificationService.clearAllMessageHistory()
         Bridge.nativeLifecycle(2)
     }
 

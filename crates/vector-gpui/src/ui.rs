@@ -218,6 +218,8 @@ pub struct VectorApp {
     new_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     signer_offline_told: bool,
     call_mic_told: Option<String>,
+    /// A call answered from its notification, taken up when it rings here, for a while.
+    answer_pending: Option<(String, std::time::Instant)>,
     jump_miss: Option<(String, SharedString)>,
     /// The window is narrower than widescreen: the slim layout.
     is_slim: bool,
@@ -1026,6 +1028,7 @@ impl VectorApp {
             new_btn: Rc::default(),
             signer_offline_told: false,
             call_mic_told: None,
+            answer_pending: None,
             jump_miss: None,
             is_slim: false,
             vw: 0.,
@@ -1850,10 +1853,13 @@ impl VectorApp {
         backend::notify::set_focused(window.is_window_active());
         animation_idle(window.is_window_active());
         let away_since = std::cell::Cell::new(None::<std::time::Instant>);
-        cx.observe_window_activation(window, move |_, window, _| {
+        cx.observe_window_activation(window, move |this, window, cx| {
             let active = window.is_window_active();
             backend::notify::set_focused(active);
             animation_idle(active);
+            if active {
+                this.battery_answered(cx);
+            }
             // `resume_after_away`: back after a minute or more, the relays are proven, the live
             // subscriptions re-armed and the gap caught up.
             if !active {
@@ -3509,6 +3515,7 @@ impl VectorApp {
             }
             "call_state" => {
                 self.call.apply_state(&payload);
+                self.answer_if_pending(cx);
                 self.call_started(cx);
                 self.sync_call_meter();
                 // Once per call: it went ahead without a microphone, so say why it is muted.
@@ -3715,7 +3722,7 @@ impl VectorApp {
                     action_type: field("action_type").unwrap_or_default(),
                     target: field("target").unwrap_or_default(),
                     message: field("message"),
-                    call: None,
+                    call: field("call").filter(|c| !c.is_empty()),
                     account: field("account").filter(|a| !a.is_empty()),
                 };
                 self.take_link(a, _window, cx);
@@ -5869,6 +5876,29 @@ impl VectorApp {
             ));
         }
         self.popup = Some((p, PopupAct::Notice));
+        cx.notify();
+    }
+
+    /// Back from the system's battery dialog: Run in Background holds only with its exemption.
+    fn battery_answered(&mut self, cx: &mut Context<Self>) {
+        use crate::settings::BatteryAsk;
+        let Some(b) = self.settings.as_mut().and_then(|s| s.battery.as_mut()) else { return };
+        let Some(ask) = b.asked.take() else { return };
+        #[cfg(target_os = "android")]
+        let exempt = crate::android::battery_exempt();
+        #[cfg(not(target_os = "android"))]
+        let exempt = true;
+        match ask {
+            BatteryAsk::Warning => b.warning = !exempt,
+            BatteryAsk::Enable if exempt => {
+                #[cfg(target_os = "android")]
+                crate::android::set_background(true);
+            }
+            BatteryAsk::Enable => {
+                b.enabled = false;
+                self.notice(&t::settings_battery_required_title(), t::settings_battery_required().into(), cx);
+            }
+        }
         cx.notify();
     }
 
@@ -14820,6 +14850,10 @@ impl VectorApp {
                 } else if self.open.as_deref() != Some(a.target.as_str()) {
                     self.open_chat(a.target.into(), window, cx);
                 }
+                if let Some(call) = a.call {
+                    self.answer_pending = Some((call, std::time::Instant::now() + std::time::Duration::from_secs(75)));
+                    self.answer_if_pending(cx);
+                }
                 if let Some(m) = a.message {
                     self.jump_to_message(m, cx);
                 }
@@ -16575,6 +16609,7 @@ impl VectorApp {
             sec_advanced: false,
             updates: self.updates.clone(),
             audio: None,
+            battery: crate::settings::Battery::read(),
             sliders: Default::default(),
             dragging: Default::default(),
             donut: Default::default(),
@@ -17225,6 +17260,24 @@ impl VectorApp {
             }
         })
         .detach();
+    }
+
+    /// `answerIfPending`: the call answered from its notification is ringing here now.
+    fn answer_if_pending(&mut self, cx: &mut Context<Self>) {
+        use crate::call::Phase;
+        let Some((id, until)) = &self.answer_pending else { return };
+        if self.call.id.as_ref() != Some(id) {
+            return;
+        }
+        let ringing = self.call.phase == Some(Phase::Ringing);
+        if !ringing || self.call.outgoing || std::time::Instant::now() > *until {
+            if !ringing {
+                self.answer_pending = None;
+            }
+            return;
+        }
+        self.answer_pending = None;
+        self.with_realtime_consent(CallGo::Accept, cx);
     }
 
     /// Off Clearnet, a call connects only once the account agrees for this session.
@@ -18577,6 +18630,27 @@ impl VectorApp {
                 if self.live {
                     let rx = backend::run(async move { vector_core::db::scoped(backend::mic::set_direct(on)).await });
                     self.toast_err(rx, cx);
+                }
+            }
+            Act::Background(on) => {
+                s.flipped.insert("background");
+                if let Some(b) = s.battery.as_mut() {
+                    b.enabled = on;
+                    b.warning = false;
+                    #[cfg(target_os = "android")]
+                    if on && !crate::android::battery_exempt() {
+                        b.asked = Some(crate::settings::BatteryAsk::Enable);
+                        crate::android::request_battery_exemption();
+                    } else {
+                        crate::android::set_background(on);
+                    }
+                }
+            }
+            Act::BatteryWarning => {
+                if let Some(b) = s.battery.as_mut() {
+                    b.asked = Some(crate::settings::BatteryAsk::Warning);
+                    #[cfg(target_os = "android")]
+                    crate::android::request_battery_exemption();
                 }
             }
             Act::MicTest => self.mic_test(cx),

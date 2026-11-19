@@ -72,6 +72,11 @@ pub fn categories(offers: &Offers) -> Vec<Category> {
         privacy.push(fresh("routing", t::settings_section_routing, "0.5", t::settings_section_routing_keys));
     }
     privacy.push(anchor("blocked", t::settings_section_blocked, t::settings_section_blocked_keys));
+    let mut notifications =
+        vec![anchor("notifications", t::settings_section_notifications, t::settings_section_notifications_keys)];
+    if cfg!(target_os = "android") {
+        notifications.push(anchor("battery", t::settings_section_battery, t::settings_section_battery_keys));
+    }
     let cat = |id, label, icon, anchors| Category {
         id,
         label,
@@ -90,9 +95,7 @@ pub fn categories(offers: &Offers) -> Vec<Category> {
         cat(
 "audio", t::settings_page_audio, "volume-max", audio),
         cat(
-"notifications", t::settings_page_notifications, "bell",
-            vec![anchor("notifications", t::settings_section_notifications, t::settings_section_notifications_keys)],
-        ),
+"notifications", t::settings_page_notifications, "bell", notifications),
         cat(
 "network", t::settings_page_network, "globe",
             vec![
@@ -298,6 +301,7 @@ pub fn help(key: &str) -> Option<(SharedString, String)> {
         "voiceModel" => (t::settings_help_voice_model(), t::settings_help_voice_model_text()),
         "voiceTranslate" => (t::settings_help_voice_translate(), t::settings_help_voice_translate_text()),
         "voiceTranscribe" => (t::settings_help_voice_transcribe(), t::settings_help_voice_transcribe_text()),
+        "battery" => (t::settings_help_battery(), t::settings_help_battery_text()),
         "logout" => (t::settings_help_logout(), t::settings_help_logout_text()),
         "webPreviews" => {
             // Off Clearnet every preview fetch rides the chosen network, or fails closed.
@@ -414,6 +418,8 @@ pub struct Settings {
     pub updates: Updates,
     /// Calls: the devices and switches once read, the test's state.
     pub audio: Option<AudioView>,
+    /// A phone's Run in Background, where there is one.
+    pub battery: Option<Battery>,
     /// Each slider's track, from its last paint, and the one being dragged.
     pub sliders: Rc<std::cell::RefCell<HashMap<&'static str, gpui::Bounds<gpui::Pixels>>>>,
     pub dragging: Rc<std::cell::Cell<Option<&'static str>>>,
@@ -539,6 +545,9 @@ pub enum Act {
     /// A voice processing switch: `autoGain`, `echoCancel` or `noiseSuppress`.
     AudioSwitch(&'static str, bool),
     Direct(bool),
+    /// Run in Background, and the warning that the phone may still stop it.
+    Background(bool),
+    BatteryWarning,
     MicTest,
     /// `input` or `output`; None is the system default.
     Device(&'static str, Option<String>),
@@ -558,6 +567,34 @@ pub enum Act {
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
+
+#[derive(Clone, Copy)]
+pub struct Battery {
+    pub enabled: bool,
+    /// On, but the phone may still stop the service to save battery.
+    pub warning: bool,
+    /// Away at the system's battery dialog, and what its answer is for.
+    pub asked: Option<BatteryAsk>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BatteryAsk {
+    Enable,
+    Warning,
+}
+
+impl Battery {
+    #[cfg(target_os = "android")]
+    pub fn read() -> Option<Self> {
+        let enabled = crate::android::background_enabled();
+        Some(Self { enabled, warning: enabled && !crate::android::battery_exempt(), asked: None })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn read() -> Option<Self> {
+        None
+    }
+}
 
 fn click(
     on: &OnAct,
@@ -3668,6 +3705,43 @@ fn calls_block(s: &Settings, on: &OnAct) -> AnyElement {
     .into_any_element()
 }
 
+fn battery_block(s: &Settings, on: &OnAct) -> AnyElement {
+    let Some(b) = s.battery else {
+        return div().into_any_element();
+    };
+    let enabled = b.enabled;
+    let switch = toggle(
+        "tg-background",
+        enabled,
+        s.flipped.contains("background"),
+        click(on, move || Act::Background(!enabled)),
+    );
+    let mut col = div().flex().flex_col().child(toggle_row(
+        "background",
+        t::settings_toggle_background(),
+        Some(Box::new(click(on, || Act::Help("battery")))),
+        switch,
+        false,
+    ));
+    if b.warning {
+        col = col.child(
+            div()
+                .id("battery-warning")
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .text_size(px(13.))
+                .text_color(c(0xfce459))
+                .child(svg().path("icons/battery-full.svg").size(px(16.)).flex_none().text_color(c(0xfce459)))
+                .child(t::settings_battery_warning())
+                .on_click(click(on, || Act::BatteryWarning)),
+        );
+    }
+    col.into_any_element()
+}
+
 fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
     Some(match id {
         "security" => security_block(s, on),
@@ -3678,6 +3752,7 @@ fn block(id: &str, s: &Settings, on: &OnAct) -> Option<AnyElement> {
         "language" => language_block(s, on),
         "privacy" => privacy_block(s, on),
         "notifications" => notifications_block(s, on),
+        "battery" => battery_block(s, on),
         "storage" => storage_block(s, on),
         "relays" => relays_block(s, on),
         "servers" => servers_block(s, on),

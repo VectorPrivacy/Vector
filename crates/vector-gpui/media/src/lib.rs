@@ -145,6 +145,8 @@ pub mod notify_host {
 
     pub fn set(host: Host) {
         let _ = HOST.set(host);
+        #[cfg(target_os = "android")]
+        crate::android::background_sync::deliver_pending_link();
     }
 
     pub(crate) fn get() -> Option<&'static Host> {
@@ -191,9 +193,11 @@ pub mod deep_link {
     #[cfg(target_os = "android")]
     pub use vector_core::deep_link::DeepLinkAction;
 
-    /// Where the desktop's Android glue leaves a tapped call; here its event carries it instead.
+    /// A tapped call, kept when it launched the app before the client was up to take its event.
     #[cfg(target_os = "android")]
-    pub fn set_pending_action(_: DeepLinkAction) {}
+    pub fn set_pending_action(action: DeepLinkAction) {
+        crate::android::background_sync::hold_link(&action);
+    }
 
     pub fn open_chat_from_notification<R: tauri::Runtime>(
         _: &tauri::AppHandle<R>,

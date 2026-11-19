@@ -126,9 +126,23 @@ fn show(mut data: NotificationData) {
     }
     ready();
     hide(&mut data, notify::ContentPrivacy::load());
-    ring();
-    if let Err(e) = native_notify::show(&data) {
-        log::warn!("notification: {e}");
+    // The phone's message channel carries its own sound.
+    #[cfg(target_os = "android")]
+    crate::android::background_sync::post_notification_jni(
+        &data.title,
+        &data.body,
+        data.avatar_path.as_deref(),
+        data.chat_id.as_deref(),
+        data.sender_name.as_deref(),
+        data.group_name.as_deref(),
+        data.group_avatar_path.as_deref(),
+    );
+    #[cfg(not(target_os = "android"))]
+    {
+        ring();
+        if let Err(e) = native_notify::show(&data) {
+            log::warn!("notification: {e}");
+        }
     }
 }
 
@@ -250,6 +264,8 @@ pub fn recount() {
 
 /// The chat was read: its notifications go.
 pub fn read(chat_id: &str) {
+    #[cfg(target_os = "android")]
+    crate::android::background_sync::cancel_notification_jni(chat_id);
     native_notify::remove_chat(chat_id);
 }
 
@@ -258,11 +274,16 @@ pub fn deleted(message_id: &str) {
 }
 
 pub fn blocked(npub: &str) {
+    // The phone's shade keeps one notification per chat, and a DM's chat is its sender.
+    #[cfg(target_os = "android")]
+    crate::android::background_sync::cancel_notification_jni(npub);
     native_notify::remove_sender(npub);
 }
 
 /// The account is leaving this machine's screen: its notifications leave with it.
 pub fn account_gone(npub: &str) {
+    #[cfg(target_os = "android")]
+    crate::android::background_sync::cancel_all_message_notifications_jni();
     native_notify::remove_account(npub);
 }
 

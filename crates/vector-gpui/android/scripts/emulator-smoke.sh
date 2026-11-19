@@ -8,6 +8,8 @@ out="$2"
 app=io.vectorapp.gpui
 mkdir -p "$out"
 adb install -r "$apk"
+# Granted up front, so the permission prompt doesn't cover the screen being checked.
+adb shell pm grant "$app" android.permission.POST_NOTIFICATIONS || true
 adb logcat -c
 adb shell am start -W -n "$app/io.vectorapp.MainActivity"
 sleep 45
@@ -16,6 +18,8 @@ pid=$(adb shell pidof "$app" || true)
 echo "pid: ${pid:-not running}"
 adb shell dumpsys meminfo "$app" > "$out/meminfo.txt" || true
 grep -E "TOTAL PSS|TOTAL RSS|Native Heap|Graphics" "$out/meminfo.txt" || true
+echo "notification channels:"
+adb shell dumpsys notification | grep -oE "vector_(service|messages_v2)" | sort -u || true
 adb logcat -d > "$out/logcat.txt"
 echo "::group::app log"
 if [ -n "$pid" ]; then adb logcat -d --pid="$pid"; else tail -400 "$out/logcat.txt"; fi

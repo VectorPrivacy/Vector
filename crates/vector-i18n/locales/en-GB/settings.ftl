@@ -26,6 +26,8 @@ settings-section-language = Language
     .keys = language languages translation translate locale english download
 settings-section-notifications = Notifications
     .keys = mute sounds everyone pings content privacy sound prelude techno custom
+settings-section-battery = Background
+    .keys = battery background run optimization
 settings-section-relays = Nostr Relays
     .keys = network nostr relays add custom
 settings-section-servers = Media Servers
@@ -325,6 +327,10 @@ settings-toggle-auto-gain = Automatic Gain
 settings-toggle-echo-cancel = Echo Cancellation
 settings-toggle-noise-suppress = Noise Suppression
 settings-toggle-direct = Direct Connection
+settings-toggle-background = Run in Background
+settings-battery-warning = Battery Optimization is active
+settings-battery-required-title = Battery Optimization
+settings-battery-required = Battery optimization must be disabled for reliable background notifications.
 
 ## Relays: adding, removing and disabling
 
