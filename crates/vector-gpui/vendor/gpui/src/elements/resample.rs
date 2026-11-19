@@ -34,6 +34,10 @@ fn catmull_rom(x: f32) -> f32 {
 struct Taps {
     spans: Vec<(usize, usize, usize)>,
     weights: Vec<f32>,
+    /// The longest span, and every span's weights padded to it with zeros: pixels summed side
+    /// by side all take `longest` taps, and a zero tap adds nothing.
+    longest: usize,
+    padded: Vec<f32>,
 }
 
 impl Taps {
@@ -60,7 +64,18 @@ impl Taps {
             }
             spans.push((left as usize, (right - left) as usize, at));
         }
-        Taps { spans, weights }
+        let longest = spans.iter().map(|s| s.1).max().unwrap_or(0);
+        let mut padded = vec![0.; spans.len() * longest];
+        for (k, &(_, n, at)) in spans.iter().enumerate() {
+            padded[k * longest..][..n].copy_from_slice(&weights[at..at + n]);
+        }
+        Taps { spans, weights, longest, padded }
+    }
+
+    /// How many source values a row read across by these taps must hold, `c` per index: the
+    /// padded taps reach past the last index, and four-lane loads one value further.
+    fn row_len(&self, len: usize, c: usize) -> usize {
+        (len + self.longest) * c + 1
     }
 
     fn iter(&self) -> impl Iterator<Item = (usize, &[f32])> {
@@ -112,6 +127,16 @@ fn fold(column: &mut [f32], line: &[u8], wt: f32) {
 }
 
 fn across_row<const C: usize>(column: &[f32], across: &Taps, out: &mut [u8]) {
+    if C == 3 || C == 4 {
+        let reach = across.spans.last().map_or(0, |s| s.0) + across.longest;
+        assert!(column.len() > reach * C, "column shorter than its padded taps reach");
+        // SAFETY: the vector unit is baseline on both targets, and each load reads four
+        // values from `(left + i) * C` for `i < longest`, within `column` by the check above.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        unsafe {
+            return simd::across::<C>(column, across, out);
+        }
+    }
     for ((left, ws), px) in across.iter().zip(out.chunks_exact_mut(C)) {
         let mut t = [0f32; C];
         for (i, &wt) in ws.iter().enumerate() {
@@ -126,12 +151,113 @@ fn across_row<const C: usize>(column: &[f32], across: &Taps, out: &mut [u8]) {
     }
 }
 
-/// `v.clamp(0.0, 255.0).round() as u8` without `round`, a library call on SSE2.
+/// [`across_row`] for three or four channels: a pixel's channels as one four-lane vector, four
+/// pixels in flight. Each lane takes the same multiply then add, in the same order, as the
+/// scalar loop, and rounds as [`to_u8`] does, so the bytes are the same.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod simd {
+    use super::Taps;
+    #[cfg(target_arch = "aarch64")]
+    use std::arch::aarch64::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    #[cfg(target_arch = "x86_64")]
+    type V = __m128;
+    #[cfg(target_arch = "aarch64")]
+    type V = float32x4_t;
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn tap(t: V, p: *const f32, w: f32) -> V {
+        unsafe { _mm_add_ps(t, _mm_mul_ps(_mm_loadu_ps(p), _mm_set1_ps(w))) }
+    }
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    unsafe fn tap(t: V, p: *const f32, w: f32) -> V {
+        unsafe { vaddq_f32(t, vmulq_f32(vld1q_f32(p), vdupq_n_f32(w))) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn zero() -> V {
+        unsafe { _mm_setzero_ps() }
+    }
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    unsafe fn zero() -> V {
+        unsafe { vdupq_n_f32(0.) }
+    }
+
+    /// The four lanes clamped to 0..=255, cut to whole, then up one where the cut lost a half
+    /// or more: `to_u8` per lane.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn bytes(t: V) -> [u8; 4] {
+        unsafe {
+            let v = _mm_min_ps(_mm_max_ps(t, _mm_setzero_ps()), _mm_set1_ps(255.));
+            let whole = _mm_cvttps_epi32(v);
+            let up = _mm_cmpge_ps(_mm_sub_ps(v, _mm_cvtepi32_ps(whole)), _mm_set1_ps(0.5));
+            let r = _mm_sub_epi32(whole, _mm_castps_si128(up));
+            let r = _mm_packus_epi16(_mm_packs_epi32(r, r), _mm_setzero_si128());
+            (_mm_cvtsi128_si32(r) as u32).to_le_bytes()
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    unsafe fn bytes(t: V) -> [u8; 4] {
+        unsafe {
+            let v = vminq_f32(vmaxq_f32(t, vdupq_n_f32(0.)), vdupq_n_f32(255.));
+            let whole = vcvtq_u32_f32(v);
+            let up = vcgeq_f32(vsubq_f32(v, vcvtq_f32_u32(whole)), vdupq_n_f32(0.5));
+            let r = vsubq_u32(whole, up);
+            let r = vmovn_u16(vcombine_u16(vmovn_u32(r), vdup_n_u16(0)));
+            (vget_lane_u32::<0>(vreinterpret_u32_u8(r))).to_le_bytes()
+        }
+    }
+
+    pub(super) unsafe fn across<const C: usize>(column: &[f32], taps: &Taps, out: &mut [u8]) {
+        let (m, base, nw) = (taps.longest, column.as_ptr(), taps.spans.len());
+        let put = |k: usize, t: V, out: &mut [u8]| {
+            let b = unsafe { bytes(t) };
+            out[k * C..][..C].copy_from_slice(&b[..C]);
+        };
+        let mut k = 0;
+        while k + 4 <= nw {
+            let p = [0, 1, 2, 3].map(|q| unsafe { base.add(taps.spans[k + q].0 * C) });
+            let w = [0, 1, 2, 3].map(|q| &taps.padded[(k + q) * m..][..m]);
+            let mut t = unsafe { [zero(), zero(), zero(), zero()] };
+            for i in 0..m {
+                for q in 0..4 {
+                    t[q] = unsafe { tap(t[q], p[q].add(i * C), w[q][i]) };
+                }
+            }
+            for q in 0..4 {
+                put(k + q, t[q], out);
+            }
+            k += 4;
+        }
+        for k in k..nw {
+            let p = unsafe { base.add(taps.spans[k].0 * C) };
+            let mut t = unsafe { zero() };
+            for (i, &w) in taps.padded[k * m..][..m].iter().enumerate() {
+                t = unsafe { tap(t, p.add(i * C), w) };
+            }
+            put(k, t, out);
+        }
+    }
+}
+
+/// `v.clamp(0.0, 255.0).round() as u8`; on x86 without `round`, a library call on SSE2.
 #[inline(always)]
 fn to_u8(v: f32) -> u8 {
     let v = v.clamp(0.0, 255.0);
-    let whole = v as u32;
-    (whole + u32::from(v - whole as f32 >= 0.5)) as u8
+    if cfg!(target_arch = "x86_64") {
+        let whole = v as u32;
+        (whole + u32::from(v - whole as f32 >= 0.5)) as u8
+    } else {
+        v.round() as u8
+    }
 }
 
 fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(f32) -> f32, support: f32) -> Vec<u8> {
@@ -141,7 +267,7 @@ fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(
     let mut out = vec![0u8; nwu * nh as usize * C];
     let mut column = COLUMN.take();
     column.clear();
-    column.resize(w * C, 0.);
+    column.resize(across.row_len(w, C), 0.);
     for ((top, ws), row) in down.iter().zip(out.chunks_exact_mut(nwu * C)) {
         let lines = ws.iter().enumerate().map(|(j, &wt)| (&src[(top + j) * w * C..][..w * C], wt));
         row_out::<C>(&mut column, lines, &across, row);
@@ -158,6 +284,7 @@ fn run<const C: usize>(src: &[u8], w: u32, h: u32, nw: u32, nh: u32, kernel: fn(
 /// held. Bit-identical to [`resample`]: an output row still takes its source rows in order.
 pub struct Rows<const C: usize> {
     n: usize,
+    stride: usize,
     down: std::rc::Rc<Taps>,
     across: std::rc::Rc<Taps>,
     /// A float row per output row still taking source rows, by output row modulo `open`.
@@ -186,21 +313,22 @@ impl<const C: usize> Rows<C> {
             open = open.max(r + 1 - first);
         }
         let n = w as usize * C;
-        Some(Self { n, acc: vec![0.; open * n], open, started: 0, next: 0, out: vec![0; nw as usize * C], down, across })
+        let stride = across.row_len(w as usize, C);
+        Some(Self { n, stride, acc: vec![0.; open * stride], open, started: 0, next: 0, out: vec![0; nw as usize * C], down, across })
     }
 
     /// Source row `y`, which follows row `y - 1`: each output row it completes goes to `emit`.
     pub fn push(&mut self, y: usize, row: &[u8], mut emit: impl FnMut(usize, &[u8])) {
-        let n = self.n;
+        let (n, stride) = (self.n, self.stride);
         while self.down.spans.get(self.started).is_some_and(|s| s.0 <= y) {
-            self.acc[(self.started % self.open) * n..][..n].fill(0.0);
+            self.acc[(self.started % self.open) * stride..][..stride].fill(0.0);
             self.started += 1;
         }
         let row = &row[..n];
         for r in self.next..self.started {
             let (top, len, at) = self.down.spans[r];
             if y < top + len {
-                fold(&mut self.acc[(r % self.open) * n..][..n], row, self.down.weights[at + y - top]);
+                fold(&mut self.acc[(r % self.open) * stride..][..n], row, self.down.weights[at + y - top]);
             }
         }
         while self.next < self.started {
@@ -208,7 +336,7 @@ impl<const C: usize> Rows<C> {
             if top + len > y + 1 {
                 break;
             }
-            across_row::<C>(&self.acc[(self.next % self.open) * n..][..n], &self.across, &mut self.out);
+            across_row::<C>(&self.acc[(self.next % self.open) * stride..][..stride], &self.across, &mut self.out);
             emit(self.next, &self.out);
             self.next += 1;
         }
