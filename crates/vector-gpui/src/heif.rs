@@ -820,17 +820,6 @@ mod decode {
             Some(Tile { frame, depth, shift })
         }
 
-        #[inline(always)]
-        fn sample(&self, plane: usize, x: usize, y: usize) -> f32 {
-            let (data, stride) = (self.frame.data(plane), self.frame.stride(plane));
-            if self.depth == 8 {
-                f32::from(data[y * stride + x])
-            } else {
-                let i = y * stride + x * 2;
-                f32::from(u16::from_le_bytes([data[i], data[i + 1]]) & ((1u16 << self.depth) - 1))
-            }
-        }
-
         /// The stream's own matrix and range, where it names them.
         fn signalled(&self) -> (Option<u16>, Option<bool>) {
             use ffmpeg::color::{Range as R, Space as S};
@@ -851,6 +840,25 @@ mod decode {
                 _ => None,
             };
             (matrix, full)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Plane<'f> {
+        data: &'f [u8],
+        stride: usize,
+    }
+
+    impl Plane<'_> {
+        /// A sample, one byte or two little-endian.
+        #[inline(always)]
+        fn at(&self, wide: bool, mask: u16, x: usize, y: usize) -> f32 {
+            if wide {
+                let i = y * self.stride + x * 2;
+                f32::from(u16::from_le_bytes([self.data[i], self.data[i + 1]]) & mask)
+            } else {
+                f32::from(self.data[y * self.stride + x])
+            }
         }
     }
 
@@ -959,7 +967,8 @@ mod decode {
         let mut feed = Feed::new(heif, order);
         let mut matrix = None;
         // The tile row above's last chroma row, for the luma rows that straddle the seam.
-        let mut carry: Option<Vec<(f32, f32)>> = None;
+        let mut carry: Vec<(f32, f32)> = Vec::new();
+        let mut lines: Vec<f32> = Vec::new();
         let w = x1 - x0;
         for r in r0..r1 {
             let band: Vec<Tile> = (c0..c1).map(|_| feed.next()).collect::<Option<_>>()?;
@@ -970,84 +979,103 @@ mod decode {
                 return None;
             }
             let m = *matrix.get_or_insert_with(|| Matrix::new(pic.nclx, first.signalled(), first.depth));
-            let luma_max = f32::from((1u16 << first.depth) - 1);
+            let (wide, mask) = (first.depth > 8, (1u16 << first.depth) - 1);
+            let luma_max = f32::from(mask);
+            // Each tile's planes, looked up once: FFmpeg sizes a plane from its format on every ask.
+            let planes: Vec<[Plane; 3]> = band
+                .iter()
+                .map(|t| {
+                    let n = t.frame.planes().min(3);
+                    std::array::from_fn(|i| if i < n { Plane { data: t.frame.data(i), stride: t.frame.stride(i) } } else { Plane { data: &[], stride: 0 } })
+                })
+                .collect();
             let (by0, by1) = ((r * th).max(y0), ((r + 1) * th).min(y1));
-            // Chroma rows of the band this band's rows reach, across every tile of the row.
             let (sx, sy) = first.shift.unwrap_or((0, 0));
             let (ctw, cth) = (tw.div_ceil(1 << sx), th.div_ceil(1 << sy));
-            let chroma_row = |cy: usize| -> Vec<(f32, f32)> {
-                (0..band.len() * ctw).map(|i| (band[i / ctw].sample(1, i % ctw, cy), band[i / ctw].sample(2, i % ctw, cy))).collect()
+            let cw = band.len() * ctw;
+            // A chroma row across every tile of the band.
+            let chroma_row = |cy: usize, out: &mut Vec<(f32, f32)>| {
+                out.extend((0..cw).map(|i| {
+                    let p = &planes[i / ctw];
+                    (p[1].at(wide, mask, i % ctw, cy), p[2].at(wide, mask, i % ctw, cy))
+                }))
             };
             let colour = matches!(out, Out::Colour { .. }) && first.shift.is_some();
             let lo = (by0 - r * th) >> sy;
-            let hi = ((by1 - 1 - r * th) >> sy) + 1;
-            let chroma: Vec<Vec<(f32, f32)>> = if colour { (lo..(hi + 1).min(cth)).map(chroma_row).collect() } else { Vec::new() };
-            let lines: Vec<Vec<f32>> = (by0..by1)
-                .into_par_iter()
-                .map_init(
-                    || vec![0f32; w * 4],
-                    |line, y| {
-                        let ly = y - r * th;
-                        // Vertically centred chroma: three parts its own row to one of the nearer
-                        // neighbour.
-                        let crow: Option<Vec<(f32, f32)>> = colour.then(|| {
-                            let j = ly >> sy;
-                            let here = &chroma[j - lo];
-                            if sy == 0 {
-                                return here.clone();
+            let hi = (((by1 - 1 - r * th) >> sy) + 2).min(cth);
+            let mut chroma = Vec::new();
+            if colour {
+                chroma.reserve_exact((hi - lo) * cw);
+                (lo..hi).for_each(|cy| chroma_row(cy, &mut chroma));
+            }
+            let chroma_at = |j: usize| chroma.get((j - lo) * cw..(j - lo + 1) * cw);
+            lines.resize((by1 - by0) * nw * 4, 0.);
+            lines.par_chunks_mut(nw * 4).enumerate().for_each_init(
+                || vec![0f32; w * 4],
+                |line, (k, to)| {
+                    let y = by0 + k;
+                    let ly = y - r * th;
+                    // Vertically centred chroma: three parts its own row to one of the nearer
+                    // neighbour.
+                    let (here, other) = if colour {
+                        let j = ly >> sy;
+                        let here = chroma_at(j).unwrap_or(&[]);
+                        let other = match (sy, ly % 2) {
+                            (0, _) => None,
+                            (_, 0) if j > lo => chroma_at(j - 1),
+                            (_, 0) => Some(carry.as_slice()).filter(|c| !c.is_empty()),
+                            _ => chroma_at(j + 1),
+                        };
+                        (here, other.unwrap_or(here))
+                    } else {
+                        (&[][..], &[][..])
+                    };
+                    let mix = |i: usize| {
+                        let (a, b) = (here[i], other[i]);
+                        (0.75 * a.0 + 0.25 * b.0, 0.75 * a.1 + 0.25 * b.1)
+                    };
+                    for (i, px) in line.chunks_exact_mut(4).enumerate() {
+                        let x = x0 + i - c0 * tw;
+                        let (t, lx) = (x / tw, x % tw);
+                        let luma = planes[t][0].at(wide, mask, lx, ly);
+                        let rgba = match out {
+                            Out::Luma => {
+                                let v = luma * 255. / luma_max;
+                                [v, v, v, 255.]
                             }
-                            let other = if ly % 2 == 0 {
-                                if j > lo { Some(&chroma[j - lo - 1]) } else { carry.as_ref() }
-                            } else {
-                                chroma.get(j + 1 - lo)
-                            };
-                            let other = other.unwrap_or(here);
-                            here.iter().zip(other).map(|(a, b)| (0.75 * a.0 + 0.25 * b.0, 0.75 * a.1 + 0.25 * b.1)).collect()
-                        });
-                        for (i, px) in line.chunks_exact_mut(4).enumerate() {
-                            let x = x0 + i - c0 * tw;
-                            let (t, lx) = (x / tw, x % tw);
-                            let luma = band[t].sample(0, lx, ly);
-                            let rgba = match out {
-                                Out::Luma => {
-                                    let v = luma * 255. / luma_max;
-                                    [v, v, v, 255.]
-                                }
-                                Out::Colour { alpha } => {
-                                    // Horizontally co-sited: odd columns sit between two samples.
-                                    let c = crow.as_ref().map(|cr| {
-                                        let ci = t * ctw + (lx >> sx);
-                                        if sx == 0 || lx % 2 == 0 {
-                                            cr[ci]
-                                        } else {
-                                            let (a, b) = (cr[ci], cr[(ci + 1).min(cr.len() - 1)]);
-                                            ((a.0 + b.0) / 2., (a.1 + b.1) / 2.)
-                                        }
-                                    });
-                                    let [r, g, b] = m.rgb(luma, c).map(|v| v.clamp(0., 255.));
-                                    match alpha {
-                                        Some(a) => {
-                                            let a = f32::from(a[(y - y0) * w + i]);
-                                            let k = a / 255.;
-                                            [r * k, g * k, b * k, a]
-                                        }
-                                        None => [r, g, b, 255.],
+                            Out::Colour { alpha } => {
+                                // Horizontally co-sited: odd columns sit between two samples.
+                                let c = (!here.is_empty()).then(|| {
+                                    let ci = t * ctw + (lx >> sx);
+                                    if sx == 0 || lx % 2 == 0 {
+                                        mix(ci)
+                                    } else {
+                                        let (a, b) = (mix(ci), mix((ci + 1).min(cw - 1)));
+                                        ((a.0 + b.0) / 2., (a.1 + b.1) / 2.)
                                     }
+                                });
+                                let [r, g, b] = m.rgb(luma, c).map(|v| v.clamp(0., 255.));
+                                match alpha {
+                                    Some(a) => {
+                                        let a = f32::from(a[(y - y0) * w + i]);
+                                        let k = a / 255.;
+                                        [r * k, g * k, b * k, a]
+                                    }
+                                    None => [r, g, b, 255.],
                                 }
-                            };
-                            px.copy_from_slice(&rgba);
-                        }
-                        let mut to = vec![0f32; nw * 4];
-                        across.apply(line, &mut to);
-                        to
-                    },
-                )
-                .collect();
-            for (i, line) in lines.iter().enumerate() {
-                row(by0 + i - y0, line);
+                            }
+                        };
+                        px.copy_from_slice(&rgba);
+                    }
+                    across.apply(line, to);
+                },
+            );
+            for (k, line) in lines.chunks_exact(nw * 4).enumerate() {
+                row(by0 + k - y0, line);
             }
             if colour && sy > 0 {
-                carry = Some(chroma_row(cth - 1));
+                carry.clear();
+                chroma_row(cth - 1, &mut carry);
             }
         }
         Some(())
