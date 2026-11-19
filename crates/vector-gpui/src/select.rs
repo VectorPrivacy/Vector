@@ -294,10 +294,25 @@ fn floor_char(text: &str, mut at: usize) -> Option<usize> {
     Some(at)
 }
 
+/// What a double-click or a word jump keeps together: letters, spaces, punctuation. Japanese and
+/// Chinese write without spaces, so kanji, hiragana and katakana each make their own runs:
+/// 東京|で|カフェ|を rather than the whole sentence.
+pub fn word_class(c: char) -> u8 {
+    match c {
+        '_' => 0,
+        '\u{3005}' | '\u{3006}' | '\u{3007}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{20000}'..='\u{3134f}' => 3,
+        '\u{3041}'..='\u{309f}' => 4,
+        '\u{30a0}'..='\u{30ff}' | '\u{31f0}'..='\u{31ff}' | '\u{ff66}'..='\u{ff9f}' => 5,
+        c if c.is_alphanumeric() => 0,
+        c if c.is_whitespace() => 1,
+        _ => 2,
+    }
+}
+
 /// The run under `offset`: word characters, punctuation or spaces, as a double-click picks.
 fn word_around(text: &str, offset: usize) -> Range<usize> {
     let offset = floor_char(text, offset.min(text.len())).unwrap_or(0);
-    let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+    let class = word_class;
     let here = text[offset..]
         .chars()
         .next()
@@ -341,5 +356,17 @@ mod tests {
         assert_eq!(&t[word_around(t, 8)], "brave");
         assert_eq!(&t[word_around(t, 5)], " ");
         assert_eq!(&t[word_around(t, t.len())], "world");
+    }
+
+    #[test]
+    fn japanese_words_split_by_script() {
+        let t = "今日は東京でカフェを見つけました。";
+        let at = |s: &str| t.find(s).unwrap();
+        assert_eq!(&t[word_around(t, at("東京"))], "東京");
+        assert_eq!(&t[word_around(t, at("で"))], "で");
+        assert_eq!(&t[word_around(t, at("フェ"))], "カフェ");
+        assert_eq!(&t[word_around(t, at("つけ"))], "つけました");
+        assert_eq!(&t[word_around(t, at("。"))], "。");
+        assert_eq!(&t[word_around(t, 0)], "今日");
     }
 }

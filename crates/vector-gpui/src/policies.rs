@@ -961,7 +961,7 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
     };
     if let Some(e) = &p.preview_error {
         return frame()
-            .child(warn().mt_0().child(t::policies_preview_failed(e.as_str())))
+            .child(warn().mt_0().child(t::policies_preview_failed(&*crate::coretext::say(e))))
             .into_any_element();
     }
     let Some(res) = &p.preview else {
@@ -1052,7 +1052,7 @@ fn preview(p: &Policies, mo: &Moderation, store: &crate::data::Store) -> AnyElem
                             .truncate()
                             .text_size(px(11.5))
                             .text_color(muted())
-                            .child(r["reasons"][0].as_str().unwrap_or("").to_string()),
+                            .child(crate::coretext::say(r["reasons"][0].as_str().unwrap_or("")).into_owned()),
                     )
                     .child(div().text_size(px(11.)).text_color(muted()).child({
                         let score = r["score"].as_u64().unwrap_or(0);

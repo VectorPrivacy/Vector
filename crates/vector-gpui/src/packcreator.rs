@@ -1770,7 +1770,7 @@ impl EmojiPicker {
                                     .text_size(px(11.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(c(DANGER))
-                                    .child(e)
+                                    .child(crate::coretext::say(&e).into_owned())
                             }))
                             .child(
                                 div()

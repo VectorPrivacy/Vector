@@ -3,6 +3,7 @@
 //! block names the CSS selector it reproduces.
 
 use crate::kit::Tipped as _;
+use crate::lang::LangFonts as _;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -3531,7 +3532,7 @@ impl VectorApp {
             "community_relay_move" => {
                 if let Some(r) = self.rekey.as_mut() {
                     let pct = payload.get("pct").and_then(Value::as_f64).unwrap_or(0.) as f32;
-                    let label = payload.get("label").and_then(Value::as_str).map(str::to_string);
+                    let label = payload.get("label").and_then(Value::as_str).map(|l| crate::coretext::say(l).into_owned());
                     r.set(pct, label);
                 }
             }
@@ -3621,7 +3622,7 @@ impl VectorApp {
                 ) {
                     self.fail_reasons
                         .borrow_mut()
-                        .insert(id.to_string(), reason.to_string());
+                        .insert(id.to_string(), crate::coretext::say(reason).into_owned());
                 }
                 let Some(msg) = payload
                     .get("message")
@@ -6711,6 +6712,7 @@ impl VectorApp {
             .flex_col()
             .bg(c(APP_BG))
             .font_family(INTER)
+            .lang_fonts()
             .text_color(c(TEXT))
             .text_size(px(16.))
             .line_height(px(24.));
@@ -9689,6 +9691,9 @@ impl VectorApp {
                 cx.defer(move |cx| {
                     app.update(cx, |app, cx| app.audio_work(probes, cx)).ok();
                 });
+            }
+            for (msg, att) in std::mem::take(&mut media.borrow_mut().size_queue) {
+                let _ = backend::run(backend::attachments::probe_size(msg, att));
             }
             let autos = std::mem::take(&mut media.borrow_mut().auto_queue);
             if !autos.is_empty() {
@@ -13845,7 +13850,7 @@ impl VectorApp {
                 if let Some(bad) = checks.iter().find(|c| !c.ok) {
                     let mut popup = kit::Popup::notice(t::community_settings_relay_refused());
                     let why = bad.reason.clone().unwrap_or_else(|| t::community_settings_relay_cant_hold(bad.relay.as_str()).into());
-                    popup.text = Some(kit::escape(&why).into());
+                    popup.text = Some(kit::escape(&crate::coretext::say(&why)).into());
                     this.popup = Some((popup, PopupAct::Notice));
                     return;
                 }
@@ -17237,6 +17242,12 @@ impl VectorApp {
                     self.call_cmd(backend::calls::set_volume(v), cx);
                 }
             }
+            Act::ShareVolume(v) => {
+                if (v - self.call.share_volume).abs() > f32::EPSILON {
+                    self.call.share_volume = v;
+                    self.call_cmd(backend::calls::set_share_volume(v), cx);
+                }
+            }
             Act::Audio(which, on) => {
                 let mut a = self.call_audio.unwrap_or_default();
                 match which {
@@ -19688,6 +19699,7 @@ impl VectorApp {
     }
 
     fn show_toast(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = &*crate::coretext::say(text);
         let at = std::time::Instant::now();
         self.toast = Some((text.to_string().into(), at));
         let hold = (1500 + text.chars().count() as u64 * 40).min(6000);

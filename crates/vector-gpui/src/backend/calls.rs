@@ -31,6 +31,10 @@ pub async fn set_volume(volume: f32) -> Result<(), String> {
     vector_core::db::scoped(session::set_volume(volume)).await
 }
 
+pub async fn set_share_volume(volume: f32) -> Result<(), String> {
+    vector_core::db::scoped(session::set_share_volume(volume)).await
+}
+
 /// The call the session holds, for a UI that missed its events.
 pub fn status() -> Option<serde_json::Value> {
     session::snapshot().and_then(|s| serde_json::to_value(s).ok())

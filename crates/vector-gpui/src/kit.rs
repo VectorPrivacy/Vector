@@ -4,6 +4,7 @@
 use gpui::{AnimationExt, AnyElement, App, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::lang::LangFonts as _;
 use crate::theme::*;
 
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
@@ -555,8 +556,12 @@ pub struct Popup {
 
 impl Popup {
     pub fn notice(title: impl Into<SharedString>) -> Self {
+        let title: SharedString = title.into();
         Self {
-            title: title.into(),
+            title: match crate::coretext::say(&title) {
+                std::borrow::Cow::Owned(said) => said.into(),
+                std::borrow::Cow::Borrowed(_) => title,
+            },
             text: None,
             icon: Some("icons/vector_warning.svg"),
             confirm: crate::t::dialog_okay(),
@@ -588,6 +593,10 @@ pub fn popup(
             .child(p.title.clone()),
     );
     if let Some(text) = &p.text {
+        let text = &match crate::coretext::say(text) {
+            std::borrow::Cow::Owned(said) => SharedString::from(said),
+            std::borrow::Cow::Borrowed(_) => text.clone(),
+        };
         let body: AnyElement = if text.contains('<') || text.contains('&') {
             rich(text).into_any_element()
         } else {
@@ -1199,6 +1208,7 @@ impl gpui::Render for Tip {
             .border_1()
             .border_color(crate::theme::white_a(0.1))
             .font_family(crate::theme::INTER)
+            .lang_fonts()
             .text_size(gpui::px(12.))
             .text_color(crate::theme::white_a(0.9))
             .child(self.0.clone())

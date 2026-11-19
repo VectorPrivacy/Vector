@@ -58,12 +58,17 @@ unread-jump = { $count ->
 - **Right-to-left languages** (Arabic, Hebrew, Persian, Urdu…) need no direction marks. A
   translated sentence reads right to left even when it opens with a Latin name or a value, and
   the app mirrors its layout to match.
+- **`core.ftl`** holds what Vector's engine says: errors, network status, moderation policies.
+  The app recognises each English line the engine writes and shows yours in its place, so
+  translate them like any other message. A value marked "often in English" is a technical
+  reason from a server or library, and stays as it came.
 
 ## Numbers and dates
 
 Numbers, sizes, lists and dates follow your language through an optional `locale.json` in its
-folder. Leave out any field English already gets right. Take the values from
-[CLDR](https://cldr.unicode.org/) for your language:
+folder. Leave out any field English already gets right. For about forty languages `new` writes
+one from [CLDR](https://cldr.unicode.org/) (`seeds/`, made by `scripts/cldr_seeds.py`); check it
+reads naturally. Otherwise take the values from CLDR for your language:
 
 ```json
 {

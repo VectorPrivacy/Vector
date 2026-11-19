@@ -1,0 +1,16 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " ja ",
+  "list_pair": " ja ",
+  "dates": {
+    "months": ["tammikuuta", "helmikuuta", "maaliskuuta", "huhtikuuta", "toukokuuta", "kesäkuuta", "heinäkuuta", "elokuuta", "syyskuuta", "lokakuuta", "marraskuuta", "joulukuuta"],
+    "months_short": ["tammik.", "helmik.", "maalisk.", "huhtik.", "toukok.", "kesäk.", "heinäk.", "elok.", "syysk.", "lokak.", "marrask.", "jouluk."],
+    "weekdays": ["sunnuntaina", "maanantaina", "tiistaina", "keskiviikkona", "torstaina", "perjantaina", "lauantaina"],
+    "weekdays_short": ["su", "ma", "ti", "ke", "to", "pe", "la"],
+    "am_pm": ["ap.", "ip."],
+    "patterns": ["d.M.y", "dd.MM.y", "d. MMM y", "d. MMMM y", "cccc d. MMMM y", "d. MMM", "ccc d. MMM", "E d. MMM y", "ccc"],
+    "times": ["h.mm a", "h.mm.ss a", "H.mm", "H.mm.ss"],
+    "date_time": "{0} {1}"
+  }
+}

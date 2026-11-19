@@ -1,0 +1,16 @@
+{
+  "decimal": ",",
+  "group": ".",
+  "list_last": " ve ",
+  "list_pair": " ve ",
+  "dates": {
+    "months": ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"],
+    "months_short": ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"],
+    "weekdays": ["Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi"],
+    "weekdays_short": ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"],
+    "am_pm": ["ÖÖ", "ÖS"],
+    "patterns": ["dd.MM.y", "dd.MM.y", "d MMM y", "d MMMM y", "d MMMM y EEEE", "d MMM", "d MMM E", "d MMM y E", "ccc"],
+    "times": ["a h:mm", "a h:mm:ss", "HH:mm", "HH:mm:ss"],
+    "date_time": "{0} {1}"
+  }
+}

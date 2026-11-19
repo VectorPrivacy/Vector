@@ -93,6 +93,10 @@ fn new(tag: &str, root: &Path) {
         let header = format!("### {tag}: mirrors en-GB/{name}. Translate a message by copying its id from English.\n");
         std::fs::write(dir.join(&name), header).unwrap();
     }
+    let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("seeds").join(format!("{tag}.json"));
+    if std::fs::copy(&seed, dir.join("locale.json")).is_ok() {
+        println!("locale.json starts from CLDR's data for {tag}: check it, then keep or change it");
+    }
     println!("created {}", dir.display());
 }
 

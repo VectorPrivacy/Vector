@@ -309,7 +309,7 @@ impl VectorApp {
             } else {
                 self.store.borrow().fixture_presets.clone()
             };
-            if let Some(cat) = cat {
+            if let Some(cat) = cat.map(crate::coretext::say_presets) {
                 p.presets = cat["presets"].as_array().cloned().unwrap_or_default();
                 p.kinds = cat["rule_kinds"].as_array().cloned().unwrap_or_default();
             }

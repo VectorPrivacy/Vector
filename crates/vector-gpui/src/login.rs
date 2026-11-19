@@ -303,7 +303,7 @@ impl LoginView {
         let text: AnyElement = if let Some(p) = &o.busy {
             div().child(t::language_downloading(p.load(std::sync::atomic::Ordering::Relaxed).min(1000) / 10)).into_any_element()
         } else if let Some(e) = &o.error {
-            div().text_color(c(0xFCA559)).child(t::language_download_failed(e.as_str())).into_any_element()
+            div().text_color(c(0xFCA559)).child(t::language_download_failed(&*crate::coretext::say(e))).into_any_element()
         } else {
             let strong = gpui::HighlightStyle { color: Some(c(0xffffff)), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
             div().child(kit::run_text(&t::language_offer(kit::escape(o.name)), strong)).into_any_element()

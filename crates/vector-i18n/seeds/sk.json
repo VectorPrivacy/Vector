@@ -1,0 +1,15 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " a ",
+  "list_pair": " a ",
+  "dates": {
+    "months": ["januára", "februára", "marca", "apríla", "mája", "júna", "júla", "augusta", "septembra", "októbra", "novembra", "decembra"],
+    "months_short": ["jan", "feb", "mar", "apr", "máj", "jún", "júl", "aug", "sep", "okt", "nov", "dec"],
+    "weekdays": ["nedeľa", "pondelok", "utorok", "streda", "štvrtok", "piatok", "sobota"],
+    "weekdays_short": ["ne", "po", "ut", "st", "št", "pi", "so"],
+    "am_pm": ["AM", "PM"],
+    "patterns": ["d. M. y", "dd. MM. y", "d. M. y", "d. MMMM y", "EEEE d. MMMM y", "d. M.", "E d. M.", "E d. M. y", "ccc"],
+    "times": ["h:mm a", "h:mm:ss a", "H:mm", "H:mm:ss"]
+  }
+}

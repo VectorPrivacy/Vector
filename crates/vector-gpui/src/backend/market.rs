@@ -169,7 +169,8 @@ pub fn permission_rows(requested: &str, granted: &str) -> Vec<(String, String, S
         .filter(|s| !s.is_empty())
         .filter_map(|id| {
             let info = known.iter().find(|p| p.id == id)?;
-            Some((id.to_string(), info.label.clone(), info.description.clone(), granted.contains(&id)))
+            let say = |s: &str| crate::coretext::say(s).into_owned();
+            Some((id.to_string(), say(&info.label), say(&info.description), granted.contains(&id)))
         })
         .collect()
 }

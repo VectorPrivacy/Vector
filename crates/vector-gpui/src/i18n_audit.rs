@@ -12,10 +12,19 @@ use std::path::Path;
 
 /// `(line, literal)` for each string literal in shipping code, comments and tests left out.
 pub fn literals(src: &str) -> Vec<(usize, String)> {
-    let shipping = match src.find("\n#[cfg(test)]\nmod tests") {
-        Some(i) => &src[..i],
-        None => src,
-    };
+    // A top-level test module ends at the first unindented `}` after it.
+    let mut kept = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(i) = rest.find("\n#[cfg(test)]\nmod ").filter(|i| rest[i + 19..].lines().next().is_some_and(|l| l.ends_with('{'))) {
+        kept.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        let end = after.find("\n}\n").map_or(after.len(), |e| e + 3);
+        // Blank lines keep every later literal on its own line number.
+        kept.extend(std::iter::repeat_n('\n', after[..end].matches('\n').count() + 1));
+        rest = &after[end..];
+    }
+    kept.push_str(rest);
+    let shipping = kept.as_str();
     let b = shipping.as_bytes();
     let (mut i, mut line) = (0, 1);
     let mut out = vec![];
@@ -173,8 +182,9 @@ pub fn offenders(src: &Path) -> BTreeMap<String, Vec<(usize, String)>> {
             }
             let rel = p.strip_prefix(src).unwrap().to_string_lossy().replace('\\', "/");
             // Not app text: the developer bridge, code keywords to colour, file-format parsers,
-            // test data, and the language-name table that packs will replace with CLDR names.
-            if matches!(rel.as_str(), "devctl.rs" | "i18n_audit.rs" | "t.rs" | "highlight.rs" | "langnames.rs")
+            // test data, the language-name table that packs will replace with CLDR names, and the
+            // English that vector-core writes, which `coretext` matches lines against.
+            if matches!(rel.as_str(), "devctl.rs" | "i18n_audit.rs" | "t.rs" | "highlight.rs" | "langnames.rs" | "coretext_table.rs")
                 || ["bin/", "model3d/", "testdata/"].iter().any(|d| rel.starts_with(d))
             {
                 continue;

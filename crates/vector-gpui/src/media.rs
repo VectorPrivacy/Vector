@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui::{App, RenderImage, WeakEntity};
 use image::{
-    AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageReader, imageops::FilterType,
+    DynamicImage, Frame, ImageDecoder, ImageReader, imageops::FilterType,
 };
 
 /// A bubble's picture box: `min(450/w, 350/h, 1)`.
@@ -171,6 +171,10 @@ pub struct Media {
     wants: Vec<Want>,
     /// Downloads the renderer asks the app to start: (msg id, attachment id).
     pub auto_queue: Vec<(String, String)>,
+    /// Attachments that came without a size and asked their server for it, once a session.
+    pub sized: HashSet<String>,
+    /// Size asks the renderer leaves for the app: (msg id, attachment id).
+    pub size_queue: Vec<(String, String)>,
     linked: HashMap<String, Linked>,
     linked_wants: Vec<String>,
     /// The messages each linked picture shows in, and the pictures done loading (or failed)
@@ -759,11 +763,11 @@ pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
 /// each scaled to `to` when that is smaller. `None` for anything that doesn't animate.
 fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<Frame>, u32, u32)> {
     if bytes.starts_with(b"GIF8") {
-        let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
-        let (w, h) = dec.dimensions();
+        let gif = GifCanvas::new(bytes)?;
+        let (w, h) = (gif.canvas.width(), gif.canvas.height());
         // Each frame's Graphic Control Extension: a count close enough to size the budget by.
         let count = bytes.windows(3).filter(|w| *w == [0x21, 0xF9, 0x04]).count();
-        return frames_of(dec.into_frames(), w, h, count, &to);
+        return frames_of(gif, w, h, count, &to);
     }
     if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         // libwebp composites the frames: the image crate's compositor keeps parts of earlier
@@ -778,7 +782,7 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
             f.map(|(rgba, ms)| Frame::from_parts(rgba, 0, 0, image::Delay::from_numer_denom_ms(ms, 1)))
                 .map_err(|e| image::ImageError::IoError(std::io::Error::other(e)))
         });
-        return frames_of(image::Frames::new(Box::new(frames)), w, h, count, &to);
+        return frames_of(Decoded::new(image::Frames::new(Box::new(frames))), w, h, count, &to);
     }
     // An APNG declares itself with `acTL` before its first `IDAT`.
     if bytes.starts_with(b"\x89PNG") {
@@ -789,7 +793,7 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
         }
         let (frames, w, h) = apng_frames(bytes)?;
         let count = frames.len();
-        return frames_of(image::Frames::new(Box::new(frames.into_iter().map(Ok))), w, h, count, &to);
+        return frames_of(Decoded::new(image::Frames::new(Box::new(frames.into_iter().map(Ok)))), w, h, count, &to);
     }
     None
 }
@@ -906,42 +910,135 @@ const MIN_SHRINK: f64 = 0.75;
 /// the GPU, so a long animation keeps every other frame (twice as long each) until it fits.
 const ANIMATION_BUDGET: usize = 24 << 20;
 
+/// An animation one frame at a time: its delay first, its pixels only for a frame that is kept.
+trait FrameSource {
+    /// The next frame's delay in ms; None at the end, or at a frame that won't decode.
+    fn advance(&mut self) -> Option<u32>;
+    /// The frame `advance` reached, scaled to `to` when given.
+    fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage;
+}
+
+/// Frames a decoder hands over whole.
+struct Decoded<'a> {
+    frames: image::Frames<'a>,
+    at: Option<image::RgbaImage>,
+}
+
+impl<'a> Decoded<'a> {
+    fn new(frames: image::Frames<'a>) -> Self {
+        Self { frames, at: None }
+    }
+}
+
+impl FrameSource for Decoded<'_> {
+    fn advance(&mut self) -> Option<u32> {
+        let f = self.frames.next()?.ok()?;
+        let (n, d) = f.delay().numer_denom_ms();
+        self.at = Some(f.into_buffer());
+        Some(n / d.max(1))
+    }
+
+    fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage {
+        let buf = self.at.take().unwrap_or_default();
+        match to {
+            Some((w, h)) => gpui::resize_premultiplied(buf, w, h),
+            None => buf,
+        }
+    }
+}
+
+/// A GIF composited on one canvas the whole way through, as the image crate composites it, but
+/// with no buffer per frame: a long GIF scrolled past decoded hundreds of megabytes of frames
+/// only to keep a few.
+struct GifCanvas<'a> {
+    reader: gif::Decoder<Cursor<&'a [u8]>>,
+    /// What the next frame draws over: every frame so far, each disposed as it asked.
+    canvas: image::RgbaImage,
+    /// The frame just reached, drawn over the canvas.
+    shown: image::RgbaImage,
+    raw: Vec<u8>,
+}
+
+impl<'a> GifCanvas<'a> {
+    fn new(bytes: &'a [u8]) -> Option<Self> {
+        let mut opts = gif::DecodeOptions::new();
+        opts.set_color_output(gif::ColorOutput::RGBA);
+        let reader = opts.read_info(Cursor::new(bytes)).ok()?;
+        let (w, h) = (u32::from(reader.width()), u32::from(reader.height()));
+        Some(Self { reader, canvas: image::RgbaImage::new(w, h), shown: image::RgbaImage::new(w, h), raw: Vec::new() })
+    }
+}
+
+impl FrameSource for GifCanvas<'_> {
+    fn advance(&mut self) -> Option<u32> {
+        let f = self.reader.next_frame_info().ok()??;
+        let (left, top, fw, fh) = (f.left as usize, f.top as usize, f.width as usize, f.height as usize);
+        let (dispose, delay) = (f.dispose, u32::from(f.delay) * 10);
+        self.raw.resize(self.reader.buffer_size(), 0);
+        self.reader.read_into_buffer(&mut self.raw).ok()?;
+        let cw = self.canvas.width() as usize;
+        let ch = self.canvas.height() as usize;
+        self.shown.copy_from_slice(&self.canvas);
+        // The part of the frame on the canvas: a frame may overhang it.
+        let (xs, ys) = (fw.min(cw.saturating_sub(left)), fh.min(ch.saturating_sub(top)));
+        for y in 0..ys {
+            let src = &self.raw[y * fw * 4..][..xs * 4];
+            let at = ((top + y) * cw + left) * 4;
+            let shown = &mut (*self.shown)[at..at + xs * 4];
+            let canvas = &mut (*self.canvas)[at..at + xs * 4];
+            for ((s, o), c) in src.chunks_exact(4).zip(shown.chunks_exact_mut(4)).zip(canvas.chunks_exact_mut(4)) {
+                if s[3] != 0 {
+                    o.copy_from_slice(s);
+                }
+                match dispose {
+                    gif::DisposalMethod::Any | gif::DisposalMethod::Keep => c.copy_from_slice(o),
+                    gif::DisposalMethod::Background => c.fill(0),
+                    gif::DisposalMethod::Previous => {}
+                }
+            }
+        }
+        Some(delay)
+    }
+
+    fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage {
+        match to {
+            // `shown` is drawn afresh from the canvas each frame, so it may be scaled in place.
+            Some((w, h)) => gpui::resize_premultiplied_from(&mut self.shown, w, h),
+            None => self.shown.clone(),
+        }
+    }
+}
+
 fn frames_of(
-    frames: image::Frames<'_>,
+    mut frames: impl FrameSource,
     w: u32,
     h: u32,
     count: usize,
     to: &impl Fn(u32, u32) -> (u32, u32),
 ) -> Option<(Vec<Frame>, u32, u32)> {
     let (tw, th) = fit_budget(to(w, h), count);
-    let scale = tw < w || th < h;
-    let ms = |d: image::Delay| {
-        let (n, d) = d.numer_denom_ms();
-        // Browsers play 10ms or less as 100ms.
-        match n / d.max(1) {
-            0..=10 => 100,
-            v => v,
-        }
+    let scale = (tw < w || th < h).then_some((tw.max(1), th.max(1)));
+    // Browsers play 10ms or less as 100ms.
+    let ms = |v: u32| match v {
+        0..=10 => 100,
+        v => v,
     };
     let mut kept: Vec<(image::RgbaImage, u32)> = Vec::new();
     let mut bytes = 0usize;
     let mut stride = 1usize;
-    for (i, f) in frames.enumerate() {
-        // A damaged frame ends the animation there, as browsers play what decodes.
-        let Ok(f) = f else { break };
-        let delay = ms(f.delay());
-        if i % stride != 0 {
+    let mut i = 0usize;
+    // A damaged frame ends the animation there, as browsers play what decodes.
+    while let Some(delay) = frames.advance() {
+        let delay = ms(delay);
+        let skip = i % stride != 0;
+        i += 1;
+        if skip {
             if let Some(last) = kept.last_mut() {
                 last.1 += delay;
             }
             continue;
         }
-        let buf = f.into_buffer();
-        let buf = if scale {
-            gpui::resize_premultiplied(buf, tw.max(1), th.max(1))
-        } else {
-            buf
-        };
+        let buf = frames.take(scale);
         bytes += buf.len();
         kept.push((buf, delay));
         if bytes > ANIMATION_BUDGET && kept.len() > 1 {
@@ -1077,6 +1174,42 @@ mod tests {
 
     fn kept(media: &super::Media, names: &[&str]) -> Vec<String> {
         names.iter().filter(|n| media.custom.contains_key(**n)).map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_gif_composites_as_the_image_crate_does() {
+        use super::FrameSource as _;
+        use gif::DisposalMethod::*;
+        use image::AnimationDecoder as _;
+        let (w, h) = (24u16, 16u16);
+        let mut bytes = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut bytes, w, h, &[]).unwrap();
+            for (i, dispose) in [Keep, Background, Previous, Any, Keep, Previous, Background, Keep, Any].into_iter().enumerate() {
+                let (fw, fh) = (8 + i as u16 % 3 * 4, 6 + i as u16 % 2 * 5);
+                let mut rgba = vec![0u8; fw as usize * fh as usize * 4];
+                for (j, px) in rgba.chunks_exact_mut(4).enumerate() {
+                    if (i + j) % 5 != 0 {
+                        px.copy_from_slice(&[(i * 30) as u8, (j * 7) as u8, (255 - i * 20) as u8, 255]);
+                    }
+                }
+                let mut f = gif::Frame::from_rgba_speed(fw, fh, &mut rgba, 30);
+                f.left = (i as u16 * 3) % (w - fw + 1);
+                f.top = (i as u16 * 2) % (h - fh + 1);
+                f.dispose = dispose;
+                f.delay = i as u16;
+                enc.write_frame(&f).unwrap();
+            }
+        }
+        let expect: Vec<_> = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&bytes)).unwrap().into_frames().map(Result::unwrap).collect();
+        assert_eq!(expect.len(), 9);
+        let mut gif = super::GifCanvas::new(&bytes).unwrap();
+        for (i, e) in expect.iter().enumerate() {
+            let (n, d) = e.delay().numer_denom_ms();
+            assert_eq!(gif.advance(), Some(n / d), "frame {i}");
+            assert_eq!(&gif.take(None), e.buffer(), "frame {i}");
+        }
+        assert_eq!(gif.advance(), None);
     }
 
     #[test]

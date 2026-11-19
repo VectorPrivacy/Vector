@@ -1042,7 +1042,7 @@ impl SecurityFlow {
             }
             Stage::Error => {
                 body = body
-                    .child(lead(SharedString::from(x.error.clone()), false))
+                    .child(lead(SharedString::from(crate::coretext::say(&x.error).into_owned()), false))
                     .child(
                         actions()
                             .child(button(

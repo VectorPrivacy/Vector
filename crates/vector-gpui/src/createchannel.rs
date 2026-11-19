@@ -342,7 +342,7 @@ pub fn view(m: &CreateChannel, on: &OnAct, window: &Window, cx: &App) -> impl In
                 .text_size(px(12.5))
                 .line_height(px(17.5))
                 .text_color(c(crate::timeline::DANGER))
-                .child(e)
+                .child(crate::coretext::say(&e).into_owned())
         }))
         .child(
             div()

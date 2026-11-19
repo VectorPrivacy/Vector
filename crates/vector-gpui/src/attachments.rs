@@ -93,6 +93,16 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         } else {
             Phase::Idle
         };
+        // Auto-download weighs a file by its size, so one sent without it asks its server.
+        if matches!(phase, Phase::Idle)
+            && att.size == 0
+            && !unsent
+            && !ctx.held
+            && (att.url.starts_with("https://") || att.url.starts_with("http://"))
+            && media.sized.insert(att.id.clone())
+        {
+            media.size_queue.push((m.id.clone(), att.id.clone()));
+        }
         let (el, bottom) = match phase {
             Phase::Ready if crate::audio::EXTENSIONS.contains(&e.as_str()) && !unsent => {
                 let input = match source(ctx, att) {

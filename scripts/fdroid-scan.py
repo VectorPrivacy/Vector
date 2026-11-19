@@ -44,8 +44,8 @@ def main():
         common.options = argparse.Namespace(verbose=True, json=False)
         app = metadata.read_metadata()['io.vectorapp']
         build = app['Builds'][-1]
-        # scandelete/scanignore act on the tree; this is a read-only check.
-        build.scandelete = []
+        # The tree is a copy, so scandelete removes from it as `fdroid build` would, and a
+        # scandelete path that matches nothing still counts as a problem.
         problems = scanner.scan_source(tree, build)
         print(f'fdroid scanner: {problems} problem(s)')
         return problems

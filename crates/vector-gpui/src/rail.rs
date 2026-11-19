@@ -2,6 +2,7 @@
 //! the communities this device holds, dragged to rearrange.
 
 use crate::kit::Tipped as _;
+use crate::lang::LangFonts as _;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -136,6 +137,7 @@ fn ghost_row() -> gpui::Div {
         .opacity(0.92)
         .shadow_lg()
         .font_family(RUBIK)
+        .lang_fonts()
         .text_size(px(14.))
         .text_color(c(0xffffff))
 }

@@ -1,0 +1,14 @@
+{
+  "decimal": ",",
+  "group": ".",
+  "list_last": " și ",
+  "list_pair": " și ",
+  "dates": {
+    "months": ["ianuarie", "februarie", "martie", "aprilie", "mai", "iunie", "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie"],
+    "months_short": ["ian.", "feb.", "mar.", "apr.", "mai", "iun.", "iul.", "aug.", "sept.", "oct.", "nov.", "dec."],
+    "weekdays": ["duminică", "luni", "marți", "miercuri", "joi", "vineri", "sâmbătă"],
+    "weekdays_short": ["dum.", "lun.", "mar.", "mie.", "joi", "vin.", "sâm."],
+    "am_pm": ["a.m.", "p.m."],
+    "patterns": ["dd.MM.y", "dd.MM.y", "d MMM y", "d MMMM y", "EEEE, d MMMM y", "d MMM", "E, d MMM", "E, d MMM y", "ccc"]
+  }
+}

@@ -32,6 +32,88 @@ pub fn digits(s: String) -> String {
     vector_i18n::locale().native(s)
 }
 
+/// Fonts for what the family lacks, in the active language's regional Han forms. The system's
+/// own fallback follows the system's language, so a Japanese app on an English desktop would
+/// otherwise draw kanji in Chinese forms.
+pub fn fallbacks() -> Option<gpui::FontFallbacks> {
+    static CHAIN: std::sync::Mutex<(u64, Option<gpui::FontFallbacks>)> = std::sync::Mutex::new((u64::MAX, None));
+    let generation = vector_i18n::generation();
+    let mut chain = CHAIN.lock().unwrap_or_else(|e| e.into_inner());
+    if chain.0 != generation {
+        let fonts = han(&vector_i18n::language()).map(|h| gpui::FontFallbacks::from_fonts(han_fonts(h).iter().map(|f| f.to_string()).collect()));
+        *chain = (generation, fonts);
+    }
+    chain.1.clone()
+}
+
+/// [`fallbacks`] on an element whose text doesn't inherit the window's: tooltips, drag ghosts.
+pub trait LangFonts: gpui::Styled + Sized {
+    fn lang_fonts(mut self) -> Self {
+        self.text_style().font_fallbacks = fallbacks();
+        self
+    }
+}
+
+impl<T: gpui::Styled> LangFonts for T {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Han {
+    Ja,
+    Ko,
+    Sc,
+    Tc,
+    Hk,
+}
+
+fn han(tag: &str) -> Option<Han> {
+    let mut parts = tag.split(['-', '_']);
+    let lang = parts.next()?.to_ascii_lowercase();
+    let rest: Vec<&str> = parts.collect();
+    let has = |x: &str| rest.iter().any(|p| p.eq_ignore_ascii_case(x));
+    Some(match lang.as_str() {
+        "ja" => Han::Ja,
+        "ko" => Han::Ko,
+        "zh" | "yue" if has("Hans") => Han::Sc, // i18n-exempt: script subtag
+        "zh" | "yue" if has("HK") || has("MO") => Han::Hk,
+        "zh" if has("Hant") || has("TW") => Han::Tc, // i18n-exempt: script subtag
+        "yue" => Han::Hk,
+        "zh" => Han::Sc,
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn han_fonts(h: Han) -> &'static [&'static str] {
+    match h {
+        Han::Ja => &["Hiragino Sans", "Hiragino Kaku Gothic ProN"], // i18n-exempt: font family names
+        Han::Ko => &["Apple SD Gothic Neo"], // i18n-exempt: font family names
+        Han::Sc => &["PingFang SC"], // i18n-exempt: font family names
+        Han::Tc => &["PingFang TC"], // i18n-exempt: font family names
+        Han::Hk => &["PingFang HK", "PingFang TC"], // i18n-exempt: font family names
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn han_fonts(h: Han) -> &'static [&'static str] {
+    match h {
+        Han::Ja => &["Yu Gothic UI", "Meiryo UI", "Meiryo", "MS UI Gothic"], // i18n-exempt: font family names
+        Han::Ko => &["Malgun Gothic"], // i18n-exempt: font family names
+        Han::Sc => &["Microsoft YaHei UI", "Microsoft YaHei"], // i18n-exempt: font family names
+        Han::Tc | Han::Hk => &["Microsoft JhengHei UI", "Microsoft JhengHei"], // i18n-exempt: font family names
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn han_fonts(h: Han) -> &'static [&'static str] {
+    match h {
+        Han::Ja => &["Noto Sans CJK JP", "Noto Sans JP", "Source Han Sans JP", "IPAGothic", "IPAexGothic", "VL Gothic", "TakaoGothic"], // i18n-exempt: font family names
+        Han::Ko => &["Noto Sans CJK KR", "Noto Sans KR", "Source Han Sans KR", "NanumGothic", "UnDotum"], // i18n-exempt: font family names
+        Han::Sc => &["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "WenQuanYi Zen Hei"], // i18n-exempt: font family names
+        Han::Tc => &["Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC", "AR PL UMing TW"], // i18n-exempt: font family names
+        Han::Hk => &["Noto Sans CJK HK", "Noto Sans HK", "Source Han Sans HC", "Noto Sans CJK TC", "AR PL UMing HK"], // i18n-exempt: font family names
+    }
+}
+
 /// Where downloaded packs live, beside the device settings.
 pub fn packs_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("languages")
@@ -147,4 +229,28 @@ fn system_hour12() -> Option<bool> {
 #[cfg(not(any(target_os = "macos", windows)))]
 fn system_hour12() -> Option<bool> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn han_forms_follow_the_tag() {
+        assert_eq!(han("ja"), Some(Han::Ja));
+        assert_eq!(han("ja-JP"), Some(Han::Ja));
+        assert_eq!(han("ko_KR"), Some(Han::Ko));
+        assert_eq!(han("zh"), Some(Han::Sc));
+        assert_eq!(han("zh-Hans"), Some(Han::Sc));
+        assert_eq!(han("zh-CN"), Some(Han::Sc));
+        assert_eq!(han("zh-Hant"), Some(Han::Tc));
+        assert_eq!(han("zh-TW"), Some(Han::Tc));
+        assert_eq!(han("zh-Hant-HK"), Some(Han::Hk));
+        assert_eq!(han("zh-HK"), Some(Han::Hk));
+        assert_eq!(han("zh-Hans-HK"), Some(Han::Sc));
+        assert_eq!(han("yue"), Some(Han::Hk));
+        assert_eq!(han("en-GB"), None);
+        assert_eq!(han("pt-BR"), None);
+        assert_eq!(han(""), None);
+    }
 }

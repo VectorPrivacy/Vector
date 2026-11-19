@@ -141,7 +141,7 @@ impl PublishForm {
 fn all_perms() -> Vec<(String, String, String, bool)> {
     vector_core::webxdc_permissions::get_all_permission_info()
         .into_iter()
-        .map(|p| (p.id, p.label, p.description, false))
+        .map(|p| (p.id, crate::coretext::say(&p.label).into_owned(), crate::coretext::say(&p.description).into_owned(), false))
         .collect()
 }
 

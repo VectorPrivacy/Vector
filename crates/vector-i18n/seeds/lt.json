@@ -1,0 +1,16 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " ir ",
+  "list_pair": " ir ",
+  "dates": {
+    "months": ["sausio", "vasario", "kovo", "balandžio", "gegužės", "birželio", "liepos", "rugpjūčio", "rugsėjo", "spalio", "lapkričio", "gruodžio"],
+    "months_short": ["saus.", "vas.", "kov.", "bal.", "geg.", "birž.", "liep.", "rugp.", "rugs.", "spal.", "lapkr.", "gruod."],
+    "weekdays": ["sekmadienis", "pirmadienis", "antradienis", "trečiadienis", "ketvirtadienis", "penktadienis", "šeštadienis"],
+    "weekdays_short": ["sk", "pr", "an", "tr", "kt", "pn", "št"],
+    "am_pm": ["priešpiet", "popiet"],
+    "patterns": ["y-MM-dd", "y-MM-dd", "y-MM-dd", "y 'm'. MMMM d 'd'.", "y 'm'. MMMM d 'd'., EEEE", "MM-dd", "MM-dd, E", "y-MM-dd, E", "ccc"],
+    "times": ["hh:mm a", "hh:mm:ss a", "HH:mm", "HH:mm:ss"],
+    "date_time": "{0} {1}"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "decimal": ",",
+  "group": ".",
+  "list_last": " in ",
+  "list_pair": " in ",
+  "dates": {
+    "months": ["januar", "februar", "marec", "april", "maj", "junij", "julij", "avgust", "september", "oktober", "november", "december"],
+    "months_short": ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "avg.", "sep.", "okt.", "nov.", "dec."],
+    "weekdays": ["nedelja", "ponedeljek", "torek", "sreda", "četrtek", "petek", "sobota"],
+    "weekdays_short": ["ned.", "pon.", "tor.", "sre.", "čet.", "pet.", "sob."],
+    "am_pm": ["dop.", "pop."],
+    "patterns": ["d. M. y", "dd. MM. y", "d. MMM y", "d. MMMM y", "EEEE, d. MMMM y", "d. MMM", "E, d. MMM", "E, d. MMM y", "ccc"]
+  }
+}
