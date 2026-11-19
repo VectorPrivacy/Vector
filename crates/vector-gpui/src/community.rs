@@ -52,6 +52,10 @@ pub enum Act {
     ChannelsMenu(gpui::Point<gpui::Pixels>),
     /// The open channel's ⋯.
     ChatMenu,
+    /// Search this channel.
+    Search,
+    /// The member pane's search.
+    Find(crate::search::Act),
     EditChannel(String),
     /// A member tapped: their mini profile, beside what was painted under the key.
     Member(String, SharedString),
@@ -132,6 +136,8 @@ pub struct View {
     pub loading: bool,
     pub panel: bool,
     pub search: Entity<TextInput>,
+    /// What the member pane's field finds beyond members: the Community's messages.
+    pub find: crate::search::Search,
     pub folded: HashSet<String>,
     pub scroll: gpui::ScrollHandle,
 }
@@ -732,6 +738,7 @@ pub fn header(
                         .child(crate::kit::one_line(&topic).into_owned())
                 })),
         )
+        .child(crate::search::button(click(on, || Act::Search)))
         .children(pins.map(crate::pins::button))
         .child(
             div()
@@ -990,6 +997,9 @@ fn member_row(store: &Store, cid: &str, npub: &str, owner: bool, colour: Option<
         )
 }
 
+/// Members listed above the messages while the pane searches.
+const MINI_MEMBERS: usize = 5;
+
 /// The roster's sections, filtered by the search, by rank, or why there are none.
 pub fn roster<E: ParentElement>(
     d: E,
@@ -1002,7 +1012,8 @@ pub fn roster<E: ParentElement>(
     visible: Option<(f32, f32)>,
     cx: &App,
 ) -> E {
-    let query = view.search.read(cx).text().trim().to_lowercase();
+    let finding = !view.search.read(cx).text().trim().is_empty();
+    let query = view.find.parsed.words.trim().to_lowercase();
     let owner = com.owner_npub.as_deref();
     let matches = |n: &&String| {
         query.is_empty()
@@ -1036,6 +1047,20 @@ pub fn roster<E: ParentElement>(
     };
     let mut everyone: Vec<&String> = everyone().filter(matches).collect();
     everyone.sort_by_cached_key(key);
+    if finding {
+        let colour = |n: &str| graph.filter(|g| g.activated).and_then(|g| g.highest(n, |r| r.color != 0)).map(|r| r.color);
+        let people = if query.is_empty() || !view.find.parsed.tokens.is_empty() { Vec::new() } else { everyone };
+        let rows = people
+            .iter()
+            .take(MINI_MEMBERS)
+            .map(|n| member_row(store, &com.community_id, n, owner == Some(n.as_str()), colour(n), view.unlisted.get(n.as_str()).map(String::as_str), on, anchors).into_any_element())
+            .collect();
+        let find: crate::search::OnAct = {
+            let on = on.clone();
+            Rc::new(move |a, w, cx| on(Act::Find(a), w, cx))
+        };
+        return d.children(crate::search::mini(&view.find, store, open, rows, people.len(), &find));
+    }
     let mut order: Vec<(String, String)> = Vec::new();
     if let Some(g) = graph {
         let mut heads: Vec<&GraphRole> = g.roles.iter().filter(|r| g.heads(r)).collect();

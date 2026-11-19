@@ -139,6 +139,7 @@ fn the_checker_reports_missing_obsolete_and_broken() {
 
 #[test]
 fn lookups_work_from_any_thread() {
+    let _g = SWITCH.lock().unwrap_or_else(|e| e.into_inner());
     let h = std::thread::spawn(|| t::day_today().to_string());
     let s = h.join().unwrap();
     assert!(s == "Today" || s.contains('Ŧ') || s == "day-today" || s == "Hoy" || s == "Region");

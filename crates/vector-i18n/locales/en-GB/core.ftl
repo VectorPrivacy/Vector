@@ -1016,3 +1016,7 @@ core-miniapp-invalid-mini-app = Invalid mini app: { $error }
 core-miniapp-invalid-manifest-too-large = Invalid manifest: too large
 # $error: a technical reason, often in English
 core-miniapp-invalid-manifest = Invalid manifest: { $error }
+# $error: a technical reason, often in English
+core-search-prepare-failed = Failed to prepare search query: { $error }
+# $error: a technical reason, often in English
+core-search-query-failed = Failed to run search query: { $error }

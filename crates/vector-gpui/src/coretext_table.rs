@@ -642,4 +642,6 @@
     ("Gyroscope", |_| Some(t::core_permission_gyroscope().to_string())),
     ("Magnetometer", |_| Some(t::core_permission_magnetometer().to_string())),
     ("Bluetooth", |_| Some(t::core_permission_bluetooth().to_string())),
+    ("Failed to prepare search query: {e}", |a| Some(t::core_search_prepare_failed(&a[0]).to_string())),
+    ("Failed to run search query: {e}", |a| Some(t::core_search_query_failed(&a[0]).to_string())),
 ]
