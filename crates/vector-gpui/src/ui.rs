@@ -20692,6 +20692,7 @@ impl VectorApp {
                 })
             })
             .collect();
+        let top = self.timeline.logical_scroll_top();
         serde_json::json!({
             "screen": screen,
             "open": self.open.as_ref().map(|s| s.to_string()),
@@ -20699,6 +20700,8 @@ impl VectorApp {
                 "id": v.id, "members": v.members.len(), "panel": v.panel,
             })),
             "timeline_items": self.timeline.item_count(),
+            "scroll": [top.item_ix, f32::from(top.offset_in_item)],
+            "following": self.timeline.is_following_tail(),
             "read_anchor": format!("{:?}", self.read_anchor),
             "unread_jump": self.unread_jump.as_ref().map(|j| serde_json::json!({ "anchor": j.anchor, "count": j.count, "status": j.status, "paused": j.paused })),
             "history_done": self.open.as_ref().is_some_and(|o| self.history_done.contains(o.as_ref())),

@@ -201,6 +201,8 @@ fn mem() -> serde_json::Value {
     let kb = |key: &str| rollup.lines().filter(|l| l.starts_with(key)).filter_map(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok()).sum::<f64>();
     serde_json::json!({
         "private": ((kb("Private_Clean:") + kb("Private_Dirty:")) / 1024. * 10.).round() / 10.,
+        // Clean pages are mostly the binary's code, which a debug build pages in as paths run.
+        "dirty": (kb("Private_Dirty:") / 1024. * 10.).round() / 10.,
         "rss": (kb("Rss:") / 1024. * 10.).round() / 10.,
     })
 }
