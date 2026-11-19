@@ -2,7 +2,7 @@
 """On-screen regression checks for a devctl build, driven through `dev:` commands on an X display.
 
     cargo build --no-default-features --features tor,i2p,video,devctl --bin vector-gpui
-    DISPLAY=:99 python3 scripts/onscreen.py [--bin PATH] [--fixtures FILE] [--only NAME] [--size WxH] [--update]
+    DISPLAY=:99 python3 scripts/onscreen.py [--bin PATH] [--fixtures FILE] [--only NAME] [--size WxH] [--lang TAG] [--update]
 
 Each check opens a screen from the fixtures and reads the app's own counters: a screen at rest must
 draw nothing, hover and toast fades must end, a menu must close on Escape and fit the window when
@@ -25,6 +25,7 @@ ap.add_argument("--bin", default=os.path.join(CRATE, "target", "debug", "vector-
 ap.add_argument("--fixtures", default=os.path.join(CRATE, "reference", "fixtures.json"))
 ap.add_argument("--only")
 ap.add_argument("--update", action="store_true")
+ap.add_argument("--lang", help="a language to switch to after boot, such as ar-XB for a mirrored layout")
 ap.add_argument("--size", default="1000x760", help="window size; the memory baseline is kept per size")
 args = ap.parse_args()
 W, H = (int(v) for v in args.size.split("x"))
@@ -117,11 +118,17 @@ def inside(node):
 
 
 def last_text():
-    """A point on the lowest, rightmost text above the composer, or None."""
+    """A point on the lowest text above the composer at the timeline's far side (right, or left
+    when mirrored), or None."""
+    rtl = args.lang and args.lang.split("-")[0] in ("ar", "he", "fa", "ur")
     texts = [n["bounds"] for n in a11y()["nodes"].values()
-             if n.get("bounds") and n["aria"].get("role") == "Label" and n["bounds"][3] < H - 60 and n["bounds"][0] > W / 2]
+             if n.get("bounds") and n["aria"].get("role") == "Label" and n["bounds"][3] < H - 60
+             and (n["bounds"][2] < W / 2 if rtl else n["bounds"][0] > W / 2)]
     if not texts:
         return None
+    if rtl:
+        b = max(texts, key=lambda b: b[3] - b[0])
+        return round(b[0] + 3), round((b[1] + b[3]) / 2)
     b = max(texts, key=lambda b: b[2] + b[3])
     return round(b[2] - 3), round((b[1] + b[3]) / 2)
 
@@ -152,6 +159,9 @@ try:
     focus(wid)
     time.sleep(2)
     check("boot", wid is not None and dev("state").get("screen") == "main", "window up, main screen")
+    if args.lang:
+        dev("lang:" + args.lang, wait=False)
+        time.sleep(1.5)
 
     if wanted("rest:chats"):
         draws, presents = at_rest()
@@ -277,6 +287,9 @@ try:
         else:
             check("memory", mb <= base[key] * MEM_SLACK, f"{mb} MB, baseline {base[key]} MB")
 finally:
+    if args.lang:
+        # The choice persists like the user's own: put the default back.
+        dev("lang:en-GB", wait=False)
     app.terminate()
     try:
         app.wait(5)
