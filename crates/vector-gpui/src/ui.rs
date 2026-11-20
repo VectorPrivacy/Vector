@@ -7615,6 +7615,9 @@ impl VectorApp {
                 .absolute()
                 .size_0(),
             )
+            // Child views (the login screen's) render after this one returns: an ease they start
+            // still needs a next frame, which only a display link would otherwise bring.
+            .child(kit::pump())
     }
 }
 
