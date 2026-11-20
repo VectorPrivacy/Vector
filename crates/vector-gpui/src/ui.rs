@@ -15146,7 +15146,8 @@ impl VectorApp {
                                 title: t::community_join_title(p.name.as_str()),
                                 text: Some(text.into()),
                                 icon: Some("icons/group-placeholder.svg"),
-                                picture: p.icon.map(Into::into),
+                                // A logo whose file has gone keeps the placeholder, not a hole.
+                                picture: p.icon.filter(|f| std::fs::metadata(f).is_ok_and(|m| m.len() > 0)).map(Into::into),
                                 confirm: t::dialog_confirm(),
                                 cancel: Some(t::dialog_cancel()),
                                 input: None,
