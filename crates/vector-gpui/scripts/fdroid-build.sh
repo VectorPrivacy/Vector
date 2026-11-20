@@ -20,7 +20,8 @@ TARGET=aarch64-linux-android
 
 prepare() {
     rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
-    (cd crates/vector-gpui && cargo fetch --locked --target "$TARGET")
+    # Every platform's crates: cargo resolves the whole lock even when building one target.
+    (cd crates/vector-gpui && cargo fetch --locked)
 }
 
 build() {
