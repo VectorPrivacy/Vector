@@ -105,9 +105,15 @@ thread_local! {
 }
 
 unsafe extern "C" fn on_frame(_frame_time_nanos: c_long, _data: *mut c_void) {
-    if let Some(window) = FRAME_WINDOW.with(|w| w.borrow().upgrade()) {
-        window.frame_pending.set(false);
-        window.request_frame();
+    // A panic cannot unwind into the Choreographer: it would abort the process.
+    let drawn = std::panic::catch_unwind(|| {
+        if let Some(window) = FRAME_WINDOW.with(|w| w.borrow().upgrade()) {
+            window.frame_pending.set(false);
+            window.request_frame();
+        }
+    });
+    if drawn.is_err() {
+        log::error!("gpui_android: a frame panicked; skipping it");
     }
 }
 

@@ -262,6 +262,8 @@ pub struct WgpuRenderer {
     atlas: Arc<WgpuAtlas>,
     transparent_alpha_mode: wgpu::CompositeAlphaMode,
     opaque_alpha_mode: wgpu::CompositeAlphaMode,
+    /// What the first surface offered: a replacement surface on the same device offers the same.
+    present_modes: Vec<wgpu::PresentMode>,
     max_texture_size: u32,
     is_bgr: bool,
     failed_frame_count: u32,
@@ -503,6 +505,7 @@ impl WgpuRenderer {
         if !surface_configured {
             surface.configure(&context.device, &surface_config);
         }
+        let present_modes = surface.get_capabilities(&context.adapter).present_modes;
 
         let surface_format = surface_config.format;
         let alpha_mode = surface_config.alpha_mode;
@@ -517,6 +520,7 @@ impl WgpuRenderer {
             atlas,
             transparent_alpha_mode,
             opaque_alpha_mode,
+            present_modes,
             max_texture_size,
             is_bgr: false,
             failed_frame_count: 0,
@@ -2244,7 +2248,11 @@ impl WgpuRenderer {
         self.surface_config.height = height;
         self.surface_config.alpha_mode = alpha_mode;
         if let Some(mode) = config.preferred_present_mode {
-            self.surface_config.present_mode = mode;
+            self.surface_config.present_mode = if self.present_modes.contains(&mode) {
+                mode
+            } else {
+                wgpu::PresentMode::Fifo
+            };
         }
 
         let mut core = match std::mem::replace(&mut self.state, RendererState::Released) {
@@ -2260,8 +2268,15 @@ impl WgpuRenderer {
                 anyhow::bail!("Cannot replace the surface: GPU resources have been released")
             }
         };
+        // Acquiring from a surface whose configure failed panics inside wgpu.
+        let scope = core.resources.device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(&core.resources.device, &self.surface_config);
+        let error = gpui::block_on(scope.pop());
         core.resources.invalidate_intermediate_textures();
+        if let Some(error) = error {
+            self.state = RendererState::Unconfigured { core };
+            anyhow::bail!("surface configuration failed: {error}");
+        }
         self.state = RendererState::Ready { surface, core };
 
         Ok(())
