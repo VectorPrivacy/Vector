@@ -1908,25 +1908,32 @@ fn lockup_size(vw: f32) -> (f32, f32) {
 
 /// `.lg-art`: the camera, faded out towards the centre.
 fn art(shown: f32) -> gpui::Div {
+    // Where the fade is solid the page shows its own background, and past it the fade is clear:
+    // painting the camera and the fade only between saves over a screen of blended fill.
+    const SOLID: f32 = 0.5719;
+    const CLEAR: f32 = 0.9156;
+    let band = 1. - SOLID;
     div()
         .absolute()
         .inset_0()
         .overflow_hidden()
         .opacity(shown)
         .child(
-            img("icons/login/cctv.png")
-                .absolute()
-                .left(gpui::relative(-0.0935))
-                .top(gpui::relative(-0.1508))
-                .w(gpui::relative(1.1679))
-                .h(gpui::relative(1.1679))
-                .object_fit(ObjectFit::Cover)
-                .opacity(0.2),
+            div().absolute().top_0().bottom_0().right_0().left(gpui::relative(SOLID)).overflow_hidden().child(
+                img("icons/login/cctv.png")
+                    .absolute()
+                    .left(gpui::relative((-0.0935 - SOLID) / band))
+                    .top(gpui::relative(-0.1508))
+                    .w(gpui::relative(1.1679 / band))
+                    .h(gpui::relative(1.1679))
+                    .object_fit(ObjectFit::Cover)
+                    .opacity(0.2),
+            ),
         )
-        .child(div().absolute().inset_0().bg(linear_gradient(
+        .child(div().absolute().top_0().bottom_0().left(gpui::relative(SOLID)).w(gpui::relative(CLEAR - SOLID)).bg(linear_gradient(
             90.,
-            linear_color_stop(c(APP_BG), 0.5719),
-            linear_color_stop(ca(3, 3, 3, 0.), 0.9156),
+            linear_color_stop(c(APP_BG), 0.),
+            linear_color_stop(ca(3, 3, 3, 0.), 1.),
         )))
 }
 
