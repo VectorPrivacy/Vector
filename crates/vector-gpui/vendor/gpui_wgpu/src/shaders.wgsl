@@ -1260,14 +1260,20 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
     // 0.3% of 1, under an 8-bit step at shadow opacities): skip the samples.
     let max_radius = max(max(shadow.corner_radii.top_left, shadow.corner_radii.top_right),
         max(shadow.corner_radii.bottom_right, shadow.corner_radii.bottom_left));
-    let solid = all(abs(center_to_point) < half_size - (3.0 * shadow.blur_radius + max_radius));
+    let clear = abs(center_to_point) < half_size - (3.0 * shadow.blur_radius + max_radius);
 
     var alpha: f32;
-    if (solid) {
+    if (all(clear)) {
         alpha = 1.0;
     } else if (shadow.blur_radius == 0.0) {
         let distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
         alpha = saturate(0.5 - distance);
+    } else if (any(clear)) {
+        // As far from every corner in one axis, the rounding can't reach: a sharp rect's blur,
+        // which separates into one erf pair per axis.
+        let scale = sqrt(0.5) / shadow.blur_radius;
+        let edges = 0.5 * (erf((center_to_point + half_size) * scale) - erf((center_to_point - half_size) * scale));
+        alpha = edges.x * edges.y;
     } else {
         // The signal is only non-zero in a limited range, so don't waste samples
         let low = center_to_point.y - half_size.y;

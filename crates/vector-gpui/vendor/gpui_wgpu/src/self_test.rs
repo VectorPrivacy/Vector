@@ -173,11 +173,11 @@ fn canned_scenes(
             s.insert_primitive(quad(bounds, gray(0.2, 1.0).into(), 16.0, 1.0));
         }
     });
-    let shadow = |inset: u32| {
+    let shadow = |inset: u32, blur: f32| {
         let bounds = rect(width * 0.1, height * 0.3, width * 0.8, height * 0.4);
         Shadow {
             order: 0,
-            blur_radius: ScaledPixels(24.0),
+            blur_radius: ScaledPixels(blur),
             bounds,
             corner_radii: Corners::all(ScaledPixels(24.0)),
             content_mask: ContentMask::new(screen),
@@ -188,23 +188,32 @@ fn canned_scenes(
             pad: 0,
         }
     };
-    add("card shadow, blur 24", &|s| s.insert_primitive(shadow(0)));
-    add("card shadow outside the card, blur 24", &|s| s.insert_primitive(shadow(2)));
+    add("card shadow, blur 24", &|s| s.insert_primitive(shadow(0, 24.0)));
+    add("card shadow outside the card, blur 24", &|s| s.insert_primitive(shadow(2, 24.0)));
+    add("card shadow, blur 8", &|s| s.insert_primitive(shadow(0, 8.0)));
     if let Some(tile) = glyph {
-        add("700 glyphs", &|s| {
-            for i in 0..700 {
-                let (col, row) = ((i % 35) as f32, (i / 35) as f32);
-                s.insert_primitive(MonochromeSprite {
-                    order: 0,
-                    pad: 0,
-                    tile: tile.clone(),
-                    bounds: rect(8.0 + col * 20.0, 40.0 + row * 40.0, 14.0, 18.0),
-                    content_mask: ContentMask::new(screen),
-                    color: gray(0.9, 1.0),
-                    transformation: TransformationMatrix::unit(),
-                });
+        let glyph = |bounds| MonochromeSprite {
+            order: 0,
+            pad: 0,
+            tile: tile.clone(),
+            bounds,
+            content_mask: ContentMask::new(screen),
+            color: gray(0.9, 1.0),
+            transformation: TransformationMatrix::unit(),
+        };
+        let glyph = &glyph;
+        let grid = |side: f32| {
+            move |s: &mut Scene| {
+                for i in 0..700 {
+                    let (col, row) = ((i % 35) as f32, (i / 35) as f32);
+                    s.insert_primitive(glyph(rect(8.0 + col * 20.0, 40.0 + row * 40.0, side * 14.0, side * 18.0)));
+                }
             }
-        });
+        };
+        add("700 glyphs", &grid(1.0));
+        // Per glyph and per pixel apart: a frame of text pays for both.
+        add("700 glyphs a pixel across", &grid(1.0 / 14.0));
+        add("1 glyph, full-screen", &|s| s.insert_primitive(glyph(screen)));
     }
     if let Some(tile) = image {
         let sprite = |bounds, radius| PolychromeSprite {

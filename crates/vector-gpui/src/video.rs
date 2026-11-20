@@ -1324,7 +1324,12 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
         .on_click(|_, _, cx| cx.stop_propagation())
         .child(
             canvas(
-                move |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                move |bounds, window, _| {
+                    // The vertical knob overhangs the track's ends by half its size.
+                    let reach = if vertical { px(10.) } else { px(0.) };
+                    let reach = Bounds::new(gpui::point(bounds.origin.x, bounds.origin.y - reach), gpui::size(bounds.size.width, bounds.size.height + reach * 2.));
+                    window.insert_hitbox(reach, HitboxBehavior::Normal)
+                },
                 move |bounds: Bounds<Pixels>, hitbox, window, _| {
                     let (track, done, knob) = if vertical {
                         let mid = bounds.center().x;
