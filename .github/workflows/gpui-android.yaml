@@ -156,8 +156,23 @@ jobs:
           key: android-apk
 
       # One debug key across runs, so a test APK installs over the last one without an
-      # uninstall (which wipes the app's data). Gradle makes the key when the cache has none.
-      - uses: actions/cache@v4
+      # uninstall (which wipes the app's data). The secret holds it for good; the cache is
+      # evicted once the repo's caches pass 10 GB, and Gradle then makes a new key.
+      - name: Debug key
+        id: debug-key
+        env:
+          KEYSTORE: ${{ secrets.GPUI_ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            mkdir -p ~/.android
+            printf '%s' "$KEYSTORE" | base64 -d > ~/.android/debug.keystore
+            echo "secret=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GPUI_ANDROID_DEBUG_KEYSTORE is not set: this APK's key lasts only as long as the Actions cache"
+          fi
+
+      - if: steps.debug-key.outputs.secret != '1'
+        uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
           key: gpui-android-debug-keystore-v1
