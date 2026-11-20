@@ -10,7 +10,6 @@ use wgpu::util::DeviceExt;
 use super::scene::{Alpha, Scene, TexRef, Wrap};
 
 const SAMPLES: u32 = 4;
-const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const OBJ_STRIDE: u64 = 256;
 pub const FOV: f32 = 35.;
@@ -69,6 +68,8 @@ pub struct Gpu {
     /// Per-frame data is written straight into GPU-visible memory and frames come back through a
     /// fragment pass: no copy pass, which costs its own driver pool on Apple GPUs.
     direct: Option<Readback>,
+    /// BGRA, as GPUI takes frames, except on GL: GLES reads nothing back from wgpu's BGRA.
+    color: wgpu::TextureFormat,
 }
 
 struct Readback {
@@ -221,8 +222,11 @@ fn small_queue(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor) -> Option
 
 impl Gpu {
     pub fn new() -> Result<Self, String> {
-        #[cfg(target_os = "linux")]
-        if let Some((device, queue)) = gpui_wgpu::shared_device() {
+        // Joints are a vertex-stage storage buffer, which a WebGL-limited device lacks.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some((device, queue)) = gpui_wgpu::shared_device()
+            && device.limits().max_storage_buffers_per_shader_stage > 0
+        {
             return Ok(Self::with(device, queue, false));
         }
         pollster::block_on(async {
@@ -274,6 +278,11 @@ impl Gpu {
     }
 
     fn with(device: wgpu::Device, queue: wgpu::Queue, direct: bool) -> Self {
+        let color = if device.adapter_info().backend == wgpu::Backend::Gl {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Bgra8Unorm
+        };
         let tex_entry = |b: u32, vis: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
             binding: b,
             visibility: vis,
@@ -335,7 +344,7 @@ impl Gpu {
                         module: &module,
                         entry_point: Some("fs"),
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: COLOR,
+                            format: color,
                             blend: blend.then_some(wgpu::BlendState {
                                 color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
                                 alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
@@ -406,8 +415,8 @@ impl Gpu {
         });
         let white = Self::texture(&device, &queue, 1, 1, &[255; 4], true).create_view(&wgpu::TextureViewDescriptor::default());
         let (obj_buf, joint_buf, obj_bind) = Self::object_buffers(&device, direct, &obj_layout, 64, 256);
-        let direct = direct.then(|| Self::readback(&device));
-        Self { device, queue, mat_layout, obj_layout, pipelines, frame_buf, frame_bind, env_lod: (levels.len() - 1) as f32, white, obj_buf, joint_buf, obj_bind, direct }
+        let direct = direct.then(|| Self::readback(&device, color));
+        Self { device, queue, mat_layout, obj_layout, pipelines, frame_buf, frame_bind, env_lod: (levels.len() - 1) as f32, white, obj_buf, joint_buf, obj_bind, direct, color }
     }
 
     #[cfg(test)]
@@ -415,7 +424,7 @@ impl Gpu {
         self.direct.is_some()
     }
 
-    fn readback(device: &wgpu::Device) -> Readback {
+    fn readback(device: &wgpu::Device, color: wgpu::TextureFormat) -> Readback {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model3d readback"),
             entries: &[
@@ -442,7 +451,7 @@ impl Gpu {
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState { format: COLOR, blend: None, write_mask: wgpu::ColorWrites::empty() })],
+                targets: &[Some(wgpu::ColorTargetState { format: color, blend: None, write_mask: wgpu::ColorWrites::empty() })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -665,7 +674,7 @@ impl Gpu {
             })
         };
         if let Some(rb) = &self.direct {
-            let resolve = tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            let resolve = tex(self.color, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
             let readback = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d readback"), size: (w * h * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::STORAGE, mapped_at_creation: true });
             readback.unmap();
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -676,11 +685,11 @@ impl Gpu {
                     wgpu::BindGroupEntry { binding: 1, resource: readback.as_entire_binding() },
                 ],
             });
-            let sink = tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default());
+            let sink = tex(self.color, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default());
             return Target {
                 w,
                 h,
-                msaa: tex(COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
+                msaa: tex(self.color, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
                 depth: tex(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
                 resolve,
                 readback,
@@ -693,9 +702,9 @@ impl Gpu {
             w,
             h,
             // Cleared and discarded every pass: tile memory only (Metal memoryless) where the GPU has it.
-            msaa: tex(COLOR, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
+            msaa: tex(self.color, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
             depth: tex(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()),
-            resolve: tex(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC),
+            resolve: tex(self.color, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC),
             readback: self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model3d readback"), size: (stride * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }),
             stride,
             sink: None,
@@ -859,7 +868,11 @@ impl Gpu {
         if self.direct.is_some() {
             return Ok(out);
         }
+        let swap = self.color == wgpu::TextureFormat::Rgba8Unorm;
         for px in out.chunks_exact_mut(4) {
+            if swap {
+                px.swap(0, 2);
+            }
             let a = px[3];
             if a != 0 && a != 255 {
                 let k = 255. / a as f32;

@@ -72,3 +72,14 @@ fn vs_probe_dead(@builtin(instance_index) instance_id: u32) -> ProbeVarying {
 fn fs_probe() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0);
 }
+
+@fragment
+fn fs_probe_mask(input: QuadVarying) -> @location(0) vec4<f32> {
+    let quad = load_quad(input.quad_id);
+    return vec4<f32>(mask_alpha(input.position.xy, quad.content_mask, quad.content_radii, quad.content_fade));
+}
+
+@fragment
+fn fs_probe_color(input: QuadVarying) -> @location(0) vec4<f32> {
+    return quad_color(input);
+}

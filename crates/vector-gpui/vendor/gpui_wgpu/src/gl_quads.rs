@@ -16,11 +16,13 @@ const LEAN: u8 = 2;
 static CHOSEN: AtomicU8 = AtomicU8::new(0);
 
 /// What each probe isolates of `vs_quad`, with its vertex and fragment entry points.
-const PROBES: [(&str, &str, &str); 4] = [
+const PROBES: [(&str, &str, &str); 6] = [
     ("the lean vertex stage", "vs_quad_lean", "fs_probe"),
     ("a whole Quad copied from storage", "vs_probe_copy", "fs_probe"),
     ("the gradient prelude", "vs_probe_gradient", "fs_probe"),
     ("quad fragment code, dead in a vertex stage", "vs_probe_dead", "fs_probe"),
+    ("the content mask, fragment", "vs_quad_lean", "fs_probe_mask"),
+    ("quad_color, fragment", "vs_quad_lean", "fs_probe_color"),
 ];
 
 /// `build` makes a pipeline from (label, vertex entry, fragment entry, module).

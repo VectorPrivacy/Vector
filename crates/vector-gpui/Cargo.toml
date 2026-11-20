@@ -125,6 +125,8 @@ libc = "0.2"
 ndk-context = "0.1.1"
 # The VAPID key a push endpoint is asked for with.
 vector-push = { path = "../vector-push", features = ["vapid"] }
+# The window's own device, which 3D models draw with too.
+gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
 
 # The same wgpu GPUI draws with on Linux; elsewhere its default backends (Metal, DX12).
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
