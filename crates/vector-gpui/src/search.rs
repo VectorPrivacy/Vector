@@ -1059,6 +1059,14 @@ fn thumb_strip(i: usize, strip: &Strip, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
+/// An icon has no baseline, so it sits on the line by its bottom edge: dropped by this much,
+/// its middle meets the 12 px digits'.
+const ICON_DROP: f32 = 2.;
+
+fn kind_icon(path: &'static str) -> impl IntoElement {
+    svg().path(path).flex_none().size(px(13.)).relative().top(px(ICON_DROP)).text_color(c(LIST_TIME))
+}
+
 fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>>, thumbs: Option<&Strip>, sel: bool, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
     let who = if hit.mine { store.my_npub.clone() } else { hit.author.clone().unwrap_or_else(|| hit.chat.clone()) };
     let name = if hit.mine { t::search_you().to_string() } else { store.chat_name(&who, &hit.chat) };
@@ -1100,19 +1108,9 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>
                         .items_baseline()
                         .gap(px(8.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
-                        // Icons have no baseline: centre them on the time's line, which keeps the baseline.
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(12.))
-                                .line_height(px(14.))
-                                .text_color(c(LIST_TIME))
-                                .child(div().whitespace_nowrap().child(when(hit.at, now_ms)))
-                                .children(badges.into_iter().map(|p| svg().path(p).flex_none().size(px(13.)).text_color(c(LIST_TIME))))
-                                .when(file_only, |d| d.child(svg().path("icons/attachment.svg").flex_none().size(px(13.)).text_color(c(LIST_TIME)))),
-                        ),
+                        .child(div().text_size(px(12.)).text_color(c(LIST_TIME)).whitespace_nowrap().child(when(hit.at, now_ms)))
+                        .children(badges.into_iter().map(kind_icon))
+                        .when(file_only, |d| d.child(kind_icon("icons/attachment.svg"))),
                 )
                 .map(|d| {
                     if hit.snippet.is_empty() && thumbs.is_some() {

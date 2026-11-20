@@ -128,6 +128,7 @@ impl VectorApp {
             Act::Close => {
                 // The plaintext corpus goes with the panel.
                 self.search = None;
+                self.media.borrow_mut().let_go(THUMB_KEY);
                 window.focus(&self.input.read(cx).focus_handle(cx), cx);
             }
             Act::Hover(i) => {
@@ -162,6 +163,7 @@ impl VectorApp {
             Act::Pick(i) => {
                 let Some(hit) = s.found.hits.get(i).cloned() else { return };
                 self.search = None;
+                self.media.borrow_mut().let_go(THUMB_KEY);
                 self.settings = None;
                 self.profile = None;
                 self.close_nexus(cx);
@@ -377,6 +379,9 @@ impl VectorApp {
 
 /// A result's attachment as a thumbnail: a downloaded picture decoded small, a video's first
 /// frame once probed, else the picture's blur. A file not downloaded stays so.
+/// Search's own cache keys: the timeline decodes the same pictures at its own size.
+const THUMB_KEY: &str = "search\u{0}";
+
 fn visual(att: &vector_core::types::Attachment) -> bool {
     let ext = att.extension.to_ascii_lowercase();
     crate::attachments::IMAGES.contains(&ext.as_str()) || crate::video::EXTENSIONS.contains(&ext.as_str())
@@ -426,7 +431,6 @@ fn thumb(media: &mut crate::media::Media, root: &std::path::Path, att: &vector_c
         Source::Held(h) => (Some(*h), None),
         Source::File(p) => (None, Some(p.clone())),
     };
-    // Its own key: the timeline decodes the same picture at its own size.
     // Shown cropped to cover its box, so decode large enough to fill it both ways.
     let fill = match att.img_meta.as_ref().filter(|m| m.width > 0 && m.height > 0) {
         Some(m) => {
@@ -436,7 +440,7 @@ fn thumb(media: &mut crate::media::Media, root: &std::path::Path, att: &vector_c
         }
         None => device(crate::search::THUMB_W.1, crate::search::THUMB_H),
     };
-    match media.image(&format!("search\u{0}{}", att.id), source, &ext, fill) {
+    match media.still(&format!("{THUMB_KEY}{}", att.id), source, &ext, fill) {
         Slot::Ready { image, w, h } => Some(Thumb {
             open: Some(crate::viewer::Open {
                 image: image.clone(),

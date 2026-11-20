@@ -146,6 +146,7 @@ struct Want {
     path: Option<PathBuf>,
     ext: String,
     max: (u32, u32),
+    still: bool,
 }
 
 #[derive(Default)]
@@ -293,6 +294,25 @@ impl Media {
 
     /// An attachment's picture; the first ask queues its decode at `max` device pixels.
     pub fn image(&mut self, key: &str, source: Source, ext: &str, max: (u32, u32)) -> Slot {
+        self.image_as(key, source, ext, max, false)
+    }
+
+    /// Pictures cached under `prefix` marked long unused, so the next sweep frees them.
+    pub fn let_go(&mut self, prefix: &str) {
+        let Some(then) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(24 * 3600)) else { return };
+        for (key, at) in self.used.iter_mut() {
+            if key.0 == 1 && key.1.starts_with(prefix) {
+                *at = then;
+            }
+        }
+    }
+
+    /// As `image`, an animation kept to its first frame.
+    pub fn still(&mut self, key: &str, source: Source, ext: &str, max: (u32, u32)) -> Slot {
+        self.image_as(key, source, ext, max, true)
+    }
+
+    fn image_as(&mut self, key: &str, source: Source, ext: &str, max: (u32, u32), still: bool) -> Slot {
         let now = std::time::Instant::now();
         self.asked = Some(now);
         self.used.insert((1, key.to_string()), now);
@@ -310,6 +330,7 @@ impl Media {
             path,
             ext: ext.to_ascii_lowercase(),
             max,
+            still,
         });
         Slot::Loading
     }
@@ -603,11 +624,11 @@ pub fn pump<V: 'static>(
                 app.update(cx, |_, cx| cx.notify()).ok();
                 return;
             }
-            let (ext, max) = (w.ext.clone(), w.max);
+            let (ext, max, still) = (w.ext.clone(), w.max, w.still);
             let decoded = match bytes {
                 Some(b) => {
                     cx.background_executor()
-                        .spawn(async move { decode(&b, &ext, max) })
+                        .spawn(async move { decode_as(&b, &ext, max, still) })
                         .await
                 }
                 None => None,
@@ -1140,14 +1161,20 @@ pub fn decode_gif_cover(bytes: &[u8], side: u32) -> Option<RenderImage> {
 
 /// A picture as frames no larger than `max`, with its natural size.
 pub fn decode(bytes: &[u8], ext: &str, max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
+    decode_as(bytes, ext, max, false)
+}
+
+/// `decode`, or with `still` an animation's first frame alone.
+pub fn decode_as(bytes: &[u8], ext: &str, max: (u32, u32), still: bool) -> Option<(RenderImage, u32, u32)> {
     let _trim = crate::trim::OnDrop;
     if ext != "svg"
         && crate::heif::sniff(bytes)
-        && let Some(d) = heif(bytes, max)
+        && let Some(d) = heif(bytes, max, still)
     {
         return Some(d);
     }
     if ext != "svg"
+        && !still
         && let Some((frames, w, h)) = gif_frames(bytes, |w, h| {
             let s = (max.0 as f32 / w.max(1) as f32)
                 .min(max.1 as f32 / h.max(1) as f32)
@@ -1285,9 +1312,12 @@ fn png_into(bytes: &[u8], max: (u32, u32)) -> Option<(image::RgbaImage, u32, u32
 }
 
 /// A HEIF file: a sequence or burst plays as an animation, else its primary picture shows.
-fn heif(bytes: &[u8], max: (u32, u32)) -> Option<(RenderImage, u32, u32)> {
+fn heif(bytes: &[u8], max: (u32, u32), still: bool) -> Option<(RenderImage, u32, u32)> {
+    #[cfg(not(feature = "video"))]
+    let _ = still;
     #[cfg(feature = "video")]
-    if crate::heif::has_track(bytes)
+    if !still
+        && crate::heif::has_track(bytes)
         && let Some((seq, w, h, count)) = crate::video::Sequence::open(bytes.to_vec())
         && let Some((frames, w, h)) = frames_of(seq, w, h, count, &|w, h| crate::heif::fit((w, h), max))
         && frames.len() > 1

@@ -6943,7 +6943,7 @@ impl VectorApp {
                     cx.stop_propagation();
                     return;
                 }
-                if e.keystroke.key == "escape" && app.search.is_some() {
+                if e.keystroke.key == "escape" && app.search.is_some() && app.viewer.is_none() {
                     app.on_search(crate::search::Act::Close, window, cx);
                     cx.stop_propagation();
                     return;
@@ -7358,9 +7358,10 @@ impl VectorApp {
             .children(perm)
             .children(self.toast_view(window))
             .children(
+                // Above the search panel, which a result's picture opens it from.
                 self.viewer
                     .clone()
-                    .map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(10)),
+                    .map(|v| gpui::deferred(div().absolute().inset_0().child(v)).with_priority(if self.search.is_some() { 12 } else { 10 })),
             )
             .children(
                 self.model_viewer
