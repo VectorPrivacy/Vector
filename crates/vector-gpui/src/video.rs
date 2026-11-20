@@ -60,6 +60,8 @@ pub enum Act {
     Speed,
     Hover(bool),
     Moved,
+    /// The pointer on the volume button (0) or the level that pops up over it (1).
+    LevelHover(usize, bool),
 }
 
 pub enum Work {
@@ -157,6 +159,8 @@ pub struct Clip {
     pub speed: f32,
     /// The volume slider is held.
     leveling: bool,
+    /// The pointer on the volume button, and on the level popped up over it.
+    level_hover: [bool; 2],
     /// Decoded for the whole window rather than its row.
     big: bool,
     hovered: bool,
@@ -181,6 +185,7 @@ impl Default for Clip {
             volume: 1.,
             speed: 1.,
             leveling: false,
+            level_hover: [false; 2],
             big: false,
             hovered: false,
             moved: None,
@@ -231,7 +236,15 @@ impl Clip {
     }
 
     fn controls(&self) -> bool {
-        !self.playing || self.scrub.is_some() || self.leveling || (self.hovered && self.moved.is_some_and(|t| t.elapsed() < IDLE))
+        !self.playing
+            || self.scrub.is_some()
+            || self.level_open()
+            || (self.hovered && self.moved.is_some_and(|t| t.elapsed() < IDLE))
+    }
+
+    /// Where the bar has no room for the level, it pops up over the volume button.
+    fn level_open(&self) -> bool {
+        self.leveling || self.level_hover.contains(&true)
     }
 }
 
@@ -390,9 +403,18 @@ impl Videos {
                 self.redecode(att, input, !leaving);
                 false
             }
+            Act::LevelHover(part, on) => {
+                if let Some(c) = self.clips.get_mut(att) {
+                    c.level_hover[part.min(1)] = on;
+                }
+                false
+            }
             Act::Hover(on) => {
                 if let Some(c) = self.clips.get_mut(att) {
                     c.hovered = on;
+                    if !on {
+                        c.level_hover = [false; 2];
+                    }
                     c.moved = on.then(Instant::now);
                 }
                 false
@@ -1041,6 +1063,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
     let level = if clip.muted { 0. } else { clip.volume };
     let full = clip.big;
     let time: SharedString = format!("{} / {}", crate::audio::format_time(pos), crate::audio::format_time(duration)).into();
+    let narrow_level = w < 380. && info.is_some_and(|i| i.audio);
     let button = |icon: &'static str, key: &'static str, label: SharedString, act: Act, on: OnAct| {
         div()
             .id(SharedString::from(format!("{key}-{id}")))
@@ -1089,15 +1112,8 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     o2,
                 ))
                 // A narrow clip gives its time's room to the buttons.
-                .when(w >= 260., {
-                    let time = time.clone();
-                    move |d| d.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(gpui::white())
-                            .flex_none()
-                            .child(time),
-                    )
+                .when(w >= 260., |d| {
+                    d.child(time_readout(format!("vtime-{id}"), pos, duration).text_size(px(12.)).text_color(gpui::white()))
                 })
                 .child(scrubber(id, frac, time.clone(), duration > 0, clip.scrub.is_some(), o3))
                 .when(w >= 290., |d| {
@@ -1125,13 +1141,54 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                             .child(speed_label),
                     )
                 })
-                .child(button(
-                    if clip.muted { "icons/volume-mute.svg" } else { "icons/volume-max.svg" },
-                    "vmute",
-                    if clip.muted { crate::t::video_unmute() } else { crate::t::video_mute() },
-                    Act::Mute,
-                    o4,
-                ))
+                .child({
+                    let mute = button(
+                        if clip.muted { "icons/volume-mute.svg" } else { "icons/volume-max.svg" },
+                        "vmute",
+                        if clip.muted { crate::t::video_unmute() } else { crate::t::video_mute() },
+                        Act::Mute,
+                        o4,
+                    );
+                    if narrow_level {
+                        let (hover_button, hover_level, set_level) = (on.clone(), on.clone(), on.clone());
+                        let track = (h - 70.).clamp(36., 84.);
+                        div()
+                            .relative()
+                            .flex_none()
+                            .child(mute.on_hover(move |on, w, cx| hover_button(Act::LevelHover(0, *on), w, cx)))
+                            .when(clip.level_open(), |d| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("vvolpop-{id}")))
+                                        .absolute()
+                                        .left_0()
+                                        // Overlapping the button, so the pointer never crosses a gap.
+                                        .bottom(px(26.))
+                                        .w(px(28.))
+                                        .pt(px(10.))
+                                        .pb(px(12.))
+                                        .rounded(px(14.))
+                                        .bg(gpui::black().opacity(0.6))
+                                        .on_hover(move |on, w, cx| hover_level(Act::LevelHover(1, *on), w, cx))
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(div().w_full().h(px(track)).child(slider(
+                                            &format!("vvol-{id}"),
+                                            crate::t::video_volume(),
+                                            format!("{}%", (level * 100.).round()).into(),
+                                            level,
+                                            true,
+                                            clip.leveling,
+                                            true,
+                                            set_level,
+                                            Act::Volume,
+                                        ))),
+                                )
+                            })
+                            .into_any_element()
+                    } else {
+                        mute.into_any_element()
+                    }
+                })
                 // The seek bar keeps its room: the level, then the speed, then the time give way.
                 .when(w >= 380. && info.is_some_and(|i| i.audio), |d| {
                     // Room for the knob, which overhangs the track's ends.
@@ -1142,6 +1199,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                         level,
                         true,
                         clip.leveling,
+                        false,
                         o6,
                         Act::Volume,
                     )))
@@ -1207,7 +1265,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
 }
 
 fn scrubber(id: &str, frac: f32, time: SharedString, seekable: bool, dragging: bool, on: OnAct) -> impl IntoElement {
-    div().flex_1().h(px(20.)).mx(px(6.)).child(slider(&format!("vseek-{id}"), crate::t::audio_seek(), time, frac, seekable, dragging, on, Act::Seek))
+    div().flex_1().h(px(20.)).mx(px(6.)).child(slider(&format!("vseek-{id}"), crate::t::audio_seek(), time, frac, seekable, dragging, false, on, Act::Seek))
 }
 
 thread_local! {
@@ -1224,9 +1282,27 @@ pub(crate) fn release(key: &SharedString) -> bool {
     PRESSED.with_borrow_mut(|p| p.take_if(|k| *k == *key).is_some())
 }
 
-/// A track with a knob: `act(fraction, done)` as it is pressed, dragged and let go.
+/// "pos / total" at a width that holds while `pos` counts: tabular digits, and `pos` right-aligned
+/// in the room `total` takes.
+pub fn time_readout(key: String, pos: u64, total: u64) -> gpui::Stateful<gpui::Div> {
+    let (pos, total) = (crate::audio::format_time(pos), crate::audio::format_time(total));
+    div()
+        .id(SharedString::from(key))
+        .flex_none()
+        .flex()
+        .whitespace_nowrap()
+        .font_features(crate::kit::tabular())
+        // One label for the screen reader, rather than the room-holding copy and both halves.
+        .role(gpui::Role::Label)
+        .aria_label(format!("{pos} / {total}"))
+        .child(div().relative().child(div().invisible().child(total.clone())).child(div().absolute().top_0().right_0().child(pos)))
+        .child(format!(" / {total}"))
+}
+
+/// A track with a knob: `act(fraction, done)` as it is pressed, dragged and let go. A `vertical`
+/// one fills from the bottom.
 #[allow(clippy::too_many_arguments)]
-fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: bool, dragging: bool, on: OnAct, act: fn(f32, bool) -> Act) -> impl IntoElement {
+fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: bool, dragging: bool, vertical: bool, on: OnAct, act: fn(f32, bool) -> Act) -> impl IntoElement {
     let seekable = live;
     let key = SharedString::from(key.to_string());
     let name = key.clone();
@@ -1243,27 +1319,45 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
             canvas(
                 move |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                 move |bounds: Bounds<Pixels>, hitbox, window, _| {
-                    let mid = bounds.center().y;
-                    let x0 = bounds.origin.x;
-                    let w = bounds.size.width;
-                    let track = Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w, px(4.)));
+                    let (track, done, knob) = if vertical {
+                        let mid = bounds.center().x;
+                        let (y0, h) = (bounds.origin.y, bounds.size.height);
+                        let top = y0 + h * (1. - frac);
+                        (
+                            Bounds::new(gpui::point(mid - px(2.), y0), gpui::size(px(4.), h)),
+                            Bounds::new(gpui::point(mid - px(2.), top), gpui::size(px(4.), h * frac)),
+                            Bounds::new(gpui::point(mid - px(6.), top - px(6.)), gpui::size(px(12.), px(12.))),
+                        )
+                    } else {
+                        let mid = bounds.center().y;
+                        let (x0, w) = (bounds.origin.x, bounds.size.width);
+                        (
+                            Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w, px(4.))),
+                            Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w * frac, px(4.))),
+                            Bounds::new(gpui::point(x0 + w * frac - px(6.), mid - px(6.)), gpui::size(px(12.), px(12.))),
+                        )
+                    };
                     window.paint_quad(gpui::fill(track, white_a(0.3)).corner_radii(px(2.)));
-                    let done = Bounds::new(track.origin, gpui::size(w * frac, px(4.)));
                     window.paint_quad(gpui::fill(done, gpui::white()).corner_radii(px(2.)));
-                    let knob = Bounds::new(gpui::point(x0 + w * frac - px(6.), mid - px(6.)), gpui::size(px(12.), px(12.)));
                     window.paint_quad(gpui::fill(knob, gpui::white()).corner_radii(px(6.)));
                     if !seekable {
                         return;
                     }
                     window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
-                    let at = move |x: Pixels| f32::from(x - bounds.origin.x) / f32::from(bounds.size.width).max(1.);
+                    let at = move |p: gpui::Point<Pixels>| {
+                        if vertical {
+                            1. - f32::from(p.y - bounds.origin.y) / f32::from(bounds.size.height).max(1.)
+                        } else {
+                            f32::from(p.x - bounds.origin.x) / f32::from(bounds.size.width).max(1.)
+                        }
+                    };
                     {
                         let (on, hitbox, name) = (on.clone(), hitbox.clone(), name.clone());
                         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                             if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
                                 cx.stop_propagation();
                                 press(&name);
-                                on(act(at(e.position.x).clamp(0., 1.), false), window, cx);
+                                on(act(at(e.position).clamp(0., 1.), false), window, cx);
                             }
                         });
                     }
@@ -1271,13 +1365,13 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
                         let on = on.clone();
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
                             if phase.bubble() && e.dragging() {
-                                on(act(at(e.position.x).clamp(0., 1.), false), window, cx);
+                                on(act(at(e.position).clamp(0., 1.), false), window, cx);
                             }
                         });
                     }
                     window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                         if phase.bubble() && release(&name) {
-                            on(act(at(e.position.x).clamp(0., 1.), true), window, cx);
+                            on(act(at(e.position).clamp(0., 1.), true), window, cx);
                         }
                     });
                 },

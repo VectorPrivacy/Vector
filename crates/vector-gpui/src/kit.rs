@@ -7,6 +7,13 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::lang::LangFonts as _;
 use crate::theme::*;
 
+/// CSS `font-variant-numeric: tabular-nums`: every digit as wide as the others.
+pub fn tabular() -> gpui::FontFeatures {
+    static TNUM: std::sync::LazyLock<gpui::FontFeatures> =
+        std::sync::LazyLock::new(|| gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));
+    TNUM.clone()
+}
+
 /// Text with CSS `letter-spacing`: GPUI has none, so each grapheme is laid out on its own,
 /// with the spacing after it as CSS adds it (trailing included).
 /// Text as a page lays a name out: each run of spaces, tabs and line breaks one space, none at

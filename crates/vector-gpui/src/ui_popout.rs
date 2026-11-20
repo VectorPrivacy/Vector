@@ -375,7 +375,6 @@ impl VectorApp {
         };
         let into = pos.saturating_sub(start).min(span.max(pos.saturating_sub(start)));
         let frac = if span > 0 { (into as f32 / span as f32).clamp(0., 1.) } else { 0. };
-        let time = format!("{} / {}", crate::audio::format_time(into), crate::audio::format_time(span));
         let is_album = album.is_some();
         let scrubbing = self.popout.scrub.is_some();
 
@@ -606,12 +605,10 @@ impl VectorApp {
                         // Narrow, an album's times step aside for the song's controls.
                         .when(!(is_album && width < 340.), |d| {
                             d.child(
-                                div()
-                                    .flex_none()
+                                crate::video::time_readout("popout-time".into(), into, span)
                                     .text_size(px(12.))
                                     .line_height(px(24.))
-                                    .text_color(white_a(0.55))
-                                    .child(time),
+                                    .text_color(white_a(0.55)),
                             )
                         }),
                 )
