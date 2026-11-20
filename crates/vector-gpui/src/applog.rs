@@ -57,7 +57,7 @@ pub fn init(data_dir: Option<PathBuf>) {
     let mut env = env_logger::Builder::from_default_env();
     // No RUST_LOG on a phone: logcat is the only place a launch that never draws can be read.
     #[cfg(target_os = "android")]
-    env.parse_filters(if cfg!(debug_assertions) { logcat::DEBUG_FILTER } else { "warn" });
+    env.parse_filters(if cfg!(any(debug_assertions, feature = "test-build")) { logcat::TEST_FILTER } else { "warn" });
     let env = env.build();
     let max = env.filter().max(log::LevelFilter::Error);
     if log::set_boxed_logger(Box::new(Logger(env))).is_ok() {
@@ -78,7 +78,7 @@ pub fn init(data_dir: Option<PathBuf>) {
     }));
 }
 
-#[cfg(all(target_os = "android", debug_assertions))]
+#[cfg(all(target_os = "android", any(debug_assertions, feature = "test-build")))]
 pub fn debug_mirror(dir: &std::path::Path) {
     logcat::mirror::into(dir);
 }
@@ -91,7 +91,7 @@ mod logcat {
     use std::io::{BufRead, BufReader};
     use std::os::fd::FromRawFd;
 
-    pub const DEBUG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,arti_client=warn,tor_=warn";
+    pub const TEST_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,arti_client=warn,tor_=warn";
 
     #[link(name = "log")]
     unsafe extern "C" {
@@ -129,7 +129,7 @@ mod logcat {
                 for b in line.iter_mut().filter(|b| **b == 0) {
                     *b = b' ';
                 }
-                #[cfg(debug_assertions)]
+                #[cfg(any(debug_assertions, feature = "test-build"))]
                 mirror::line(&line);
                 line.push(0);
                 // SAFETY: both strings are NUL-terminated and outlive the call.
@@ -148,9 +148,9 @@ mod logcat {
         }
     }
 
-    /// Debug builds also keep a launch's output where the phone's Files app can read it, so a
+    /// Test builds also keep a launch's output where the phone's Files app can read it, so a
     /// test build that never draws can be diagnosed without adb.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-build"))]
     pub mod mirror {
         use std::io::Write;
         use std::path::Path;

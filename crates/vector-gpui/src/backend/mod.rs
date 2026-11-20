@@ -135,7 +135,7 @@ pub(crate) fn core(data_dir: PathBuf) -> &'static tokio::runtime::Runtime {
                 vector_core::db::set_download_dir(dir.into());
             }
             let public = storage::public_dir();
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "test-build"))]
             if let Some(dir) = public.as_ref().or(media.as_ref()) {
                 crate::applog::debug_mirror(std::path::Path::new(dir));
             }

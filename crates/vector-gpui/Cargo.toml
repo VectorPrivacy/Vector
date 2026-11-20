@@ -33,6 +33,9 @@ video-static = ["video", "ffmpeg-next/static", "ffmpeg-next/software-resampling"
 devctl = []
 # The F-Droid flavour: its store installs every update, so no in-app installer.
 fdroid = ["vector-media/fdroid"]
+# Test builds (Android debug APKs, which still compile optimised): a fuller log, kept in a file
+# the phone's Files app can read too.
+test-build = []
 
 [dependencies]
 dhat = { version = "0.3", optional = true }

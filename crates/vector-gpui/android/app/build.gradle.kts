@@ -160,7 +160,7 @@ androidComponents {
             abis.set(wantedAbis)
             // Debug APKs still run optimised: the unoptimised client is too slow on a phone.
             profile.set(if (variant.buildType == "release") "release" else "fastrel")
-            features.set(wantedFeatures)
+            features.set(wantedFeatures + if (variant.buildType == "release") "" else ",test-build")
             crateDir.set(rootProject.layout.projectDirectory.dir(".."))
             ndkDir.set(androidComponents.sdkComponents.ndkDirectory)
             jniLibs.set(layout.buildDirectory.dir("rustJniLibs/${variant.name}"))
