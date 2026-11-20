@@ -43,6 +43,15 @@ pub(crate) fn pipeline(
         CHOSEN.store(LEAN, Ordering::Relaxed);
         return build("quads", "vs_quad_lean", "fs_quad", &lean_module(device));
     }
+    // A slow GLES compiler pays for the refused stage and the probes once per driver, not per launch.
+    let key = verdict_key(device);
+    if let Some((chosen, vs)) = remembered(&key) {
+        let (pipeline, error) = caught(device, || build("quads", vs, "fs_quad", &lean_module(device)));
+        if error.is_none() {
+            CHOSEN.store(chosen, Ordering::Relaxed);
+            return pipeline;
+        }
+    }
     let (pipeline, error) = caught(device, || build("quads", "vs_quad", "fs_quad", stock));
     let Some(error) = error else {
         CHOSEN.store(STOCK, Ordering::Relaxed);
@@ -58,12 +67,16 @@ pub(crate) fn pipeline(
     let Some(error) = error else {
         log::warn!("quads: drawing with the lean vertex stage");
         CHOSEN.store(LEAN, Ordering::Relaxed);
+        remember(&key, LEAN);
         return pipeline;
     };
     log::warn!("the GPU refused the lean vertex stage too, trying a bare one: {error}");
     let (pipeline, error) = caught(device, || build("quads", "vs_quad_bare", "fs_quad", &lean));
     match error {
-        None => log::warn!("quads: drawing with the bare vertex stage"),
+        None => {
+            log::warn!("quads: drawing with the bare vertex stage");
+            remember(&key, BARE);
+        }
         Some(error) => log::error!("quads: the bare vertex stage was refused too: {error}"),
     }
     CHOSEN.store(BARE, Ordering::Relaxed);
@@ -77,6 +90,36 @@ fn forced_lean() -> bool {
     return crate::wgpu_context::android_property(c"debug.vector.gpu") == "gl-lean";
     #[cfg(not(target_os = "android"))]
     std::env::var_os("VECTOR_GL_LEAN").is_some()
+}
+
+/// The GPU, its driver and these shaders: a verdict outlives none of them.
+fn verdict_key(device: &wgpu::Device) -> String {
+    let info = device.adapter_info();
+    let hash = LEAN_SHADERS.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{}|{}|{}|{hash:016x}", info.name, info.driver, info.driver_info)
+}
+
+/// Android points the temporary folder at the app's cache.
+fn verdict_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("vector-gl-quads")
+}
+
+fn remembered(key: &str) -> Option<(u8, &'static str)> {
+    let text = std::fs::read_to_string(verdict_path()).ok()?;
+    let (stage, rest) = text.split_once('\n')?;
+    if rest.trim_end() != key {
+        return None;
+    }
+    match stage {
+        "lean" => Some((LEAN, "vs_quad_lean")),
+        "bare" => Some((BARE, "vs_quad_bare")),
+        _ => None,
+    }
+}
+
+fn remember(key: &str, chosen: u8) {
+    let stage = if chosen == BARE { "bare" } else { "lean" };
+    let _ = std::fs::write(verdict_path(), format!("{stage}\n{key}\n"));
 }
 
 fn lean_module(device: &wgpu::Device) -> wgpu::ShaderModule {
