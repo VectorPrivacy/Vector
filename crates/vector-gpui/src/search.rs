@@ -1100,9 +1100,19 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>
                         .items_baseline()
                         .gap(px(8.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).overflow_hidden().text_ellipsis().whitespace_nowrap().child(name))
-                        .child(div().text_size(px(12.)).text_color(c(LIST_TIME)).whitespace_nowrap().child(when(hit.at, now_ms)))
-                        .children(badges.into_iter().map(|p| svg().path(p).size(px(13.)).text_color(c(LIST_TIME))))
-                        .when(file_only, |d| d.child(svg().path("icons/attachment.svg").size(px(13.)).text_color(c(LIST_TIME)))),
+                        // Icons have no baseline: centre them on the time's line, which keeps the baseline.
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .line_height(px(14.))
+                                .text_color(c(LIST_TIME))
+                                .child(div().whitespace_nowrap().child(when(hit.at, now_ms)))
+                                .children(badges.into_iter().map(|p| svg().path(p).flex_none().size(px(13.)).text_color(c(LIST_TIME))))
+                                .when(file_only, |d| d.child(svg().path("icons/attachment.svg").flex_none().size(px(13.)).text_color(c(LIST_TIME)))),
+                        ),
                 )
                 .map(|d| {
                     if hit.snippet.is_empty() && thumbs.is_some() {
