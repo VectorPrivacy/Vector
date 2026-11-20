@@ -145,6 +145,32 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
     .await
 }
 
+/// Advance a chat's read marker to its newest contact message, picked from the full DB history:
+/// a channel never opened holds no message in RAM for the frontend to name. Returns the new
+/// marker as hex so the frontend can sync its cached `last_read`, or `None` when there is no
+/// contact message to read.
+#[tauri::command]
+pub async fn mark_caught_up(chat_id: String) -> Option<String> {
+    vector_core::db::scoped(async move {
+        let last_read_hex = vector_core::db::events::newest_contact_message_id(&chat_id).await.ok()??;
+        let slim = {
+            let mut state = crate::STATE.lock().await;
+            let idx = state.chats.iter().position(|c| c.id == chat_id)?;
+            state.chats[idx].mark_read_at(encode_message_id(&last_read_hex));
+            crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+        };
+        let _ = crate::db::chats::save_slim_chat(slim).await;
+
+        crate::commands::messaging::reconcile_chat_unread(&chat_id).await;
+        crate::services::notification_service::cancel_chat_notification_on_user_read(&chat_id);
+        if let Some(handle) = crate::TAURI_APP.get() {
+            let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
+        }
+        Some(last_read_hex)
+    })
+    .await
+}
+
 /// Mark a chat unread from `message_id` on: that message and every later one from others count,
 /// even past our own replies, until the chat is read again. Returns the chat's new unread count.
 #[tauri::command]

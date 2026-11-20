@@ -2,9 +2,9 @@
     // The voice Channel call this device is in, as the 1:1 call's pill: its community, how it's
     // going, and the same controls in the same order. It drags anywhere and shares the 1:1
     // pill's place; a tap opens the channel.
-    import { voiceSession, voiceStage, voiceMicOff, toggleVoiceMic, voiceSince } from '../lib/voice.svelte.js';
+    import { voiceSession, voiceStage, voiceMicOff, toggleVoiceMic, voiceSince, voiceOwnTrouble } from '../lib/voice.svelte.js';
     import { openChatId } from '../lib/signals.svelte.js';
-    import { rttQuality } from '../lib/calls.svelte.js';
+    import { fade } from 'svelte/transition';
     import { loadPillPos, savePillPos, clampPill, pillDrag } from '../lib/call-pill.js';
     import { avatarThumb } from '../lib/avatar.js';
     import Avatar from '../ui/Avatar.svelte';
@@ -35,9 +35,8 @@
     // The call's own stage on screen carries the same controls.
     const onStage = $derived(!!v && voiceStage()?.channelId === v.channelId && openChatId() === v.channelId);
     const linked = $derived(v ? v.peers.filter((p) => p.connected) : []);
-    // The call is as good as its slowest link.
-    const ping = $derived(Math.max(0, ...linked.map((p) => p.rtt_ms || 0)));
-    const quality = $derived(rttQuality(ping));
+    // Only our own connection: a peer's weak link is shown beside their name.
+    const trouble = $derived(voiceOwnTrouble(v));
     const avatarPath = $derived(v ? h.communityAvatar(v.communityId) : null);
     const avatar = $derived(avatarPath ? h.convertFileSrc(avatarThumb(avatarPath)) : null);
     // The ring glows with whoever is loudest, on the 1:1 pill's curve.
@@ -84,7 +83,7 @@
             <div class="call-pill-text">
                 <span class="call-pill-name cutoff"><span class="icon icon-volume-max"></span>{h.channelName(v.communityId, v.channelId)}</span>
                 <span class="call-pill-status cutoff">
-                    {#if quality}<span class="call-dot call-dot-{quality}" title={`${ping} ms to the slowest link`}></span>{/if}
+                    {#if trouble}<span class="call-dot call-dot-{trouble}" title="Your connection is unstable" transition:fade={{ duration: 250 }}></span>{/if}
                     {status}
                 </span>
             </div>

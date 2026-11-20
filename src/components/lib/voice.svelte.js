@@ -72,3 +72,54 @@ export function voiceLevel(npub, me) {
 
 /** Louder than room tone. */
 export const SPEAKING = 0.15;
+
+const GRADES = ['excellent', 'good', 'fair', 'poor'];
+const worse = (a, b) => (GRADES.indexOf(a) >= GRADES.indexOf(b) ? a : b);
+// A flag outlives its link's recovery by this much, so a link at the edge of a grade doesn't blink.
+const FLAG_HOLD_MS = 4000;
+const flagsHeld = new Map();
+
+/** Trouble on a peer's link to us, from what actually hurts: loss, or a round trip grown well past
+ *  the link's own usual (on a relay, trouble shows as delay, not loss). A steady long path is fine. */
+function linkTrouble(p) {
+    const loss = p.loss_pct || 0;
+    const byLoss = loss < 0.5 ? 'excellent' : loss < 2 ? 'good' : loss < 5 ? 'fair' : 'poor';
+    const floor = p.rtt_floor_ms || 0;
+    const queued = floor && p.rtt_ms ? p.rtt_ms - floor : 0;
+    const byQueue = queued >= 1000 ? 'poor' : queued >= Math.max(300, floor) ? 'fair' : 'excellent';
+    return { grade: worse(byLoss, byQueue), byLoss: byLoss !== 'excellent' && worse(byLoss, byQueue) === byLoss };
+}
+
+/** A peer's link to us while it's in trouble: { grade, label, title }, the label being the
+ *  figure that earned the grade. Null while it's fine or not linked yet. */
+export function voiceLinkFlag(p) {
+    if (!p?.connected) return null;
+    const { grade, byLoss } = linkTrouble(p);
+    if (grade !== 'excellent') {
+        const flag = { grade, label: byLoss ? `${Math.max(1, Math.round(p.loss_pct))}% loss` : `${p.rtt_ms} ms`, title: voiceLinkTitle(p) };
+        flagsHeld.set(p.npub, { flag, at: Date.now() });
+        return flag;
+    }
+    const held = flagsHeld.get(p.npub);
+    if (held && Date.now() - held.at < FLAG_HOLD_MS) return held.flag;
+    flagsHeld.delete(p.npub);
+    return null;
+}
+
+/** A linked peer's path in words: round trip against its usual, loss and route. */
+export function voiceLinkTitle(p) {
+    if (!p?.connected || !p.rtt_ms) return null;
+    const usual = p.rtt_floor_ms && p.rtt_ms - p.rtt_floor_ms >= 50 ? ` (usually ${p.rtt_floor_ms} ms)` : '';
+    return `${p.rtt_ms} ms${usual}, ${(p.loss_pct || 0).toFixed(1)}% loss, ${p.direct ? 'direct' : 'through a relay'}`;
+}
+
+/** Most of our links in trouble at once: the trouble is ours, not theirs. Its grade, or null. */
+export function voiceOwnTrouble(s) {
+    const linked = (s?.peers || []).filter((p) => p.connected && p.rtt_ms);
+    if (linked.length < 2) return null;
+    const grades = linked.map((p) => linkTrouble(p).grade);
+    const poor = grades.filter((g) => g === 'poor').length;
+    const bad = poor + grades.filter((g) => g === 'fair').length;
+    if (bad * 2 <= linked.length) return null;
+    return poor * 2 > linked.length ? 'poor' : 'fair';
+}

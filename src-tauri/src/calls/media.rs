@@ -10,7 +10,7 @@ use super::settings::AudioSettings;
 use super::declick::Declicker;
 use super::gate::SpeechGate;
 use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
-use super::rate::{LinkSample, MeshRate, RateControl, START_KBPS};
+use super::rate::{LinkSample, MeshRate, RateControl, HOLD_PROBE_EVERY, START_KBPS};
 use super::resample::Resampler;
 use super::ring::SpscRing;
 use super::settings;
@@ -102,18 +102,31 @@ pub(crate) enum Outbound {
 }
 
 impl Outbound {
-    fn send(&self, datagram: bytes::Bytes, stats: &MediaStats) {
+    /// `lean` goes instead of `datagram` to the links it names, by stable id, and a `held` link
+    /// gets only `probe`, when there is one.
+    fn send(&self, datagram: bytes::Bytes, lean: Option<(bytes::Bytes, &[u64])>, held: &[u64], probe: Option<&bytes::Bytes>, stats: &MediaStats) {
         let sent = |c: &Connection, d: bytes::Bytes| match c.send_datagram(d) {
             Ok(()) => stats.sent.fetch_add(1, Ordering::Relaxed),
             Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
         };
-        match self {
-            Outbound::One(c) => {
-                sent(c, datagram);
+        let to = |c: &Connection, d: &bytes::Bytes| {
+            let id = c.stable_id() as u64;
+            if held.binary_search(&id).is_ok() {
+                if let Some(p) = probe {
+                    sent(c, p.clone());
+                }
+                return;
             }
+            match &lean {
+                Some((l, links)) if links.binary_search(&id).is_ok() => sent(c, l.clone()),
+                _ => sent(c, d.clone()),
+            };
+        };
+        match self {
+            Outbound::One(c) => to(c, &datagram),
             Outbound::Many(peers) => {
                 for c in peers.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                    sent(c, datagram.clone());
+                    to(c, &datagram);
                 }
             }
         }
@@ -250,11 +263,11 @@ impl MediaEngine {
                         if frame.flags & FLAG_SHARE != 0 {
                             stats.share_received.fetch_add(1, Ordering::Relaxed);
                             let mut j = share_jitter.lock().unwrap_or_else(|e| e.into_inner());
-                            j.push(frame.seq, false, frame.payload, now_ms(), &stats);
+                            j.push(frame.seq, frame.ts_ms, false, frame.payload, now_ms(), &stats);
                         } else {
                             stats.received.fetch_add(1, Ordering::Relaxed);
                             let mut j = jitter.lock().unwrap_or_else(|e| e.into_inner());
-                            j.push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
+                            j.push(frame.seq, frame.ts_ms, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
                         }
                     }
                 }
@@ -390,6 +403,18 @@ impl NetSim {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Debug builds only: `VECTOR_CALL_TEST_INPUT=<raw f32le, 48 kHz mono>` stands in for the
+/// microphone, looped on the clock a microphone would keep.
+fn test_input() -> Option<Vec<f32>> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let path = std::env::var("VECTOR_CALL_TEST_INPUT").ok()?;
+    let pcm: Vec<f32> = std::fs::read(&path).ok()?.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    log_info!("[CALLS] test input on: {path}, {:.1}s", pcm.len() as f32 / ENGINE_RATE as f32);
+    (!pcm.is_empty()).then_some(pcm)
+}
+
 pub(crate) fn capture_thread(
     out: Option<Outbound>,
     link: Arc<LiveLink>,
@@ -440,7 +465,10 @@ pub(crate) fn capture_thread(
         Ok((stream, ring, in_rate))
     };
 
-    let opened = if !mic_wanted {
+    let fake = test_input();
+    let opened = if fake.is_some() {
+        Err(String::new())
+    } else if !mic_wanted {
         Err("the microphone did not open in time".to_string())
     } else if crate::mic_access::granted() {
         setup()
@@ -453,6 +481,7 @@ pub(crate) fn capture_thread(
     }
     let (_stream, cap_ring, in_rate) = match opened {
         Ok((stream, ring, rate)) => (Some(stream), ring, rate),
+        Err(_) if fake.is_some() => (None, Arc::new(SpscRing::new(ENGINE_RATE as usize)), ENGINE_RATE),
         // A call goes on without a microphone: muted, but still hearing the peer and still
         // sending the muted frames that tell them we are here.
         Err(e) if out.is_some() => {
@@ -465,7 +494,8 @@ pub(crate) fn capture_thread(
             return;
         }
     };
-    let silent = _stream.is_none();
+    let clocked = _stream.is_none();
+    let silent = clocked && fake.is_none();
     let mut silent_samples: u64 = 0;
     let mut aec = match SpeexAec::new(ENGINE_RATE, FRAME, AEC_TAIL_MS) {
         Ok(a) => a,
@@ -503,6 +533,11 @@ pub(crate) fn capture_thread(
     let mut netsim = NetSim::from_env();
     let mut rate = RateControl::new();
     let mut mesh = MeshRate::new(VOICE_MAX_KBPS);
+    // The second encoder and the links it serves: only while a link can't carry the main one.
+    let mut lean: Option<(Encoder, Vec<u64>)> = None;
+    // Links with a backlog building: fed only a probe until they drain.
+    let mut held: Vec<u64> = Vec::new();
+    let mut lean_packet = [0u8; 1500];
     if let Some(conn) = out.as_ref().and_then(Outbound::one) {
         let net = conn.stats();
         rate.prime(net.udp_tx.datagrams, net.lost_packets);
@@ -521,11 +556,14 @@ pub(crate) fn capture_thread(
         if n > 0 {
             near_rs.process(&scratch[..n], &mut near);
         }
-        if silent {
+        if clocked {
             // Silence on the clock a microphone would keep, so frames still go out on time.
             let due = (started.elapsed().as_secs_f64() * ENGINE_RATE as f64) as u64;
             let add = due.saturating_sub(silent_samples) as usize;
-            near.extend(std::iter::repeat_n(0.0, add));
+            match &fake {
+                Some(t) => near.extend((0..add as u64).map(|i| t[((silent_samples + i) % t.len() as u64) as usize])),
+                None => near.extend(std::iter::repeat_n(0.0, add)),
+            }
             silent_samples += add as u64;
         }
         let m = link.tap.pop(&mut scratch);
@@ -568,17 +606,20 @@ pub(crate) fn capture_thread(
                 continue;
             };
             let ts = started.elapsed().as_millis() as u32;
-            let datagram = if silent || muted.load(Ordering::Relaxed) || (gated && !speaking) {
-                pack(seq, ts, FLAG_MUTED, &[])
-            } else {
-                match enc.encode(&clean, &mut packet) {
-                    Ok(len) => pack(seq, ts, 0, &packet[..len]),
-                    Err(_) => pack(seq, ts, FLAG_MUTED, &[]),
-                }
+            let quiet = silent || muted.load(Ordering::Relaxed) || (gated && !speaking);
+            let encoded = |enc: &mut Encoder, buf: &mut [u8]| match enc.encode(&clean, buf) {
+                Ok(len) => pack(seq, ts, 0, &buf[..len]),
+                Err(_) => pack(seq, ts, FLAG_MUTED, &[]),
             };
+            let datagram = if quiet { pack(seq, ts, FLAG_MUTED, &[]) } else { encoded(&mut enc, &mut packet) };
+            let lean_out = match lean.as_mut() {
+                Some((lean_enc, links)) if !quiet => Some((encoded(lean_enc, &mut lean_packet), links.as_slice())),
+                _ => None,
+            };
+            let probe = (!held.is_empty() && seq % HOLD_PROBE_EVERY == 0).then(|| pack(seq, ts, FLAG_MUTED, &[]));
             match (netsim.as_mut(), out.one()) {
                 (Some(sim), Some(_)) => sim.offer(datagram),
-                _ => out.send(datagram, &stats),
+                _ => out.send(datagram, lean_out, &held, probe.as_ref(), &stats),
             }
             seq = seq.wrapping_add(1);
             stats.next_seq.store(seq as u32, Ordering::Relaxed);
@@ -597,6 +638,11 @@ pub(crate) fn capture_thread(
                         stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
                     }
                 }
+                let now_held = if rate.held() { vec![conn.stable_id() as u64] } else { Vec::new() };
+                if now_held.is_empty() != held.is_empty() {
+                    log_info!("[CALLS] link {}: round trip {rtt_ms} ms", if now_held.is_empty() { "fed again" } else { "held, a backlog is building" });
+                }
+                held = now_held;
                 stats.net_loss.store(rate.loss_pct().to_bits(), Ordering::Relaxed);
             }
         }
@@ -612,10 +658,30 @@ pub(crate) fn capture_thread(
                         LinkSample { id: c.stable_id() as u64, sent_packets: net.udp_tx.datagrams, lost_packets: net.lost_packets, rtt_ms, relay }
                     })
                     .collect();
-                if let Some(setting) = mesh.observe(&samples) {
-                    if enc.set_rate(setting.kbps, setting.fec_pct).is_ok() {
-                        stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
+                if let Some(tiers) = mesh.observe(&samples) {
+                    if enc.set_rate(tiers.main.kbps, tiers.main.fec_pct).is_ok() {
+                        stats.bitrate_kbps.store(tiers.main.kbps, Ordering::Relaxed);
                     }
+                    let had = lean.is_some();
+                    let lean_setting = tiers.lean.as_ref().map(|l| (l.setting, l.links.len()));
+                    lean = tiers.lean.and_then(|l| {
+                        let mut lean_enc = match lean.take() {
+                            Some((e, _)) => e,
+                            None => Encoder::new().ok()?,
+                        };
+                        lean_enc.set_rate(l.setting.kbps, l.setting.fec_pct).ok()?;
+                        Some((lean_enc, l.links))
+                    });
+                    match (&lean, had) {
+                        (Some((_, links)), false) => log_info!("[voice] {} weak link(s) on a lean stream", links.len()),
+                        (None, true) => log_info!("[voice] every link back on the main stream"),
+                        _ => {}
+                    }
+                    if tiers.held != held {
+                        log_info!("[voice] {} link(s) held for a backlog", tiers.held.len());
+                    }
+                    held = tiers.held;
+                    log_debug!("[voice] main {} kbps fec {}%, lean {lean_setting:?}", tiers.main.kbps, tiers.main.fec_pct);
                 }
                 stats.net_loss.store(mesh.loss_pct().to_bits(), Ordering::Relaxed);
             }

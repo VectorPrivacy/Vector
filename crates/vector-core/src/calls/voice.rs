@@ -14,6 +14,7 @@ use nostr_sdk::prelude::{PublicKey, ToBech32};
 use serde::Serialize;
 
 use super::platform::AwakeLevel;
+use super::rate::{LossMeter, RttFloor};
 use crate::community::roles::Permissions;
 use crate::community::transport::LiveTransport;
 use crate::community::v2::{community::CommunityV2, voice as presence};
@@ -86,6 +87,11 @@ pub struct VoicePeer {
     pub direct: bool,
     /// The selected path's round trip, 0 until there is one.
     pub rtt_ms: u32,
+    /// Our packets lost on the way to them lately, in percent.
+    pub loss_pct: f32,
+    /// The selected path's usual round trip: its lowest lately, 0 until known. A round trip
+    /// well above it is a queue building; a steady long one is only distance.
+    pub rtt_floor_ms: u32,
     /// How loud they are now, 0 to 1.
     pub level: f32,
     pub muted: bool,
@@ -125,6 +131,42 @@ pub struct VoiceState {
 struct Link {
     author: PublicKey,
     conn: Connection,
+    loss: LossMeter,
+    floor: RttFloor,
+    floor_ms: u32,
+    sampled_ms: u64,
+}
+
+/// Two seconds of frames per sample, so one lost packet doesn't flag a healthy link.
+const LINK_SAMPLE_MS: u64 = 2000;
+
+impl Link {
+    fn new(author: PublicKey, conn: Connection) -> Self {
+        let mut loss = LossMeter::default();
+        let net = conn.stats();
+        loss.prime(net.udp_tx.datagrams, net.lost_packets);
+        Self { author, conn, loss, floor: RttFloor::default(), floor_ms: 0, sampled_ms: now_ms() }
+    }
+
+    /// The selected path, direct or not, and its round trip.
+    fn path(&self) -> Option<(bool, u32)> {
+        let paths = self.conn.paths();
+        paths.iter().find(|path| path.is_selected()).map(|path| (path.is_ip(), path.rtt().as_millis() as u32))
+    }
+
+    /// Recent loss toward them in percent, and the path's usual round trip: what the call's
+    /// readout grades them on.
+    fn sample(&mut self, now: u64, path: Option<(bool, u32)>) -> (f32, u32) {
+        if now.saturating_sub(self.sampled_ms) >= LINK_SAMPLE_MS {
+            self.sampled_ms = now;
+            let net = self.conn.stats();
+            self.loss.sample(net.udp_tx.datagrams, net.lost_packets);
+            if let Some((direct, rtt)) = path {
+                self.floor_ms = self.floor.observe(rtt, !direct).unwrap_or(0);
+            }
+        }
+        (self.loss.pct(), self.floor_ms)
+    }
 }
 
 struct Voice {
@@ -317,6 +359,7 @@ async fn bind(community: &CommunityV2) -> Result<Endpoint, String> {
         .stream_receive_window(VarInt::from_u32(512 * 1024))
         .receive_window(VarInt::from_u32(2 * 1024 * 1024))
         .max_concurrent_uni_streams(VarInt::from_u32(256))
+        .datagram_send_buffer_size(super::DATAGRAM_SEND_BUFFER)
         .build();
     let builder = Endpoint::builder(Voice(mode)).alpns(vec![VOICE_ALPN.to_vec()]).transport_config(transport);
     #[cfg(not(target_arch = "wasm32"))]
@@ -859,26 +902,34 @@ fn state(v: &Voice) -> VoiceState {
     let level_of = |ep: Option<[u8; 32]>| levels.iter().find(|(e, _)| *e == ep).map_or(0.0, |(_, l)| *l);
     // Read before the links are held: the video side takes its locks one at a time too.
     let (sending, viewers) = (v.video.sending(), v.video.viewers());
-    let links = v.links.lock().unwrap_or_else(|e| e.into_inner());
-    let mut peers: Vec<VoicePeer> = presence::present(&v.channel_hex, now_ms())
+    let mut links = v.links.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ms();
+    let mut peers: Vec<VoicePeer> = presence::present(&v.channel_hex, now)
         .into_iter()
         .filter(|p| p.author != v.me)
         .map(|p| {
-            let link = p.endpoint.and_then(|ep| links.get(&ep));
-            let path = link.and_then(|l| {
-                let paths = l.conn.paths();
-                paths.iter().find(|path| path.is_selected()).map(|path| (path.is_ip(), path.rtt().as_millis() as u32))
-            });
+            let link = p.endpoint.and_then(|ep| links.get_mut(&ep));
+            let linked = link.is_some();
+            let (path, loss_pct, rtt_floor_ms) = match link {
+                Some(l) => {
+                    let path = l.path();
+                    let (loss, floor) = l.sample(now, path);
+                    (path, loss, floor)
+                }
+                None => (None, 0.0, 0),
+            };
             VoicePeer {
                 volume: peer_volume(&p.author),
                 npub: p.author.to_bech32().unwrap_or_default(),
                 pubkey: p.author.to_hex(),
                 screen: p.screen,
                 camera: p.camera,
-                connected: link.is_some(),
+                connected: linked,
                 direct: path.is_some_and(|(ip, _)| ip),
                 rtt_ms: path.map_or(0, |(_, rtt)| rtt),
-                level: if link.is_some() { level_of(p.endpoint) } else { 0.0 },
+                loss_pct,
+                rtt_floor_ms,
+                level: if linked { level_of(p.endpoint) } else { 0.0 },
                 muted: p.muted,
                 deafened: p.deafened,
                 server_muted: p.server_muted,
@@ -1136,7 +1187,7 @@ fn link(v: &Arc<Voice>, id: [u8; 32], author: PublicKey, conn: Connection) {
             conn.close(0u32.into(), b"already connected");
             return;
         }
-        links.insert(id, Link { author, conn: conn.clone() });
+        links.insert(id, Link::new(author, conn.clone()));
     }
     video::on_link(v, id, author, conn.clone());
     if let Some(m) = v.engine() {
@@ -1274,7 +1325,7 @@ mod tests {
             exclusive: true,
         });
         let id = *b.id().as_bytes();
-        v.links.lock().unwrap().insert(id, Link { author: nostr_sdk::prelude::Keys::generate().public_key(), conn });
+        v.links.lock().unwrap().insert(id, Link::new(nostr_sdk::prelude::Keys::generate().public_key(), conn));
         v.video.add_watcher(id);
         v.video.set_sending_for_test(crate::calls::wire::Tracks { camera: true, screen: true });
         let run = |f: Box<dyn Fn() + Send>| {

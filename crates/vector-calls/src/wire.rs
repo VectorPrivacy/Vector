@@ -14,6 +14,8 @@ pub const HEADER_LEN: usize = 8;
 
 pub struct Frame<'a> {
     pub seq: u16,
+    /// Milliseconds on the sender's media clock when it went out.
+    pub ts_ms: u32,
     pub flags: u16,
     pub payload: &'a [u8],
 }
@@ -33,6 +35,7 @@ pub fn unpack(data: &[u8]) -> Option<Frame<'_>> {
     }
     Some(Frame {
         seq: u16::from_be_bytes([data[0], data[1]]),
+        ts_ms: u32::from_be_bytes([data[2], data[3], data[4], data[5]]),
         flags: u16::from_be_bytes([data[6], data[7]]),
         payload: &data[HEADER_LEN..],
     })

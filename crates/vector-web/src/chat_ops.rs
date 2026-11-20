@@ -47,6 +47,7 @@ async fn run(cmd: &str, a: &Args) -> Result<Option<Value>, String> {
             to_value(meta)?
         }
         "mark_as_unread" => db::scoped(mark_as_unread(a.str("chatId")?)).await.map_or(Value::Null, Value::String),
+        "mark_caught_up" => db::scoped(mark_caught_up(a.str("chatId")?)).await.map_or(Value::Null, Value::String),
         "mark_unread_from" => json!(db::scoped(mark_unread_from(a.str("chatId")?, a.str("messageId")?)).await?),
         "set_self_destruct_timer" => {
             let (chat_id, secs) = (a.str("chatId")?, a.de::<Option<u64>>("secs")?);
@@ -336,6 +337,20 @@ async fn mark_as_unread(chat_id: String) -> Option<String> {
     if is_clear {
         let _ = db::chats::clear_chat_last_read(&chat_id);
     }
+    reconcile_unread(&chat_id).await;
+    Some(last_read_hex)
+}
+
+/// Read up to the chat's newest contact message, picked from the DB; the new marker.
+async fn mark_caught_up(chat_id: String) -> Option<String> {
+    let last_read_hex = db::events::newest_contact_message_id(&chat_id).await.ok()??;
+    let slim = {
+        let mut state = STATE.lock().await;
+        let idx = state.chats.iter().position(|c| c.id == chat_id)?;
+        state.chats[idx].mark_read_at(vector_core::compact::encode_message_id(&last_read_hex));
+        db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner)
+    };
+    let _ = db::chats::save_slim_chat(&slim);
     reconcile_unread(&chat_id).await;
     Some(last_read_hex)
 }

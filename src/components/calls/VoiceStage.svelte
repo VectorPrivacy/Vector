@@ -1,9 +1,9 @@
 <script>
     // A voice channel's stage, above its chat: who is in the call (speaking, muted, deafened),
     // and joining it, or the call's own controls once in.
-    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, voiceJoining, SPEAKING } from '../lib/voice.svelte.js';
+    import { voiceSession, voicePresent, voiceStage, voiceCallHandlers, voiceLevel, voiceMicOff, toggleVoiceMic, voiceFocus, setVoiceFocus, voiceJoining, voiceLinkFlag, voiceLinkTitle, voiceOwnTrouble, SPEAKING } from '../lib/voice.svelte.js';
     import { openChatId, profileVersion } from '../lib/signals.svelte.js';
-    import { rttQuality } from '../lib/calls.svelte.js';
+    import { fade } from 'svelte/transition';
     import Avatar from '../ui/Avatar.svelte';
     import RouteButton from './RouteButton.svelte';
     import StayOnScreen from './StayOnScreen.svelte';
@@ -24,10 +24,10 @@
         h.join(stage.communityId, stage.channelId);
     }
     const connected = (npub) => npub === me || !!v?.peers.find((p) => p.npub === npub && p.connected);
-    // The call is as good as its slowest link: that round trip, once anyone is linked.
-    const linked = $derived(inCall ? v.peers.filter((p) => p.connected && p.rtt_ms) : []);
-    const ping = $derived(linked.length ? Math.max(...linked.map((p) => p.rtt_ms)) : 0);
-    const quality = $derived(rttQuality(ping));
+    // Our own trouble says so once, in the header, rather than flagging everyone we can't reach well.
+    const trouble = $derived(inCall ? voiceOwnTrouble(v) : null);
+    const peerOf = (npub) => (inCall && npub !== me ? v.peers.find((x) => x.npub === npub && x.connected) : null);
+    const flagOf = (npub) => (trouble ? null : voiceLinkFlag(peerOf(npub)));
     // Shared screens: whose are live, and the one on the stage. Ours shows only when picked.
     const sharing = (p) => p.screen || (p.npub === me && !!v?.sharing);
     const sharers = $derived(people.filter(sharing).map((p) => p.npub));
@@ -69,10 +69,7 @@
     }
     // A name follows its profile as it loads.
     const nameOf = (npub) => (profileVersion(npub), h.getName?.(npub, stage?.communityId));
-    function pathOf(npub) {
-        const p = inCall ? v.peers.find((x) => x.npub === npub && x.connected) : null;
-        return p?.rtt_ms ? `${p.rtt_ms} ms, ${p.direct ? 'direct' : 'through a relay'}` : null;
-    }
+    const pathOf = (npub) => voiceLinkTitle(peerOf(npub));
 </script>
 
 {#if shown}
@@ -86,8 +83,8 @@
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <span class="voice-stage-warn" onclick={() => h.micAccess?.()}>No microphone access: others can't hear you</span>
             {/if}
-            {#if quality}
-                <span class="voice-stage-ping" title="Round trip to the slowest link in the call"><span class="call-dot call-dot-{quality}"></span>{ping} ms</span>
+            {#if trouble}
+                <span class="voice-stage-ping" title="Most of your links are slow or losing packets" transition:fade={{ duration: 250 }}><span class="call-dot call-dot-{trouble}"></span>Your connection is unstable</span>
             {/if}
         </div>
         {#if viewing}
@@ -118,6 +115,7 @@
             <div class="voice-stage-grid">
                 {#each people as p (p.npub)}
                     {@const level = inCall ? voiceLevel(p.npub, me) : 0}
+                    {@const flag = flagOf(p.npub)}
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <div class="voice-tile" class:is-speaking={level > SPEAKING && !p.muted} class:is-pending={inCall && !connected(p.npub)}
                          class:is-sharing={sharing(p)} class:is-viewing={viewing === p.npub} class:has-cam={cam(p) && (p.npub === me || !!keyOf(p.npub))}
@@ -145,7 +143,10 @@
                                 </span>
                             {/if}
                         </div>
-                        {#if sharing(p)}<span class="voice-tile-live" title={inCall ? (viewing === p.npub ? 'Hide their screen' : 'Show their screen') : 'Sharing their screen'}>LIVE</span>{/if}
+                        <span class="voice-tile-corner">
+                            {#if flag}<span class="voice-ping is-{flag.grade}" title={flag.title} transition:fade={{ duration: 250 }}>{flag.label}</span>{/if}
+                            {#if sharing(p)}<span class="voice-tile-live" title={inCall ? (viewing === p.npub ? 'Hide their screen' : 'Show their screen') : 'Sharing their screen'}>LIVE</span>{/if}
+                        </span>
                         <span class="voice-tile-name cutoff">{p.npub === me ? 'You' : nameOf(p.npub)}</span>
                         {#if p.elsewhere}<span class="voice-tile-note">another app</span>{:else if inCall && !connected(p.npub)}<span class="voice-tile-note">connecting</span>{/if}
                     </div>
