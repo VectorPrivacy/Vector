@@ -2345,6 +2345,28 @@ pub async fn compute_unread_anchor(chat_identifier: &str) -> Result<UnreadMark, 
     })
 }
 
+/// The read marker that leaves `chat_identifier` fully caught up: its newest contact message,
+/// from the full DB history (RAM may hold no message at all for a channel never opened). `None`
+/// when no contact message exists. The count query reads whole seconds, so same-second
+/// neighbours of the marker read as caught up too.
+pub async fn newest_contact_message_id(chat_identifier: &str) -> Result<Option<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT e.id FROM events e JOIN chats c ON e.chat_id = c.id \
+         WHERE c.chat_identifier = ?1 AND e.mine = 0 AND e.kind IN (?2, ?3, ?4) \
+         ORDER BY e.created_at DESC LIMIT 1",
+        rusqlite::params![
+            chat_identifier,
+            event_kind::CHAT_MESSAGE as i32,
+            event_kind::PRIVATE_DIRECT_MESSAGE as i32,
+            event_kind::FILE_ATTACHMENT as i32
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("newest contact message: {e}"))
+}
+
 /// Drain a sync loop's pending message batch into one transaction. The shared flush for the
 /// segment-flush pattern: bulk loops COLLECT message saves and call this at delete barriers +
 /// loop end (a batched save committing AFTER a delete it originally preceded would resurrect
@@ -3122,6 +3144,41 @@ mod tests {
         let e = "npub1anchorE";
         save_message(e, &mk("e_mine", 5000, true)).await.unwrap();
         assert_eq!(compute_unread_anchor(e).await.unwrap(), UnreadMark::NoOp);
+    }
+
+    // Catching up a chat whose history lives only in the DB must clear it, own sends and
+    // same-second neighbours included.
+    #[tokio::test]
+    async fn newest_contact_message_id_catches_a_chat_up() {
+        let (_tmp, _guard) = init_test_db();
+        let mk = |id: &str, secs: u64, mine: bool| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine,
+            npub: (!mine).then(|| "npub1sender".to_string()),
+            ..Default::default()
+        };
+        let unread = |chat: &'static str| async move {
+            unread_counts().await.unwrap().get(chat).copied().unwrap_or(0)
+        };
+        let set_lr = |chat: &str, lr: &str| {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET last_read = ?1 WHERE chat_identifier = ?2",
+                rusqlite::params![lr, chat]).unwrap();
+        };
+
+        let a = "npub1caughtupA";
+        save_message(a, &mk("a_mine", 1000, true)).await.unwrap();
+        for i in 0..5u64 { save_message(a, &mk(&format!("a{i}"), 2000 + i, false)).await.unwrap(); }
+        save_message(a, &mk("a_tie", 2004, false)).await.unwrap();
+        assert_eq!(unread(a).await, 6);
+        let marker = newest_contact_message_id(a).await.unwrap().unwrap();
+        assert!(marker == "a4" || marker == "a_tie", "newest second's message, got {marker}");
+        set_lr(a, &marker);
+        assert_eq!(unread(a).await, 0, "caught up, same-second neighbour included");
+
+        let b = "npub1caughtupB";
+        save_message(b, &mk("b_mine", 1000, true)).await.unwrap();
+        assert_eq!(newest_contact_message_id(b).await.unwrap(), None, "only our own messages");
+        assert_eq!(newest_contact_message_id("npub1nochat").await.unwrap(), None, "unknown chat");
     }
 
     // Regression: a "read to here" marker that lands on a system event (kind 30078, not a counted

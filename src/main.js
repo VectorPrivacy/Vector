@@ -1787,8 +1787,22 @@ function markAsRead(chat, message, explicit = false) {
  *  unread query a row it can't anchor on, wedging the badge at a permanent 99+. No-op when the
  *  window holds no contact message (nothing non-mine can be unread). Used by the jump/reveal paths. */
 function markChatCaughtUp(chat, explicit = false) {
+    if (explicit && chat) return markChatReadThrough(chat);
     const caughtUp = findLatestContactMessage(chat?.messages);
     if (caughtUp) markAsRead(chat, caughtUp, explicit);
+}
+
+/** An explicit read covers the whole history, so the backend picks the marker from the DB:
+ *  RAM holds no message at all for a channel never opened, or only a stale preview. */
+async function markChatReadThrough(chat) {
+    if (isChatUnreadLatched(chat.id)) clearChatUnreadLatch(chat.id);
+    chat.unread_from = '';
+    chat.unread = 0;
+    chatChanged(chat);
+    let lastRead = null;
+    try { lastRead = await invoke('mark_caught_up', { chatId: chat.id }); } catch (_e) {}
+    if (lastRead) chat.last_read = lastRead;
+    scheduleUnreadRefresh();
 }
 
 /** True when the chat's newest conversational message is from the other side (not us, not a

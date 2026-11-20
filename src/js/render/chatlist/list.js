@@ -751,11 +751,15 @@ function communityHasUnread(communityId) {
         && computeRowUnreadCount(c) > 0);
 }
 
-/** Catch up every channel of a community, not just the one anchoring its row. */
+/**
+ * Catch up every channel of a community, not just the one anchoring its row. Muted channels
+ * too: unmuting one later should show only what arrived since.
+ */
 function markCommunityCaughtUp(communityId) {
     for (const c of arrChats) {
         if (c.chat_type !== 'Community' || c.metadata?.custom_fields?.community_id !== communityId) continue;
-        if (computeRowUnreadCount(c) > 0) markChatCaughtUp(c, /* explicit */ true);
+        const unread = typeof c.unread === 'number' ? c.unread : countUnreadMessages(c);
+        if (unread > 0) markChatCaughtUp(c, /* explicit */ true);
     }
 }
 
@@ -795,7 +799,9 @@ function countPingMessages(chat) {
             && mayMentionEveryone(chat, everyoneAuthor);
         if (mentionedMe || mentionedEveryone || (isGroup && rolePingsMe(msg, chat))) pings++;
     }
-    return pings;
+    // The walk stops only on a read marker it holds; a marker picked from the DB may not be
+    // in RAM, and the DB count is the authority on how much is unread at all.
+    return typeof chat.unread === 'number' ? Math.min(pings, chat.unread) : pings;
 }
 
 /**
