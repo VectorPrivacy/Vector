@@ -33,6 +33,40 @@ const SEVERE_LOSS_PCT: f32 = 15.0;
 /// Where a severe second puts the voice at once: still wideband.
 const SEVERE_KBPS: u32 = 32;
 
+/// Round trip over its floor at which a link is building a backlog: it stops being fed audio
+/// until it falls back under the lower mark, so the queue drains instead of growing.
+const HOLD_ABOVE_MS: u32 = 1_000;
+const RESUME_ABOVE_MS: u32 = 400;
+/// A held link still gets one muted frame in this many, so its round trip keeps being measured.
+pub const HOLD_PROBE_EVERY: u16 = 10;
+/// Held this long without draining: the path is slower now, not backed up. Let go and relearn its floor.
+const HOLD_MAX_SECS: u32 = 15;
+
+/// Whether a link is held, with hysteresis.
+#[derive(Default)]
+struct Backlog {
+    held: bool,
+    secs: u32,
+}
+
+impl Backlog {
+    /// Once a second, with the round trip (0 when unknown) and the path's floor. True when the
+    /// floor is stale and should be learned again.
+    fn update(&mut self, rtt_ms: u32, floor: Option<u32>) -> bool {
+        match floor {
+            None => self.held = false,
+            Some(_) if rtt_ms == 0 => {}
+            Some(f) => self.held = rtt_ms > f + if self.held { RESUME_ABOVE_MS } else { HOLD_ABOVE_MS },
+        }
+        self.secs = if self.held { self.secs + 1 } else { 0 };
+        if self.secs > HOLD_MAX_SECS {
+            *self = Self::default();
+            return true;
+        }
+        false
+    }
+}
+
 /// Seconds per bucket of a round-trip floor, and how many buckets it keeps.
 const FLOOR_BUCKET_SECS: u32 = 10;
 const FLOOR_BUCKETS: usize = 30;
@@ -59,6 +93,11 @@ impl Default for FloorWindow {
 }
 
 impl RttFloor {
+    /// Starts this path kind's floor over.
+    fn forget(&mut self, relay: bool) {
+        self.paths[relay as usize] = FloorWindow::default();
+    }
+
     /// Once a second, with the selected path's round trip (0 when unknown). Returns
     /// that path's floor once it has one.
     pub fn observe(&mut self, rtt_ms: u32, relay: bool) -> Option<u32> {
@@ -86,15 +125,52 @@ fn severe(rtt_ms: u32, floor: Option<u32>, loss_pct: f32) -> bool {
     loss_pct >= SEVERE_LOSS_PCT || floor.is_some_and(|f| rtt_ms > f.saturating_add(SEVERE_QUEUE_MS))
 }
 
-pub struct RateControl {
-    rung: usize,
-    clean_secs: u32,
-    hold: u32,
+/// A link's loss from QUIC's cumulative counts, a sample at a time, smoothed over a few.
+#[derive(Default)]
+pub struct LossMeter {
     last_sent: u64,
     last_lost: u64,
-    /// Loss smoothed over a few seconds, for the FEC budget.
-    loss_avg: f32,
+    avg: f32,
+}
+
+impl LossMeter {
+    /// Sets the baseline so the first sample covers only what comes after.
+    pub fn prime(&mut self, sent_packets: u64, lost_packets: u64) {
+        self.last_sent = sent_packets;
+        self.last_lost = lost_packets;
+    }
+
+    /// The loss since the last sample, in percent, once enough went out to judge it.
+    pub fn sample(&mut self, sent_packets: u64, lost_packets: u64) -> Option<f32> {
+        let sent = sent_packets.saturating_sub(self.last_sent);
+        let lost = lost_packets.saturating_sub(self.last_lost);
+        self.last_sent = sent_packets;
+        self.last_lost = lost_packets;
+        // Too few packets to judge: a call sends fifty a second.
+        if sent < 10 {
+            return None;
+        }
+        let loss = 100.0 * lost as f32 / sent as f32;
+        self.avg += (loss - self.avg) * 0.3;
+        Some(loss)
+    }
+
+    /// Recent loss, smoothed, in percent.
+    pub fn pct(&self) -> f32 {
+        self.avg
+    }
+}
+
+pub struct RateControl {
+    rung: usize,
+    /// The highest rung this ladder may climb to.
+    top: usize,
+    clean_secs: u32,
+    hold: u32,
+    /// Smoothed over a few seconds, for the FEC budget.
+    loss: LossMeter,
     floor: RttFloor,
+    backlog: Backlog,
 }
 
 /// What the encoder should be set to after an observation.
@@ -106,14 +182,19 @@ pub struct Setting {
 
 impl RateControl {
     pub fn new() -> Self {
-        let rung = LADDER.iter().position(|&k| k == START_KBPS).unwrap_or(0);
-        Self { rung, clean_secs: 0, hold: 0, last_sent: 0, last_lost: 0, loss_avg: 0.0, floor: RttFloor::default() }
+        Self::with_ceiling(LADDER[LADDER.len() - 1])
+    }
+
+    /// A ladder that never climbs past `kbps`, so loss takes it down from there at once.
+    pub fn with_ceiling(kbps: u32) -> Self {
+        let top = LADDER.iter().rposition(|&k| k <= kbps).unwrap_or(0);
+        let rung = LADDER.iter().position(|&k| k == START_KBPS).unwrap_or(0).min(top);
+        Self { rung, top, clean_secs: 0, hold: 0, loss: LossMeter::default(), floor: RttFloor::default(), backlog: Backlog::default() }
     }
 
     /// Sets the baseline so the first observation covers only the next second.
     pub fn prime(&mut self, sent_packets: u64, lost_packets: u64) {
-        self.last_sent = sent_packets;
-        self.last_lost = lost_packets;
+        self.loss.prime(sent_packets, lost_packets);
     }
 
     pub fn kbps(&self) -> u32 {
@@ -122,24 +203,20 @@ impl RateControl {
 
     /// Loss seen in the last observed second, in percent.
     pub fn loss_pct(&self) -> f32 {
-        self.loss_avg
+        self.loss.pct()
     }
 
     /// Once a second, with the path's cumulative packet counts and the selected
     /// path's round trip (0 when unknown). Returns a new setting when the encoder
     /// should change.
     pub fn observe(&mut self, sent_packets: u64, lost_packets: u64, rtt_ms: u32, relay: bool) -> Option<Setting> {
-        let sent = sent_packets.saturating_sub(self.last_sent);
-        let lost = lost_packets.saturating_sub(self.last_lost);
-        self.last_sent = sent_packets;
-        self.last_lost = lost_packets;
+        let loss = self.loss.sample(sent_packets, lost_packets);
         let floor = self.floor.observe(rtt_ms, relay);
-        // Too few packets to judge: a call sends fifty a second.
-        if sent < 10 {
-            return None;
+        // Before the packet count is judged: a held link sends next to nothing.
+        if self.backlog.update(rtt_ms, floor) {
+            self.floor.forget(relay);
         }
-        let loss = 100.0 * lost as f32 / sent as f32;
-        self.loss_avg += (loss - self.loss_avg) * 0.3;
+        let loss = loss?;
         let before = self.setting();
         if self.hold > 0 {
             self.hold -= 1;
@@ -157,7 +234,7 @@ impl RateControl {
             }
         } else if loss < CLEAN_PCT {
             self.clean_secs += 1;
-            if self.clean_secs >= CLIMB_AFTER_SECS && self.rung + 1 < LADDER.len() {
+            if self.clean_secs >= CLIMB_AFTER_SECS && self.rung < self.top {
                 self.rung += 1;
                 self.clean_secs = 0;
             }
@@ -168,9 +245,14 @@ impl RateControl {
         (after != before).then_some(after)
     }
 
+    /// The link's round trip shows a backlog: hold audio back until it drains.
+    pub fn held(&self) -> bool {
+        self.backlog.held
+    }
+
     /// The encoder setting this ladder stands at now.
     pub fn setting(&self) -> Setting {
-        let fec = (self.loss_avg.round() as u32).clamp(FEC_MIN_PCT, FEC_MAX_PCT);
+        let fec = (self.loss.pct().round() as u32).clamp(FEC_MIN_PCT, FEC_MAX_PCT);
         Setting { kbps: self.kbps(), fec_pct: fec }
     }
 }
@@ -185,13 +267,31 @@ pub struct LinkSample {
     pub relay: bool,
 }
 
-/// A voice Channel encodes each frame once for every peer, so the encoder runs at its
-/// weakest link: each link keeps its own ladder, the lowest rung and the largest FEC
-/// budget win, and the whole stays under a ceiling a mesh's upload can afford.
+/// What a voice Channel encodes: `main` for every link that carries it, and `lean` for
+/// the links that can't. Each peer receives one of them, never both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tiers {
+    pub main: Setting,
+    pub lean: Option<Lean>,
+    /// Links fed nothing but a probe now, by [`LinkSample::id`], sorted.
+    pub held: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lean {
+    pub setting: Setting,
+    /// The links it goes to, by [`LinkSample::id`], sorted.
+    pub links: Vec<u64>,
+}
+
+/// A voice Channel's encoder settings across its links. Each link keeps its own ladder under
+/// a ceiling a mesh's upload can afford. The links at the highest rung share the main
+/// encoder; any below it share a second, lean one at the lowest of their rungs, so one
+/// weak link costs the rest nothing.
 pub struct MeshRate {
     links: Vec<(u64, RateControl)>,
     ceiling_kbps: u32,
-    current: Option<Setting>,
+    current: Option<Tiers>,
 }
 
 impl MeshRate {
@@ -199,9 +299,9 @@ impl MeshRate {
         Self { links: Vec::new(), ceiling_kbps, current: None }
     }
 
-    /// Once a second, with every live link. Returns a new setting when the encoder
-    /// should change; a link seen for the first time only sets its baseline.
-    pub fn observe(&mut self, samples: &[LinkSample]) -> Option<Setting> {
+    /// Once a second, with every live link. Returns the tiers when either encoder should
+    /// change; a link seen for the first time only sets its baseline.
+    pub fn observe(&mut self, samples: &[LinkSample]) -> Option<Tiers> {
         self.links.retain(|(id, _)| samples.iter().any(|s| s.id == *id));
         for s in samples {
             match self.links.iter_mut().find(|(id, _)| *id == s.id) {
@@ -209,20 +309,27 @@ impl MeshRate {
                     rc.observe(s.sent_packets, s.lost_packets, s.rtt_ms, s.relay);
                 }
                 None => {
-                    let mut rc = RateControl::new();
+                    let mut rc = RateControl::with_ceiling(self.ceiling_kbps);
                     rc.prime(s.sent_packets, s.lost_packets);
                     self.links.push((s.id, rc));
                 }
             }
         }
-        let worst = self
-            .links
-            .iter()
-            .map(|(_, rc)| rc.setting())
-            .reduce(|a, b| Setting { kbps: a.kbps.min(b.kbps), fec_pct: a.fec_pct.max(b.fec_pct) })?;
-        let next = Setting { kbps: worst.kbps.min(self.ceiling_kbps), ..worst };
-        (self.current != Some(next)).then(|| {
-            self.current = Some(next);
+        let settings: Vec<(u64, Setting)> = self.links.iter().map(|(id, rc)| (*id, rc.setting())).collect();
+        let top = settings.iter().map(|(_, s)| s.kbps).max()?;
+        let fold = |a: Setting, b: Setting| Setting { kbps: a.kbps.min(b.kbps), fec_pct: a.fec_pct.max(b.fec_pct) };
+        let main = settings.iter().filter(|(_, s)| s.kbps == top).map(|(_, s)| *s).reduce(fold)?;
+        let weak: Vec<&(u64, Setting)> = settings.iter().filter(|(_, s)| s.kbps < top).collect();
+        let lean = weak.iter().map(|(_, s)| *s).reduce(fold).map(|setting| {
+            let mut links: Vec<u64> = weak.iter().map(|(id, _)| *id).collect();
+            links.sort_unstable();
+            Lean { setting, links }
+        });
+        let mut held: Vec<u64> = self.links.iter().filter(|(_, rc)| rc.held()).map(|(id, _)| *id).collect();
+        held.sort_unstable();
+        let next = Tiers { main, lean, held };
+        (self.current.as_ref() != Some(&next)).then(|| {
+            self.current = Some(next.clone());
             next
         })
     }
@@ -659,6 +766,36 @@ mod video_tests {
     }
 }
 
+/// Which links of a one-stream mesh are held: for a sender with no ladder per link.
+#[derive(Default)]
+pub struct LinkHolds {
+    links: Vec<(u64, RttFloor, Backlog)>,
+    held: Vec<u64>,
+}
+
+impl LinkHolds {
+    /// Once a second, with every live link's `(id, round trip in ms or 0, relayed)`.
+    pub fn observe(&mut self, samples: &[(u64, u32, bool)]) {
+        self.links.retain(|(id, _, _)| samples.iter().any(|s| s.0 == *id));
+        for &(id, rtt, relay) in samples {
+            if !self.links.iter().any(|l| l.0 == id) {
+                self.links.push((id, RttFloor::default(), Backlog::default()));
+            }
+            let link = self.links.iter_mut().find(|l| l.0 == id).expect("just added");
+            let floor = link.1.observe(rtt, relay);
+            if link.2.update(rtt, floor) {
+                link.1.forget(relay);
+            }
+        }
+        self.held = self.links.iter().filter(|l| l.2.held).map(|l| l.0).collect();
+        self.held.sort_unstable();
+    }
+
+    pub fn held(&self, id: u64) -> bool {
+        self.held.binary_search(&id).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod mesh_tests {
     use super::*;
@@ -668,15 +805,82 @@ mod mesh_tests {
     }
 
     #[test]
-    fn the_weakest_link_sets_the_rate_and_its_leaving_lifts_it() {
+    fn a_lossy_link_gets_the_lean_stream_and_the_rest_keep_theirs() {
         let mut mesh = MeshRate::new(START_KBPS);
-        assert_eq!(mesh.observe(&[sample(1, 0, 0), sample(2, 0, 0)]).map(|s| s.kbps), Some(START_KBPS));
-        // Link 2 loses a fifth of a second's fifty frames; link 1 is clean.
-        let down = mesh.observe(&[sample(1, 50, 0), sample(2, 50, 10)]).expect("a lossy link moves the encoder");
-        assert!(down.kbps < START_KBPS, "the encoder follows the lossy link down");
-        assert!(down.fec_pct > FEC_MIN_PCT, "and spends more on FEC");
-        let up = mesh.observe(&[sample(1, 100, 0)]).expect("the lossy link left");
-        assert_eq!(up.kbps, START_KBPS, "the clean link's rung is back at once");
+        let start = mesh.observe(&[sample(1, 0, 0), sample(2, 0, 0), sample(3, 0, 0)]).expect("a first setting");
+        assert_eq!((start.main.kbps, start.lean), (START_KBPS, None));
+        // Link 3 loses a fifth of a second's fifty frames; links 1 and 2 are clean.
+        let split = mesh.observe(&[sample(1, 50, 0), sample(2, 50, 0), sample(3, 50, 10)]).expect("a lossy link moves");
+        assert_eq!(split.main, Setting { kbps: START_KBPS, fec_pct: FEC_MIN_PCT }, "the clean links keep their rate and FEC");
+        let lean = split.lean.expect("the lossy link gets its own stream");
+        assert_eq!(lean.links, vec![3]);
+        assert!(lean.setting.kbps < START_KBPS, "the lean stream follows the lossy link down");
+        assert!(lean.setting.fec_pct > FEC_MIN_PCT, "and spends more on FEC");
+        let healed = mesh.observe(&[sample(1, 100, 0), sample(2, 100, 0)]).expect("the lossy link left");
+        assert_eq!((healed.main.kbps, healed.lean), (START_KBPS, None), "the second encoder goes with it");
+    }
+
+    #[test]
+    fn a_link_long_clean_still_leaves_the_main_stream_on_its_first_lossy_second() {
+        let mut mesh = MeshRate::new(START_KBPS);
+        for sec in 0..120u64 {
+            mesh.observe(&[sample(1, sec * 50, 0), sample(2, sec * 50, 0)]);
+        }
+        let split = mesh.observe(&[sample(1, 120 * 50, 0), sample(2, 120 * 50, 10)]).expect("a lossy second moves it");
+        assert_eq!(split.main.kbps, START_KBPS);
+        assert_eq!(split.lean.map(|l| l.links), Some(vec![2]), "no headroom above the ceiling to burn first");
+    }
+
+    #[test]
+    fn when_every_link_suffers_one_encoder_serves_them_all() {
+        let mut mesh = MeshRate::new(START_KBPS);
+        mesh.observe(&[sample(1, 0, 0), sample(2, 0, 0)]);
+        let down = mesh.observe(&[sample(1, 50, 10), sample(2, 50, 10)]).expect("both links lossy");
+        assert!(down.main.kbps < START_KBPS, "our own trouble lowers the one stream");
+        assert_eq!(down.lean, None, "with nobody to spare, there is no second encoder");
+    }
+
+    #[test]
+    fn a_backed_up_link_is_held_until_it_drains() {
+        let mut holds = LinkHolds::default();
+        for _ in 0..12 {
+            holds.observe(&[(1, 100, true), (2, 90, true)]);
+        }
+        holds.observe(&[(1, 1_400, true), (2, 95, true)]);
+        assert!(holds.held(1) && !holds.held(2), "only the backed-up link");
+        holds.observe(&[(1, 700, true), (2, 95, true)]);
+        assert!(holds.held(1), "still draining: not fed again yet");
+        holds.observe(&[(1, 300, true), (2, 95, true)]);
+        assert!(!holds.held(1), "drained");
+    }
+
+    #[test]
+    fn a_hold_that_never_drains_lets_go_and_takes_the_new_floor() {
+        let mut holds = LinkHolds::default();
+        for _ in 0..12 {
+            holds.observe(&[(1, 100, true)]);
+        }
+        let mut held_secs = 0;
+        for _ in 0..40 {
+            holds.observe(&[(1, 1_600, true)]);
+            held_secs += holds.held(1) as u32;
+        }
+        assert!((14..=17).contains(&held_secs), "held about {HOLD_MAX_SECS} s, then the slower path is the path: {held_secs}");
+        assert!(!holds.held(1));
+    }
+
+    #[test]
+    fn a_held_link_in_a_mesh_still_updates_on_its_probes_alone() {
+        let mut mesh = MeshRate::new(START_KBPS);
+        let at = |sec: u64, rtt: u32, rate: u64| LinkSample { id: 1, sent_packets: sec * rate, lost_packets: 0, rtt_ms: rtt, relay: true };
+        for sec in 0..12 {
+            mesh.observe(&[at(sec, 100, 50)]);
+        }
+        let held = mesh.observe(&[at(12, 1_500, 50)]).expect("the hold changes the tiers");
+        assert_eq!(held.held, vec![1]);
+        // Five probes a second from here on: too few for the ladder, enough for the hold.
+        let freed = (13..20).find_map(|sec| mesh.observe(&[LinkSample { sent_packets: 600 + (sec - 12) * 5, ..at(sec, 150, 0) }]));
+        assert_eq!(freed.map(|t| t.held), Some(vec![]), "drained on probes alone");
     }
 
     #[test]
@@ -684,8 +888,8 @@ mod mesh_tests {
         let mut mesh = MeshRate::new(START_KBPS);
         let mut changes = Vec::new();
         for sec in 0..120u64 {
-            if let Some(s) = mesh.observe(&[sample(7, sec * 50, 0)]) {
-                changes.push(s.kbps);
+            if let Some(t) = mesh.observe(&[sample(7, sec * 50, 0)]) {
+                changes.push(t.main.kbps);
             }
         }
         assert!(changes.iter().all(|k| *k <= START_KBPS), "climbing stops at the ceiling: {changes:?}");

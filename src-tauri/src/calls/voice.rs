@@ -110,7 +110,7 @@ impl VoiceMedia for VoiceEngine {
                         continue;
                     }
                     stats.received.fetch_add(1, Ordering::Relaxed);
-                    jitter.lock().unwrap_or_else(|e| e.into_inner()).push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
+                    jitter.lock().unwrap_or_else(|e| e.into_inner()).push(frame.seq, frame.ts_ms, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
                 }
             })
         };
@@ -232,8 +232,23 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
     let mut heard: Vec<(f32, bool, [i16; FRAME * 2])> = Vec::new();
     let mut duck = 1.0f32;
     let mut priority_heard: Option<std::time::Instant> = None;
+    let mut reported = std::time::Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
+        if reported.elapsed() >= Duration::from_secs(2) {
+            reported = std::time::Instant::now();
+            for (ep, p) in peers.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                let s = &p.stats;
+                vector_core::log_debug!(
+                    "[voice] {}: behind {} ms, stale {}, lost {}, depth {}",
+                    vector_core::simd::hex::bytes_to_hex_32(ep).get(..8).unwrap_or(""),
+                    s.behind_ms.load(Ordering::Relaxed),
+                    s.stale.load(Ordering::Relaxed),
+                    s.lost.load(Ordering::Relaxed),
+                    p.jitter.lock().unwrap_or_else(|e| e.into_inner()).buffered(),
+                );
+            }
+        }
         if link.play.len() >= play_ahead(out_rate) * 2 {
             std::thread::sleep(Duration::from_millis(5));
             continue;

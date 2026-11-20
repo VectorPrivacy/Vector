@@ -15,6 +15,7 @@ use iroh::endpoint::Connection;
 use tokio::sync::{mpsc, Notify};
 use vector_core::calls::platform::{AudioStart, CallAudio, CallPlatform, LinkConn};
 use vector_core::calls::voice::VoiceMedia;
+use vector_core::calls::rate::{LinkHolds, HOLD_PROBE_EVERY};
 use vector_core::calls::wire::{pack, unpack};
 pub use vector_core::calls::{ENGINE_RATE, FRAME};
 
@@ -326,6 +327,9 @@ async fn send_loop(engine: std::sync::Weak<Engine>) {
     let mut seq: u16 = 0;
     let mut frame = vec![0i16; FRAME * 2];
     let mut packet = vec![0u8; 1500];
+    // Links with a backlog building: fed only a probe until they drain.
+    let mut holds = LinkHolds::default();
+    let mut judged = Instant::now();
     loop {
         tick.tick().await;
         let Some(engine) = engine.upgrade() else { return };
@@ -353,8 +357,26 @@ async fn send_loop(engine: std::sync::Weak<Engine>) {
             engine.level.store(0, Ordering::Relaxed);
             pack(seq, ts, FLAG_MUTED, &[])
         };
-        for conn in engine.connections() {
-            let _ = conn.send_datagram(datagram.clone());
+        let conns = engine.connections();
+        if judged.elapsed() >= Duration::from_secs(1) {
+            judged = Instant::now();
+            let samples: Vec<(u64, u32, bool)> = conns
+                .iter()
+                .map(|c| {
+                    let paths = c.paths();
+                    let path = paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next());
+                    (c.stable_id() as u64, path.as_ref().map_or(0, |p| p.rtt().as_millis() as u32), path.is_none_or(|p| p.is_relay()))
+                })
+                .collect();
+            holds.observe(&samples);
+        }
+        let probe = (seq % HOLD_PROBE_EVERY == 0).then(|| pack(seq, ts, FLAG_MUTED, &[]));
+        for conn in conns {
+            if !holds.held(conn.stable_id() as u64) {
+                let _ = conn.send_datagram(datagram.clone());
+            } else if let Some(p) = &probe {
+                let _ = conn.send_datagram(p.clone());
+            }
         }
         seq = seq.wrapping_add(1);
     }

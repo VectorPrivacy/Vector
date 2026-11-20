@@ -317,6 +317,7 @@ async fn bind(community: &CommunityV2) -> Result<Endpoint, String> {
         .stream_receive_window(VarInt::from_u32(512 * 1024))
         .receive_window(VarInt::from_u32(2 * 1024 * 1024))
         .max_concurrent_uni_streams(VarInt::from_u32(256))
+        .datagram_send_buffer_size(super::DATAGRAM_SEND_BUFFER)
         .build();
     let builder = Endpoint::builder(Voice(mode)).alpns(vec![VOICE_ALPN.to_vec()]).transport_config(transport);
     #[cfg(not(target_arch = "wasm32"))]

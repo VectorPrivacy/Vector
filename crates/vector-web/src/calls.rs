@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use vector_core::calls::gate::SpeechGate;
 use vector_core::calls::jitter::{Jitter, Pop, MAX_PLC_RUN};
 use vector_core::calls::platform::{AudioStart, CallAudio, CallPlatform, LinkConn};
-use vector_core::calls::rate::RateControl;
+use vector_core::calls::rate::{LinkHolds, RateControl, HOLD_PROBE_EVERY};
 use vector_core::calls::session;
 use vector_core::calls::settings::{self, AudioSettings};
 use vector_core::calls::stats::MediaStats;
@@ -179,7 +179,7 @@ impl WebAudio {
                 }
                 rx_engine.stats.received.fetch_add(1, Ordering::Relaxed);
                 let mut j = rx_engine.jitter.lock().unwrap_or_else(|e| e.into_inner());
-                j.push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &rx_engine.stats);
+                j.push(frame.seq, frame.ts_ms, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &rx_engine.stats);
             }
         });
         Ok(Box::new(WebAudio { engine, rx }))
@@ -239,10 +239,14 @@ pub fn call_audio_frame(packet: &[u8], ok: bool) {
     let seq = e.stats.next_seq.load(Ordering::Relaxed) as u16;
     let ts = e.started.elapsed().as_millis() as u32;
     let datagram = if !ok || e.muted.load(Ordering::Relaxed) { pack(seq, ts, FLAG_MUTED, &[]) } else { pack(seq, ts, 0, packet) };
-    match e.conn.send_datagram(datagram) {
-        Ok(()) => e.stats.sent.fetch_add(1, Ordering::Relaxed),
-        Err(_) => e.stats.send_dropped.fetch_add(1, Ordering::Relaxed),
-    };
+    let held = e.rate.lock().unwrap_or_else(|e| e.into_inner()).0.held();
+    if !held || seq % HOLD_PROBE_EVERY == 0 {
+        let datagram = if held { pack(seq, ts, FLAG_MUTED, &[]) } else { datagram };
+        match e.conn.send_datagram(datagram) {
+            Ok(()) => e.stats.sent.fetch_add(1, Ordering::Relaxed),
+            Err(_) => e.stats.send_dropped.fetch_add(1, Ordering::Relaxed),
+        };
+    }
     e.stats.next_seq.store(seq.wrapping_add(1) as u32, Ordering::Relaxed);
 
     let mut rate = e.rate.lock().unwrap_or_else(|e| e.into_inner());
@@ -250,10 +254,7 @@ pub fn call_audio_frame(packet: &[u8], ok: bool) {
         rate.1 = Instant::now();
         // Every QUIC packet goes out as one UDP datagram, so this is packets sent.
         let net = e.conn.stats();
-        let rtt_ms = {
-            let paths = e.conn.paths();
-            paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next()).map_or(0, |p| p.rtt().as_millis() as u32)
-        };
+        let rtt_ms = selected_rtt(&e.conn);
         // A browser has no UDP: every path it holds is a relay.
         if let Some(setting) = rate.0.observe(net.udp_tx.datagrams, net.lost_packets, rtt_ms, true) {
             e.stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
@@ -366,6 +367,8 @@ struct VoiceEngine {
     duck: Mutex<f32>,
     priority_heard: Mutex<Option<Instant>>,
     gate: Mutex<SpeechGate>,
+    /// Links with a backlog building, fed only a probe, and when they were last judged.
+    holds: Mutex<(LinkHolds, Instant)>,
 }
 
 static VOICE: Mutex<Option<Arc<VoiceEngine>>> = Mutex::new(None);
@@ -385,8 +388,20 @@ impl VoiceEngine {
         let quiet = !ok || !speaking || self.muted.load(Ordering::Relaxed) || self.deafened.load(Ordering::Relaxed);
         let datagram = if quiet { pack(seq, ts, FLAG_MUTED, &[]) } else { pack(seq, ts, 0, packet) };
         let conns: Vec<Connection> = self.peers.lock().unwrap_or_else(|e| e.into_inner()).values().map(|p| p.conn.clone()).collect();
+        let mut holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
+        if holds.1.elapsed() >= Duration::from_secs(1) {
+            holds.1 = Instant::now();
+            // A browser has no UDP: every path it holds is a relay.
+            let samples: Vec<(u64, u32, bool)> = conns.iter().map(|c| (c.stable_id() as u64, selected_rtt(c), true)).collect();
+            holds.0.observe(&samples);
+        }
+        let probe = (seq % HOLD_PROBE_EVERY == 0).then(|| pack(seq, ts, FLAG_MUTED, &[]));
         for conn in conns {
-            let _ = conn.send_datagram(datagram.clone());
+            if !holds.0.held(conn.stable_id() as u64) {
+                let _ = conn.send_datagram(datagram.clone());
+            } else if let Some(p) = &probe {
+                let _ = conn.send_datagram(p.clone());
+            }
         }
     }
 
@@ -411,6 +426,7 @@ impl WebVoice {
             duck: Mutex::new(1.0),
             priority_heard: Mutex::new(None),
             gate: Mutex::new(SpeechGate::default()),
+            holds: Mutex::new((LinkHolds::default(), Instant::now())),
         });
         let (tx, rx) = oneshot::channel();
         *READY.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
@@ -461,7 +477,7 @@ impl VoiceMedia for WebVoice {
                     continue;
                 }
                 reader.stats.received.fetch_add(1, Ordering::Relaxed);
-                reader.jitter.lock().unwrap_or_else(|e| e.into_inner()).push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &reader.stats);
+                reader.jitter.lock().unwrap_or_else(|e| e.into_inner()).push(frame.seq, frame.ts_ms, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &reader.stats);
             }
         });
         *peer.rx.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
@@ -841,3 +857,8 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
     })
 }
 
+/// The selected path's round trip, in ms; 0 while there is none.
+fn selected_rtt(conn: &Connection) -> u32 {
+    let paths = conn.paths();
+    paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next()).map_or(0, |p| p.rtt().as_millis() as u32)
+}

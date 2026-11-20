@@ -284,6 +284,8 @@ impl Mesh {
             .max_concurrent_bidi_streams(VarInt::from_u32(256))
             .max_concurrent_uni_streams(VarInt::from_u32(256))
             .initial_rtt(std::time::Duration::from_millis(100))
+            // Only call audio rides datagrams here.
+            .datagram_send_buffer_size(crate::calls::DATAGRAM_SEND_BUFFER)
             .congestion_controller_factory(Arc::new(noq_proto::congestion::CubicConfig::default()))
             // Observed-address reports route data onto a path the peer can't reach.
             .send_observed_address_reports(false)

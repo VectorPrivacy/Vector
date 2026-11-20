@@ -24,3 +24,6 @@ pub const FRAME_MS: u32 = 20;
 pub const FRAME: usize = (ENGINE_RATE * FRAME_MS / 1000) as usize;
 /// How late the echo may arrive after its far-end reference: device buffers plus room.
 pub const AEC_TAIL_MS: u32 = 200;
+/// Unsent audio a connection may hold, in bytes: from a quarter second to about a second,
+/// by bitrate. A choked link drops its oldest frames instead of queueing minutes of them.
+pub const DATAGRAM_SEND_BUFFER: usize = 4096;

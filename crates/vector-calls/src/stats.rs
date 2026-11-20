@@ -16,6 +16,10 @@ pub struct MediaStats {
     pub rebuilt: AtomicU64,
     pub concealed: AtomicU64,
     pub late: AtomicU64,
+    /// Frames dropped on arrival for trailing the sender too far: a backlog is worth less than its gap.
+    pub stale: AtomicU64,
+    /// How far behind the quickest recent delivery the newest frame arrived, in ms.
+    pub behind_ms: AtomicU32,
     pub depth_ms: AtomicU32,
     pub jitter_ms: AtomicU32,
     /// Cable clicks cut out of the microphone before encoding.
