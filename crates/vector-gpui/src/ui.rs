@@ -15115,7 +15115,7 @@ impl VectorApp {
                     community_id: "c".repeat(64),
                     name,
                     description: "Late-night builders, ships and shenanigans.".into(), // i18n-exempt: fixture
-                    icon: None,
+                    icon: std::env::var("VECTOR_INVITE_PREVIEW_ICON").ok(),
                 }
             });
             tx.send(preview.map_err(|_| "Not found on any relay".to_string())) // i18n-exempt: fixture
@@ -15146,6 +15146,7 @@ impl VectorApp {
                                 title: t::community_join_title(p.name.as_str()),
                                 text: Some(text.into()),
                                 icon: Some("icons/group-placeholder.svg"),
+                                picture: p.icon.map(Into::into),
                                 confirm: t::dialog_confirm(),
                                 cancel: Some(t::dialog_cancel()),
                                 input: None,

@@ -707,6 +707,8 @@ pub struct Popup {
     pub title: SharedString,
     pub text: Option<SharedString>,
     pub icon: Option<&'static str>,
+    /// A picture file in place of `icon`, cut to a circle: `.popup-icon-circular`.
+    pub picture: Option<SharedString>,
     pub confirm: SharedString,
     /// None for a notice (Okay only).
     pub cancel: Option<SharedString>,
@@ -728,6 +730,7 @@ impl Popup {
             },
             text: None,
             icon: Some("icons/vector_warning.svg"),
+            picture: None,
             confirm: crate::t::dialog_okay(),
             cancel: None,
             input: None,
@@ -744,7 +747,10 @@ pub fn popup(
 ) -> AnyElement {
     let ok = answer.clone();
     let mut content = div().flex().flex_col().items_center().p(px(5.)).mb(px(10.));
-    if let Some(icon) = p.icon {
+    if let Some(picture) = &p.picture {
+        let path = std::path::PathBuf::from(picture.as_str());
+        content = content.child(crate::pic::img_face(path, 100.).size(px(100.)).rounded_full().object_fit(gpui::ObjectFit::Cover).mb(px(26.)));
+    } else if let Some(icon) = p.icon {
         content = content.child(crate::pic::img_fit(icon, 100.).h(px(100.)).w(px(100.)).mb(px(26.)));
     }
     content = content.child(
@@ -773,7 +779,7 @@ pub fn popup(
                 .when(list, |d| d.line_height(px(24.)))
                 .text_color(c(TEXT))
                 .mb(px(16.))
-                .when(p.icon.is_some(), |d| d.max_w(px(420.)))
+                .when(p.icon.is_some() || p.picture.is_some(), |d| d.max_w(px(420.)))
                 .child(body)
                 .when_some(p.link.clone(), |d, (label, go)| {
                     d.child(
