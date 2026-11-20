@@ -34,6 +34,32 @@ fn vs_quad_lean(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) 
     out.border_color = hsla_to_rgba(b_quads_lean[instance_id].border_color);
     out.quad_id = instance_id;
     out.clip_distances = distance_from_clip_rect(unit_vertex, bounds, b_quads_lean[instance_id].content_mask);
+    out.solid_rect = quad_solid_rect(tag, bounds, b_quads_lean[instance_id].corner_radii,
+        b_quads_lean[instance_id].border_widths, b_quads_lean[instance_id].content_mask,
+        b_quads_lean[instance_id].content_radii, b_quads_lean[instance_id].content_fade);
+    return out;
+}
+
+// `vs_quad_lean` without the solid area, for a compiler that refuses even that.
+@vertex
+fn vs_quad_bare(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let bounds = b_quads_lean[instance_id].bounds;
+    let tag = b_quads_lean[instance_id].background.tag;
+
+    var out = QuadVarying();
+    out.position = to_device_position(unit_vertex, bounds);
+    if (tag == 0u || tag == 2u || tag == 3u) {
+        out.background_solid = hsla_to_rgba(b_quads_lean[instance_id].background.solid);
+    } else if (tag == 1u) {
+        let color_space = b_quads_lean[instance_id].background.color_space;
+        out.background_color0 = quad_stop_color(b_quads_lean[instance_id].background.colors[0].color, color_space);
+        out.background_color1 = quad_stop_color(b_quads_lean[instance_id].background.colors[1].color, color_space);
+    }
+    out.border_color = hsla_to_rgba(b_quads_lean[instance_id].border_color);
+    out.quad_id = instance_id;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, bounds, b_quads_lean[instance_id].content_mask);
+    out.solid_rect = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     return out;
 }
 

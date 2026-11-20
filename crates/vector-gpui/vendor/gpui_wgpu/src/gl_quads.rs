@@ -11,6 +11,7 @@ pub(crate) const LEAN_SHADERS: &str = concat!(
 
 const STOCK: u8 = 1;
 const LEAN: u8 = 2;
+const BARE: u8 = 3;
 
 /// What the first renderer found, so a rebuilt one never compiles a refused stage again.
 static CHOSEN: AtomicU8 = AtomicU8::new(0);
@@ -34,6 +35,7 @@ pub(crate) fn pipeline(
     match CHOSEN.load(Ordering::Relaxed) {
         STOCK => return build("quads", "vs_quad", "fs_quad", stock),
         LEAN => return build("quads", "vs_quad_lean", "fs_quad", &lean_module(device)),
+        BARE => return build("quads", "vs_quad_bare", "fs_quad", &lean_module(device)),
         _ => {}
     }
     if forced_lean() {
@@ -53,11 +55,18 @@ pub(crate) fn pipeline(
         log::warn!("quads probe, {what}: {}", if error.is_some() { "refused" } else { "compiles" });
     }
     let (pipeline, error) = caught(device, || build("quads", "vs_quad_lean", "fs_quad", &lean));
+    let Some(error) = error else {
+        log::warn!("quads: drawing with the lean vertex stage");
+        CHOSEN.store(LEAN, Ordering::Relaxed);
+        return pipeline;
+    };
+    log::warn!("the GPU refused the lean vertex stage too, trying a bare one: {error}");
+    let (pipeline, error) = caught(device, || build("quads", "vs_quad_bare", "fs_quad", &lean));
     match error {
-        None => log::warn!("quads: drawing with the lean vertex stage"),
-        Some(error) => log::error!("quads: the lean vertex stage was refused too: {error}"),
+        None => log::warn!("quads: drawing with the bare vertex stage"),
+        Some(error) => log::error!("quads: the bare vertex stage was refused too: {error}"),
     }
-    CHOSEN.store(LEAN, Ordering::Relaxed);
+    CHOSEN.store(BARE, Ordering::Relaxed);
     pipeline
 }
 

@@ -576,6 +576,44 @@ struct QuadVarying {
     @location(3) @interpolate(flat) background_solid: vec4<f32>,
     @location(4) @interpolate(flat) background_color0: vec4<f32>,
     @location(5) @interpolate(flat) background_color1: vec4<f32>,
+    // Min and max corners of the area that is all background at full coverage; empty when none.
+    @location(6) @interpolate(flat) solid_rect: vec4<f32>,
+}
+
+fn solid_inset(border: f32, radius0: f32, radius1: f32) -> f32 {
+    return max(select(border + 0.5, 0.0, border == 0.0), max(radius0, radius1)) + 0.5;
+}
+
+// Where `fs_quad` would return the solid background unmasked, conservatively, so the fragment
+// stage can answer those pixels without loading the quad.
+fn quad_solid_rect(tag: u32, bounds: Bounds, radii: Corners, borders: Edges,
+    mask: Bounds, mask_radii: Corners, fade: Fade) -> vec4<f32> {
+    if (tag != 0u) {
+        return vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    }
+    var lo = bounds.origin + vec2<f32>(
+        solid_inset(borders.left, radii.top_left, radii.bottom_left),
+        solid_inset(borders.top, radii.top_left, radii.top_right));
+    var hi = bounds.origin + bounds.size - vec2<f32>(
+        solid_inset(borders.right, radii.top_right, radii.bottom_right),
+        solid_inset(borders.bottom, radii.bottom_left, radii.bottom_right));
+    let mask_radius = max(max(mask_radii.top_left, mask_radii.top_right), max(mask_radii.bottom_right, mask_radii.bottom_left));
+    let mask_inset = select(0.5, mask_radius + 1.0, mask_radius > 0.0);
+    lo = max(lo, mask.origin + mask_inset);
+    hi = min(hi, mask.origin + mask.size - mask_inset);
+    if (fade.top_len > 0.0) {
+        lo.y = max(lo.y, fade.top + fade.top_len + 0.5);
+    }
+    if (fade.bottom_len > 0.0) {
+        hi.y = min(hi.y, fade.bottom - fade.bottom_len - 0.5);
+    }
+    if (fade.left_len > 0.0) {
+        lo.x = max(lo.x, fade.left + fade.left_len + 0.5);
+    }
+    if (fade.right_len > 0.0) {
+        hi.x = min(hi.x, fade.right - fade.right_len - 0.5);
+    }
+    return vec4<f32>(lo, hi);
 }
 
 @vertex
@@ -598,11 +636,17 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     out.border_color = hsla_to_rgba(quad.border_color);
     out.quad_id = instance_id;
     out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
+    out.solid_rect = quad_solid_rect(quad.background.tag, quad.bounds, quad.corner_radii,
+        quad.border_widths, quad.content_mask, quad.content_radii, quad.content_fade);
     return out;
 }
 
 @fragment
 fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
+    let point = input.position.xy;
+    if (all(point > input.solid_rect.xy) && all(point < input.solid_rect.zw)) {
+        return blend_color(input.background_solid, 1.0);
+    }
     let quad = load_quad(input.quad_id);
     return masked(quad_color(input), mask_alpha(input.position.xy, quad.content_mask, quad.content_radii, quad.content_fade));
 }
