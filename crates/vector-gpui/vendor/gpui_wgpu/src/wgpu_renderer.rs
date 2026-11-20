@@ -197,6 +197,7 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    path_intermediate_bind_group: Option<wgpu::BindGroup>,
 }
 
 struct CachedTextureBindGroup {
@@ -210,6 +211,7 @@ impl WgpuResources {
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
         self.path_msaa_view = None;
+        self.path_intermediate_bind_group = None;
     }
 }
 
@@ -1403,6 +1405,7 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                path_intermediate_bind_group: None,
             },
             atlas,
             path_globals_offset,
@@ -1463,6 +1466,7 @@ impl WgpuRendererCore {
         .unwrap_or((None, None));
         resources.path_msaa_texture = path_msaa_texture;
         resources.path_msaa_view = path_msaa_view;
+        resources.path_intermediate_bind_group = None;
     }
 
     fn render_frame(
@@ -1564,6 +1568,14 @@ impl WgpuRendererCore {
                     label: Some("main_encoder"),
                 });
 
+        // Each break in the main pass makes a tiled GPU write the whole frame out and read it
+        // back, so paths are rasterized up front whenever their batches can share the texture.
+        let paths_rasterized = if paths_share_intermediate(scene) {
+            Some(self.draw_paths_to_intermediate(&mut encoder, &scene.paths, &mut instance_offset)?)
+        } else {
+            None
+        };
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
@@ -1597,6 +1609,12 @@ impl WgpuRendererCore {
                     PrimitiveBatch::Paths(range) => {
                         let paths = &scene.paths[range];
                         if paths.is_empty() {
+                            continue;
+                        }
+                        if let Some(rasterized) = paths_rasterized {
+                            if rasterized {
+                                self.draw_paths_from_intermediate(paths, &mut instance_offset, &mut pass)?;
+                            }
                             continue;
                         }
 
@@ -1876,15 +1894,21 @@ impl WgpuRendererCore {
         };
         let instances =
             self.write_instance_binding("path_sprites_bind_group", instance_offset, &sprites)?;
-        let texture = self.create_texture_bind_group(
-            "path_intermediate_texture_bind_group",
-            &path_intermediate_view,
-        );
+        if self.resources().path_intermediate_bind_group.is_none() {
+            let bind_group = self.create_texture_bind_group(
+                "path_intermediate_texture_bind_group",
+                &path_intermediate_view,
+            );
+            self.resources_mut().path_intermediate_bind_group = Some(bind_group);
+        }
         let resources = self.resources();
+        let Some(texture) = resources.path_intermediate_bind_group.as_ref() else {
+            return Ok(());
+        };
         pass.set_pipeline(&resources.pipelines.paths);
         pass.set_bind_group(0, &resources.globals_bind_group, &[]);
         pass.set_bind_group(1, &instances.bind_group, &[]);
-        pass.set_bind_group(2, &texture, &[]);
+        pass.set_bind_group(2, texture, &[]);
         pass.draw(
             0..4,
             instances.first_instance..instances.first_instance + sprites.len() as u32,
@@ -1938,7 +1962,8 @@ impl WgpuRendererCore {
                     resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        // Only the resolve is read; storing the samples too would write 4x the frame.
+                        store: if resolve_target.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                     },
                     depth_slice: None,
                 })],
@@ -2608,6 +2633,28 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.core.atlas.clone()
     }
+}
+
+/// Whether every path batch can be rasterized into the intermediate at once: no two batches
+/// overlap, so compositing one never picks up another's coverage.
+fn paths_share_intermediate(scene: &Scene) -> bool {
+    if scene.paths.is_empty() {
+        return false;
+    }
+    let mut batches = SmallVec::<[Bounds<ScaledPixels>; 16]>::new();
+    for batch in scene.batches() {
+        let PrimitiveBatch::Paths(range) = batch else { continue };
+        let mut paths = scene.paths[range].iter();
+        let Some(first) = paths.next() else { continue };
+        let bounds = paths
+            .fold(first.clipped_bounds(), |bounds, path| bounds.union(&path.clipped_bounds()))
+            .dilate(ScaledPixels(1.));
+        if batches.iter().any(|other| other.intersects(&bounds)) {
+            return false;
+        }
+        batches.push(bounds);
+    }
+    true
 }
 
 fn instance_range(range: Range<usize>) -> Range<u32> {
