@@ -17,7 +17,7 @@ use crate::media::{self, Media, Slot, Source, Transfer};
 use crate::theme::*;
 use crate::timeline::{Act, Ctx, DANGER};
 
-const IMAGES: [&str; 15] = [
+pub(crate) const IMAGES: [&str; 15] = [
     "png", "jpeg", "jpg", "gif", "webp", "jxl", "svg", "bmp", "tiff", "tif", "ico", "heic", "heif", "heics", "heifs",
 ];
 /// Pictures that wait behind their blur rather than a file box.

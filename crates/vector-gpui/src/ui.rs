@@ -4239,6 +4239,22 @@ impl VectorApp {
         }
     }
 
+    pub(super) fn open_viewer(&mut self, open: crate::viewer::Open, window: &mut Window, cx: &mut Context<Self>) {
+        let live = self.live;
+        let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
+        cx.subscribe_in(&viewer, window, |app, _, _: &crate::viewer::Closed, window, cx| {
+            app.viewer = None;
+            match &app.search {
+                Some(s) => window.focus(&s.input.focus_handle(cx), cx),
+                None => window.focus(&app.input.focus_handle(cx), cx),
+            }
+            cx.notify();
+        })
+        .detach();
+        self.viewer = Some(viewer);
+        cx.notify();
+    }
+
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         if self.open.as_ref() != Some(&id) {
             self.store.borrow_mut().unveiled.clear();
@@ -4997,22 +5013,7 @@ impl VectorApp {
                 }
                 cx.notify();
             }
-            Act::View(open) => {
-                let live = self.live;
-                let viewer = cx.new(|cx| crate::viewer::Viewer::new(open, live, window, cx));
-                cx.subscribe_in(
-                    &viewer,
-                    window,
-                    |app, _, _: &crate::viewer::Closed, window, cx| {
-                        app.viewer = None;
-                        window.focus(&app.input.focus_handle(cx), cx);
-                        cx.notify();
-                    },
-                )
-                .detach();
-                self.viewer = Some(viewer);
-                cx.notify();
-            }
+            Act::View(open) => self.open_viewer(open, window, cx),
             Act::React => self.toggle_picker(Some(id), window, cx),
             Act::ReactionHover(emoji, on) => {
                 self.rx_gen += 1;

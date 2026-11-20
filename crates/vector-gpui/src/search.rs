@@ -517,7 +517,26 @@ pub struct Search {
     pub loading: bool,
     /// Drawn snippets by corpus doc, for the query on screen.
     drawn: std::cell::RefCell<std::collections::HashMap<u32, Rc<[Atom]>>>,
+    /// Attachments of results the open chats don't hold, by message: None while read.
+    pub atts: std::collections::HashMap<String, Option<Vec<vector_core::types::Attachment>>>,
 }
+
+/// A result's picture or video still, as its row shows it.
+#[derive(Clone)]
+pub struct Thumb {
+    pub image: Arc<gpui::RenderImage>,
+    pub w: u32,
+    pub h: u32,
+    /// What a click opens; a video, or a picture not yet downloaded, opens its message instead.
+    pub open: Option<crate::viewer::Open>,
+    pub video: bool,
+}
+
+/// A thumbnail's height; widths follow each picture, within these.
+pub const THUMB_H: f32 = 72.;
+pub const THUMB_W: (f32, f32) = (48., 160.);
+/// Thumbnails a row shows before counting the rest.
+pub const THUMBS: usize = 3;
 
 impl Search {
     pub fn new(input: Entity<TextInput>, dir: Directory) -> Self {
@@ -536,6 +555,7 @@ impl Search {
             scope: Vec::new(),
             loading: false,
             drawn: Default::default(),
+            atts: Default::default(),
         }
     }
 
@@ -605,6 +625,8 @@ impl Search {
 pub enum Act {
     Close,
     Pick(usize),
+    /// A result's picture, full screen.
+    View(crate::viewer::Open),
     Hover(usize),
     Suggest(usize),
     Sort,
@@ -986,7 +1008,58 @@ fn mini_look() -> Look {
     Look::new(RUBIK, 12.5, 17., white_a(0.82))
 }
 
-fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>>, sel: bool, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
+/// A result's pictures: the first few shown, and how many more the message holds.
+pub struct Strip {
+    pub thumbs: Vec<Thumb>,
+    pub more: usize,
+}
+
+fn thumb_strip(i: usize, strip: &Strip, on: &OnAct) -> AnyElement {
+    let (thumbs, more) = (&strip.thumbs, strip.more);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .mt(px(6.))
+        .children(thumbs.iter().take(THUMBS).enumerate().map(|(k, t)| {
+            let w = (THUMB_H * t.w as f32 / t.h.max(1) as f32).clamp(THUMB_W.0, THUMB_W.1);
+            let act = t.open.clone();
+            div()
+                .id(SharedString::from(format!("search-thumb-{i}-{k}")))
+                .relative()
+                .w(px(w))
+                .h(px(THUMB_H))
+                .rounded(px(6.))
+                .overflow_hidden()
+                .bg(white_a(0.04))
+                .cursor_pointer()
+                .on_click(click(on, move || match &act {
+                    Some(open) => Act::View(open.clone()),
+                    None => Act::Pick(i),
+                }))
+                .child(crate::pic::img(t.image.clone()).size_full().object_fit(gpui::ObjectFit::Cover))
+                .when(t.video, |d| {
+                    d.child(
+                        div().absolute().inset_0().flex().items_center().justify_center().child(
+                            div()
+                                .size(px(26.))
+                                .rounded_full()
+                                .bg(gpui::black().opacity(0.5))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(svg().path("icons/play.svg").size(px(12.)).text_color(gpui::white())),
+                        ),
+                    )
+                })
+        }))
+        .when(more > 0, |d| {
+            d.child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(c(LIST_TIME)).child(format!("+{}", crate::lang::num(more)))) // i18n-exempt: a count
+        })
+        .into_any_element()
+}
+
+fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>>, thumbs: Option<&Strip>, sel: bool, store: &Store, now_ms: u64, on: &OnAct) -> AnyElement {
     let who = if hit.mine { store.my_npub.clone() } else { hit.author.clone().unwrap_or_else(|| hit.chat.clone()) };
     let name = if hit.mine { t::search_you().to_string() } else { store.chat_name(&who, &hit.chat) };
     let badges: Vec<&str> = [(Has::IMAGE, "icons/image.svg"), (Has::VIDEO, "icons/video.svg"), (Has::AUDIO, "icons/volume-max.svg")]
@@ -1032,7 +1105,9 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>
                         .when(file_only, |d| d.child(svg().path("icons/attachment.svg").size(px(13.)).text_color(c(LIST_TIME)))),
                 )
                 .map(|d| {
-                    if hit.snippet.is_empty() {
+                    if hit.snippet.is_empty() && thumbs.is_some() {
+                        d
+                    } else if hit.snippet.is_empty() {
                         let kind = [Has::IMAGE, Has::VIDEO, Has::AUDIO, Has::FILE].into_iter().find(|h| hit.has.contains(*h)).unwrap_or(Has::FILE);
                         d.child(div().text_size(px(14.)).line_height(px(20.)).italic().text_color(c(LIST_TIME)).child(has_label(kind)))
                     } else if let Some(atoms) = drawn {
@@ -1040,7 +1115,8 @@ fn result_row(i: usize, hit: &vector_core::search::Hit, drawn: Option<Rc<[Atom]>
                     } else {
                         d.child(div().text_size(px(14.)).line_height(px(20.)).text_color(white_a(0.82)).child(snippet(&hit.snippet, &hit.marks)))
                     }
-                }),
+                })
+                .children(thumbs.map(|t| thumb_strip(i, t, on))),
         )
         .into_any_element()
 }
@@ -1131,7 +1207,7 @@ pub fn mini(s: &Search, store: &Store, open: &str, members: Vec<AnyElement>, mat
 }
 
 /// The panel: a centred card on a wide window, the whole window on a slim one.
-pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on: &OnAct) -> AnyElement {
+pub fn view(s: &Search, store: &Store, thumbs: &std::collections::HashMap<usize, Strip>, vp: (f32, f32), slim: bool, cx: &App, on: &OnAct) -> AnyElement {
     let now = store.now_ms();
     let text_empty = s.input.read(cx).text().trim().is_empty();
     let field = div()
@@ -1225,7 +1301,7 @@ pub fn view(s: &Search, store: &Store, vp: (f32, f32), slim: bool, cx: &App, on:
             if i == 0 || hits[i - 1].chat != hit.chat {
                 rows.push(header(store, &hit.chat));
             }
-            rows.push(result_row(i, hit, s.drawn(hit, store, &row_look()), i == s.sel, store, now, on));
+            rows.push(result_row(i, hit, s.drawn(hit, store, &row_look()), thumbs.get(&i), i == s.sel, store, now, on));
         }
         list = list.children(rows);
     }

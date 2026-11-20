@@ -1,15 +1,17 @@
 //! Message search's lifecycle: opened from the keyboard or a chat header, the corpus read in
 //! the background, each keystroke a fresh scan, and a result opened where it was said.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, AppContext as _, Context, Focusable as _, SharedString, Window};
+use gpui::{AnyElement, AppContext as _, Context, Focusable as _, SharedString, Window, px};
+use vector_core::search::Has;
 
 use super::VectorApp;
 use crate::backend;
 use crate::composer::{CancelInput, InputChanged, Nav, TextInput};
-use crate::search::{Act, Directory, Search, Suggest};
+use crate::search::{Act, Directory, Search, Strip, Suggest, Thumb};
 use crate::t;
 
 impl VectorApp {
@@ -156,6 +158,7 @@ impl VectorApp {
                 window.focus(&focus, cx);
                 return self.search_changed(cx);
             }
+            Act::View(open) => return self.open_viewer(open, window, cx),
             Act::Pick(i) => {
                 let Some(hit) = s.found.hits.get(i).cloned() else { return };
                 self.search = None;
@@ -175,6 +178,7 @@ impl VectorApp {
     }
 
     pub(super) fn search_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let thumbs = self.search_thumbs(window, cx);
         let s = self.search.as_ref()?;
         let app = cx.entity().downgrade();
         let on: crate::search::OnAct = Rc::new(move |act, window, cx| {
@@ -182,7 +186,73 @@ impl VectorApp {
         });
         let vp = window.viewport_size();
         let store = self.store.borrow();
-        Some(crate::search::view(s, &store, (f32::from(vp.width), f32::from(vp.height)), self.is_slim, cx, &on))
+        Some(crate::search::view(s, &store, &thumbs, (f32::from(vp.width), f32::from(vp.height)), self.is_slim, cx, &on))
+    }
+
+    /// Thumbnails for the media results on screen or near it: only those decode, and a message
+    /// no open chat holds is read once for its attachments. Nothing downloads for search.
+    fn search_thumbs(&mut self, window: &Window, cx: &mut Context<Self>) -> HashMap<usize, Strip> {
+        let mut out = HashMap::new();
+        let live = self.live;
+        let Some(s) = self.search.as_mut() else { return out };
+        if s.showing_suggestions() {
+            return out;
+        }
+        let area = s.scroll.bounds();
+        let top = area.top() - s.scroll.offset().y - px(400.);
+        let bottom = area.bottom() - s.scroll.offset().y + px(400.);
+        let scale = window.scale_factor();
+        let store = self.store.borrow();
+        let mut media = self.media.borrow_mut();
+        let mut wanted = Vec::new();
+        // Rows are the chats' headers and the results, as the view lays them out.
+        let mut row = 0;
+        for (i, hit) in s.found.hits.iter().enumerate() {
+            if i == 0 || s.found.hits[i - 1].chat != hit.chat {
+                row += 1;
+            }
+            row += 1;
+            if !(hit.has.contains(Has::IMAGE) || hit.has.contains(Has::VIDEO)) {
+                continue;
+            }
+            let near = match s.scroll.bounds_for_item(row - 1) {
+                Some(b) => b.bottom() > top && b.top() < bottom,
+                None => i < 12,
+            };
+            if !near {
+                continue;
+            }
+            let held = store.chat(&hit.chat).and_then(|c| c.messages.iter().find(|m| m.id == hit.id)).map(|m| &m.attachments);
+            let read = s.atts.get(&hit.id).and_then(Option::as_ref);
+            let Some(atts) = held.or(read) else {
+                if live && !s.atts.contains_key(&hit.id) {
+                    s.atts.insert(hit.id.clone(), None);
+                    wanted.push((hit.chat.clone(), hit.id.clone()));
+                }
+                continue;
+            };
+            let visual: Vec<_> = atts.iter().filter(|a| visual(a)).collect();
+            let thumbs: Vec<Thumb> = visual.iter().take(crate::search::THUMBS).filter_map(|a| thumb(&mut media, &store.media_root, a, scale)).collect();
+            if !thumbs.is_empty() {
+                out.insert(i, Strip { more: visual.len() - thumbs.len(), thumbs });
+            }
+        }
+        drop((store, media));
+        for (chat, id) in wanted {
+            let rx = backend::run(backend::messaging::messages_around(chat, id.clone(), 0, 0));
+            cx.spawn(async move |this, cx| {
+                let found = rx.await.ok().and_then(Result::ok).and_then(|ms| ms.into_iter().find(|m| m.id == id));
+                this.update(cx, |this, cx| {
+                    if let Some(s) = this.search.as_mut() {
+                        s.atts.insert(id, Some(found.map(|m| m.attachments).unwrap_or_default()));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        out
     }
 
     /// The member pane's field changed: members filter as before, messages scan the Community.
@@ -298,8 +368,87 @@ impl VectorApp {
                 self.jump_or_say(hit.id, t::msg_jump_not_local(), cx);
                 return cx.notify();
             }
+            Act::View(open) => return self.open_viewer(open, window, cx),
             Act::Sort | Act::Unfilter(_) => {}
         }
         self.pane_find_changed(cx);
+    }
+}
+
+/// A result's attachment as a thumbnail: a downloaded picture decoded small, a video's first
+/// frame once probed, else the picture's blur. A file not downloaded stays so.
+fn visual(att: &vector_core::types::Attachment) -> bool {
+    let ext = att.extension.to_ascii_lowercase();
+    crate::attachments::IMAGES.contains(&ext.as_str()) || crate::video::EXTENSIONS.contains(&ext.as_str())
+}
+
+fn thumb(media: &mut crate::media::Media, root: &std::path::Path, att: &vector_core::types::Attachment, scale: f32) -> Option<Thumb> {
+    use crate::media::{Slot, Source};
+    let ext = att.extension.to_ascii_lowercase();
+    let picture = crate::attachments::IMAGES.contains(&ext.as_str());
+    let video = crate::video::EXTENSIONS.contains(&ext.as_str());
+    if !picture && !video {
+        return None;
+    }
+    let source = (att.downloaded || att.resident).then(|| match vector_core::simd::hex::hex_to_bytes_32_checked(&att.id) {
+        Some(h) if att.resident || att.path.is_empty() => Source::Held(h),
+        _ => {
+            let p = std::path::Path::new(&att.path);
+            Source::File(if p.is_absolute() { p.to_path_buf() } else { root.join(p) })
+        }
+    });
+    let device = |w: f32, h: f32| (((w * scale).ceil() as u32).max(1), ((h * scale).ceil() as u32).max(1));
+    let blur = |media: &mut crate::media::Media| {
+        let meta = att.img_meta.as_ref()?;
+        let (w, h) = (meta.width.max(1), meta.height.max(1));
+        let shown_w = (crate::search::THUMB_H * w as f32 / h as f32).clamp(crate::search::THUMB_W.0, crate::search::THUMB_W.1);
+        let image = media.thumb(&meta.thumbhash, device(shown_w, crate::search::THUMB_H))?;
+        Some(Thumb { image, w, h, open: None, video })
+    };
+    if video {
+        if let Some(source) = source {
+            let input = match source {
+                Source::Held(h) => crate::audio::AudioInputSpec::Held(h),
+                Source::File(p) => crate::audio::AudioInputSpec::File(p),
+            };
+            media.videos.want_probe(&att.id, &input);
+            let info = media.videos.clip(&att.id).and_then(|c| c.info.clone());
+            if let Some(i) = info
+                && let Some(image) = i.poster
+            {
+                return Some(Thumb { image, w: i.w, h: i.h, open: None, video: true });
+            }
+        }
+        return blur(media);
+    }
+    let Some(source) = source else { return blur(media) };
+    let (hash, path) = match &source {
+        Source::Held(h) => (Some(*h), None),
+        Source::File(p) => (None, Some(p.clone())),
+    };
+    // Its own key: the timeline decodes the same picture at its own size.
+    // Shown cropped to cover its box, so decode large enough to fill it both ways.
+    let fill = match att.img_meta.as_ref().filter(|m| m.width > 0 && m.height > 0) {
+        Some(m) => {
+            let a = m.width as f32 / m.height as f32;
+            let shown = (crate::search::THUMB_H * a).clamp(crate::search::THUMB_W.0, crate::search::THUMB_W.1);
+            device((crate::search::THUMB_H * a).max(shown).min(4096.), (shown / a).max(crate::search::THUMB_H).min(4096.))
+        }
+        None => device(crate::search::THUMB_W.1, crate::search::THUMB_H),
+    };
+    match media.image(&format!("search\u{0}{}", att.id), source, &ext, fill) {
+        Slot::Ready { image, w, h } => Some(Thumb {
+            open: Some(crate::viewer::Open {
+                image: image.clone(),
+                w,
+                h,
+                full: Some(crate::viewer::Full { hash, path, ext, url: None }),
+            }),
+            image,
+            w,
+            h,
+            video: false,
+        }),
+        _ => blur(media),
     }
 }
