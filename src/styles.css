@@ -4524,6 +4524,30 @@ body:not(.ws) .voice-tile {
   background: rgba(0, 0, 0, 0.6);
 }
 .voice-tile.has-cam .voice-tile-note { display: none; }
+/* A tile's corner badges: a weak link to us, then LIVE. */
+.voice-tile-corner {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* A member's weak link to us, coloured by its grade. */
+.voice-ping {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: color 0.3s ease;
+}
+.voice-ping.is-good { color: var(--status-good); }
+.voice-ping.is-fair { color: var(--status-fair); }
+.voice-ping.is-poor { color: var(--status-poor); }
 .voice-tile-video {
   display: block;
   width: 100%;
@@ -4532,9 +4556,6 @@ body:not(.ws) .voice-tile {
 }
 .voice-tile-cam .voice-tile-badges { right: 6px; bottom: 6px; }
 .voice-tile-live {
-  position: absolute;
-  top: 6px;
-  right: 6px;
   padding: 1px 6px;
   border-radius: 6px;
   background: var(--danger-color);
