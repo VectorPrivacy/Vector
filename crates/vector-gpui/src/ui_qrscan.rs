@@ -132,7 +132,8 @@ impl VectorApp {
                     (Err(e), _) => {
                         app.scanner = None;
                         log::warn!("qr scanner: {e}");
-                        app.show_toast(&t::qrscan_camera_unavailable(), cx);
+                        // The opener's errors are written for the user: blocked, silent or failed.
+                        app.show_toast(&e, cx);
                         false
                     }
                 })
