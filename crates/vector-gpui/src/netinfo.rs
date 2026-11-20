@@ -124,11 +124,12 @@ pub fn modal(
                 .on_click(move |_, w, cx| close(w, cx))
                 .child("✕")
         })
-        .child(if i2p {
+        // Art keeps its size on a short screen; the card scrolls instead.
+        .child(div().flex_none().child(if i2p {
             crate::netglyph::glyph(crate::netglyph::Net::I2p, crate::netglyph::State::Connected, None, 56.)
         } else {
             img("icons/tor-logo.svg").w(px(119.)).h(px(72.)).into_any_element()
-        })
+        }))
         .child(div().mt(px(12.)).text_size(px(22.)).line_height(px(27.)).font_weight(FontWeight::BOLD).child(title))
         .child(div().mt(px(12.)).max_w(px(400.)).text_size(px(15.)).line_height(px(20.)).text_color(accent).child(lead));
     let mut list = div().mt(px(if i2p { 14. } else { 20. })).py(px(4.)).gap(px(4.)).flex().flex_col().text_size(px(14.)).line_height(px(20.)).text_color(c(ICON_MUTED));
