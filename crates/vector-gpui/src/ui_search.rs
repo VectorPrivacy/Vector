@@ -128,7 +128,7 @@ impl VectorApp {
             Act::Close => {
                 // The plaintext corpus goes with the panel.
                 self.search = None;
-                self.media.borrow_mut().let_go(THUMB_KEY);
+                self.release_search_thumbs(window, cx);
                 window.focus(&self.input.read(cx).focus_handle(cx), cx);
             }
             Act::Hover(i) => {
@@ -163,7 +163,7 @@ impl VectorApp {
             Act::Pick(i) => {
                 let Some(hit) = s.found.hits.get(i).cloned() else { return };
                 self.search = None;
-                self.media.borrow_mut().let_go(THUMB_KEY);
+                self.release_search_thumbs(window, cx);
                 self.settings = None;
                 self.profile = None;
                 self.close_nexus(cx);
@@ -379,6 +379,19 @@ impl VectorApp {
 
 /// A result's attachment as a thumbnail: a downloaded picture decoded small, a video's first
 /// frame once probed, else the picture's blur. A file not downloaded stays so.
+impl VectorApp {
+    /// The panel's thumbnails off the GPU soon after it closes: nothing else draws them. The
+    /// sweep waits for a frame without them, as one still on screen is kept.
+    fn release_search_thumbs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.media.borrow_mut().let_go(THUMB_KEY);
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+            this.update_in(cx, |this, window, cx| this.sweep_pictures(false, window, cx)).ok();
+        })
+        .detach();
+    }
+}
+
 /// Search's own cache keys: the timeline decodes the same pictures at its own size.
 const THUMB_KEY: &str = "search\u{0}";
 

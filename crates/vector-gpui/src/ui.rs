@@ -10508,7 +10508,7 @@ fn unread_jump_pill(j: &UnreadJump, cx: &mut Context<VectorApp>) -> AnyElement {
         .child(
             div()
                 .id("unread-jump-pill")
-                .occlude()
+                .block_mouse_except_scroll()
                 .px(px(15.))
                 .py(px(7.))
                 .rounded_full()

@@ -254,7 +254,7 @@ pub fn return_button(unread: u32, on: Rc<dyn Fn(&mut Window, &mut App)>) -> AnyE
         .child(
             div()
                 .id("chat-scroll-return")
-                .occlude()
+                .block_mouse_except_scroll()
                 .h(px(32.))
                 .flex()
                 .items_center()
