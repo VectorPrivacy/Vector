@@ -143,3 +143,14 @@ fn only_plain_fills_are_trimmed() {
         assert_eq!(scene.quads[0].bounds, rect(0., 0., 720., 1600.));
     }
 }
+
+#[test]
+fn a_cover_across_the_middle_leaves_two_strips() {
+    let scene = finished(|s| {
+        s.insert_primitive(quad(rect(0., 0., 1080., 1920.), OPAQUE, 0.));
+        s.insert_primitive(quad(rect(0., 63., 1080., 1731.), OPAQUE, 0.));
+        s.insert_primitive(quad(rect(0., 63., 1080., 1731.), SEE_THROUGH, 0.));
+    });
+    let bounds: Vec<_> = scene.quads.iter().map(|q| q.bounds).collect();
+    assert_eq!(bounds, [rect(0., 0., 1080., 63.), rect(0., 1794., 1080., 126.), rect(0., 63., 1080., 1731.), rect(0., 63., 1080., 1731.)]);
+}

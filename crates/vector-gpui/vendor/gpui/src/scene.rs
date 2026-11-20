@@ -238,8 +238,15 @@ impl Scene {
             let reach = s.bounds.dilate(ScaledPixels(3.0 * s.blur_radius.0)).union(&s.element_bounds);
             !hidden(s.order, reach.intersect(&s.content_mask.bounds))
         });
-        for q in &mut self.quads {
-            q.trim_under(&covers);
+        let mut pieces = smallvec::SmallVec::<[(usize, Quad); 2]>::new();
+        for (i, q) in self.quads.iter_mut().enumerate() {
+            if let Some(piece) = q.trim_under(&covers) {
+                pieces.push((i + 1, piece));
+            }
+        }
+        // Next to their quad, from the back: the order sort still holds.
+        for (at, piece) in pieces.into_iter().rev() {
+            self.quads.insert(at, piece);
         }
         self.quads.retain(|q| !hidden(q.order, q.bounds.intersect(&q.content_mask.bounds)));
         // Paths and surfaces may ignore their mask: only their own bounds are safe.
@@ -747,9 +754,10 @@ impl Quad {
 
 impl Quad {
     /// A plain fill (solid, square, borderless) paints every pixel its bounds hold alike, so a
-    /// later cover spanning its whole width or height can cut the covered end off: a backdrop
-    /// left showing only behind a status bar shades that strip, not the window.
-    fn trim_under(&mut self, covers: &[(DrawOrder, Bounds<ScaledPixels>)]) {
+    /// later cover spanning its whole width or height can cut the covered part out: a backdrop
+    /// left showing only past a pane's ends shades those strips, not the window. A cover across
+    /// the middle leaves two pieces: this quad keeps the first and returns the second.
+    fn trim_under(&mut self, covers: &[(DrawOrder, Bounds<ScaledPixels>)]) -> Option<Quad> {
         let square = |c: &Corners<ScaledPixels>| {
             c.top_left.0 == 0.0 && c.top_right.0 == 0.0 && c.bottom_right.0 == 0.0 && c.bottom_left.0 == 0.0
         };
@@ -758,31 +766,49 @@ impl Quad {
             b.top.0 == 0.0 && b.right.0 == 0.0 && b.bottom.0 == 0.0 && b.left.0 == 0.0
         };
         if self.background.as_solid().is_none() || !square(&self.corner_radii) || !borderless {
-            return;
+            return None;
         }
+        let mut rest = None;
         for (above, cover) in covers {
             if *above <= self.order {
                 continue;
             }
-            let (mut x0, mut y0) = (self.bounds.origin.x.0, self.bounds.origin.y.0);
-            let (mut x1, mut y1) = (x0 + self.bounds.size.width.0, y0 + self.bounds.size.height.0);
+            let (x0, y0) = (self.bounds.origin.x.0, self.bounds.origin.y.0);
+            let (x1, y1) = (x0 + self.bounds.size.width.0, y0 + self.bounds.size.height.0);
             let (cx0, cy0) = (cover.origin.x.0, cover.origin.y.0);
             let (cx1, cy1) = (cx0 + cover.size.width.0, cy0 + cover.size.height.0);
-            if cx0 <= x0 && cx1 >= x1 {
-                if cy0 <= y0 && cy1 > y0 {
-                    y0 = cy1.min(y1);
-                } else if cy1 >= y1 && cy0 < y1 {
-                    y1 = cy0.max(y0);
+            let set = |q: &mut Quad, x0: f32, y0: f32, x1: f32, y1: f32| {
+                q.bounds = Bounds {
+                    origin: point(ScaledPixels(x0), ScaledPixels(y0)),
+                    size: size(ScaledPixels((x1 - x0).max(0.0)), ScaledPixels((y1 - y0).max(0.0))),
+                };
+            };
+            // Each axis: the cover spans the other one whole and overlaps this one.
+            if cx0 <= x0 && cx1 >= x1 && cy0 < y1 && cy1 > y0 {
+                if cy0 <= y0 {
+                    set(self, x0, cy1.min(y1), x1, y1);
+                } else if cy1 >= y1 {
+                    set(self, x0, y0, x1, cy0);
+                } else if rest.is_none() {
+                    let mut after = self.clone();
+                    set(&mut after, x0, cy1, x1, y1);
+                    set(self, x0, y0, x1, cy0);
+                    rest = Some(after);
                 }
-            } else if cy0 <= y0 && cy1 >= y1 {
-                if cx0 <= x0 && cx1 > x0 {
-                    x0 = cx1.min(x1);
-                } else if cx1 >= x1 && cx0 < x1 {
-                    x1 = cx0.max(x0);
+            } else if cy0 <= y0 && cy1 >= y1 && cx0 < x1 && cx1 > x0 {
+                if cx0 <= x0 {
+                    set(self, cx1.min(x1), y0, x1, y1);
+                } else if cx1 >= x1 {
+                    set(self, x0, y0, cx0, y1);
+                } else if rest.is_none() {
+                    let mut after = self.clone();
+                    set(&mut after, cx1, y0, x1, y1);
+                    set(self, x0, y0, cx0, y1);
+                    rest = Some(after);
                 }
             }
-            self.bounds = Bounds { origin: point(ScaledPixels(x0), ScaledPixels(y0)), size: size(ScaledPixels(x1 - x0), ScaledPixels(y1 - y0)) };
         }
+        rest
     }
 }
 
