@@ -238,15 +238,16 @@ impl Scene {
             let reach = s.bounds.dilate(ScaledPixels(3.0 * s.blur_radius.0)).union(&s.element_bounds);
             !hidden(s.order, reach.intersect(&s.content_mask.bounds))
         });
-        let mut pieces = smallvec::SmallVec::<[(usize, Quad); 2]>::new();
+        let mut pieces = smallvec::SmallVec::<[(usize, smallvec::SmallVec<[Quad; 3]>); 2]>::new();
         for (i, q) in self.quads.iter_mut().enumerate() {
-            if let Some(piece) = q.trim_under(&covers) {
-                pieces.push((i + 1, piece));
+            let rest = q.trim_under(&covers);
+            if !rest.is_empty() {
+                pieces.push((i + 1, rest));
             }
         }
         // Next to their quad, from the back: the order sort still holds.
-        for (at, piece) in pieces.into_iter().rev() {
-            self.quads.insert(at, piece);
+        for (at, rest) in pieces.into_iter().rev() {
+            self.quads.splice(at..at, rest);
         }
         self.quads.retain(|q| !hidden(q.order, q.bounds.intersect(&q.content_mask.bounds)));
         // Paths and surfaces may ignore their mask: only their own bounds are safe.
@@ -753,11 +754,12 @@ impl Quad {
 }
 
 impl Quad {
-    /// A plain fill (solid, square, borderless) paints every pixel its bounds hold alike, so a
-    /// later cover spanning its whole width or height can cut the covered part out: a backdrop
-    /// left showing only past a pane's ends shades those strips, not the window. A cover across
-    /// the middle leaves two pieces: this quad keeps the first and returns the second.
-    fn trim_under(&mut self, covers: &[(DrawOrder, Bounds<ScaledPixels>)]) -> Option<Quad> {
+    /// A plain fill (solid, square, borderless) paints every pixel its bounds hold alike, so the
+    /// part a later cover hides can be cut out: a backdrop left showing only round a pane shades
+    /// that margin, not the window. This quad keeps one piece of what is left and returns the
+    /// others, at most three, for a cover inside it.
+    fn trim_under(&mut self, covers: &[(DrawOrder, Bounds<ScaledPixels>)]) -> smallvec::SmallVec<[Quad; 3]> {
+        let mut rest = smallvec::SmallVec::new();
         let square = |c: &Corners<ScaledPixels>| {
             c.top_left.0 == 0.0 && c.top_right.0 == 0.0 && c.bottom_right.0 == 0.0 && c.bottom_left.0 == 0.0
         };
@@ -766,47 +768,45 @@ impl Quad {
             b.top.0 == 0.0 && b.right.0 == 0.0 && b.bottom.0 == 0.0 && b.left.0 == 0.0
         };
         if self.background.as_solid().is_none() || !square(&self.corner_radii) || !borderless {
-            return None;
+            return rest;
         }
-        let mut rest = None;
+        let piece = |q: &Quad, x0: f32, y0: f32, x1: f32, y1: f32| Quad {
+            bounds: Bounds {
+                origin: point(ScaledPixels(x0), ScaledPixels(y0)),
+                size: size(ScaledPixels(x1 - x0), ScaledPixels(y1 - y0)),
+            },
+            ..q.clone()
+        };
         for (above, cover) in covers {
-            if *above <= self.order {
-                continue;
-            }
             let (x0, y0) = (self.bounds.origin.x.0, self.bounds.origin.y.0);
             let (x1, y1) = (x0 + self.bounds.size.width.0, y0 + self.bounds.size.height.0);
-            let (cx0, cy0) = (cover.origin.x.0, cover.origin.y.0);
-            let (cx1, cy1) = (cx0 + cover.size.width.0, cy0 + cover.size.height.0);
-            let set = |q: &mut Quad, x0: f32, y0: f32, x1: f32, y1: f32| {
-                q.bounds = Bounds {
-                    origin: point(ScaledPixels(x0), ScaledPixels(y0)),
-                    size: size(ScaledPixels((x1 - x0).max(0.0)), ScaledPixels((y1 - y0).max(0.0))),
-                };
-            };
-            // Each axis: the cover spans the other one whole and overlaps this one.
-            if cx0 <= x0 && cx1 >= x1 && cy0 < y1 && cy1 > y0 {
-                if cy0 <= y0 {
-                    set(self, x0, cy1.min(y1), x1, y1);
-                } else if cy1 >= y1 {
-                    set(self, x0, y0, x1, cy0);
-                } else if rest.is_none() {
-                    let mut after = self.clone();
-                    set(&mut after, x0, cy1, x1, y1);
-                    set(self, x0, y0, x1, cy0);
-                    rest = Some(after);
-                }
-            } else if cy0 <= y0 && cy1 >= y1 && cx0 < x1 && cx1 > x0 {
-                if cx0 <= x0 {
-                    set(self, cx1.min(x1), y0, x1, y1);
-                } else if cx1 >= x1 {
-                    set(self, x0, y0, cx0, y1);
-                } else if rest.is_none() {
-                    let mut after = self.clone();
-                    set(&mut after, cx1, y0, x1, y1);
-                    set(self, x0, y0, cx0, y1);
-                    rest = Some(after);
+            let (cx0, cy0) = (cover.origin.x.0.max(x0), cover.origin.y.0.max(y0));
+            let (cx1, cy1) = ((cover.origin.x.0 + cover.size.width.0).min(x1), (cover.origin.y.0 + cover.size.height.0).min(y1));
+            if *above <= self.order || cx1 <= cx0 || cy1 <= cy0 {
+                continue;
+            }
+            // What is left: the full-width bands above and below, then the sides between them.
+            let mut left = smallvec::SmallVec::<[Quad; 4]>::new();
+            for (px0, py0, px1, py1) in [(x0, y0, x1, cy0), (x0, cy1, x1, y1), (x0, cy0, cx0, cy1), (cx1, cy0, x1, cy1)] {
+                if px1 > px0 && py1 > py0 {
+                    left.push(piece(self, px0, py0, px1, py1));
                 }
             }
+            // Pieces of an earlier split stay as they are: one cut per quad keeps this cheap.
+            let pieces_allowed = rest.is_empty() || left.len() <= 1;
+            if !pieces_allowed {
+                continue;
+            }
+            let mut left = left.into_iter();
+            match left.next() {
+                Some(first) => *self = first,
+                // Covered whole: the cull drops it.
+                None => {
+                    self.bounds.size = Size::default();
+                    break;
+                }
+            }
+            rest.extend(left);
         }
         rest
     }

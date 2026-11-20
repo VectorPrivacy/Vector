@@ -74,8 +74,11 @@ fn a_cover_counts_only_its_whole_pixels() {
         s.insert_primitive(quad(rect(11., 11., 299., 299.), OPAQUE, 0.));
         s.insert_primitive(quad(cover, OPAQUE, 0.));
     });
-    // The first two reach the edge pixels the cover only half covers; the third lies inside.
-    assert_eq!(scene.quads.len(), 3);
+    // The first two keep only the half pixels round the cover's whole ones; the third lies inside.
+    let whole = rect(11., 11., 299., 299.);
+    let below: Vec<_> = scene.quads[..scene.quads.len() - 1].iter().map(|q| q.bounds).collect();
+    assert_eq!(below.len(), 8);
+    assert!(below.iter().all(|b| !b.intersects(&whole)), "{below:?}");
 }
 
 #[test]
@@ -153,4 +156,23 @@ fn a_cover_across_the_middle_leaves_two_strips() {
     });
     let bounds: Vec<_> = scene.quads.iter().map(|q| q.bounds).collect();
     assert_eq!(bounds, [rect(0., 0., 1080., 63.), rect(0., 1794., 1080., 126.), rect(0., 63., 1080., 1731.), rect(0., 63., 1080., 1731.)]);
+}
+
+#[test]
+fn a_centred_cover_leaves_a_frame() {
+    let scene = finished(|s| {
+        s.insert_primitive(quad(rect(0., 0., 2400., 1200.), OPAQUE, 0.));
+        s.insert_primitive(quad(rect(600., 100., 1200., 1000.), OPAQUE, 0.));
+    });
+    let bounds: Vec<_> = scene.quads.iter().map(|q| q.bounds).collect();
+    assert_eq!(
+        bounds,
+        [
+            rect(0., 0., 2400., 100.),
+            rect(0., 1100., 2400., 100.),
+            rect(0., 100., 600., 1000.),
+            rect(1800., 100., 600., 1000.),
+            rect(600., 100., 1200., 1000.),
+        ]
+    );
 }
