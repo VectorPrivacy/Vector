@@ -155,6 +155,13 @@ jobs:
           workspaces: crates/vector-gpui -> target
           key: android-apk
 
+      # One debug key across runs, so a test APK installs over the last one without an
+      # uninstall (which wipes the app's data). Gradle makes the key when the cache has none.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: gpui-android-debug-keystore-v1
+
       - name: Build
         run: ./gradlew --no-daemon :app:assembleDebug -PvectorNdk="$(basename "$ANDROID_NDK_LATEST_HOME")"
 
