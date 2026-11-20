@@ -270,6 +270,9 @@ impl TextSystem {
                 font("Noto Sans"),    // KDE
                 font("DejaVu Sans"),
                 font("Arial"), // macOS, Windows
+                font("Roboto"), // Android
+                // Bundled with the app, so a family no platform has never ends in a panic.
+                font("Rubik"),
             ],
             font_generation: Arc::default(),
             missing_glyph_reporter: Arc::new(MissingGlyphReporter {

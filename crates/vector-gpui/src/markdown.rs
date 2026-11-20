@@ -17,6 +17,8 @@ pub const MONO: &str = if cfg!(target_os = "macos") {
     "Menlo" // i18n-exempt: font name
 } else if cfg!(target_os = "windows") {
     "Consolas" // i18n-exempt: font name
+} else if cfg!(target_os = "android") {
+    "Droid Sans Mono" // i18n-exempt: font name
 } else {
     "DejaVu Sans Mono" // i18n-exempt: font name
 };
