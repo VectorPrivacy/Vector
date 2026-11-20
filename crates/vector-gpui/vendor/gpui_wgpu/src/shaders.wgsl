@@ -1144,11 +1144,14 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
 
 // --- path rasterization --- //
 
+// A multiple of 16 bytes: GL and WebGL refuse storage arrays of any other stride.
 struct PathRasterizationVertex {
     xy_position: vec2<f32>,
     st_position: vec2<f32>,
     color: Background,
     bounds: Bounds,
+    pad0: u32,
+    pad1: u32,
 }
 
 

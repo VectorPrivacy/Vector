@@ -112,6 +112,7 @@ struct PathRasterizationVertex {
     st_position: Point<f32>,
     color: Background,
     bounds: Bounds<ScaledPixels>,
+    pad: [u32; 2],
 }
 
 pub struct WgpuSurfaceConfig {
@@ -1187,20 +1188,19 @@ impl WgpuRenderer {
             self.device_errors
                 .observe_error(&mut self.observed_error_generation)
         }) {
-            self.failed_frame_count += 1;
-            log::error!(
-                "GPU error during frame (failure {} of 10): {error}",
-                self.failed_frame_count
-            );
-
-            // TBD. Does retrying more actually help?
-            if self.failed_frame_count > 10 {
-                panic!("Too many consecutive GPU errors. Last error: {error}");
-            } else if self.failed_frame_count > 5 {
+            self.failed_frame_count = self.failed_frame_count.saturating_add(1);
+            // An error that outlives a rebuilt atlas (an invalid pipeline) won't heal by
+            // rebuilding it every few frames, which re-rasterizes every glyph each time.
+            if self.failed_frame_count <= 6 || self.failed_frame_count.is_power_of_two() {
+                log::error!(
+                    "GPU error during frame ({} in a row): {error}",
+                    self.failed_frame_count
+                );
+            }
+            if self.failed_frame_count == 6 {
                 core.resources.invalidate_intermediate_textures();
                 self.atlas.clear();
                 self.needs_redraw = true;
-                self.failed_frame_count = 0;
                 return false;
             }
         } else {
@@ -1930,6 +1930,7 @@ impl WgpuRendererCore {
                 st_position: v.st_position,
                 color: path.color,
                 bounds,
+                pad: [0; 2],
             }));
         }
 
@@ -2896,7 +2897,7 @@ mod tests {
     fn webgl_record_sizes_match_shader_word_strides() {
         assert_eq!(std::mem::size_of::<Quad>(), 52 * 4);
         assert_eq!(std::mem::size_of::<Shadow>(), 40 * 4);
-        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 26 * 4);
+        assert_eq!(std::mem::size_of::<PathRasterizationVertex>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PathSprite>(), 4 * 4);
         assert_eq!(std::mem::size_of::<Underline>(), 28 * 4);
         assert_eq!(std::mem::size_of::<MonochromeSprite>(), 40 * 4);
