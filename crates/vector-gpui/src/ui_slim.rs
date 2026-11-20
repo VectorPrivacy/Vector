@@ -16,11 +16,14 @@ use super::{MenuAct, VectorApp, avatar, preview_line_at, slim_badge};
 use crate::composer::TextInput;
 use crate::data::{self, Community, Store};
 use crate::kit;
+use crate::pull::{self, Step};
 use crate::t;
 use crate::theme::*;
 
 /// `--cc-peek` (lib/drawer.js PEEK).
 const DRAWER_PEEK: f32 = 64.;
+/// How far past its edge the drawer parks, so its shadow is off screen too (drawer.js SHADOW).
+const DRAWER_SHADOW: f32 = 32.;
 /// Narrowest window that gets the multi-pane layout (`WS_MIN_W`).
 pub(super) const WIDE_MIN: f32 = 900.;
 
@@ -76,8 +79,25 @@ pub(super) struct Slim {
     /// Display's Hide Community Rail: folded with no pull tab.
     pub hidden: bool,
     pub filter: Filter,
+    /// How far out the rail is, 0 folded to 1 out: eased to `rail`, or held to a finger.
+    rail_p: pull::Eased,
+    rail_pull: pull::Pull,
     /// A community's channels stand over the channel on screen.
     pub drawer: bool,
+    /// How far out that drawer is, eased to `drawer` or held to a finger.
+    drawer_p: pull::Eased,
+    drawer_pull: pull::Pull,
+    /// The list was on screen at the last render, so a chat opening now came from it.
+    on_list: bool,
+    /// How far a channel's details sheet is slid off to the right, 0 covering the channel.
+    sheet_p: pull::Eased,
+    sheet_pull: pull::Pull,
+    /// Drawn at the last render; on its way away, to close once it is off.
+    sheet_shown: bool,
+    sheet_closing: bool,
+    /// The rail's pull tab as last drawn, and the span of the screen's left edge claimed for it.
+    tab_probe: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    edge_claim: Option<(f32, f32)>,
     /// The channel whose community details slide over it.
     pub details: Option<String>,
     pub search: Option<Entity<TextInput>>,
@@ -91,11 +111,23 @@ pub(super) struct Slim {
 
 impl Slim {
     pub fn new() -> Self {
+        let rail = crate::backend::device::get("cc_rail").is_none_or(|v| v != "false");
         Self {
-            rail: crate::backend::device::get("cc_rail").is_none_or(|v| v != "false"),
+            rail,
+            rail_p: pull::Eased::at(if rail { 1. } else { 0. }),
+            rail_pull: pull::Pull::default(),
             hidden: crate::backend::device::get("cc_rail_hidden").is_some_and(|v| v == "true"),
             filter: Filter::Messages,
             drawer: false,
+            drawer_p: pull::Eased::at(0.),
+            drawer_pull: pull::Pull::default(),
+            on_list: false,
+            sheet_p: pull::Eased::at(1.),
+            sheet_pull: pull::Pull::default(),
+            sheet_shown: false,
+            sheet_closing: false,
+            tab_probe: Rc::default(),
+            edge_claim: None,
             details: None,
             search: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -144,8 +176,109 @@ fn community_latest<'a>(store: &'a Store, com: &Community) -> Option<(&'a Serial
 impl VectorApp {
     pub(super) fn slim_set_rail(&mut self, open: bool, cx: &mut Context<Self>) {
         self.slim.rail = open;
+        self.slim.rail_p.go(if open { 1. } else { 0. });
         crate::backend::device::set("cc_rail", open.to_string());
         cx.notify();
+    }
+
+    /// A chat on screen, which a sideways pull draws its drawer over.
+    fn slim_layer(&self) -> bool {
+        self.open.is_some() && self.slim.details.is_none()
+    }
+
+    /// The rail's pull, by the rail itself, the screen's edge or the tab. In a channel's drawer
+    /// a sideways pull moves the drawer, so the rail stays as it is.
+    fn rail_scroll(&mut self, e: &gpui::ScrollEvent, cx: &mut Context<Self>) {
+        if self.slim_layer() || self.slim.hidden {
+            return;
+        }
+        // The rail moves by itself, by the screen's edge while folded, and by its tab.
+        let (x, y) = (f32::from(e.position.x), f32::from(e.position.y));
+        let tab = self.slim.edge_claim.is_some_and(|(top, bottom)| x < 26. && (top..bottom).contains(&y));
+        let Slim { rail_pull, rail_p, .. } = &mut self.slim;
+        let p = rail_p.value();
+        let grabs = x < RAIL_W * p || (p < 1. && x < 20.) || tab;
+        match rail_pull.feed(e, |_| grabs.then(|| (rail_p.stop(), RAIL_W))) {
+            Some(Step::Move(v)) => self.slim.rail_p.set(v),
+            Some(Step::End(open)) if open != self.slim.rail => self.slim_set_rail(open, cx),
+            Some(Step::End(open)) => self.slim.rail_p.go(if open { 1. } else { 0. }),
+            None => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The drawer's pull: out from the channel, back from the drawer or its shade, either way
+    /// mid-slide. What scrolls sideways itself keeps the gesture, and the composer is its own.
+    fn drawer_scroll(&mut self, e: &gpui::ScrollEvent, from_chat: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.slim_layer() {
+            return;
+        }
+        if from_chat && !self.slim.drawer_pull.pulling() && self.composer_box.get().is_some_and(|b| e.position.y >= b.top()) {
+            return;
+        }
+        let peek = if self.slim_flat() { 0. } else { DRAWER_PEEK };
+        let span = f32::from(window.viewport_size().width) - peek + DRAWER_SHADOW;
+        let was = self.slim.drawer_pull.pulling();
+        let Slim { drawer_pull, drawer_p, .. } = &mut self.slim;
+        let step = drawer_pull.feed(e, |dx| pull::takes(drawer_p, dx).then(|| (drawer_p.stop(), span)));
+        if !was && self.slim.drawer_pull.pulling() {
+            // What floats over the conversation goes as the drawer starts over it, and the
+            // keyboard belongs to the conversation going under.
+            window.blur(cx);
+            self.menu = None;
+            self.picker = None;
+            self.attach = None;
+        }
+        match step {
+            Some(Step::Move(v)) => self.slim.drawer_p.set(v),
+            Some(Step::End(open)) => {
+                self.slim.drawer = open;
+                self.slim.drawer_p.go(if open { 1. } else { 0. });
+            }
+            None => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The details slide away to the right, then close.
+    pub(super) fn slim_close_details(&mut self, cx: &mut Context<Self>) {
+        if self.slim.details.is_some() {
+            self.slim.sheet_closing = true;
+            cx.notify();
+        }
+    }
+
+    /// A pull to the right takes the details sheet away.
+    fn sheet_scroll(&mut self, e: &gpui::ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let width = f32::from(window.viewport_size().width);
+        let Slim { sheet_pull, sheet_p, .. } = &mut self.slim;
+        match sheet_pull.feed(e, |dx| pull::takes(sheet_p, dx).then(|| (sheet_p.stop(), width))) {
+            Some(Step::Move(v)) => self.slim.sheet_p.set(v),
+            Some(Step::End(gone)) => {
+                self.slim.sheet_closing = gone;
+                self.slim.sheet_p.go(if gone { 1. } else { 0. });
+            }
+            None => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn drawer_listener(cx: &mut Context<Self>) -> impl Fn(&gpui::ScrollEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(|app, e: &gpui::ScrollEvent, window, cx| app.drawer_scroll(e, false, window, cx))
+    }
+
+    /// The system back gesture gives way where the rail's pull tab meets the screen's edge.
+    fn claim_edge(&mut self) {
+        let span = self.slim.tab_probe.take().map(|b| (f32::from(b.top()), f32::from(b.bottom())));
+        if span == self.slim.edge_claim {
+            return;
+        }
+        self.slim.edge_claim = span;
+        #[cfg(target_os = "android")]
+        crate::android::claim_left_edge(span);
     }
 
     fn slim_query(&self, cx: &gpui::App) -> String {
@@ -160,26 +293,37 @@ impl VectorApp {
             .unwrap_or_default()
     }
 
-    /// Out of the chat on screen: a community of many channels to its drawer, else the list.
+    /// Out of the chat on screen: a community of many channels to its drawer, else the list,
+    /// which a flat chat's drawer is, pulled the rest of the way over it.
     pub(super) fn slim_back(&mut self, cx: &mut Context<Self>) {
         self.slim.details = None;
-        let multi = self.community.as_ref().is_some_and(|v| {
-            self.store.borrow().community(&v.id).is_some_and(|c| c.channels.len() > 1)
-        });
-        if multi && !self.slim.drawer {
+        if self.open.is_some() && self.slim_flat() {
+            self.slim.drawer = true;
+        } else if !self.slim_flat() && !self.slim.drawer && self.open.is_some() {
             self.slim.drawer = true;
         } else {
-            self.slim.drawer = false;
-            if self.community.is_some() {
-                self.leave_community();
-            } else {
-                self.open = None;
-                if self.live {
-                    crate::backend::messaging::set_active_chat(None);
-                }
-            }
+            self.slim_leave_chat();
         }
         cx.notify();
+    }
+
+    fn slim_leave_chat(&mut self) {
+        self.slim.drawer = false;
+        self.slim.drawer_p.set(0.);
+        if self.community.is_some() {
+            self.leave_community();
+        } else {
+            self.open = None;
+            if self.live {
+                crate::backend::messaging::set_active_chat(None);
+            }
+        }
+    }
+
+    /// A chat with no drawer of its own: a DM, or a community of one channel. Its drawer is the
+    /// whole list, out only to leave for it.
+    fn slim_flat(&self) -> bool {
+        self.community.as_ref().is_none_or(|v| self.store.borrow().community(&v.id).is_none_or(|c| c.channels.len() <= 1))
     }
 
     fn slim_home(&mut self, cx: &mut Context<Self>) {
@@ -215,6 +359,8 @@ impl VectorApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.claim_edge();
+        let from_list = std::mem::take(&mut self.slim.on_list);
         let width = f32::from(window.viewport_size().width);
         let screen = |body: AnyElement| div().flex_1().min_h_0().w_full().flex().flex_col().child(body);
         if let Some(settings) = self.settings.as_ref() {
@@ -260,21 +406,49 @@ impl VectorApp {
                 .into_any_element();
         }
         let drawer = self.slim.drawer && self.community.is_some();
-        if let Some(id) = self.open.clone().filter(|_| !drawer) {
-            if self.slim.details.as_deref() == Some(&*id)
-                && let Some(view) = self.slim_details(store, &id, window, cx)
-            {
-                return view;
+        let sheet_was = std::mem::take(&mut self.slim.sheet_shown);
+        if let Some(id) = self.open.clone() {
+            let sheet = if !drawer && self.slim.details.as_deref() == Some(&*id) {
+                self.slim_details(store, &id, window, cx)
+            } else {
+                None
+            };
+            let flat = self.slim_flat();
+            let drawer = self.slim.drawer;
+            let pulling = self.slim.drawer_pull.pulling();
+            // Opened from the list, which slides away off it.
+            if from_list && !pulling {
+                self.slim.drawer_p.set(1.);
             }
+            let target = if drawer { 1. } else { 0. };
+            if !pulling && self.slim.drawer_p.target() != target {
+                self.slim.drawer_p.go(target);
+            }
+            let p = self.slim.drawer_p.get(window);
+            // A flat chat's drawer all the way out is the list it left for.
+            if flat && drawer && p >= 1. && !pulling {
+                self.slim_leave_chat();
+                return self.slim_main(store, on_community, window, cx);
+            }
+            let entrance = self.chat_in.shown(0.28, window);
+            // Under a drawer, the drawer's slide is the chat's entrance.
+            let t = if p > 0. || drawer { 1. } else { kit::bezier(0.22, 1., 0.36, 1.)(entrance) };
             let back = cx.listener(|app, _: &gpui::ClickEvent, _, cx| app.slim_back(cx));
-            let t = crate::kit::bezier(0.22, 1., 0.36, 1.)(self.chat_in.shown(0.28, window));
-            return div()
+            let chat = div()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .relative()
                 .left(px(width * 0.35 * (1. - t)))
                 .flex()
+                .on_scroll(cx.listener(|app, e: &gpui::ScrollEvent, window, cx| {
+                    // A pull that slid the details sheet off its start carries on over the chat.
+                    if app.slim.details.is_some() {
+                        app.sheet_scroll(e, window, cx)
+                    } else {
+                        app.drawer_scroll(e, true, window, cx)
+                    }
+                }))
                 .child(self.chat_cached(id, cx))
                 .child(
                     // .nav-back-btn
@@ -292,11 +466,112 @@ impl VectorApp {
                         .on_click(back)
                         .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
                 )
-                .children(crate::kit::veil(0.4 + 0.6 * t))
+                .children(crate::kit::veil(0.4 + 0.6 * t));
+            if let Some(sheet) = sheet {
+                // Slid in over the channel, which stays open beneath.
+                if !sheet_was {
+                    self.slim.sheet_p.set(1.);
+                }
+                let pulling = self.slim.sheet_pull.pulling();
+                let target = if self.slim.sheet_closing { 1. } else { 0. };
+                if !pulling && self.slim.sheet_p.target() != target {
+                    self.slim.sheet_p.go(target);
+                }
+                let away = self.slim.sheet_p.get(window);
+                if self.slim.sheet_closing && away >= 1. && !pulling {
+                    self.slim.details = None;
+                    self.slim.sheet_closing = false;
+                    return self.slim_main(store, on_community, window, cx);
+                }
+                self.slim.sheet_shown = true;
+                return div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .relative()
+                    .flex()
+                    .child(chat)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(away * width))
+                            .w(px(width))
+                            .flex()
+                            .occlude()
+                            .on_scroll(cx.listener(|app, e: &gpui::ScrollEvent, window, cx| app.sheet_scroll(e, window, cx)))
+                            .child(sheet),
+                    )
+                    .into_any_element();
+            }
+            self.slim.sheet_closing = false;
+            if p <= 0. {
+                return chat.into_any_element();
+            }
+            // .cc-drawer-shade + `--cc-peek`: a channel stays on screen beside its drawer, and
+            // only the drawer moves. A flat chat's is the whole list, the tab bar rising with
+            // it on the way to leave.
+            let span = width - if flat { 0. } else { DRAWER_PEEK };
+            let header = self.slim_header(store, window, cx);
+            let body = self.slim_body(store, span, on_community, window, cx);
+            let col = div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(c(if flat { 0x050505 } else { 0x0b0b0b }))
+                .child(header)
+                .child(body)
+                .when(flat && drawer, |d| {
+                    d.child(div().flex_shrink_0().relative().top(px(NAV_H * (1. - p))).child(self.slim_navbar(store, cx)))
+                });
+            let drawer_el = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px((p - 1.) * (span + DRAWER_SHADOW)))
+                .w(px(span))
+                .flex()
+                .occlude()
+                .shadow(vec![gpui::BoxShadow {
+                    color: gpui::black().opacity(0.5),
+                    offset: gpui::point(px(4.), px(0.)),
+                    blur_radius: px(24.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+                .on_scroll(Self::drawer_listener(cx))
+                .child(col);
+            // On its way away, a tap is for the conversation coming back, not the shade leaving it.
+            let shade = div()
+                .id("cc-drawer-shade")
+                .absolute()
+                .inset_0()
+                .bg(gpui::black().opacity(0.55))
+                .opacity(p)
+                .on_scroll(Self::drawer_listener(cx))
+                .when(drawer, |d| {
+                    d.occlude().on_click(cx.listener(|app, _, _, cx| {
+                        app.slim.drawer = false;
+                        cx.notify();
+                    }))
+                });
+            return div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .flex()
+                .child(chat)
+                .child(shade)
+                .child(drawer_el)
                 .into_any_element();
         }
+        self.slim.on_list = true;
         let header = self.slim_header(store, window, cx);
-        let body = self.slim_body(store, if drawer && self.open.is_some() { width - DRAWER_PEEK } else { width }, on_community, window, cx);
+        let body = self.slim_body(store, width, on_community, window, cx);
         let col = div()
             .flex_1()
             .min_h_0()
@@ -308,66 +583,16 @@ impl VectorApp {
             .child(body);
         if drawer {
             let key = self.community.as_ref().map(|v| v.id.clone()).unwrap_or_default();
-            let Some(id) = self.open.clone() else {
-                return col
-                    .with_animation(
-                        SharedString::from(format!("slim-drawer-in-{key}")),
-                        gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
-                        move |d, t| {
-                            d.relative()
-                                .left(px(-width * 0.2 * (1. - t)))
-                                .children(crate::kit::veil(0.5 + 0.5 * t))
-                        },
-                    )
-                    .into_any_element();
-            };
-            // .cc-drawer-shade + `--cc-peek`: the channel stays on screen beside the drawer.
-            let span = width - DRAWER_PEEK;
-            let drawer_el = div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left_0()
-                .w(px(span))
-                .flex()
-                .shadow(vec![gpui::BoxShadow {
-                    color: gpui::black().opacity(0.5),
-                    offset: gpui::point(px(4.), px(0.)),
-                    blur_radius: px(24.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
-                .child(col)
-                .with_animation(
-                    SharedString::from(format!("slim-drawer-in-{key}")),
-                    gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
-                    move |d, t| d.left(px(-(span + 32.) * (1. - t))),
-                );
-            let shade = div()
-                .id("cc-drawer-shade")
-                .absolute()
-                .inset_0()
-                .bg(gpui::black().opacity(0.55))
-                .occlude()
-                .on_click(cx.listener(|app, _, _, cx| {
-                    app.slim.drawer = false;
-                    cx.notify();
-                }))
-                .with_animation(
-                    SharedString::from(format!("slim-shade-in-{key}")),
-                    gpui::Animation::new(std::time::Duration::from_millis(260)),
-                    |d, t| d.opacity(t),
-                );
-            return div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .relative()
-                .flex()
-                .child(self.chat_cached(id, cx))
-                .child(shade)
-                .child(drawer_el)
-                .into_any_element();
+            col.with_animation(
+                SharedString::from(format!("slim-drawer-in-{key}")),
+                gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                move |d, t| {
+                    d.relative()
+                        .left(px(-width * 0.2 * (1. - t)))
+                        .children(crate::kit::veil(0.5 + 0.5 * t))
+                },
+            )
+            .into_any_element()
         } else {
             let (fade, rise) = self.intro_ease();
             div()
@@ -531,8 +756,9 @@ impl VectorApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let query = self.slim_query(cx);
-        let rail = self.slim.rail_out() && query.is_empty();
-        let pane_w = width - if rail { RAIL_W } else { 0. };
+        let p = if self.slim.hidden || !query.is_empty() { 0. } else { self.slim.rail_p.get(window) };
+        let rail = p > 0.;
+        let pane_w = width - RAIL_W * p;
         let community = self
             .community
             .as_ref()
@@ -562,7 +788,18 @@ impl VectorApp {
             .flex_1()
             .min_h_0()
             .flex()
-            .when(rail, |d| d.child(self.slim_rail(store, on_community, cx)))
+            .on_scroll(cx.listener(|app, e: &gpui::ScrollEvent, _, cx| app.rail_scroll(e, cx)))
+            .when(rail, |d| {
+                // The rail's room grows with how far out it is, and the rail rides in with that edge.
+                d.child(
+                    div()
+                        .w(px(RAIL_W * p))
+                        .flex_shrink_0()
+                        .h_full()
+                        .overflow_hidden()
+                        .child(div().relative().left(px((p - 1.) * RAIL_W)).w(px(RAIL_W)).h_full().child(self.slim_rail(store, on_community, cx))),
+                )
+            })
             .child(pane)
             .into_any_element()
     }
@@ -647,6 +884,7 @@ impl VectorApp {
             .border_color(c(EDGE))
             .rounded_tr(px(14.))
             .overflow_y_scroll()
+            .restrict_scroll_to_axis()
             .child(div().pt(px(10.)).child(door))
             .child(div().mt(px(16.)).mx(px(14.)).mb(px(4.)).h(px(1.5)).flex_shrink_0().bg(c(EDGE)))
             .child(tiles)
@@ -1106,10 +1344,7 @@ impl VectorApp {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.slim.details = None;
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(|app, _, _, cx| app.slim_close_details(cx)))
                     .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
             );
         let _ = window;
@@ -1163,11 +1398,6 @@ impl VectorApp {
                 .bg(c(0x030303))
                 .child(header)
                 .child(body)
-                .with_animation(
-                    "group-overview-in",
-                    gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
-                    |d, t| d.ml(px(40. * (1. - t))).opacity(t),
-                )
                 .into_any_element(),
         )
     }
@@ -1374,27 +1604,35 @@ impl VectorApp {
         let origin = self.slim.tabs.borrow().get(&filters[0]).map(|b| f32::from(b.left())).unwrap_or(0.);
         let bar = bar.map(|b| div().absolute().inset_0().ml(px(-origin)).child(b));
         let _ = row_probe;
-        let folded = !self.slim.rail_out() && !self.slim.hidden;
+        // The grab area, wider and taller than the tab it draws, which tucks into the rail's
+        // edge as it comes out.
+        let p = self.slim.rail_p.value();
+        let probe = self.slim.tab_probe.clone();
         div()
             .h(px(49.))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .child(if folded {
+            .child(if !self.slim.hidden {
                 div()
                     .id("cc-rail-pull")
-                    .tip(t::slim_show_communities())
+                    .when(p < 1., |d| d.tip(t::slim_show_communities()).cursor_pointer())
                     .group("cc-rail-pull")
-                    .w(px(26.))
+                    .w(px(GUTTER + (26. - GUTTER) * (1. - p)))
                     .h(px(44.))
                     .mt(px(2.))
                     .flex_shrink_0()
+                    .overflow_hidden()
                     .flex()
                     .items_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|app, _, _, cx| app.slim_set_rail(true, cx)))
+                    .when(p < 1., |d| d.on_click(cx.listener(|app, _, _, cx| app.slim_set_rail(true, cx))))
+                    .when(p < 1., |d| {
+                        d.child(gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+                    })
                     .child(
                         div()
+                            .relative()
+                            .left(px(-16. * p))
                             .w(px(16.))
                             .h(px(32.))
                             .bg(c(SURFACE))

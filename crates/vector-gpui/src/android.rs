@@ -121,6 +121,33 @@ fn battery_helper(method: &str, sig: &str, flag: Option<bool>) -> bool {
     .unwrap_or(false)
 }
 
+/// The system back gesture gives way on the screen's left edge across `span` (top, bottom),
+/// else where a thumb swipes.
+pub fn claim_left_edge(span: Option<(f32, f32)>) {
+    use jni::objects::{JClass, JValue};
+    let done = utils::with_android_context(|env, ctx| {
+        let err = |e: jni::errors::Error| format!("{e:?}");
+        let loader = env.call_method(ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]).and_then(|v| v.l()).map_err(err)?;
+        let name = env.new_string("io.vectorapp.gpui.Bridge").map_err(err)?;
+        let class = env
+            .call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])
+            .and_then(|v| v.l())
+            .map_err(err)?;
+        let class = JClass::from(class);
+        let out = match span {
+            Some((top, bottom)) => env.call_static_method(&class, "claimLeft", "(FF)V", &[JValue::Float(top), JValue::Float(bottom)]),
+            None => env.call_static_method(&class, "releaseLeft", "()V", &[]),
+        };
+        if out.is_err() {
+            let _ = env.exception_clear();
+        }
+        out.map(|_| ()).map_err(err)
+    });
+    if let Err(e) = done {
+        log::warn!("android edge claim: {e}");
+    }
+}
+
 fn battery_flag(method: &str) -> bool {
     battery_helper(method, "(Landroid/content/Context;)Z", None)
 }

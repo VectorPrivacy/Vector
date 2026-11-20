@@ -86,6 +86,11 @@ object Bridge {
 
     @JvmStatic fun showKeyboard() = ui { it.view.showKeyboard() }
 
+    /** The system back gesture gives way on the left edge from `top` to `bottom`, GPUI's pixels. */
+    @JvmStatic fun claimLeft(top: Float, bottom: Float) = ui { it.view.claimLeft(top to bottom) }
+
+    @JvmStatic fun releaseLeft() = ui { it.view.claimLeft(null) }
+
     @JvmStatic fun hideKeyboard() = ui { it.view.hideKeyboard() }
 
     @JvmStatic fun setBackEnabled(enabled: Boolean) {

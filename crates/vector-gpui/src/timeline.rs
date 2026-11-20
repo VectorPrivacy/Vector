@@ -45,6 +45,8 @@ pub enum Act {
     ReactionPress(String, bool),
     /// Right-click on a message: its menu, at the pointer.
     MessageMenu(gpui::Point<gpui::Pixels>),
+    /// A finger's scroll over the row, which may be a swipe to reply.
+    Swipe(gpui::ScrollEvent),
     /// Right-clicked: in a community, their member menu.
     AuthorMenu(String, SharedString, gpui::Point<gpui::Pixels>),
     Text(Target),
@@ -95,6 +97,82 @@ pub enum Act {
 
 pub type OnAct = Rc<dyn Fn(&str, Act, &mut Window, &mut App)>;
 
+/// Leftward travel before it rubber-bands, and the travel a release replies from.
+const SWIPE_MAX: f32 = 102.;
+const SWIPE_TRIGGER: f32 = 60.;
+
+/// Swipe a row left to reply (`_dmsgInitGestures`): the row follows the finger, rubber-banded past
+/// its travel, over a chip that ignites past the point where letting go replies.
+pub struct ReplySwipe {
+    pub id: String,
+    pub drag: crate::pull::Drag,
+    off: f32,
+    past: bool,
+    crossings: u32,
+    /// Let go: when, the row's offset and the chip's size then, and whether it springs back (a
+    /// let-go short of a reply; a reply returns flat, handing off to reply mode).
+    released: Option<(std::time::Instant, f32, f32, bool)>,
+}
+
+/// What a row draws of a swipe.
+#[derive(Clone, Copy, Debug)]
+pub struct Swiped {
+    /// px, leftward negative.
+    pub off: f32,
+    /// The chip's size and opacity, 0 to 1.
+    pub chip: f32,
+    pub past: bool,
+    /// Bumped each time it crosses into replying, so the chip's pop plays again.
+    pub crossings: u32,
+}
+
+impl ReplySwipe {
+    pub fn new(id: String) -> Self {
+        Self { id, drag: Default::default(), off: 0., past: false, crossings: 0, released: None }
+    }
+
+    /// The finger at `dx` px from where it began.
+    pub fn moved(&mut self, dx: f32) {
+        let mut off = dx.min(0.);
+        if off < -SWIPE_MAX {
+            off = -SWIPE_MAX + (off + SWIPE_MAX) * 0.2;
+        }
+        self.off = off;
+        let past = off <= -SWIPE_TRIGGER;
+        if past && !self.past {
+            self.crossings += 1;
+        }
+        self.past = past;
+    }
+
+    /// Let go (or lost): whether it replies, given whether the message can take one.
+    pub fn release(&mut self, let_go: bool, can_reply: bool) -> bool {
+        let reply = let_go && self.past && can_reply;
+        self.released = Some((std::time::Instant::now(), self.off, (self.off.abs() / SWIPE_TRIGGER).min(1.), !reply));
+        self.past = false;
+        reply
+    }
+
+    pub fn frame(&self, window: &mut Window) -> Option<Swiped> {
+        let Some((at, off, chip, spring)) = self.released else {
+            if !self.drag.dragging() {
+                return None;
+            }
+            let chip = (self.off.abs() / SWIPE_TRIGGER).min(1.);
+            return Some(Swiped { off: self.off, chip, past: self.past, crossings: self.crossings });
+        };
+        let secs = at.elapsed().as_secs_f32();
+        let (span, ease) = if spring { (0.3, crate::kit::bezier(0.34, 1.4, 0.7, 1.)) } else { (0.18, crate::kit::bezier(0.25, 0.1, 0.25, 1.)) };
+        let row = (secs / span).min(1.);
+        let fade = (secs / 0.2).min(1.);
+        if row >= 1. && fade >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        Some(Swiped { off: off * (1. - ease(row)), chip: chip * (1. - fade), past: false, crossings: self.crossings })
+    }
+}
+
 /// What the rows of one chat share while drawing.
 pub struct Ctx<'a> {
     pub store: &'a Store,
@@ -137,6 +215,8 @@ pub struct Ctx<'a> {
     pub by_id: &'a HashMap<String, usize>,
     /// The window's width: what `100vw` reads.
     pub vw: f32,
+    /// The row mid swipe-to-reply, and how far it has gone.
+    pub swiped: Option<(&'a str, Swiped)>,
     /// The message the keyboard is on, while the timeline has focus.
     pub cursor: Option<&'a str>,
 }
@@ -489,12 +569,26 @@ fn row_shell(
     first: bool,
 ) -> AnyElement {
     let group: SharedString = format!("dmsg-{}", m.id).into();
+    let swiped = ctx.swiped.filter(|(id, _)| *id == m.id).map(|(_, s)| s);
+    // The swipe is followed by what stays put, as the row slides out from under the finger.
     div()
+        .id(SharedString::from(format!("{}-swipe", m.id)))
         .pt(px(gap))
+        .relative()
+        .on_scroll({
+            let (act, id) = (ctx.on_act.clone(), m.id.clone());
+            move |e, w, cx| {
+                if e.source == gpui::ScrollSource::Touch {
+                    act(&id, Act::Swipe(e.clone()), w, cx)
+                }
+            }
+        })
+        .children(swiped.filter(|s| s.chip > 0.).map(|s| swipe_chip(&m.id, s, gap)))
         .child(
             div()
                 .id(SharedString::from(m.id.clone()))
                 .role(gpui::Role::ListItem)
+                .when_some(swiped, |d, s| d.left(px(s.off)))
                 .when(ctx.cursor == Some(m.id.as_str()), |d| {
                     d.aria_active_descendant().child(
                         div().absolute().inset_0().border_2().border_color(c(ACCENT)).rounded(px(6.)),
@@ -530,10 +624,78 @@ fn row_shell(
                 })
                 .child(gutter)
                 .child(body)
-                .when(hovered || ctx.picker == Some(m.id.as_str()), |d| {
+                // A phone has no hover: a hold opens the menu and a swipe replies instead.
+                .when((hovered && !cfg!(target_os = "android")) || ctx.picker == Some(m.id.as_str()), |d| {
                     d.children(toolbar(ctx, m, first))
                 }),
         )
+        .into_any_element()
+}
+
+/// `.dmsg-swipe-reply`: beside the swiped row's end, growing as the swipe nears a reply and lit
+/// once a release would send one.
+fn swipe_chip(id: &str, s: Swiped, gap: f32) -> AnyElement {
+    use gpui::AnimationExt as _;
+    let size = 36. * (0.4 + 0.6 * s.chip);
+    let chip = div()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(s.chip)
+        .map(|d| {
+            if s.past {
+                d.bg(ca(10, 10, 10, 0.9)).border_color(c(ACCENT)).shadow(vec![
+                    gpui::BoxShadow { color: c(ACCENT).into(), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), inset: false },
+                    gpui::BoxShadow { color: ca(89, 252, 179, 0.55), offset: gpui::point(px(0.), px(0.)), blur_radius: px(18.), spread_radius: px(3.), inset: false },
+                    gpui::BoxShadow { color: ca(0, 0, 0, 0.4), offset: gpui::point(px(0.), px(3.)), blur_radius: px(10.), spread_radius: px(0.), inset: false },
+                ])
+            } else {
+                d.bg(ca(18, 18, 18, 0.82)).border_color(white_a(0.1)).shadow(vec![gpui::BoxShadow {
+                    color: ca(0, 0, 0, 0.4),
+                    offset: gpui::point(px(0.), px(3.)),
+                    blur_radius: px(10.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+            }
+        });
+    let icon = svg().path("icons/reply.svg").size(px(18. * (0.4 + 0.6 * s.chip))).text_color(if s.past { c(ACCENT) } else { white_a(0.88) });
+    let chip = if s.past {
+        // `dmsg-swipe-pop` on the glyph, and `dmsg-swipe-ring` pulsing out from the chip.
+        let key = format!("swipe-{id}-{}", s.crossings);
+        chip.child(
+            gpui::zoom(icon)
+                .with_animation(
+                    SharedString::from(format!("{key}-pop")),
+                    gpui::Animation::new(std::time::Duration::from_millis(340)).with_easing(crate::kit::bezier(0.34, 1.56, 0.64, 1.)),
+                    |z, t| z.scale(1. + 0.38 * (1. - (2. * t - 1.).abs())),
+                ),
+        )
+        .child(
+            gpui::zoom(div().absolute().size(px(size)).rounded_full().border_2().border_color(c(ACCENT)))
+                .with_animation(
+                    SharedString::from(format!("{key}-ring")),
+                    gpui::Animation::new(std::time::Duration::from_millis(520)).with_easing(crate::kit::bezier(0., 0., 0.58, 1.)),
+                    |z, t| z.scale(1. + 0.95 * t).opacity(0.22 * (1. - t)),
+                ),
+        )
+    } else {
+        chip.child(icon)
+    };
+    div()
+        .absolute()
+        .top(px(gap))
+        .bottom_0()
+        .right(px(22.))
+        .w(px(36.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(chip)
         .into_any_element()
 }
 

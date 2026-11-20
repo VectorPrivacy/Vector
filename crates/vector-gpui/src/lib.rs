@@ -79,6 +79,7 @@ mod lyrics;
 mod media;
 mod spell;
 mod profilewatch;
+mod pull;
 mod untrack;
 mod model3d;
 mod trim;

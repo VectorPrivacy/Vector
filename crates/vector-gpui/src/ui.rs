@@ -141,6 +141,8 @@ pub struct VectorApp {
     mode: Mode,
     /// The row carrying the hover toolbar.
     hovered: Option<String>,
+    /// The row mid swipe-to-reply.
+    reply_swipe: Option<timeline::ReplySwipe>,
     /// The message whose reaction menu is open.
     picker: Option<String>,
     popup: Option<(kit::Popup, PopupAct)>,
@@ -1032,6 +1034,7 @@ impl VectorApp {
             started: std::time::Instant::now(),
             mode: Mode::Normal,
             hovered: None,
+            reply_swipe: None,
             picker: None,
             popup: None,
             rekey: None,
@@ -4862,6 +4865,28 @@ impl VectorApp {
         serde_json::json!({ "message": m, "ui": state })
     }
 
+    /// A finger's scroll over row `id`: a leftward swipe replies to it; one heading right is the
+    /// drawer's, and an upright one the list's.
+    fn reply_swipe(&mut self, id: String, e: &gpui::ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if e.touch_phase == gpui::TouchPhase::Started && !self.reply_swipe.as_ref().is_some_and(|s| s.drag.dragging()) {
+            self.reply_swipe = Some(timeline::ReplySwipe::new(id.clone()));
+        }
+        let Some(swipe) = self.reply_swipe.as_mut().filter(|s| s.id == id) else { return };
+        match swipe.drag.feed(e, |dx| dx < 0.) {
+            Some(crate::pull::Step::Move(dx)) => swipe.moved(dx),
+            Some(crate::pull::Step::End(let_go)) => {
+                let can = self.message(&id).is_some_and(|m| !(m.mine && (m.pending || m.failed)));
+                let Some(swipe) = self.reply_swipe.as_mut() else { return };
+                if swipe.release(let_go, can) {
+                    self.on_act(id, timeline::Act::Reply, window, cx);
+                }
+            }
+            None => return,
+        }
+        cx.stop_propagation();
+        crate::pane::notify(&self.panes.timeline, cx);
+    }
+
     fn message(&self, id: &str) -> Option<Message> {
         let store = self.store.borrow();
         let find = |chat: &str| store.chat(chat)?.messages.iter().find(|m| m.id == id).cloned();
@@ -4898,6 +4923,7 @@ impl VectorApp {
             }
             Act::AuthorMenu(npub, key, at) => self.author_menu(npub, key, at, cx),
             Act::MessageMenu(at) => self.message_menu(id, at, cx),
+            Act::Swipe(e) => self.reply_swipe(id, &e, window, cx),
             Act::RetryHistory => {
                 if let Some(open) = self.open.clone() {
                     self.history_net.remove(open.as_ref());
@@ -9776,6 +9802,7 @@ impl VectorApp {
                 .ok();
         });
         let hovered = self.hovered.clone();
+        let swiped = self.reply_swipe.as_ref().and_then(|s| Some((s.id.clone(), s.frame(window)?)));
         // The head of the hovered message's streak: its avatar moves for any row of the streak.
         let hover_head = hovered.as_ref().and_then(|h| {
             let at = *self.msg_index.get(h)?;
@@ -9859,6 +9886,7 @@ impl VectorApp {
                 content_w,
                 vw,
                 cursor: cursor.as_deref(),
+                swiped: swiped.as_ref().map(|(id, s)| (id.as_str(), *s)),
             };
             if ctx.jumped.is_some_and(|(id, _)| {
                 chat.messages
@@ -15654,7 +15682,7 @@ impl VectorApp {
             Screen::Booting(_) => return false,
         }
         if self.slim.details.is_some() {
-            self.slim.details = None;
+            self.slim_close_details(cx);
         } else if self.profile.is_some() {
             self.on_profile(crate::profile::Act::Back, window, cx);
         } else if self.new_chat.is_some() {

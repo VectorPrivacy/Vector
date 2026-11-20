@@ -2,6 +2,7 @@ package io.vectorapp.gpui
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
@@ -50,6 +51,35 @@ class GpuiView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         isFocusable = true
         isFocusableInTouchMode = true
         access?.addAccessibilityStateChangeListener { on -> if (!on) Bridge.nativeA11yOff() }
+        addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> claimEdges() }
+    }
+
+    /** The rail's left-edge pull (top, bottom) in this view's pixels, while one shows. */
+    private var leftPull: Pair<Int, Int>? = null
+
+    /** `top`..`bottom` in GPUI's pixels; none to release it. */
+    fun claimLeft(span: Pair<Float, Float>?) {
+        val density = resources.displayMetrics.density
+        leftPull = span?.let { (top, bottom) -> (top * density).toInt() to (bottom * density).toInt() }
+        claimEdges()
+    }
+
+    /**
+     * Vector draws its own side swipes (the Communities rail, swipe to reply), so the system back
+     * gesture gives way along both side edges as far as Android allows: 200dp of height a side. On
+     * the left it sits on the rail's pull tab while one shows, else where a thumb swipes.
+     */
+    private fun claimEdges() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || width == 0 || height == 0) return
+        val density = resources.displayMetrics.density
+        val band = (200 * density).toInt().coerceAtMost(height)
+        val edge = (48 * density).toInt()
+        val thumb = (height * 2 / 5 - band / 2).coerceIn(0, height - band)
+        val left = leftPull?.let { (top, bottom) -> ((top + bottom) / 2 - band / 2).coerceIn(0, height - band) } ?: thumb
+        systemGestureExclusionRects = listOf(
+            Rect(0, left, edge, left + band),
+            Rect(width - edge, thumb, width, thumb + band),
+        )
     }
 
     override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider = nodes
