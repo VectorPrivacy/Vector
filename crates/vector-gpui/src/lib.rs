@@ -195,6 +195,10 @@ fn args() -> Args {
             _ => {}
         }
     }
+    #[cfg(all(target_os = "android", feature = "test-build"))]
+    if a.fixtures.is_none() {
+        a.fixtures = android::fixtures();
+    }
     a
 }
 

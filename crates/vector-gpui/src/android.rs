@@ -190,3 +190,28 @@ pub fn offer_notifications() -> Option<Offer> {
         Some(_) => None,
     }
 }
+
+/// Test builds: `adb shell setprop debug.vector.fixtures 1` starts on the desktop's fixtures
+/// (no account, no relays), as an app can't be handed `--fixtures`. Their media isn't shipped.
+#[cfg(feature = "test-build")]
+pub fn fixtures() -> Option<PathBuf> {
+    use std::ffi::{CStr, c_char, c_int};
+    unsafe extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
+    }
+    let mut value = [0 as c_char; 92];
+    // SAFETY: PROP_VALUE_MAX (92) bytes is the most the call writes, NUL included.
+    let on = unsafe {
+        __system_property_get(c"debug.vector.fixtures".as_ptr(), value.as_mut_ptr());
+        CStr::from_ptr(value.as_ptr())
+    }
+    .to_bytes()
+        == b"1";
+    if !on {
+        return None;
+    }
+    let path = cache_dir()?.join("fixtures.json");
+    std::fs::write(&path, include_bytes!("../reference/fixtures.json")).ok()?;
+    log::info!("debug.vector.fixtures: starting on fixtures");
+    Some(path)
+}
