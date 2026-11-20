@@ -1151,7 +1151,7 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                     );
                     if narrow_level {
                         let (hover_button, hover_level, set_level) = (on.clone(), on.clone(), on.clone());
-                        let track = (h - 70.).clamp(36., 84.);
+                        let track = (h - 70.).clamp(36., 96.);
                         div()
                             .relative()
                             .flex_none()
@@ -1165,10 +1165,10 @@ pub fn view(id: &str, clip: &Clip, dim: bool, size: Option<(f32, f32)>, radius: 
                                         // Overlapping the button, so the pointer never crosses a gap.
                                         .bottom(px(26.))
                                         .w(px(28.))
-                                        .pt(px(10.))
-                                        .pb(px(12.))
+                                        .pt(px(16.))
+                                        .pb(px(16.))
                                         .rounded(px(14.))
-                                        .bg(gpui::black().opacity(0.6))
+                                        .bg(gpui::black().opacity(0.48))
                                         .on_hover(move |on, w, cx| hover_level(Act::LevelHover(1, *on), w, cx))
                                         .on_click(|_, _, cx| cx.stop_propagation())
                                         .child(div().w_full().h(px(track)).child(slider(
@@ -1306,6 +1306,13 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
     let seekable = live;
     let key = SharedString::from(key.to_string());
     let name = key.clone();
+    // A click glides the knob there; a drag it follows exactly.
+    let shown = if vertical {
+        crate::kit::ease(format!("{key}-at").into(), frac, if dragging { 0. } else { 0.15 }, crate::kit::bezier(0.22, 1., 0.36, 1.))
+    } else {
+        frac
+    };
+    let halo_key = SharedString::from(format!("{key}-halo"));
     div()
         .id(key)
         .as_slider(label, value, frac)
@@ -1322,24 +1329,50 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
                     let (track, done, knob) = if vertical {
                         let mid = bounds.center().x;
                         let (y0, h) = (bounds.origin.y, bounds.size.height);
-                        let top = y0 + h * (1. - frac);
-                        (
-                            Bounds::new(gpui::point(mid - px(2.), y0), gpui::size(px(4.), h)),
-                            Bounds::new(gpui::point(mid - px(2.), top), gpui::size(px(4.), h * frac)),
-                            Bounds::new(gpui::point(mid - px(6.), top - px(6.)), gpui::size(px(12.), px(12.))),
-                        )
+                        let top = y0 + h * (1. - shown);
+                        let center = gpui::point(mid, top);
+                        // The halo answers the knob itself, not the track around it.
+                        let on_knob = move |p: gpui::Point<Pixels>| {
+                            let (dx, dy) = (f32::from(p.x - center.x), f32::from(p.y - center.y));
+                            dx * dx + dy * dy <= 12. * 12.
+                        };
+                        let hot = dragging || (hitbox.is_hovered(window) && on_knob(window.mouse_position()));
+                        let grow = crate::kit::ease(halo_key.clone(), hot as u8 as f32, 0.25, crate::kit::bezier(0.22, 1., 0.36, 1.));
+                        let line = |from, len| Bounds::new(gpui::point(mid - px(2.), from), gpui::size(px(4.), len));
+                        let round = |d: f32| Bounds::new(gpui::point(mid - px(d / 2.), top - px(d / 2.)), gpui::size(px(d), px(d)));
+                        window.paint_quad(gpui::fill(line(y0, h), white_a(0.35)).corner_radii(px(2.)));
+                        window.paint_quad(gpui::fill(line(top, h * shown), gpui::white()).corner_radii(px(2.)));
+                        if grow > 0. {
+                            let d = 16. + 15. * grow;
+                            let alpha = if dragging { 0.28 } else { 0.22 };
+                            window.paint_quad(gpui::fill(round(d), white_a(alpha * grow)).corner_radii(px(d / 2.)));
+                        }
+                        window.paint_quad(gpui::fill(round(16.), gpui::white()).corner_radii(px(8.)));
+                        if shown != frac || grow != hot as u8 as f32 {
+                            window.request_animation_frame();
+                        }
+                        // Crossing the knob's edge redraws, through the player's own hover act.
+                        let (was, on, hitbox) = (hot, on.clone(), hitbox.clone());
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                            if phase.bubble() && !e.dragging() && (hitbox.is_hovered(window) && on_knob(e.position)) != was {
+                                on(Act::LevelHover(1, true), window, cx);
+                            }
+                        });
+                        (None, None, None)
                     } else {
                         let mid = bounds.center().y;
                         let (x0, w) = (bounds.origin.x, bounds.size.width);
                         (
-                            Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w, px(4.))),
-                            Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w * frac, px(4.))),
-                            Bounds::new(gpui::point(x0 + w * frac - px(6.), mid - px(6.)), gpui::size(px(12.), px(12.))),
+                            Some(Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w, px(4.)))),
+                            Some(Bounds::new(gpui::point(x0, mid - px(2.)), gpui::size(w * frac, px(4.)))),
+                            Some(Bounds::new(gpui::point(x0 + w * frac - px(6.), mid - px(6.)), gpui::size(px(12.), px(12.)))),
                         )
                     };
-                    window.paint_quad(gpui::fill(track, white_a(0.3)).corner_radii(px(2.)));
-                    window.paint_quad(gpui::fill(done, gpui::white()).corner_radii(px(2.)));
-                    window.paint_quad(gpui::fill(knob, gpui::white()).corner_radii(px(6.)));
+                    if let (Some(track), Some(done), Some(knob)) = (track, done, knob) {
+                        window.paint_quad(gpui::fill(track, white_a(0.3)).corner_radii(px(2.)));
+                        window.paint_quad(gpui::fill(done, gpui::white()).corner_radii(px(2.)));
+                        window.paint_quad(gpui::fill(knob, gpui::white()).corner_radii(px(6.)));
+                    }
                     if !seekable {
                         return;
                     }
