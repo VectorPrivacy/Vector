@@ -873,14 +873,7 @@ pub fn resize_premultiplied(buf: image::RgbaImage, w: u32, h: u32) -> image::Rgb
 
 /// [`resize_premultiplied`] from a scratch buffer the caller reuses: `buf` is left premultiplied.
 pub fn resize_premultiplied_from(pre: &mut image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
-    for px in pre.chunks_exact_mut(4) {
-        let a = px[3] as u32;
-        if a < 255 {
-            for c in &mut px[..3] {
-                *c = ((*c as u32 * a + 127) / 255) as u8;
-            }
-        }
-    }
+    premultiply(pre);
     let mut out = super::resample(pre, w, h, image::imageops::FilterType::Triangle);
     unpremultiply(&mut out);
     out
@@ -1055,15 +1048,37 @@ fn put(src: &[u8], channels: usize, out: &mut [u8], mut at: isize, step: i64, r:
     }
 }
 
-fn unpremultiply(out: &mut image::RgbaImage) {
+/// `(c * a + 127) / 255` per channel. Branchless and divide-free so it vectorises; opaque pixels
+/// come out unchanged.
+fn premultiply(buf: &mut [u8]) {
+    let div255 = |t: u32| (t + 1 + (t >> 8)) >> 8;
+    for px in buf.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        px[0] = div255(px[0] as u32 * a + 127) as u8;
+        px[1] = div255(px[1] as u32 * a + 127) as u8;
+        px[2] = div255(px[2] as u32 * a + 127) as u8;
+    }
+}
+
+/// `ceil(2^32 / a)`: multiplying by it and shifting divides exactly for every numerator here.
+static RECIPROCAL: [u64; 256] = {
+    let mut t = [0u64; 256];
+    let mut a = 1;
+    while a < 256 {
+        t[a] = ((1u64 << 32) + a as u64 - 1) / a as u64;
+        a += 1;
+    }
+    t
+};
+
+/// `(c * 255 + a / 2) / a` per channel, clear where `a` is 0; opaque pixels come out unchanged.
+/// Matches the division for all 65,536 (channel, alpha) pairs.
+fn unpremultiply(out: &mut [u8]) {
     for px in out.chunks_exact_mut(4) {
         let a = px[3] as u32;
-        if a == 0 {
-            px[..3].fill(0);
-        } else if a < 255 {
-            for c in &mut px[..3] {
-                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
-            }
+        let (m, half) = (RECIPROCAL[a as usize], (a / 2) as u64);
+        for c in &mut px[..3] {
+            *c = (((*c as u64 * 255 + half) * m) >> 32).min(255) as u8;
         }
     }
 }
