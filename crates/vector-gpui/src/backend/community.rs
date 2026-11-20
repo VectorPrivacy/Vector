@@ -668,10 +668,11 @@ pub async fn leave_or_delete(community_id: String, owner: bool) -> Result<(), St
     .await
 }
 
-/// Every channel read to its newest message.
+/// Every channel read to its newest message, muted ones too: unmuting one later shows only
+/// what arrived since.
 pub async fn mark_read(community_id: String) {
     for ch in channel_ids(&community_id) {
-        super::messaging::mark_as_read(ch.clone(), None).await;
+        super::messaging::mark_caught_up(ch.clone()).await;
         STATE.lock().await.unread_clear(&ch);
     }
     vector_core::emit_event("unread_counts_stale", &json!({ "chats": [] }));

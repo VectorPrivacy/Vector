@@ -14,7 +14,7 @@ use gpui::{AnyElement, App, Bounds, BoxShadow, ObjectFit, Pixels, Point, RenderI
 use crate::pic::img;
 use serde::Deserialize;
 
-use crate::call::{Quality, accent_mix, call_btn, dot, grade, phone, round_btn};
+use crate::call::{Quality, accent_mix, call_btn, dot, phone, round_btn};
 use crate::data::Store;
 use crate::t;
 use crate::theme::*;
@@ -28,6 +28,9 @@ pub struct Peer {
     pub connected: bool,
     pub direct: bool,
     pub rtt_ms: u32,
+    /// Recent loss toward them in percent, and the link's usual round trip (0 until known).
+    pub loss_pct: f32,
+    pub rtt_floor_ms: u32,
     pub level: f32,
     pub muted: bool,
 }
@@ -62,9 +65,18 @@ impl Session {
         self.peers.iter().filter(|p| p.connected)
     }
 
-    /// The call is as good as its slowest link.
-    fn ping(&self) -> u32 {
-        self.linked().map(|p| p.rtt_ms).max().unwrap_or(0)
+    /// Most of our links in trouble at once: the trouble is ours, not theirs.
+    fn own_trouble(&self) -> Option<Quality> {
+        let grades: Vec<Quality> = self.linked().filter(|p| p.rtt_ms > 0).map(|p| trouble(p).0).collect();
+        if grades.len() < 2 {
+            return None;
+        }
+        let poor = grades.iter().filter(|g| **g == Quality::Poor).count();
+        let bad = poor + grades.iter().filter(|g| **g == Quality::Fair).count();
+        if bad * 2 <= grades.len() {
+            return None;
+        }
+        Some(if poor * 2 > grades.len() { Quality::Poor } else { Quality::Fair })
     }
 
     fn level(&self, npub: &str, me: &str) -> f32 {
@@ -105,6 +117,88 @@ pub struct Voice {
     pub expanded: bool,
     /// What we asked of each member's pictures, (screen, camera).
     pub watched: HashMap<String, (bool, bool)>,
+    /// Each member's last link flag and when it was earned.
+    flags: std::cell::RefCell<HashMap<String, (Flag, Instant)>>,
+}
+
+/// A member's link to us while it's in trouble: its grade and the figure that earned it.
+#[derive(Clone)]
+struct Flag {
+    grade: Quality,
+    label: SharedString,
+}
+
+/// A flag outlives its link's recovery by this much, so a link at a grade's edge doesn't blink.
+const FLAG_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+
+fn rank(q: Quality) -> u8 {
+    match q {
+        Quality::Excellent => 0,
+        Quality::Good => 1,
+        Quality::Fair => 2,
+        Quality::Poor => 3,
+    }
+}
+
+/// Trouble on a link from what actually hurts: loss, or a round trip grown well past the link's
+/// own usual (a relay shows trouble as delay, not loss). A steady long path is fine. The grade,
+/// and whether loss earned it.
+fn trouble(p: &Peer) -> (Quality, bool) {
+    let loss = p.loss_pct;
+    let by_loss = if loss < 0.5 {
+        Quality::Excellent
+    } else if loss < 2. {
+        Quality::Good
+    } else if loss < 5. {
+        Quality::Fair
+    } else {
+        Quality::Poor
+    };
+    let floor = p.rtt_floor_ms;
+    let queued = if floor > 0 && p.rtt_ms > 0 { p.rtt_ms.saturating_sub(floor) } else { 0 };
+    let by_queue = if queued >= 1000 {
+        Quality::Poor
+    } else if queued >= floor.max(300) {
+        Quality::Fair
+    } else {
+        Quality::Excellent
+    };
+    if rank(by_loss) >= rank(by_queue) { (by_loss, by_loss != Quality::Excellent) } else { (by_queue, false) }
+}
+
+/// A linked member's path in words: round trip against its usual, loss and route.
+fn link_title(p: &Peer) -> Option<SharedString> {
+    if !p.connected || p.rtt_ms == 0 {
+        return None;
+    }
+    let usual = p.rtt_floor_ms > 0 && p.rtt_ms.saturating_sub(p.rtt_floor_ms) >= 50;
+    Some(match (usual, p.direct) {
+        (true, true) => t::voice_path_usual_direct(p.rtt_ms, p.rtt_floor_ms, p.loss_pct),
+        (true, false) => t::voice_path_usual_relay(p.rtt_ms, p.rtt_floor_ms, p.loss_pct),
+        (false, true) => t::voice_path_direct(p.rtt_ms, p.loss_pct),
+        (false, false) => t::voice_path_relay(p.rtt_ms, p.loss_pct),
+    })
+}
+
+impl Voice {
+    /// A member's link flag, held a moment past its recovery.
+    fn flag(&self, p: &Peer) -> Option<Flag> {
+        let mut held = self.flags.borrow_mut();
+        let (grade, by_loss) = trouble(p);
+        if p.connected && grade != Quality::Excellent {
+            let label = if by_loss { t::voice_link_loss(p.loss_pct.round().max(1.) as u32) } else { t::call_delay_ms(p.rtt_ms) };
+            let flag = Flag { grade, label };
+            held.insert(p.npub.clone(), (flag.clone(), Instant::now()));
+            return Some(flag);
+        }
+        match held.get(&p.npub) {
+            Some((f, at)) if p.connected && at.elapsed() < FLAG_HOLD => Some(f.clone()),
+            _ => {
+                held.remove(&p.npub);
+                None
+            }
+        }
+    }
 }
 
 /// The pictures the stage shows this frame.
@@ -353,10 +447,6 @@ fn live_tag(size: f32, line: f32, pad: f32) -> impl IntoElement {
         .child(t::voice_live().to_uppercase())
 }
 
-fn rtt_quality(ms: u32) -> Option<Quality> {
-    (ms > 0).then(|| grade(0., ms as f32))
-}
-
 /// `voiceKeyHint`: the app-wide shortcut for a voice control.
 fn key_hint(key: char) -> String {
     // i18n-exempt: key names
@@ -582,7 +672,8 @@ pub fn stage(
     let people = voice.present(channel);
     let joining = voice.joining.as_deref() == Some(channel);
     let connected = |npub: &str| npub == me || session.is_some_and(|s| s.peers.iter().any(|p| p.npub == npub && p.connected));
-    let ping = session.map_or(0, Session::ping);
+    // Our own trouble says so once, here, rather than flagging everyone we can't reach well.
+    let own = session.and_then(Session::own_trouble);
     let head = div()
         .flex()
         .items_center()
@@ -621,7 +712,7 @@ pub fn stage(
                     .child(t::voice_no_mic()),
             )
         })
-        .when_some(rtt_quality(ping), |d, q| {
+        .when_some(own, |d, q| {
             d.child(
                 div()
                     .id("voice-stage-ping")
@@ -629,9 +720,9 @@ pub fn stage(
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .tip(t::voice_ping_tip())
+                    .tip(t::voice_unstable_tip())
                     .child(dot(q))
-                    .child(t::call_delay_ms(ping)),
+                    .child(t::voice_unstable()),
             )
         });
     let tiles = people.iter().map(|p| {
@@ -694,14 +785,9 @@ pub fn stage(
         };
         let pick = (session.is_some() && sharing).then(|| on.clone());
         let npub = p.npub.clone();
-        let path = if p.elsewhere {
-            Some(t::voice_elsewhere_tip())
-        } else {
-            session
-                .and_then(|s| s.peers.iter().find(|x| x.npub == p.npub && x.connected))
-                .filter(|x| x.rtt_ms > 0)
-                .map(|x| if x.direct { t::voice_path_direct(x.rtt_ms) } else { t::voice_path_relay(x.rtt_ms) })
-        };
+        let link = session.filter(|_| p.npub != me).and_then(|s| s.peers.iter().find(|x| x.npub == p.npub && x.connected));
+        let path = if p.elsewhere { Some(t::voice_elsewhere_tip()) } else { link.and_then(link_title) };
+        let flag = link.filter(|_| own.is_none()).and_then(|l| voice.flag(l));
         let live_tip = match session {
             Some(_) if is_viewing => t::voice_hide_their_screen(),
             Some(_) => t::voice_show_their_screen(),
@@ -831,22 +917,44 @@ pub fn stage(
                     }))
                 }
             })
-            .when(sharing, |d| {
+            // A weak link to us, then LIVE.
+            .when(sharing || flag.is_some(), |d| {
                 d.child(
                     div()
-                        .id("voice-tile-live")
-                        .tip(live_tip)
                         .absolute()
                         .top(px(6.))
                         .right(px(6.))
-                        .px(px(6.))
-                        .rounded(px(6.))
-                        .bg(c(crate::call::DANGER))
-                        .text_color(c(0xffffff))
-                        .text_size(px(10.))
-                        .line_height(px(16.))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .child(t::voice_live().to_uppercase()),
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .children(flag.map(|f| {
+                            div()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(6.))
+                                .bg(ca(0, 0, 0, 0.6))
+                                .text_color(f.grade.color())
+                                .text_size(px(10.))
+                                .line_height(px(16.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .whitespace_nowrap()
+                                .child(f.label)
+                        }))
+                        .when(sharing, |d| {
+                            d.child(
+                                div()
+                                    .id("voice-tile-live")
+                                    .tip(live_tip)
+                                    .px(px(6.))
+                                    .rounded(px(6.))
+                                    .bg(c(crate::call::DANGER))
+                                    .text_color(c(0xffffff))
+                                    .text_size(px(10.))
+                                    .line_height(px(16.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(t::voice_live().to_uppercase()),
+                            )
+                        }),
                 )
             })
     });
@@ -993,7 +1101,8 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
             t::voice_in_call_time(linked.len() + 1, time)
         }
     };
-    let ping = s.ping();
+    // Only our own connection: a member's weak link shows on their tile.
+    let own = s.own_trouble();
     let talk = ((linked.iter().map(|p| p.level).fold(0f32, f32::max) - 0.3) / 0.55).clamp(0., 1.);
     let name = store
         .community(&s.community_id)
@@ -1106,7 +1215,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
                         .text_size(px(11.5))
                         .line_height(px(13.2))
                         .text_color(c(0xb2b2b2))
-                        .when_some(rtt_quality(ping), |d, q| d.child(div().id("voice-bar-ping").tip(t::voice_ping_bar(ping)).child(dot(q))))
+                        .when_some(own, |d, q| d.child(div().id("voice-bar-ping").tip(t::voice_unstable()).child(dot(q))))
                         .child(div().truncate().child(status)),
                 ),
         )

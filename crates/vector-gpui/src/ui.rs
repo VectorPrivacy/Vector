@@ -2122,8 +2122,7 @@ impl VectorApp {
             }
             MenuAct::ChannelRead(id) => {
                 if self.live {
-                    let theirs = self.store.borrow().chat(&id).and_then(|c| data::newest_theirs(&c.messages));
-                    let rx = backend::run(messaging::mark_as_read(id, theirs));
+                    let rx = backend::run(messaging::mark_caught_up(id));
                     cx.spawn(async move |this, cx| {
                         let _ = rx.await;
                         this.update(cx, |this, cx| this.refresh_unread(cx)).ok();

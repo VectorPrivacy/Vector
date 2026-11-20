@@ -28,10 +28,16 @@ voice-you = You
 voice-note-elsewhere = another app
 voice-note-connecting = connecting
 voice-elsewhere-tip = In this call on another app: you can't hear each other
-# $ms is the round trip in whole milliseconds.
-voice-path-direct = { $ms } ms, direct
-# $ms is the round trip in whole milliseconds.
-voice-path-relay = { $ms } ms, through a relay
+# A member's link to you. $ms is the round trip in whole milliseconds, $loss the share of packets lost.
+voice-path-direct = { $ms } ms, { NUMBER($loss, minimumFractionDigits: 1, maximumFractionDigits: 1) }% loss, direct
+# As above, over a relay.
+voice-path-relay = { $ms } ms, { NUMBER($loss, minimumFractionDigits: 1, maximumFractionDigits: 1) }% loss, through a relay
+# As above, while the round trip runs well past what it usually is ($usual, in milliseconds).
+voice-path-usual-direct = { $ms } ms (usually { $usual } ms), { NUMBER($loss, minimumFractionDigits: 1, maximumFractionDigits: 1) }% loss, direct
+# As above, over a relay.
+voice-path-usual-relay = { $ms } ms (usually { $usual } ms), { NUMBER($loss, minimumFractionDigits: 1, maximumFractionDigits: 1) }% loss, through a relay
+# A badge on a member whose link to you is losing packets. $percent is a whole number.
+voice-link-loss = { $percent }% loss
 voice-hide-their-screen = Hide their screen
 voice-show-their-screen = Show their screen
 
@@ -77,9 +83,8 @@ voice-sharing-watched = { $count ->
    *[other] Sharing your screen · { $count } watching
 }
 voice-no-mic = No microphone access: others can't hear you
-voice-ping-tip = Round trip to the slowest link in the call
-# $ms is the round trip in whole milliseconds.
-voice-ping-bar = { $ms } ms to the slowest link
+voice-unstable = Your connection is unstable
+voice-unstable-tip = Most of your links are slow or losing packets
 voice-no-audio = Without audio
 # $time is how long you've been in the call, like "4:05".
 voice-waiting = Waiting for others · { $time }

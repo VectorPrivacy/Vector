@@ -219,6 +219,15 @@ pub async fn mark_as_read(chat_id: String, message_id: Option<String>) -> bool {
     true
 }
 
+/// An explicit read covers the whole history: the marker is the newest contact message in the
+/// database, as a channel never opened holds none in memory.
+pub async fn mark_caught_up(chat_id: String) -> bool {
+    match db::events::newest_contact_message_id(&chat_id).await {
+        Ok(Some(id)) => mark_as_read(chat_id, Some(id)).await,
+        _ => mark_as_read(chat_id, None).await,
+    }
+}
+
 /// Unread counts per chat, from the database: boot holds only each chat's last message.
 pub async fn unread_counts() -> HashMap<String, u32> {
     let counts = db::events::unread_counts().await.unwrap_or_default();
