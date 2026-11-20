@@ -141,7 +141,8 @@ pub fn modal(
                 .child(lead_bold(&point, FontWeight::BOLD)),
         );
     }
-    card = card.child(div().flex().justify_center().child(list.text_left())).children(extras.router);
+    // Capped at the card's width: a phone's card is narrower than the list's longest line.
+    card = card.child(div().w_full().flex().justify_center().child(list.text_left().min_w_0().max_w_full())).children(extras.router);
     card = card.child(
         div()
             .w_full()

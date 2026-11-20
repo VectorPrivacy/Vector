@@ -633,6 +633,18 @@ impl LoginView {
             self.answer_popup(yes, window, cx);
             return true;
         }
+        if self.signer.qr_open {
+            self.signer_close_qr(cx);
+            return true;
+        }
+        if self.net_back(window, cx) {
+            return true;
+        }
+        if self.select_open {
+            self.select_open = false;
+            cx.notify();
+            return true;
+        }
         if self.busy {
             return false;
         }
@@ -1872,13 +1884,13 @@ impl Render for LoginView {
             cx.notify();
         })))
         .children(account_list)
-        .children(self.net_modal(vw <= 480., cx))
-        .children(self.signer_qr(cx))
-        .children(self.pill(cx).map(|pill| div().absolute().top(px(51. + lock_h + 23.)).left_0().right_0().px(px(24.)).flex().justify_center().child(pill)))
-        // Above the footer's credit and links, clear of the window's own controls.
+        // Above the footer's credit and links, clear of the window's own controls; under any sheet.
         .children(self.offer_pill(cx).map(|pill| {
             div().absolute().bottom(px(if stacked { toggle_row + 6. } else { 25. } + 72.)).left_0().right_0().px(px(16.)).flex().justify_center().child(pill)
         }))
+        .children(self.net_modal(vw <= 480., cx))
+        .children(self.signer_qr(cx))
+        .children(self.pill(cx).map(|pill| div().absolute().top(px(51. + lock_h + 23.)).left_0().right_0().px(px(24.)).flex().justify_center().child(pill)))
         .when_some(self.popup.clone(), |root, p| {
             let entity = cx.entity();
             root.child(kit::popup(&p, move |yes, window, cx| {

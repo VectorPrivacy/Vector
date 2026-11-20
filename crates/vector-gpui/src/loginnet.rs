@@ -392,6 +392,21 @@ impl LoginView {
         self.net_paint(v, String::new(), cx);
     }
 
+    /// The network layer Back closes, innermost first.
+    pub(super) fn net_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.net.sam_open {
+            self.close_sam_form(cx);
+        } else if self.net.select_open {
+            self.net.select_open = false;
+            cx.notify();
+        } else if self.net.info.is_some() {
+            self.net_info(None, window, cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// The explainer: a tab opens it (or switches it), None closes it.
     fn net_info(&mut self, tab: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
         if tab.is_none() {
