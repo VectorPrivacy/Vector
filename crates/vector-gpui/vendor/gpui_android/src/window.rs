@@ -625,6 +625,16 @@ impl PlatformWindow for AndroidWindow {
         self.0.drawn.set(Some((started.elapsed(), renderer.frame_timing(), counts)));
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| log::info!("gpui_android: first frame drawn"));
+        // Once, on the first frame with something drawn, when the app asks for it.
+        static TESTED: std::sync::Once = std::sync::Once::new();
+        if scene.len() > 0 && std::env::var_os("VECTOR_GPU_SELF_TEST").is_some() {
+            TESTED.call_once(|| {
+                log::info!("gpui_android: GPU self-test at {:?}", renderer.viewport_size());
+                for line in renderer.gpu_self_test(scene) {
+                    log::info!("gpui_android: GPU self-test, {line}");
+                }
+            });
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

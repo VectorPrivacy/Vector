@@ -359,6 +359,15 @@ pub fn gpui_android_main() {
         unsafe { std::env::set_var("TMPDIR", cache) };
         // Copies of what the picker chose: nothing reads them after the run that picked them.
         let _ = std::fs::remove_dir_all(cache.join("picked"));
+        // Test builds time the GPU once per build: the log then says where frame time goes.
+        #[cfg(feature = "test-build")]
+        {
+            let marker = cache.join(format!("gpu-self-test-{}", option_env!("GITHUB_SHA").unwrap_or("local")));
+            if !marker.exists() && std::fs::write(&marker, b"").is_ok() {
+                // SAFETY: as above.
+                unsafe { std::env::set_var("VECTOR_GPU_SELF_TEST", "1") };
+            }
+        }
     }
     // An Amber account signs through the signer app from its first event.
     android::external_signer::register();

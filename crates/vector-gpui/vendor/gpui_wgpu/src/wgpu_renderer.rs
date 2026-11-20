@@ -16,6 +16,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[cfg(not(target_family = "wasm"))]
+#[path = "self_test.rs"]
+mod self_test;
+
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 /// Path textures are window-sized, four times over for MSAA, and most frames draw no paths, so
 /// they go after this many frames without one; a spinner that comes and goes keeps them.
