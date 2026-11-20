@@ -173,9 +173,9 @@ fn canned_scenes(
             s.insert_primitive(quad(bounds, gray(0.2, 1.0).into(), 16.0, 1.0));
         }
     });
-    add("card shadow, blur 24", &|s| {
+    let shadow = |inset: u32| {
         let bounds = rect(width * 0.1, height * 0.3, width * 0.8, height * 0.4);
-        s.insert_primitive(Shadow {
+        Shadow {
             order: 0,
             blur_radius: ScaledPixels(24.0),
             bounds,
@@ -184,10 +184,12 @@ fn canned_scenes(
             color: gray(0.0, 0.5),
             element_bounds: bounds,
             element_corner_radii: Corners::all(ScaledPixels(24.0)),
-            inset: 0,
+            inset,
             pad: 0,
-        })
-    });
+        }
+    };
+    add("card shadow, blur 24", &|s| s.insert_primitive(shadow(0)));
+    add("card shadow outside the card, blur 24", &|s| s.insert_primitive(shadow(2)));
     if let Some(tile) = glyph {
         add("700 glyphs", &|s| {
             for i in 0..700 {

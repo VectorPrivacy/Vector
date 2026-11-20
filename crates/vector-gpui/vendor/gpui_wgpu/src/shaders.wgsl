@@ -466,6 +466,47 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     return result;
 }
 
+// Where `position` falls between a linear gradient's stops, unclamped. Affine in `position`, so a
+// vertex stage can compute it and leave the rest to interpolation.
+fn linear_gradient_t(background: Background, position: vec2<f32>, bounds: Bounds) -> f32 {
+    // -90 degrees to match the CSS gradient angle.
+    let angle = background.gradient_angle_or_pattern_height;
+    let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
+    var direction = vec2<f32>(cos(radians), sin(radians));
+    let stop0_percentage = background.colors[0].percentage;
+    let stop1_percentage = background.colors[1].percentage;
+
+    // Expand the short side to be the same as the long side
+    if (bounds.size.x > bounds.size.y) {
+        direction.y *= bounds.size.y / bounds.size.x;
+    } else {
+        direction.x *= bounds.size.x / bounds.size.y;
+    }
+
+    // Get the t value for the linear gradient with the color stop percentages.
+    let half_size = bounds.size / 2.0;
+    let center = bounds.origin + half_size;
+    let center_to_point = position - center;
+    var t = dot(center_to_point, direction) / length(direction);
+    // Check the direct to determine the use x or y
+    if (abs(direction.x) > abs(direction.y)) {
+        t = (t + half_size.x) / bounds.size.x;
+    } else {
+        t = (t + half_size.y) / bounds.size.y;
+    }
+
+    // Adjust t based on the stop percentages
+    return (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
+}
+
+fn linear_gradient_at(color_space: u32, t: f32, color0: vec4<f32>, color1: vec4<f32>) -> vec4<f32> {
+    let mixed = mix(color0, color1, clamp(t, 0.0, 1.0));
+    if (color_space == 1u) {
+        return oklab_to_linear_srgb(mixed);
+    }
+    return srgba_to_linear(mixed);
+}
+
 fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
     solid_color: vec4<f32>, color0: vec4<f32>, color1: vec4<f32>) -> vec4<f32> {
     var background_color = vec4<f32>(0.0);
@@ -475,46 +516,7 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             return solid_color;
         }
         case 1u: {
-            // Linear gradient background.
-            // -90 degrees to match the CSS gradient angle.
-            let angle = background.gradient_angle_or_pattern_height;
-            let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
-            var direction = vec2<f32>(cos(radians), sin(radians));
-            let stop0_percentage = background.colors[0].percentage;
-            let stop1_percentage = background.colors[1].percentage;
-
-            // Expand the short side to be the same as the long side
-            if (bounds.size.x > bounds.size.y) {
-                direction.y *= bounds.size.y / bounds.size.x;
-            } else {
-                direction.x *= bounds.size.x / bounds.size.y;
-            }
-
-            // Get the t value for the linear gradient with the color stop percentages.
-            let half_size = bounds.size / 2.0;
-            let center = bounds.origin + half_size;
-            let center_to_point = position - center;
-            var t = dot(center_to_point, direction) / length(direction);
-            // Check the direct to determine the use x or y
-            if (abs(direction.x) > abs(direction.y)) {
-                t = (t + half_size.x) / bounds.size.x;
-            } else {
-                t = (t + half_size.y) / bounds.size.y;
-            }
-
-            // Adjust t based on the stop percentages
-            t = (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
-            t = clamp(t, 0.0, 1.0);
-
-            switch (background.color_space) {
-                default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
-                }
-                case 1u: {
-                    let oklab_color = mix(color0, color1, t);
-                    background_color = oklab_to_linear_srgb(oklab_color);
-                }
-            }
+            background_color = linear_gradient_at(background.color_space, linear_gradient_t(background, position, bounds), color0, color1);
         }
         case 2u: {
             // pattern slash
@@ -567,17 +569,89 @@ struct Quad {
     border_widths: Edges,
 }
 
+// Carries everything the fragment stage reads, so it never loads the quad: a load per pixel from
+// instance storage is what tiled mobile GPUs are slowest at. Fifteen vectors is GLES 3's minimum.
 struct QuadVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) border_color: vec4<f32>,
-    @location(1) @interpolate(flat) quad_id: u32,
-    // TODO: use `clip_distance` once Naga supports it
-    @location(2) clip_distances: vec4<f32>,
-    @location(3) @interpolate(flat) background_solid: vec4<f32>,
-    @location(4) @interpolate(flat) background_color0: vec4<f32>,
-    @location(5) @interpolate(flat) background_color1: vec4<f32>,
+    @location(1) @interpolate(flat) background_solid: vec4<f32>,
+    @location(2) @interpolate(flat) background_color0: vec4<f32>,
+    @location(3) @interpolate(flat) background_color1: vec4<f32>,
     // Min and max corners of the area that is all background at full coverage; empty when none.
-    @location(6) @interpolate(flat) solid_rect: vec4<f32>,
+    @location(4) @interpolate(flat) solid_rect: vec4<f32>,
+    @location(5) @interpolate(flat) bounds: vec4<f32>,
+    @location(6) @interpolate(flat) corner_radii: vec4<f32>,
+    @location(7) @interpolate(flat) border_widths: vec4<f32>,
+    @location(8) @interpolate(flat) content_mask: vec4<f32>,
+    @location(9) @interpolate(flat) content_radii: vec4<f32>,
+    @location(10) @interpolate(flat) content_fade0: vec4<f32>,
+    @location(11) @interpolate(flat) content_fade1: vec4<f32>,
+    // x: background tag | color space << 8 | border style << 16; y: the gradient angle or
+    // pattern height's bits. Integers, as a flat float may flush such bits to zero.
+    @location(12) @interpolate(flat) params: vec4<u32>,
+    @location(13) gradient_t: f32,
+}
+
+fn bounds_vec(bounds: Bounds) -> vec4<f32> {
+    return vec4<f32>(bounds.origin, bounds.size);
+}
+
+fn corners_vec(c: Corners) -> vec4<f32> {
+    return vec4<f32>(c.top_left, c.top_right, c.bottom_right, c.bottom_left);
+}
+
+// The varyings of `quad` at `unit_vertex`, all but the solid area.
+fn quad_vertex(unit_vertex: vec2<f32>, quad: Quad) -> QuadVarying {
+    var out = QuadVarying();
+    out.position = to_device_position(unit_vertex, quad.bounds);
+    let gradient = prepare_gradient_color(
+        quad.background.tag,
+        quad.background.color_space,
+        quad.background.solid,
+        quad.background.colors
+    );
+    out.background_solid = gradient.solid;
+    out.background_color0 = gradient.color0;
+    out.background_color1 = gradient.color1;
+    out.border_color = hsla_to_rgba(quad.border_color);
+    out.bounds = bounds_vec(quad.bounds);
+    out.corner_radii = corners_vec(quad.corner_radii);
+    out.border_widths = vec4<f32>(quad.border_widths.top, quad.border_widths.right,
+        quad.border_widths.bottom, quad.border_widths.left);
+    out.content_mask = bounds_vec(quad.content_mask);
+    out.content_radii = corners_vec(quad.content_radii);
+    let fade = quad.content_fade;
+    out.content_fade0 = vec4<f32>(fade.top, fade.top_len, fade.bottom, fade.bottom_len);
+    out.content_fade1 = vec4<f32>(fade.left, fade.left_len, fade.right, fade.right_len);
+    out.params = vec4<u32>(
+        (quad.background.tag & 0xffu) | ((quad.background.color_space & 0xffu) << 8u) | ((quad.border_style & 0xffu) << 16u),
+        bitcast<u32>(quad.background.gradient_angle_or_pattern_height), 0u, 0u);
+    if (quad.background.tag == 1u) {
+        let position = unit_vertex * quad.bounds.size + quad.bounds.origin;
+        out.gradient_t = linear_gradient_t(quad.background, position, quad.bounds);
+    }
+    return out;
+}
+
+// The quad as far as the fragment stage reads it; the colors it needs come prepared.
+fn varying_quad(input: QuadVarying) -> Quad {
+    var quad = Quad();
+    quad.border_style = (input.params.x >> 16u) & 0xffu;
+    quad.bounds = Bounds(input.bounds.xy, input.bounds.zw);
+    quad.content_mask = Bounds(input.content_mask.xy, input.content_mask.zw);
+    let r = input.content_radii;
+    quad.content_radii = Corners(r.x, r.y, r.z, r.w);
+    let f0 = input.content_fade0;
+    let f1 = input.content_fade1;
+    quad.content_fade = Fade(f0.x, f0.y, f0.z, f0.w, f1.x, f1.y, f1.z, f1.w);
+    quad.background.tag = input.params.x & 0xffu;
+    quad.background.color_space = (input.params.x >> 8u) & 0xffu;
+    quad.background.gradient_angle_or_pattern_height = bitcast<f32>(input.params.y);
+    let c = input.corner_radii;
+    quad.corner_radii = Corners(c.x, c.y, c.z, c.w);
+    let b = input.border_widths;
+    quad.border_widths = Edges(b.x, b.y, b.z, b.w);
+    return quad;
 }
 
 fn solid_inset(border: f32, radius0: f32, radius1: f32) -> f32 {
@@ -620,22 +694,7 @@ fn quad_solid_rect(tag: u32, bounds: Bounds, radii: Corners, borders: Edges,
 fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let quad = load_quad(instance_id);
-
-    var out = QuadVarying();
-    out.position = to_device_position(unit_vertex, quad.bounds);
-
-    let gradient = prepare_gradient_color(
-        quad.background.tag,
-        quad.background.color_space,
-        quad.background.solid,
-        quad.background.colors
-    );
-    out.background_solid = gradient.solid;
-    out.background_color0 = gradient.color0;
-    out.background_color1 = gradient.color1;
-    out.border_color = hsla_to_rgba(quad.border_color);
-    out.quad_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
+    var out = quad_vertex(unit_vertex, quad);
     out.solid_rect = quad_solid_rect(quad.background.tag, quad.bounds, quad.corner_radii,
         quad.border_widths, quad.content_mask, quad.content_radii, quad.content_fade);
     return out;
@@ -647,20 +706,24 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     if (all(point > input.solid_rect.xy) && all(point < input.solid_rect.zw)) {
         return blend_color(input.background_solid, 1.0);
     }
-    let quad = load_quad(input.quad_id);
-    return masked(quad_color(input), mask_alpha(input.position.xy, quad.content_mask, quad.content_radii, quad.content_fade));
+    let quad = varying_quad(input);
+    return masked(quad_color(input, quad), mask_alpha(input.position.xy, quad.content_mask, quad.content_radii, quad.content_fade));
 }
 
-fn quad_color(input: QuadVarying) -> vec4<f32> {
+fn quad_color(input: QuadVarying, quad: Quad) -> vec4<f32> {
     // Alpha clip first, since we don't have `clip_distance`.
-    if (any(input.clip_distances < vec4<f32>(0.0))) {
+    if (any(distance_from_clip_rect_impl(input.position.xy, quad.content_mask) < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let quad = load_quad(input.quad_id);
-
-    let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
-        input.background_solid, input.background_color0, input.background_color1);
+    var background_color: vec4<f32>;
+    if (quad.background.tag == 1u) {
+        background_color = linear_gradient_at(quad.background.color_space, input.gradient_t,
+            input.background_color0, input.background_color1);
+    } else {
+        background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
+            input.background_solid, input.background_color0, input.background_color1);
+    }
 
     let unrounded = quad.corner_radii.top_left == 0.0 &&
         quad.corner_radii.bottom_left == 0.0 &&
@@ -1055,12 +1118,39 @@ struct Shadow {
     pad: u32, // align to 8 bytes
 }
 
+// Like `QuadVarying`, everything the fragment stage reads.
 struct ShadowVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) color: vec4<f32>,
-    @location(1) @interpolate(flat) shadow_id: u32,
-    //TODO: use `clip_distance` once Naga supports it
-    @location(3) clip_distances: vec4<f32>,
+    @location(1) @interpolate(flat) bounds: vec4<f32>,
+    @location(2) @interpolate(flat) corner_radii: vec4<f32>,
+    @location(3) @interpolate(flat) content_mask: vec4<f32>,
+    @location(4) @interpolate(flat) content_radii: vec4<f32>,
+    @location(5) @interpolate(flat) content_fade0: vec4<f32>,
+    @location(6) @interpolate(flat) content_fade1: vec4<f32>,
+    @location(7) @interpolate(flat) element_bounds: vec4<f32>,
+    @location(8) @interpolate(flat) element_radii: vec4<f32>,
+    @location(9) @interpolate(flat) blur_radius: f32,
+    @location(10) @interpolate(flat) inset: u32,
+}
+
+fn varying_shadow(input: ShadowVarying) -> Shadow {
+    var shadow = Shadow();
+    shadow.blur_radius = input.blur_radius;
+    shadow.bounds = Bounds(input.bounds.xy, input.bounds.zw);
+    let c = input.corner_radii;
+    shadow.corner_radii = Corners(c.x, c.y, c.z, c.w);
+    shadow.content_mask = Bounds(input.content_mask.xy, input.content_mask.zw);
+    let r = input.content_radii;
+    shadow.content_radii = Corners(r.x, r.y, r.z, r.w);
+    let f0 = input.content_fade0;
+    let f1 = input.content_fade1;
+    shadow.content_fade = Fade(f0.x, f0.y, f0.z, f0.w, f1.x, f1.y, f1.z, f1.w);
+    shadow.element_bounds = Bounds(input.element_bounds.xy, input.element_bounds.zw);
+    let e = input.element_radii;
+    shadow.element_corner_radii = Corners(e.x, e.y, e.z, e.w);
+    shadow.inset = input.inset;
+    return shadow;
 }
 
 @vertex
@@ -1082,27 +1172,53 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
     var out = ShadowVarying();
     out.position = to_device_position(unit_vertex, geometry);
     out.color = hsla_to_rgba(shadow.color);
-    out.shadow_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, geometry, shadow.content_mask);
+    out.bounds = bounds_vec(shadow.bounds);
+    out.corner_radii = corners_vec(shadow.corner_radii);
+    out.content_mask = bounds_vec(shadow.content_mask);
+    out.content_radii = corners_vec(shadow.content_radii);
+    let fade = shadow.content_fade;
+    out.content_fade0 = vec4<f32>(fade.top, fade.top_len, fade.bottom, fade.bottom_len);
+    out.content_fade1 = vec4<f32>(fade.left, fade.left_len, fade.right, fade.right_len);
+    out.element_bounds = bounds_vec(shadow.element_bounds);
+    out.element_radii = corners_vec(shadow.element_corner_radii);
+    out.blur_radius = shadow.blur_radius;
+    out.inset = shadow.inset;
     return out;
 }
 
 @fragment
 fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
+    let shadow = varying_shadow(input);
     // Alpha clip first, since we don't have `clip_distance`.
-    if (any(input.clip_distances < vec4<f32>(0.0))) {
+    if (any(distance_from_clip_rect_impl(input.position.xy, shadow.content_mask) < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let shadow = load_shadow(input.shadow_id);
+    var element_distance = 0.0;
+    if (shadow.inset != 0u) {
+        element_distance = quad_sdf(input.position.xy, shadow.element_bounds, shadow.element_corner_radii);
+        // Under the element, a shadow drawn outside it only covers nothing.
+        if (shadow.inset == 2u && element_distance <= -0.5) {
+            return blend_color(input.color, 0.0);
+        }
+    }
+
     let half_size = shadow.bounds.size / 2.0;
     let center = shadow.bounds.origin + half_size;
     let center_to_point = input.position.xy - center;
 
     let corner_radius = pick_corner_radius(center_to_point, shadow.corner_radii);
 
+    // Three blur radii in from every edge and corner, the shadow is all but solid (alpha within
+    // 0.3% of 1, under an 8-bit step at shadow opacities): skip the samples.
+    let max_radius = max(max(shadow.corner_radii.top_left, shadow.corner_radii.top_right),
+        max(shadow.corner_radii.bottom_right, shadow.corner_radii.bottom_left));
+    let solid = all(abs(center_to_point) < half_size - (3.0 * shadow.blur_radius + max_radius));
+
     var alpha: f32;
-    if (shadow.blur_radius == 0.0) {
+    if (solid) {
+        alpha = 1.0;
+    } else if (shadow.blur_radius == 0.0) {
         let distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
         alpha = saturate(0.5 - distance);
     } else {
@@ -1128,13 +1244,9 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         // The inset shadow is the complement of the (blurred) hole rect, clipped to the element.
         // `saturate(0.5 - d)` gives a 1-pixel antialiased edge: d <= -0.5 -> 1, d >= 0.5 -> 0.
         alpha = 1.0 - alpha;
-        let element_distance = quad_sdf(input.position.xy, shadow.element_bounds,
-                                        shadow.element_corner_radii);
         alpha *= saturate(0.5 - element_distance);
     } else if (shadow.inset == 2u) {
         // A box's own shadow, as CSS draws it: outside its border box only.
-        let element_distance = quad_sdf(input.position.xy, shadow.element_bounds,
-                                        shadow.element_corner_radii);
         alpha *= saturate(0.5 + element_distance);
     }
 
@@ -1156,23 +1268,38 @@ struct PathRasterizationVertex {
 
 
 
+// As `QuadVarying`, everything the fragment stage reads. A path's vertices share its color and
+// bounds, so flat values are the same whichever vertex provokes.
 struct PathRasterizationVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) st_position: vec2<f32>,
-    @location(1) @interpolate(flat) vertex_id: u32,
-    //TODO: use `clip_distance` once Naga supports it
-    @location(3) clip_distances: vec4<f32>,
+    @location(1) @interpolate(flat) solid: vec4<f32>,
+    @location(2) @interpolate(flat) color0: vec4<f32>,
+    @location(3) @interpolate(flat) color1: vec4<f32>,
+    @location(4) @interpolate(flat) bounds: vec4<f32>,
+    // As `QuadVarying::params`, without a border style.
+    @location(5) @interpolate(flat) params: vec4<u32>,
+    @location(6) gradient_t: f32,
 }
 
 @vertex
 fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasterizationVarying {
     let v = load_path_vertex(vertex_id);
+    let background = v.color;
 
     var out = PathRasterizationVarying();
     out.position = to_device_position_impl(v.xy_position);
     out.st_position = v.st_position;
-    out.vertex_id = vertex_id;
-    out.clip_distances = distance_from_clip_rect_impl(v.xy_position, v.bounds);
+    let prepared = prepare_gradient_color(background.tag, background.color_space, background.solid, background.colors);
+    out.solid = prepared.solid;
+    out.color0 = prepared.color0;
+    out.color1 = prepared.color1;
+    out.bounds = bounds_vec(v.bounds);
+    out.params = vec4<u32>((background.tag & 0xffu) | ((background.color_space & 0xffu) << 8u),
+        bitcast<u32>(background.gradient_angle_or_pattern_height), 0u, 0u);
+    if (background.tag == 1u) {
+        out.gradient_t = linear_gradient_t(background, v.xy_position, v.bounds);
+    }
     return out;
 }
 
@@ -1180,13 +1307,10 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
 fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f32> {
     let dx = dpdx(input.st_position);
     let dy = dpdy(input.st_position);
-    if (any(input.clip_distances < vec4<f32>(0.0))) {
+    let bounds = Bounds(input.bounds.xy, input.bounds.zw);
+    if (any(distance_from_clip_rect_impl(input.position.xy, bounds) < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
-
-    let v = load_path_vertex(input.vertex_id);
-    let background = v.color;
-    let bounds = v.bounds;
 
     var alpha: f32;
     if (length(vec2<f32>(dx.x, dy.x)) < 0.001) {
@@ -1198,14 +1322,16 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         let distance = f / length(gradient);
         alpha = saturate(0.5 - distance);
     }
-    let prepared_gradient = prepare_gradient_color(
-        background.tag,
-        background.color_space,
-        background.solid,
-        background.colors,
-    );
-    let color = gradient_color(background, input.position.xy, bounds,
-        prepared_gradient.solid, prepared_gradient.color0, prepared_gradient.color1);
+    var background = Background();
+    background.tag = input.params.x & 0xffu;
+    background.color_space = (input.params.x >> 8u) & 0xffu;
+    background.gradient_angle_or_pattern_height = bitcast<f32>(input.params.y);
+    var color: vec4<f32>;
+    if (background.tag == 1u) {
+        color = linear_gradient_at(background.color_space, input.gradient_t, input.color0, input.color1);
+    } else {
+        color = gradient_color(background, input.position.xy, bounds, input.solid, input.color0, input.color1);
+    }
     return vec4<f32>(color.rgb * color.a * alpha, color.a * alpha);
 }
 
@@ -1396,15 +1522,20 @@ struct PolychromeSprite {
 }
 
 
+// As `QuadVarying`, everything the fragment stage reads.
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
-    @location(1) @interpolate(flat) sprite_id: u32,
-    @location(3) clip_distances: vec4<f32>,
     // As `QuadVarying::solid_rect`: where neither rounding nor the mask touches the image.
-    @location(4) @interpolate(flat) solid_rect: vec4<f32>,
-    @location(5) @interpolate(flat) opacity: f32,
-    @location(6) @interpolate(flat) grayscale: u32,
+    @location(1) @interpolate(flat) solid_rect: vec4<f32>,
+    @location(2) @interpolate(flat) bounds: vec4<f32>,
+    @location(3) @interpolate(flat) corner_radii: vec4<f32>,
+    @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
+    @location(5) @interpolate(flat) mask_radii: vec4<f32>,
+    @location(6) @interpolate(flat) mask_fade: vec4<f32>,
+    @location(7) @interpolate(flat) mask_fade_x: vec4<f32>,
+    @location(8) @interpolate(flat) opacity: f32,
+    @location(9) @interpolate(flat) grayscale: u32,
 }
 
 @vertex
@@ -1415,10 +1546,15 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     var out = PolySpriteVarying();
     out.position = to_device_position(unit_vertex, sprite.bounds);
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
-    out.sprite_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
     out.solid_rect = quad_solid_rect(0u, sprite.bounds, sprite.corner_radii, Edges(0.0, 0.0, 0.0, 0.0),
         sprite.content_mask, sprite.content_radii, sprite.content_fade);
+    out.bounds = bounds_vec(sprite.bounds);
+    out.corner_radii = corners_vec(sprite.corner_radii);
+    out.mask_bounds = bounds_vec(sprite.content_mask);
+    out.mask_radii = corners_vec(sprite.content_radii);
+    let fade = sprite.content_fade;
+    out.mask_fade = vec4<f32>(fade.top, fade.top_len, fade.bottom, fade.bottom_len);
+    out.mask_fade_x = vec4<f32>(fade.left, fade.left_len, fade.right, fade.right_len);
     out.opacity = sprite.opacity;
     out.grayscale = sprite.grayscale;
     return out;
@@ -1436,20 +1572,21 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         return blend_color(color, input.opacity);
     }
     // Alpha clip after using the derivatives.
-    if (any(input.clip_distances < vec4<f32>(0.0))) {
+    let mask_bounds = Bounds(input.mask_bounds.xy, input.mask_bounds.zw);
+    if (any(distance_from_clip_rect_impl(point, mask_bounds) < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let sprite = load_poly_sprite(input.sprite_id);
-    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    let r = input.corner_radii;
+    let distance = quad_sdf(point, Bounds(input.bounds.xy, input.bounds.zw), Corners(r.x, r.y, r.z, r.w));
 
     var color = sample;
-    if (sprite.grayscale != 0u) {
+    if (input.grayscale != 0u) {
         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = vec4<f32>(vec3<f32>(grayscale), sample.a);
     }
-    let mask = mask_alpha(input.position.xy, sprite.content_mask, sprite.content_radii, sprite.content_fade);
-    return blend_color(color, sprite.opacity * saturate(0.5 - distance) * mask);
+    let mask = varying_mask_alpha(point, input.mask_bounds, input.mask_radii, input.mask_fade, input.mask_fade_x);
+    return blend_color(color, input.opacity * saturate(0.5 - distance) * mask);
 }
 
 // --- surfaces --- //
