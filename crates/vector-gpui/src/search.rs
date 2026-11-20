@@ -1059,9 +1059,9 @@ fn thumb_strip(i: usize, strip: &Strip, on: &OnAct) -> AnyElement {
         .into_any_element()
 }
 
-/// An icon has no baseline, so it sits on the line by its bottom edge: dropped by this much,
-/// its middle meets the 12 px digits'.
-const ICON_DROP: f32 = 2.;
+/// An icon has no baseline, so the line places it by an edge: shifted by this much, its middle
+/// meets the 12 px digits'.
+const ICON_DROP: f32 = -5.5;
 
 fn kind_icon(path: &'static str) -> impl IntoElement {
     svg().path(path).flex_none().size(px(13.)).relative().top(px(ICON_DROP)).text_color(c(LIST_TIME))
