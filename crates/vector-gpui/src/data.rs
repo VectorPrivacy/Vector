@@ -909,7 +909,6 @@ impl Store {
             && !chat.messages.iter().any(|m| m.mine)
     }
 
-    /// Whether the chat gets a row: a DM once it has content and its sender isn't blocked.
     /// `chatIsArchived`: archived, and nothing said since the archiving device's newest message.
     pub fn is_archived(&self, chat: &SerializableChat) -> bool {
         chat.chat_type == vector_core::ChatType::DirectMessage
@@ -920,6 +919,7 @@ impl Store {
         self.pinned.iter().position(|p| p == id)
     }
 
+    /// Whether the chat gets a row: a DM once it has content and its sender isn't blocked.
     pub fn listed(&self, chat: &SerializableChat) -> bool {
         chat.chat_type == vector_core::ChatType::DirectMessage
             && !chat.messages.is_empty()

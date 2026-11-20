@@ -16143,15 +16143,22 @@ impl VectorApp {
     }
 
     /// Back to Messages: the chat list returns in place of the channels.
-    /// `wsOpenDmHome`: the last DM, else the newest with messages, else the bare list.
+    /// `wsOpenDmHome`: the last DM, else the first the Messages tab lists, else the bare list.
+    /// A blocked sender or a waiting request is not a conversation to return to.
     fn open_dm_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = {
             let store = self.store.borrow();
-            self.last_dm.clone().filter(|id| store.chat(id).is_some()).or_else(|| {
+            let home = |c: &&vector_core::chat::SerializableChat| {
+                c.chat_type == vector_core::ChatType::DirectMessage
+                    && !store.profiles.get(&c.id).is_some_and(|p| p.is_blocked)
+                    && !store.is_request(c)
+            };
+            self.last_dm.as_deref().and_then(|id| store.chat(id)).filter(home).map(|c| c.id.clone()).or_else(|| {
                 store
                     .chats
                     .iter()
-                    .find(|c| c.chat_type == vector_core::ChatType::DirectMessage && c.id != store.my_npub && !c.messages.is_empty())
+                    .filter(|c| c.id != store.my_npub && store.listed(c) && !store.is_archived(c))
+                    .find(home)
                     .map(|c| c.id.clone())
             })
         };

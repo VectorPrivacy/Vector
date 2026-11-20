@@ -17,6 +17,23 @@ use gpui::Hsla;
 
 use crate::theme::*;
 
+/// What a keystroke edit was, for joining it to the undo step before.
+#[derive(Clone, Copy, PartialEq)]
+enum Keyed {
+    Type,
+    Delete,
+}
+
+/// The undo step a run of keystrokes is filling.
+#[derive(Clone, Copy)]
+struct Run {
+    kind: Keyed,
+    from: usize,
+    end: usize,
+    at: std::time::Instant,
+    spaced: bool,
+}
+
 actions!(
     text_input,
     [
@@ -107,8 +124,14 @@ pub struct TextInput {
     /// Earlier states for Undo, and what Undo took back for Redo.
     undo: Vec<(SharedString, Range<usize>)>,
     redo: Vec<(SharedString, Range<usize>)>,
-    /// The last edit was typing, and when: a run of it undoes as one step.
+    /// The last edit was typing a word character, and when.
     typed: Option<std::time::Instant>,
+    /// The open undo step that the next keystroke may join.
+    run: Option<Run>,
+    /// The edit under way is a Backspace or Delete keystroke.
+    deleting: bool,
+    /// The edit under way is the app's own (a paste, an emoji, a mention): a step of its own.
+    alone: bool,
     /// Checked for spelling, as the webview's `spellcheck` does.
     spell: Option<Spelling>,
 }
@@ -845,6 +868,7 @@ impl TextInput {
             return cx.emit(Edge::Empty);
         }
         if self.selected_range.is_empty() {
+            self.deleting = true;
             let prev = self.previous_boundary(self.cursor_offset());
             if self.cursor_offset() == prev {
                 window.play_system_bell();
@@ -860,6 +884,7 @@ impl TextInput {
             return cx.emit(Edge::Empty);
         }
         if self.selected_range.is_empty() {
+            self.deleting = true;
             let next = self.next_boundary(self.cursor_offset());
             if self.cursor_offset() == next {
                 window.play_system_bell();
@@ -996,7 +1021,7 @@ impl TextInput {
                     None if still && ix < guesses.len() => {
                         self.marked_range = None;
                         self.selected_range = word;
-                        self.replace_text_in_range(None, &guesses[ix], window, cx);
+                        self.write(&guesses[ix], window, cx);
                         return;
                     }
                     Some(1) | Some(2) if still => {
@@ -1089,7 +1114,7 @@ impl TextInput {
             } else {
                 text.replace('\n', " ")
             };
-            self.replace_text_in_range(None, &text, window, cx);
+            self.write(&text, window, cx);
         }
     }
 
@@ -1217,24 +1242,45 @@ impl TextInput {
         self.out_of_sub(at, true)
     }
 
-    /// Keep the state before an edit for Undo; a run of typing keeps only its first.
-    fn remember(&mut self, typing: bool) {
+    /// Keep the state before an edit for Undo. Typing joins while it runs on from the same spot,
+    /// until a space after a word; deleting joins while it eats on from where it was.
+    fn remember(&mut self, keyed: Option<(Keyed, Range<usize>, &str)>) {
         let now = std::time::Instant::now();
-        let joins = typing && self.typed.is_some_and(|t| now.duration_since(t).as_millis() < 1000);
+        let joins = match (&keyed, self.run) {
+            (Some((kind, range, text)), Some(run)) if run.kind == *kind && now.duration_since(run.at).as_millis() < 1000 => match kind {
+                Keyed::Type => range.is_empty() && range.start == run.end && !(text.starts_with(char::is_whitespace) && !run.spaced),
+                Keyed::Delete => range.end == run.from || range.start == run.from,
+            },
+            _ => false,
+        };
         if !joins {
             self.undo.push((self.content.clone(), self.selected_range.clone()));
             if self.undo.len() > 200 {
                 self.undo.remove(0);
             }
         }
-        self.typed = typing.then_some(now);
+        self.run = keyed.as_ref().map(|(kind, range, text)| Run {
+            kind: *kind,
+            from: range.start,
+            end: range.start + text.len(),
+            at: now,
+            spaced: text.ends_with(char::is_whitespace),
+        });
+        self.typed = matches!(&keyed, Some((Keyed::Type, _, text)) if !text.chars().any(char::is_whitespace)).then_some(now);
         self.redo.clear();
+    }
+
+    /// Text the app puts in, an undo step of its own.
+    fn write(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.alone = true;
+        self.replace_text_in_range(None, text, window, cx);
     }
 
     fn forget(&mut self) {
         self.undo.clear();
         self.redo.clear();
         self.typed = None;
+        self.run = None;
     }
 
     fn restore(&mut self, (content, sel): (SharedString, Range<usize>), window: &Window, cx: &mut Context<Self>) {
@@ -1243,6 +1289,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.typed = None;
+        self.run = None;
         self.reveal = true;
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(InputChanged);
@@ -1329,6 +1376,7 @@ impl TextInput {
 
     fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
+            self.deleting = true;
             self.select_to(self.word_start(self.cursor_offset()), window, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
@@ -1336,6 +1384,7 @@ impl TextInput {
 
     fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
+            self.deleting = true;
             self.select_to(self.word_end(self.cursor_offset()), window, cx);
         }
         self.replace_text_in_range(None, "", window, cx)
@@ -1355,7 +1404,7 @@ impl TextInput {
             return cx.propagate();
         }
         let (text, sel) = crate::marks::toggle(&self.content, self.selected_range.clone(), mark);
-        self.remember(false);
+        self.remember(None);
         self.restore((text.into(), sel), window, cx);
     }
 
@@ -1459,11 +1508,15 @@ impl EntityInputHandler for TextInput {
             }
             None => new_text,
         };
-        let typing = range.is_empty()
-            && self.marked_range.is_none()
-            && new_text.graphemes(true).count() == 1
-            && !new_text.chars().any(char::is_whitespace);
-        self.remember(typing);
+        let (deleting, alone) = (std::mem::take(&mut self.deleting), std::mem::take(&mut self.alone));
+        let keyed = if alone || self.marked_range.is_some() {
+            None
+        } else if new_text.is_empty() {
+            deleting.then_some(Keyed::Delete)
+        } else {
+            (new_text.graphemes(true).count() == 1).then_some(Keyed::Type)
+        };
+        self.remember(keyed.map(|k| (k, range.clone(), new_text)));
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -2301,6 +2354,9 @@ impl TextInput {
             undo: Vec::new(),
             redo: Vec::new(),
             typed: None,
+            run: None,
+            deleting: false,
+            alone: false,
             spell: None,
         }
     }
@@ -2381,6 +2437,7 @@ impl TextInput {
         self.undo.push((self.content.clone(), self.selected_range.clone()));
         self.redo.clear();
         self.typed = None;
+        self.run = None;
         let caret = self.selected_range.end + fix.len() - original.len();
         self.content = format!("{}{}{}", &self.content[..word.start], fix, &self.content[word.end..]).into();
         self.selected_range = caret..caret;
@@ -2549,7 +2606,7 @@ impl TextInput {
         if after.is_some_and(|c| !c.is_whitespace()) {
             t.push(' ');
         }
-        self.replace_text_in_range(None, &t, window, cx);
+        self.write(&t, window, cx);
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -2717,7 +2774,7 @@ impl TextInput {
         let range = range.start.min(self.content.len())..range.end.min(self.content.len());
         self.selected_range = range;
         self.marked_range = None;
-        self.replace_text_in_range(None, text, window, cx);
+        self.write(text, window, cx);
     }
 
     /// A content offset as an offset into what is drawn.
