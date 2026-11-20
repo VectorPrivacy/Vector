@@ -1488,7 +1488,6 @@ impl WgpuRendererCore {
             self.max_texture_size
         );
 
-        self.atlas.before_frame();
         if scene.paths.is_empty() {
             self.pathless_frames = self.pathless_frames.saturating_add(1);
             if self.pathless_frames >= PATH_TEXTURE_IDLE_FRAMES {

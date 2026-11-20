@@ -3,6 +3,7 @@ use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size, edge_padded_into, padded_size,
+    write_edge_padded,
     texel_bytes,
 };
 use parking_lot::Mutex;
@@ -23,19 +24,14 @@ fn etagere_point_to_device(point: etagere::Point) -> Point<DevicePixels> {
 
 pub struct WgpuAtlas(Mutex<AtlasState<WgpuAtlasTextures>>);
 
-struct PendingUpload {
-    id: AtlasTextureId,
-    bounds: Bounds<DevicePixels>,
-    data: Vec<u8>,
-}
-
 struct WgpuAtlasTextures {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     max_texture_size: u32,
     color_texture_format: wgpu::TextureFormat,
     storage: WgpuAtlasStorage,
-    pending_uploads: Vec<PendingUpload>,
+    /// Border columns of a padded tile, gathered between writes.
+    scratch: Vec<u8>,
     next_texture_generation: u64,
 }
 
@@ -58,7 +54,7 @@ impl WgpuAtlas {
             max_texture_size,
             color_texture_format,
             storage: WgpuAtlasStorage::default(),
-            pending_uploads: Vec::new(),
+            scratch: Vec::new(),
             next_texture_generation: 0,
         })))
     }
@@ -69,11 +65,6 @@ impl WgpuAtlas {
             context.queue.clone(),
             context.color_texture_format(),
         )
-    }
-
-    pub fn before_frame(&self) {
-        let mut lock = self.0.lock();
-        lock.backend.flush_uploads();
     }
 
     /// Returns the view backing `id`, or `None` once every tile in it has been
@@ -94,7 +85,6 @@ impl WgpuAtlas {
     pub fn clear(&self) {
         self.0.lock().clear(|textures| {
             textures.storage = WgpuAtlasStorage::default();
-            textures.pending_uploads.clear();
         });
     }
 
@@ -106,7 +96,6 @@ impl WgpuAtlas {
             textures.queue = context.queue.clone();
             textures.color_texture_format = context.color_texture_format();
             textures.storage = WgpuAtlasStorage::default();
-            textures.pending_uploads.clear();
         });
     }
 }
@@ -152,13 +141,24 @@ impl AtlasBackend for WgpuAtlasTextures {
         bytes: &[u8],
     ) -> Result<AtlasTile> {
         let tile = self.allocate(padded_size(size), kind).context("failed to allocate")?;
-        let format = self.storage.get(tile.texture_id).map(|texture| texture.format);
-        let mut data = Vec::new();
-        edge_padded_into(&mut data, bytes, size, texel_bytes(kind));
-        if format == Some(wgpu::TextureFormat::Rgba8Unorm) {
+        let Some(texture) = self.storage.get(tile.texture_id) else {
+            return Ok(tile);
+        };
+        let bpp = texel_bytes(kind);
+        if texture.format == wgpu::TextureFormat::Rgba8Unorm {
+            // Swizzled, so copied whole either way.
+            let mut data = Vec::new();
+            edge_padded_into(&mut data, bytes, size, bpp);
             swap_red_blue(&mut data);
+            write_tile(&self.queue, texture, tile.bounds, &data);
+            return Ok(tile);
         }
-        self.pending_uploads.push(PendingUpload { id: tile.texture_id, bounds: tile.bounds, data });
+        let origin = tile.bounds.origin;
+        write_edge_padded(bytes, size, bpp, &mut self.scratch, |at, part, src| {
+            let bounds = Bounds { origin: Point { x: origin.x + at.x, y: origin.y + at.y }, size: part };
+            write_tile(&self.queue, texture, bounds, src);
+            Ok(())
+        })?;
         Ok(tile)
     }
 
@@ -172,8 +172,6 @@ impl AtlasBackend for WgpuAtlasTextures {
             texture.allocator.deallocate(tile.tile_id.into());
             texture.decrement_ref_count();
             if texture.is_unreferenced() {
-                self.pending_uploads
-                    .retain(|upload| upload.id != texture.id);
                 self.storage[id.kind]
                     .free_list
                     .push(texture.id.index as usize);
@@ -288,14 +286,6 @@ impl WgpuAtlasTextures {
         write_tile(&self.queue, texture, bounds, &data);
     }
 
-    fn flush_uploads(&mut self) {
-        for upload in self.pending_uploads.drain(..) {
-            let Some(texture) = self.storage.get(upload.id) else {
-                continue;
-            };
-            write_tile(&self.queue, texture, upload.bounds, &upload.data);
-        }
-    }
 }
 
 fn write_tile(queue: &wgpu::Queue, texture: &WgpuAtlasTexture, bounds: Bounds<DevicePixels>, data: &[u8]) {
@@ -479,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn before_frame_skips_uploads_for_removed_texture() -> anyhow::Result<()> {
+    fn removing_a_new_tile_leaves_the_atlas_usable() -> anyhow::Result<()> {
         let (device, queue) = test_device_and_queue()?;
 
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
@@ -493,12 +483,13 @@ mod tests {
         };
         let mut build = || Ok(Some((size, Cow::Owned(vec![0, 0, 0, 255]))));
 
-        // Regression test: before the fix, this panicked in flush_uploads
         atlas
             .get_or_insert_with(key.clone(), &mut build)?
             .expect("tile should be created");
         atlas.remove(&key);
-        atlas.before_frame();
+        atlas
+            .get_or_insert_with(key.clone(), &mut build)?
+            .expect("tile should be created again");
         Ok(())
     }
 
