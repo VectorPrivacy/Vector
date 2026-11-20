@@ -27,6 +27,9 @@ on:
       - crates/vector-gpui/Cargo.toml
       - crates/vector-gpui/Cargo.lock
 
+permissions:
+  contents: read
+
 concurrency:
   group: fdroid-${{ github.ref }}
   cancel-in-progress: true
