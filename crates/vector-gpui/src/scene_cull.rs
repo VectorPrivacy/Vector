@@ -13,7 +13,7 @@ fn quad(bounds: Bounds<ScaledPixels>, color: Hsla, radius: f32) -> Quad {
         order: 0,
         border_style: BorderStyle::Solid,
         bounds,
-        content_mask: ContentMask::new(rect(0., 0., 1000., 1000.)),
+        content_mask: ContentMask::new(rect(0., 0., 4000., 4000.)),
         background: color.into(),
         border_color: hsla(0., 0., 0.5, 1.),
         corner_radii: Corners::all(ScaledPixels(radius)),
@@ -112,4 +112,34 @@ fn what_lies_above_a_cover_stays() {
         s.insert_primitive(quad(rect(0., 0., 50., 50.), SEE_THROUGH, 0.));
     });
     assert_eq!(scene.quads.len(), 3);
+}
+
+#[test]
+fn a_backdrop_keeps_only_the_strip_left_showing() {
+    let scene = finished(|s| {
+        s.insert_primitive(quad(rect(0., 0., 720., 1600.), OPAQUE, 0.));
+        s.insert_primitive(quad(rect(0., 0., 720., 1600.), SEE_THROUGH, 0.));
+        s.insert_primitive(quad(rect(0., 48.4, 720., 1552.), OPAQUE, 0.));
+    });
+    assert_eq!(scene.quads.len(), 3);
+    // Cut at the cover's first whole row, where its own coverage is total.
+    assert_eq!(scene.quads[0].bounds, rect(0., 0., 720., 49.));
+    // A see-through fill's hidden part shows nothing either.
+    assert_eq!(scene.quads[1].bounds, rect(0., 0., 720., 49.));
+}
+
+#[test]
+fn only_plain_fills_are_trimmed() {
+    let below = |radius: f32, border: f32| {
+        let mut q = quad(rect(0., 0., 720., 1600.), OPAQUE, radius);
+        q.border_widths = Edges::all(ScaledPixels(border));
+        q
+    };
+    for q in [below(4., 0.), below(0., 1.)] {
+        let scene = finished(|s| {
+            s.insert_primitive(q);
+            s.insert_primitive(quad(rect(0., 48., 720., 1552.), OPAQUE, 0.));
+        });
+        assert_eq!(scene.quads[0].bounds, rect(0., 0., 720., 1600.));
+    }
 }

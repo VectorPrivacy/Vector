@@ -95,9 +95,36 @@ fn coverage(scene: &Scene, screen: f32) -> String {
     let glyphs = sum(&mut scene.monochrome_sprites.iter().map(|g| area(g.bounds, &g.content_mask)));
     let images = sum(&mut scene.polychrome_sprites.iter().map(|i| area(i.bounds, &i.content_mask)));
     let paths = sum(&mut scene.paths.iter().map(|p| area(p.bounds, &p.content_mask)));
+    // The biggest quads, so a layer that survives culling names itself.
+    let mut big: Vec<&Quad> = scene.quads.iter().collect();
+    big.sort_by(|a, b| area(b.bounds, &b.content_mask).total_cmp(&area(a.bounds, &a.content_mask)));
+    let big: Vec<String> = big
+        .iter()
+        .take(4)
+        .map(|q| {
+            let b = q.bounds;
+            let alpha = q.background.as_solid().map_or("gradient".to_string(), |c| format!("alpha {:.2}", c.a));
+            let mask = &q.content_mask;
+            format!(
+                "#{} {:.0}x{:.0} at {:.1},{:.1} {alpha}, radius {:.0}, border {:.0}, mask radius {:.0}, mask fade {:.0}",
+                q.order,
+                b.size.width.0,
+                b.size.height.0,
+                b.origin.x.0,
+                b.origin.y.0,
+                q.corner_radii.top_left.0.max(q.corner_radii.bottom_right.0),
+                q.border_widths.top.0.max(q.border_widths.left.0),
+                mask.corner_radii.top_left.0.max(mask.corner_radii.bottom_right.0),
+                mask.fade.top_len.0.max(mask.fade.bottom_len.0).max(mask.fade.left_len.0).max(mask.fade.right_len.0),
+            )
+        })
+        .collect();
     format!(
-        "this frame shades {:.2} screens: quads {quads:.2} ({opaque:.2} opaque), shadows {shadows:.2}, glyphs {glyphs:.2}, images {images:.2}, paths {paths:.2}",
-        quads + shadows + glyphs + images + paths
+        "this frame shades {:.2} screens: quads {quads:.2} ({opaque:.2} opaque), shadows {:.2}, glyphs {glyphs:.2}, images {images:.2}, paths {:.2}; biggest quads: {}",
+        quads + shadows + glyphs + images + paths,
+        shadows.abs(),
+        paths.abs(),
+        big.join("; ")
     )
 }
 
