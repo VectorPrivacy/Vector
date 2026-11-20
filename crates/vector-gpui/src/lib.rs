@@ -214,6 +214,7 @@ pub fn run() {
     let args = args();
     // A fixture run without its own data dir keeps out of the real account's log.
     applog::init(args.data_dir.clone().or_else(|| args.fixtures.is_none().then(backend::default_data_dir)));
+    log::info!("starting {}", env!("CARGO_PKG_VERSION"));
     jxl_oxide::integration::register_image_decoding_hook();
     let fixtures = args.fixtures.as_ref().map(|f| {
         let store = data::Store::from_fixtures(f).expect("fixtures");
@@ -243,6 +244,7 @@ pub fn run() {
     let packs = fixtures.is_none().then(|| lang::packs_dir(&data_dir));
     let events = fixtures.is_none().then(|| backend::start(data_dir));
     lang::init(packs);
+    log::info!("core started");
 
     let os_links = links_tx.clone();
     let app = gpui_platform::application().with_assets(assets::Assets);
@@ -257,6 +259,7 @@ pub fn run() {
             .expect("bundled fonts");
         composer::bind_keys(cx);
         miniapp::attach(cx);
+        log::info!("launched: opening the window");
         let min = size(px(385.), px(575.));
         let remember = fixtures.is_none() && !args.sized;
         let (window_bounds, display_id) = if remember {
@@ -288,6 +291,7 @@ pub fn run() {
                 },
             )
             .expect("main window");
+        log::info!("window open");
         cx.activate(true);
         // Closing the main window ends the app: nothing else can bring it back.
         let main = window.window_id();

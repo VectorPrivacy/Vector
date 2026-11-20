@@ -54,6 +54,13 @@ pub fn init(data_dir: Option<PathBuf>) {
     }
     #[cfg(target_os = "android")]
     logcat::capture();
+    #[cfg(all(target_os = "android", any(debug_assertions, feature = "test-build")))]
+    {
+        use vector_media::android::storage;
+        if let Some(dir) = storage::public_dir().or_else(storage::external_media_dir) {
+            logcat::mirror::into(std::path::Path::new(&dir));
+        }
+    }
     let mut env = env_logger::Builder::from_default_env();
     // No RUST_LOG on a phone: logcat is the only place a launch that never draws can be read.
     #[cfg(target_os = "android")]
@@ -76,11 +83,6 @@ pub fn init(data_dir: Option<PathBuf>) {
         }));
         previous(info);
     }));
-}
-
-#[cfg(all(target_os = "android", any(debug_assertions, feature = "test-build")))]
-pub fn debug_mirror(dir: &std::path::Path) {
-    logcat::mirror::into(dir);
 }
 
 /// Android points stdout and stderr at /dev/null: both go to logcat instead, so core's lines,
