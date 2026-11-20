@@ -16163,7 +16163,16 @@ impl VectorApp {
     }
 
     /// Its own timer: an idle window draws nothing, so a sweep tied to drawing never runs.
+    /// The system asking for memory back sheds every picture off screen at once.
     fn start_sweeps(window: &mut Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        let this = cx.entity().downgrade();
+        cx.on_memory_warning(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.shed_pictures(window, cx));
+            });
+        })
+        .detach();
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(15)).await;
@@ -16199,6 +16208,15 @@ impl VectorApp {
         if any {
             crate::trim::soon();
         }
+    }
+
+    fn shed_pictures(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let gone = self.media.borrow_mut().sweep(std::time::Duration::ZERO, |image| window.image_on_screen(image));
+        for image in gone {
+            let _ = window.drop_image(image);
+        }
+        cx.evict_idle_images(std::time::Duration::ZERO, Some(window));
+        crate::trim::soon();
     }
 
     fn leave_community(&mut self) {
