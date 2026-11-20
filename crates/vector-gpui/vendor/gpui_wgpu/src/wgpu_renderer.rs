@@ -812,18 +812,28 @@ impl WgpuRendererCore {
             })
         };
 
-        let quads = create_pipeline(
-            "quads",
-            "vs_quad",
-            "fs_quad",
-            &layouts.globals,
-            &layouts.instances,
-            None,
-            wgpu::PrimitiveTopology::TriangleStrip,
-            &[Some(color_target.clone())],
-            1,
-            &shader_module,
-        );
+        let quads_with = |label: &str, vs: &str, fs: &str, module: &wgpu::ShaderModule| {
+            create_pipeline(
+                label,
+                vs,
+                fs,
+                &layouts.globals,
+                &layouts.instances,
+                None,
+                wgpu::PrimitiveTopology::TriangleStrip,
+                &[Some(color_target.clone())],
+                1,
+                module,
+            )
+        };
+        #[cfg(not(target_family = "wasm"))]
+        let quads = if !uses_webgl_instance_data && device.adapter_info().backend == wgpu::Backend::Gl {
+            crate::gl_quads::pipeline(device, &shader_module, quads_with)
+        } else {
+            quads_with("quads", "vs_quad", "fs_quad", &shader_module)
+        };
+        #[cfg(target_family = "wasm")]
+        let quads = quads_with("quads", "vs_quad", "fs_quad", &shader_module);
 
         let shadows = create_pipeline(
             "shadows",
@@ -2823,6 +2833,11 @@ mod tests {
     #[test]
     fn storage_buffer_shader_is_valid_wgsl() {
         validate_wgsl(STORAGE_BUFFER_SHADERS, naga::valid::Capabilities::empty());
+    }
+
+    #[test]
+    fn quad_lean_shader_is_valid_wgsl() {
+        validate_wgsl(crate::gl_quads::LEAN_SHADERS, naga::valid::Capabilities::empty());
     }
 
     #[test]

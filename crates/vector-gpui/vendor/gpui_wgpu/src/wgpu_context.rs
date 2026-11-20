@@ -522,6 +522,12 @@ impl WgpuContext {
             BACKENDS.get_or_init(|| backends);
             return make(backends);
         }
+        #[cfg(target_os = "android")]
+        if android_powervr() {
+            log::info!("PowerVR: drawing with GL, without loading its Vulkan driver");
+            BACKENDS.get_or_init(|| wgpu::Backends::GL);
+            return make(wgpu::Backends::GL);
+        }
         let vulkan = make(wgpu::Backends::VULKAN);
         let adapters = gpui::block_on(vulkan.enumerate_adapters(wgpu::Backends::VULKAN));
         let found = adapters.iter().any(|a| !Self::vulkan_unreliable(&a.get_info()));
@@ -910,4 +916,26 @@ mod tests {
             parse_pci_id(&format!("{:#X}", 0x1234)).unwrap(),
         );
     }
+}
+
+/// The phone names its GPU drivers in system properties, readable without loading either: a
+/// broken Vulkan driver can hang in instance creation, before any adapter can be looked at.
+#[cfg(target_os = "android")]
+fn android_powervr() -> bool {
+    use std::ffi::{CStr, c_char, c_int};
+    unsafe extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
+    }
+    [c"ro.hardware.vulkan", c"ro.hardware.egl"].iter().any(|key| {
+        let mut value = [0 as c_char; 92];
+        // SAFETY: PROP_VALUE_MAX (92) bytes is the most the call writes, NUL included.
+        let value = unsafe {
+            __system_property_get(key.as_ptr(), value.as_mut_ptr());
+            CStr::from_ptr(value.as_ptr())
+        }
+        .to_string_lossy()
+        .to_ascii_lowercase();
+        log::info!("{}={value}", key.to_string_lossy());
+        value.contains("powervr")
+    })
 }

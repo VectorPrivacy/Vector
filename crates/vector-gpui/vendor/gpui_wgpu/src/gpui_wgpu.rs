@@ -1,4 +1,6 @@
 mod cosmic_text_system;
+#[cfg(not(target_family = "wasm"))]
+mod gl_quads;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;
