@@ -3214,8 +3214,8 @@ impl App {
         self.platform.can_select_mixed_files_and_dirs()
     }
 
-    /// Drops decoded images no element has asked for in `idle`, from the cache and from every
-    /// window's atlas; one drawn again later is decoded again. Past 1 MB the wait shrinks with
+    /// Drops decoded images no element has asked for in `idle` and no window still shows, from
+    /// the cache and from every window's atlas; one drawn again later is decoded again. Past 1 MB the wait shrinks with
     /// the square root of the size, to a sixth of `idle`: big pictures cost the most to keep.
     pub fn evict_idle_images(&mut self, idle: Duration, mut current_window: Option<&mut Window>) {
         type Loaded = Result<Arc<RenderImage>, crate::ImageCacheError>;
@@ -3249,7 +3249,11 @@ impl App {
                         })
                         .sum();
                     let keep = idle.mul_f64(((1usize << 20) as f64 / bytes.max(1) as f64).sqrt().clamp(1. / 6., 1.));
-                    if age <= keep {
+                    // Drawn still, by a window at rest: a cached pane replays its tiles.
+                    if age <= keep
+                        || current_window.as_deref().is_some_and(|w| w.image_on_screen(&image))
+                        || self.windows.values().flatten().any(|w| w.image_on_screen(&image))
+                    {
                         continue;
                     }
                     images.push(image)
