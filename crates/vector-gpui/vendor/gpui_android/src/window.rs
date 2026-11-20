@@ -780,9 +780,12 @@ impl PlatformWindow for AndroidWindow {
 
     fn text_input_state_changed(&self, change: TextInputStateChange) {
         match change {
+            // No field has focus any more, so nothing is left for the keyboard to type into. A
+            // hand-off between fields keeps one focused throughout and never comes here.
             TextInputStateChange::FocusLost => {
                 self.0.field.replace(None);
                 Field::default().send(self.0.ime_serial.get());
+                bridge::show_keyboard(false);
             }
             _ => self.0.sync_field(),
         }

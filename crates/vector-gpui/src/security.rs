@@ -335,6 +335,7 @@ impl SecurityFlow {
     }
 
     /// Android's Back on the topmost card: closes what can close, and holds the rest.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn back(&mut self, cx: &mut Context<Self>) -> bool {
         if let Some((_, tx)) = self.confirm.take() {
             let _ = tx.send(false);
@@ -1105,6 +1106,7 @@ pub(crate) fn head_tinted(
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .text_size(px(18.))
                 .line_height(px(22.))
                 .font_weight(FontWeight::BOLD)
@@ -1117,6 +1119,7 @@ pub(crate) fn head_tinted(
                 .aria_label(t::dialog_close())
                 .group("vcard-x")
                 .self_start()
+                .flex_shrink_0()
                 // A finger-sized target around the same small glyph.
                 .w(px(23.7 + 20.))
                 .h(px(22. + 22.))
