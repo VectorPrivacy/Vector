@@ -1332,6 +1332,8 @@ pub struct Window {
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
+    /// A long press's start is offered to secondary-click listeners before anything else.
+    long_press_menus: bool,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -2472,6 +2474,7 @@ impl Window {
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
+            long_press_menus: false,
             refreshing: false,
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
@@ -3804,6 +3807,12 @@ impl Window {
     /// Returns whether the given entity has captured the current long press.
     pub fn has_long_press_capture<T: 'static>(&self, entity: &Entity<T>) -> bool {
         self.long_press_capture == Some(entity.entity_id())
+    }
+
+    /// Whether the long press being dispatched is on offer to secondary-click listeners: a touch
+    /// screen's press and hold is its right click, which comes before a tooltip.
+    pub fn long_press_menus(&self) -> bool {
+        self.long_press_menus
     }
 
     /// The current state of the keyboard's modifiers
@@ -6673,7 +6682,15 @@ impl Window {
                     long_press.phase,
                     crate::TouchPhase::Ended | crate::TouchPhase::Cancelled
                 );
-                self.dispatch_mouse_event(&long_press, cx);
+                if started {
+                    self.long_press_menus = true;
+                    self.dispatch_mouse_event(&long_press, cx);
+                    self.long_press_menus = false;
+                }
+                if !started || !self.default_prevented {
+                    cx.propagate_event = true;
+                    self.dispatch_mouse_event(&long_press, cx);
+                }
                 if started {
                     let claimed = self.default_prevented;
                     self.touch_gestures.resolve_long_press(claimed);

@@ -128,6 +128,31 @@ impl Interactivity {
         button: MouseButton,
         listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) {
+        let listener = Rc::new(listener);
+        if button == MouseButton::Right {
+            // A touch screen's right click is a press and hold.
+            let listener = listener.clone();
+            self.long_press_listeners
+                .push(Box::new(move |event, phase, hitbox, window, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.phase == TouchPhase::Started
+                        && window.long_press_menus()
+                        && !window.default_prevented()
+                        && hitbox.is_hovered(window)
+                    {
+                        let down = MouseDownEvent {
+                            button: MouseButton::Right,
+                            position: event.start_position,
+                            modifiers: Default::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        };
+                        (listener)(&down, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }));
+        }
         self.mouse_down_listeners
             .push(Box::new(move |event, phase, hitbox, window, cx| {
                 if phase == DispatchPhase::Bubble
@@ -1810,6 +1835,9 @@ pub(crate) type PinchListener =
 pub(crate) type BackGestureListener =
     Box<dyn Fn(&BackGestureEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
 
+pub(crate) type LongPressListener =
+    Box<dyn Fn(&LongPressEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
+
 pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// Controls how [`StatefulInteractiveElement::on_hover`] responds to key presses while the mouse
@@ -2343,6 +2371,7 @@ pub struct Interactivity {
     pub(crate) scroll_listeners: Vec<ScrollListener>,
     pub(crate) pinch_listeners: Vec<PinchListener>,
     pub(crate) back_gesture_listeners: Vec<BackGestureListener>,
+    pub(crate) long_press_listeners: Vec<LongPressListener>,
     pub(crate) key_down_listeners: Vec<KeyDownListener>,
     pub(crate) key_up_listeners: Vec<KeyUpListener>,
     pub(crate) modifiers_changed_listeners: Vec<ModifiersChangedListener>,
@@ -2622,6 +2651,7 @@ impl Interactivity {
             || !self.scroll_listeners.is_empty()
             || self.has_pinch_listeners()
             || !self.back_gesture_listeners.is_empty()
+            || !self.long_press_listeners.is_empty()
             || self.drag_listener.is_some()
             || !self.drop_listeners.is_empty()
             || !self.drag_over_styles.is_empty()
@@ -3108,6 +3138,13 @@ impl Interactivity {
         for listener in self.back_gesture_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &BackGestureEvent, phase, window, cx| {
+                listener(event, phase, &hitbox, window, cx);
+            })
+        }
+
+        for listener in self.long_press_listeners.drain(..) {
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                 listener(event, phase, &hitbox, window, cx);
             })
         }
@@ -3667,20 +3704,19 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
+                    // A wheel turned over a one-axis scroller moves it along that axis; a
+                    // finger moves what it drags, and a sideways drag is a swipe's.
+                    let cross = !restrict_scroll_to_axis && event.source != crate::ScrollSource::Touch;
                     let mut delta_x = match overflow.x {
                         Overflow::Scroll if !delta.x.is_zero() => delta.x,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
-                        {
+                        Overflow::Scroll if cross && overflow.y != Overflow::Scroll => {
                             if mirrored { -delta.y } else { delta.y }
                         }
                         _ => Pixels::ZERO,
                     };
                     let mut delta_y = match overflow.y {
                         Overflow::Scroll if !delta.y.is_zero() => delta.y,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll =>
-                        {
+                        Overflow::Scroll if cross && overflow.x != Overflow::Scroll => {
                             delta.x
                         }
                         _ => Pixels::ZERO,
@@ -4233,7 +4269,11 @@ pub(crate) fn register_tooltip_mouse_handlers(
             }
 
             match event.phase {
-                TouchPhase::Started if !window.default_prevented() && check_is_hovered(window) => {
+                TouchPhase::Started
+                    if !window.default_prevented()
+                        && !window.long_press_menus()
+                        && check_is_hovered(window) =>
+                {
                     if show_tooltip(
                         &active_tooltip,
                         &build_tooltip,
@@ -5472,6 +5512,64 @@ mod tests {
             .unwrap();
 
         assert!(active_tooltip.borrow().is_none());
+    }
+
+    struct MenuOwner {
+        menus: Rc<RefCell<Vec<Point<Pixels>>>>,
+        clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for MenuOwner {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let (menus, clicks) = (self.menus.clone(), self.clicks.clone());
+            div()
+                .id("row")
+                .size_full()
+                .on_mouse_down(MouseButton::Right, move |e, _, _| menus.borrow_mut().push(e.position))
+                .child(
+                    div()
+                        .id("tipped")
+                        .w(px(50.))
+                        .h(px(50.))
+                        .tooltip(|_, cx| cx.new(|_| TestTooltipView).into())
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+        }
+    }
+
+    #[test]
+    fn long_press_is_a_right_click_before_a_tooltip_and_never_a_tap() {
+        let mut test_app = TestAppContext::single();
+        let menus = Rc::new(RefCell::new(Vec::new()));
+        let clicks = Rc::new(Cell::new(0));
+        let window = test_app.add_window({
+            let (menus, clicks) = (menus.clone(), clicks.clone());
+            move |_, _| MenuOwner { menus, clicks }
+        });
+        let any_window: AnyWindowHandle = window.into();
+        let at = point(px(20.), px(20.));
+        let touch = move |phase| {
+            TouchEvent { id: TouchId(1), phase, position: at, predicted_position: None, force: None, time: None }
+                .to_platform_input()
+        };
+        test_app
+            .update_window(any_window, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.dispatch_event(touch(TouchPhase::Started), cx);
+            })
+            .unwrap();
+        test_app
+            .dispatcher
+            .advance_clock(GestureTuning::default().long_press_duration + Duration::from_millis(1));
+        test_app.run_until_parked();
+        assert_eq!(*menus.borrow(), vec![at]);
+        test_app
+            .update_window(any_window, |_, window, cx| {
+                window.dispatch_event(touch(TouchPhase::Ended), cx);
+            })
+            .unwrap();
+        assert_eq!(clicks.get(), 0);
+        assert_eq!(menus.borrow().len(), 1);
     }
 
     fn setup_tooltip_owner_test(
