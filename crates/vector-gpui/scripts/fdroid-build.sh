@@ -37,6 +37,8 @@ build() {
         cd "$build_root"
     fi
     export VECTOR_FDROID=1
+    # Fat LTO over the whole client outgrows a 16 GB builder; the released flavour builds the same way.
+    export CARGO_PROFILE_RELEASE_LTO=thin
     export CARGO_NET_OFFLINE=true
     export ANDROID_NDK_HOME="$NDK_HOME"
     # The NDK ships only llvm-* binutils; vendored C builds ask for a ranlib by its GNU name.
