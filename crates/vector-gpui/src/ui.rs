@@ -6646,7 +6646,9 @@ fn animation_idle(active: bool) {
 
 impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let el = self.render_root(window, cx);
+        // Child views (the login screen's) render after this one returns: an ease they start
+        // still needs a next frame, which only a display link would otherwise bring.
+        let el = div().size_full().child(self.render_root(window, cx)).child(kit::pump());
         if kit::easing() {
             window.request_animation_frame();
         }
@@ -7615,9 +7617,6 @@ impl VectorApp {
                 .absolute()
                 .size_0(),
             )
-            // Child views (the login screen's) render after this one returns: an ease they start
-            // still needs a next frame, which only a display link would otherwise bring.
-            .child(kit::pump())
     }
 }
 
