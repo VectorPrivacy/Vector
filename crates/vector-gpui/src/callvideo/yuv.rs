@@ -110,6 +110,73 @@ impl I420 {
         Some(out)
     }
 
+    /// YUV_420_888 into I420: luma rows at `y_row`, chroma at `uv_row` with `uv_pixel` bytes
+    /// between samples (1 planar, 2 interleaved).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_planes(y: &[u8], u: &[u8], v: &[u8], y_row: usize, uv_row: usize, uv_pixel: usize, w: usize, h: usize) -> Option<Self> {
+        let mut out = Self::new(w, h);
+        let (ow, oh) = (out.w, out.h);
+        if ow == 0 || oh == 0 || uv_pixel == 0 {
+            return None;
+        }
+        let (cw, ch) = (ow / 2, oh / 2);
+        let (ys, cs) = (ow * oh, cw * ch);
+        let (yp, rest) = out.data.split_at_mut(ys);
+        let (up, vp) = rest.split_at_mut(cs);
+        for row in 0..oh {
+            yp[row * ow..(row + 1) * ow].copy_from_slice(y.get(row * y_row..row * y_row + ow)?);
+        }
+        for row in 0..ch {
+            let (us, vs) = (u.get(row * uv_row..)?, v.get(row * uv_row..)?);
+            if uv_pixel == 1 {
+                up[row * cw..(row + 1) * cw].copy_from_slice(us.get(..cw)?);
+                vp[row * cw..(row + 1) * cw].copy_from_slice(vs.get(..cw)?);
+            } else {
+                let last = (cw - 1) * uv_pixel;
+                if us.len() <= last || vs.len() <= last {
+                    return None;
+                }
+                for x in 0..cw {
+                    up[row * cw + x] = us[x * uv_pixel];
+                    vp[row * cw + x] = vs[x * uv_pixel];
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Turned clockwise by `degrees` (0, 90, 180 or 270).
+    pub fn turned(self, degrees: i32) -> Self {
+        let pic = self;
+        let (w, h) = (pic.w, pic.h);
+        let (nw, nh) = match degrees {
+            90 | 270 => (h, w),
+            180 => (w, h),
+            _ => return pic,
+        };
+        let mut out = Self::new(nw, nh);
+        let turn_plane = |src: &[u8], dst: &mut [u8], w: usize, h: usize| {
+            for y in 0..h {
+                for x in 0..w {
+                    let (dx, dy, dw) = match degrees {
+                        90 => (h - 1 - y, x, h),
+                        180 => (w - 1 - x, h - 1 - y, w),
+                        _ => (y, w - 1 - x, h),
+                    };
+                    dst[dy * dw + dx] = src[y * w + x];
+                }
+            }
+        };
+        let (sy, su, sv) = pic.planes();
+        let (ys, cs) = (nw * nh, (nw / 2) * (nh / 2));
+        let (dy, rest) = out.data.split_at_mut(ys);
+        let (du, dv) = rest.split_at_mut(cs);
+        turn_plane(sy, dy, w, h);
+        turn_plane(su, du, w / 2, h / 2);
+        turn_plane(sv, &mut dv[..cs], w / 2, h / 2);
+        out
+    }
+
     /// NV12: the luma plane, then U and V interleaved.
     pub fn from_nv12(src: &[u8], w: usize, h: usize) -> Option<Self> {
         let mut out = Self::new(w, h);
@@ -234,5 +301,57 @@ mod tests {
             let s = pic.scale(w, h);
             assert!(s.data.iter().all(|&b| b == 120), "{w}x{h}");
         }
+    }
+
+    /// A 4x2 picture whose every sample names its place, padded rows as a camera pads them.
+    fn camera_planes(uv_pixel: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>, usize, usize) {
+        let (y_row, uv_row) = (8, 8);
+        let mut y = vec![0xEE; y_row * 2];
+        for r in 0..2 {
+            for x in 0..4 {
+                y[r * y_row + x] = (r * 4 + x) as u8;
+            }
+        }
+        let (mut u, mut v) = (vec![0xEE; uv_row], vec![0xEE; uv_row]);
+        for x in 0..2 {
+            u[x * uv_pixel] = 100 + x as u8;
+            v[x * uv_pixel] = 200 + x as u8;
+        }
+        (y, u, v, y_row, uv_row)
+    }
+
+    #[test]
+    fn camera_planes_gather_planar_and_interleaved_alike() {
+        for uv_pixel in [1, 2] {
+            let (y, u, v, y_row, uv_row) = camera_planes(uv_pixel);
+            let pic = I420::from_planes(&y, &u, &v, y_row, uv_row, uv_pixel, 4, 2).unwrap();
+            let (py, pu, pv) = pic.planes();
+            assert_eq!(py, &[0, 1, 2, 3, 4, 5, 6, 7], "pixel stride {uv_pixel}");
+            assert_eq!(pu, &[100, 101]);
+            assert_eq!(pv, &[200, 201]);
+        }
+    }
+
+    #[test]
+    fn camera_planes_short_of_a_row_are_refused() {
+        let (y, u, v, y_row, uv_row) = camera_planes(2);
+        assert!(I420::from_planes(&y[..y_row + 3], &u, &v, y_row, uv_row, 2, 4, 2).is_none());
+        assert!(I420::from_planes(&y, &u[..2], &v, y_row, uv_row, 2, 4, 2).is_none());
+    }
+
+    #[test]
+    fn turning_goes_clockwise_and_back() {
+        let (y, u, v, y_row, uv_row) = camera_planes(1);
+        let pic = I420::from_planes(&y, &u, &v, y_row, uv_row, 1, 4, 2).unwrap();
+        let right = pic.clone().turned(90);
+        assert_eq!((right.w, right.h), (2, 4));
+        // The left column, read bottom to top, becomes the top row.
+        assert_eq!(&right.planes().0[..2], &[4, 0]);
+        assert_eq!(right.planes().1, &[100, 101]);
+        let upside = pic.clone().turned(180);
+        assert_eq!(upside.planes().0, &[7, 6, 5, 4, 3, 2, 1, 0]);
+        let back = right.turned(270);
+        assert_eq!(back.data, pic.data);
+        assert_eq!(pic.clone().turned(0).data, pic.data);
     }
 }

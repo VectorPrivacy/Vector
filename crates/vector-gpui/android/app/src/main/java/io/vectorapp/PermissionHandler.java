@@ -17,6 +17,11 @@ public class PermissionHandler {
         int requestCode,
         @NonNull int[] grantResults
     ) {
+        if (requestCode == io.vectorapp.gpui.CameraFeed.PERMISSION_REQUEST) {
+            io.vectorapp.gpui.CameraFeed.nativePermission(
+                grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            return;
+        }
         if (requestCode == 9876) { // AUDIO_PERMISSION_REQUEST_CODE
             boolean granted = grantResults.length > 0 &&
                             grantResults[0] == PackageManager.PERMISSION_GRANTED;

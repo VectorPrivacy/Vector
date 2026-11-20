@@ -114,7 +114,7 @@ impl VectorApp {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let (out_tx, mut out_rx) = unbounded();
-        let opening = cx.background_spawn(async move { callvideo::open_camera(VideoKind::Camera, tx) });
+        let opening = cx.background_spawn(async move { callvideo::open_back_camera(VideoKind::Camera, tx) });
         std::thread::Builder::new()
             .name("qr-scan".into())
             .spawn(move || pump(rx, out_tx))

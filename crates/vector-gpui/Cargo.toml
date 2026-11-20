@@ -109,7 +109,6 @@ pollster = "0.4"
 # Call video: H.264 both ways (the codec WebCodecs peers send), and the camera.
 openh264 = "0.9"
 bytes = "1"
-nokhwa = { version = "0.10", features = ["input-native"] }
 dom_query = "0.28"
 
 # Screen sharing: X11 read directly; macOS and Windows through xcap.
@@ -118,6 +117,8 @@ xcap = "0.9"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3.7", default-features = false }
+# The camera; Android's comes through the shell's Camera2 feed.
+nokhwa = { version = "0.10", features = ["input-native"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"

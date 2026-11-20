@@ -277,5 +277,5 @@ pub fn open(target: Target, to: Sender<In>) -> Result<Capture, String> {
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(Capture { stop })
+    Ok(Capture { stop, release: None })
 }
