@@ -256,6 +256,9 @@ pub struct VectorApp {
     last_dm: Option<String>,
     /// Each chat's composer as it was left, until it is opened again. Runtime only.
     drafts: HashMap<String, Draft>,
+    /// The chat the composer's text and reply belong to, which a close leaving no chat open
+    /// keeps until another opens.
+    draft_owner: Option<SharedString>,
     /// The draft has text: Send stands where the mic does.
     send_shown: bool,
     /// When typing last flipped the two: the swap runs from this clock, not element state.
@@ -1082,6 +1085,7 @@ impl VectorApp {
             last_dm: None,
             root_focus: cx.focus_handle(),
             drafts: HashMap::new(),
+            draft_owner: None,
             send_shown: false,
             send_flipped: None,
             jumped: None,
@@ -4364,6 +4368,7 @@ impl VectorApp {
         if switching {
             self.restore_draft(&id, cx);
         }
+        self.draft_owner = Some(id.clone());
         self.sync_mentions(cx);
         let community = self.store.borrow().community_of(&id).map(|c| c.community_id.clone());
         if let Some(cid) = community.filter(|c| self.live && !self.store.borrow().mention_rules.contains_key(c)) {
@@ -6413,9 +6418,9 @@ impl VectorApp {
         }
     }
 
-    /// The open chat's composer kept as its draft, and cleared for the next.
+    /// The composer kept as the draft of the chat it belongs to, and cleared for the next.
     fn stash_draft(&mut self, cx: &mut Context<Self>) {
-        let Some(open) = self.open.clone() else { return };
+        let Some(open) = self.draft_owner.take() else { return };
         let text = self.input.read(cx).text().to_string();
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         let held = self.edit_held.take();
