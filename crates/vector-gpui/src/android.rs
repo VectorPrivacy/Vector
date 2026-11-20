@@ -135,6 +135,7 @@ pub fn claim_left_edge(span: Option<(f32, f32)>) {
             .map_err(err)?;
         let class = JClass::from(class);
         let out = match span {
+            // i18n-exempt: JNI signature
             Some((top, bottom)) => env.call_static_method(&class, "claimLeft", "(FF)V", &[JValue::Float(top), JValue::Float(bottom)]),
             None => env.call_static_method(&class, "releaseLeft", "()V", &[]),
         };
