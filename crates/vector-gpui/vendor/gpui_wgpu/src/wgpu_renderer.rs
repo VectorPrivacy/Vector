@@ -1570,7 +1570,7 @@ impl WgpuRendererCore {
 
         // Each break in the main pass makes a tiled GPU write the whole frame out and read it
         // back, so paths are rasterized up front whenever their batches can share the texture.
-        let paths_rasterized = if paths_share_intermediate(scene) {
+        let paths_rasterized = if !scene.paths.is_empty() && scene.path_batches_disjoint() {
             Some(self.draw_paths_to_intermediate(&mut encoder, &scene.paths, &mut instance_offset)?)
         } else {
             None
@@ -2633,28 +2633,6 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.core.atlas.clone()
     }
-}
-
-/// Whether every path batch can be rasterized into the intermediate at once: no two batches
-/// overlap, so compositing one never picks up another's coverage.
-fn paths_share_intermediate(scene: &Scene) -> bool {
-    if scene.paths.is_empty() {
-        return false;
-    }
-    let mut batches = SmallVec::<[Bounds<ScaledPixels>; 16]>::new();
-    for batch in scene.batches() {
-        let PrimitiveBatch::Paths(range) = batch else { continue };
-        let mut paths = scene.paths[range].iter();
-        let Some(first) = paths.next() else { continue };
-        let bounds = paths
-            .fold(first.clipped_bounds(), |bounds, path| bounds.union(&path.clipped_bounds()))
-            .dilate(ScaledPixels(1.));
-        if batches.iter().any(|other| other.intersects(&bounds)) {
-            return false;
-        }
-        batches.push(bounds);
-    }
-    true
 }
 
 fn instance_range(range: Range<usize>) -> Range<u32> {

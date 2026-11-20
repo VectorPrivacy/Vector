@@ -203,6 +203,25 @@ impl Scene {
         sort_stable(&mut self.surfaces, keys, |surface| order(surface.order));
     }
 
+    /// Whether no two path batches overlap, so a renderer can rasterize every path into one
+    /// intermediate before compositing: a tiled GPU then never breaks its main pass for paths.
+    pub fn path_batches_disjoint(&self) -> bool {
+        let mut seen = smallvec::SmallVec::<[Bounds<ScaledPixels>; 16]>::new();
+        for batch in self.batches() {
+            let PrimitiveBatch::Paths(range) = batch else { continue };
+            let mut paths = self.paths[range].iter();
+            let Some(first) = paths.next() else { continue };
+            let bounds = paths
+                .fold(first.clipped_bounds(), |bounds, path| bounds.union(&path.clipped_bounds()))
+                .dilate(ScaledPixels(1.));
+            if seen.iter().any(|other| other.intersects(&bounds)) {
+                return false;
+            }
+            seen.push(bounds);
+        }
+        true
+    }
+
     #[cfg_attr(
         all(
             any(target_os = "linux", target_os = "freebsd"),

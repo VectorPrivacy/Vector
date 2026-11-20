@@ -882,6 +882,14 @@ impl MetalRenderer {
             .context("creating command buffer")?;
         let alpha = if self.opaque { 1. } else { 0. };
 
+        // Ending the encoder for a path batch makes the tiled GPU store the frame and load it
+        // back, so paths are rasterized up front whenever their batches can share the texture.
+        let paths_drawn = if !scene.paths.is_empty() && scene.path_batches_disjoint() {
+            Some(self.draw_paths_to_intermediate(&scene.paths, writer, viewport_size, &command_buffer)?)
+        } else {
+            None
+        };
+
         let mut command_encoder = new_command_encoder_for_texture(
             &command_buffer,
             texture,
@@ -904,6 +912,20 @@ impl MetalRenderer {
                 }
                 PrimitiveBatch::Paths(range) => {
                     let paths = &scene.paths[range];
+                    if let Some(did_draw) = paths_drawn {
+                        if did_draw {
+                            if let Err(error) = self.draw_paths_from_intermediate(
+                                paths,
+                                writer,
+                                viewport_size,
+                                &command_encoder,
+                            ) {
+                                command_encoder.endEncoding();
+                                return Err(error);
+                            }
+                        }
+                        continue;
+                    }
                     command_encoder.endEncoding();
 
                     let did_draw = self.draw_paths_to_intermediate(
