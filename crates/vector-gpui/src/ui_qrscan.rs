@@ -107,7 +107,8 @@ impl VectorApp {
         if self.scanner.is_some() {
             return;
         }
-        if !self.live {
+        // Fixtures stand in for the camera, except on an Android test build, which checks it.
+        if !self.live && !cfg!(all(target_os = "android", feature = "test-build")) {
             self.scanner = Some(Scanner { capture: None, frame: None, retired: Vec::new(), nudged: None, _task: Task::ready(()) });
             cx.notify();
             return;
