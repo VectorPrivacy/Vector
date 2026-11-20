@@ -8,10 +8,16 @@
 @vertex
 fn vs_quad_lean(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    let quad = b_quads_lean[instance_id];
-    var out = quad_vertex(unit_vertex, quad);
-    out.solid_rect = quad_solid_rect(quad.background.tag, quad.bounds, quad.corner_radii,
-        quad.border_widths, quad.content_mask, quad.content_radii, quad.content_fade);
+    let i = instance_id;
+    var out = quad_vertex(unit_vertex, b_quads_lean[i].bounds, b_quads_lean[i].content_mask,
+        b_quads_lean[i].corner_radii, b_quads_lean[i].border_widths, b_quads_lean[i].content_radii,
+        b_quads_lean[i].content_fade, b_quads_lean[i].border_color, b_quads_lean[i].border_style,
+        b_quads_lean[i].background.tag, b_quads_lean[i].background.color_space,
+        b_quads_lean[i].background.gradient_angle_or_pattern_height, b_quads_lean[i].background.solid,
+        b_quads_lean[i].background.colors[0], b_quads_lean[i].background.colors[1]);
+    out.solid_rect = quad_solid_rect(b_quads_lean[i].background.tag, b_quads_lean[i].bounds,
+        b_quads_lean[i].corner_radii, b_quads_lean[i].border_widths, b_quads_lean[i].content_mask,
+        b_quads_lean[i].content_radii, b_quads_lean[i].content_fade);
     return out;
 }
 
@@ -19,7 +25,13 @@ fn vs_quad_lean(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) 
 @vertex
 fn vs_quad_bare(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
-    var out = quad_vertex(unit_vertex, b_quads_lean[instance_id]);
+    let i = instance_id;
+    var out = quad_vertex(unit_vertex, b_quads_lean[i].bounds, b_quads_lean[i].content_mask,
+        b_quads_lean[i].corner_radii, b_quads_lean[i].border_widths, b_quads_lean[i].content_radii,
+        b_quads_lean[i].content_fade, b_quads_lean[i].border_color, b_quads_lean[i].border_style,
+        b_quads_lean[i].background.tag, b_quads_lean[i].background.color_space,
+        b_quads_lean[i].background.gradient_angle_or_pattern_height, b_quads_lean[i].background.solid,
+        b_quads_lean[i].background.colors[0], b_quads_lean[i].background.colors[1]);
     out.solid_rect = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     return out;
 }
@@ -44,7 +56,8 @@ fn vs_probe_gradient(@builtin(instance_index) instance_id: u32) -> ProbeVarying 
         b_quads_probe[instance_id].background.tag,
         b_quads_probe[instance_id].background.color_space,
         b_quads_probe[instance_id].background.solid,
-        b_quads_probe[instance_id].background.colors
+        b_quads_probe[instance_id].background.colors[0].color,
+        b_quads_probe[instance_id].background.colors[1].color
     );
     return ProbeVarying(gradient.solid + gradient.color0 + gradient.color1);
 }

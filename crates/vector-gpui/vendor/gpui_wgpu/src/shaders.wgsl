@@ -439,16 +439,18 @@ struct GradientColor {
     color1: vec4<f32>,
 }
 
+// Takes the stops' colors one by one: PowerVR's GLSL compiler refuses what naga writes for an
+// array of structs, so shaders never construct or pass one.
 fn prepare_gradient_color(tag: u32, color_space: u32,
-    solid: Hsla, colors: array<LinearColorStop, 2>) -> GradientColor {
+    solid: Hsla, stop0: Hsla, stop1: Hsla) -> GradientColor {
     var result = GradientColor();
 
     if (tag == 0u || tag == 2u || tag == 3u) {
         result.solid = hsla_to_rgba(solid);
     } else if (tag == 1u) {
         // The hsla_to_rgba is returns a linear sRGB color
-        result.color0 = hsla_to_rgba(colors[0].color);
-        result.color1 = hsla_to_rgba(colors[1].color);
+        result.color0 = hsla_to_rgba(stop0);
+        result.color1 = hsla_to_rgba(stop1);
 
         // Prepare color space in vertex for avoid conversion
         // in fragment shader for performance reasons
@@ -468,13 +470,10 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
 
 // Where `position` falls between a linear gradient's stops, unclamped. Affine in `position`, so a
 // vertex stage can compute it and leave the rest to interpolation.
-fn linear_gradient_t(background: Background, position: vec2<f32>, bounds: Bounds) -> f32 {
+fn linear_gradient_t(angle: f32, stop0_percentage: f32, stop1_percentage: f32, position: vec2<f32>, bounds: Bounds) -> f32 {
     // -90 degrees to match the CSS gradient angle.
-    let angle = background.gradient_angle_or_pattern_height;
     let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
     var direction = vec2<f32>(cos(radians), sin(radians));
-    let stop0_percentage = background.colors[0].percentage;
-    let stop1_percentage = background.colors[1].percentage;
 
     // Expand the short side to be the same as the long side
     if (bounds.size.x > bounds.size.y) {
@@ -507,20 +506,17 @@ fn linear_gradient_at(color_space: u32, t: f32, color0: vec4<f32>, color1: vec4<
     return srgba_to_linear(mixed);
 }
 
-fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
-    solid_color: vec4<f32>, color0: vec4<f32>, color1: vec4<f32>) -> vec4<f32> {
+// A solid or patterned background; callers mix a linear gradient (tag 1) from its varyings.
+fn gradient_color(tag: u32, gradient_angle_or_pattern_height: f32, position: vec2<f32>, bounds: Bounds,
+    solid_color: vec4<f32>) -> vec4<f32> {
     var background_color = vec4<f32>(0.0);
 
-    switch (background.tag) {
+    switch (tag) {
         default: {
             return solid_color;
         }
-        case 1u: {
-            background_color = linear_gradient_at(background.color_space, linear_gradient_t(background, position, bounds), color0, color1);
-        }
         case 2u: {
             // pattern slash
-            let gradient_angle_or_pattern_height = background.gradient_angle_or_pattern_height;
             let pattern_width = (gradient_angle_or_pattern_height / 65535.0f) / 255.0f;
             let pattern_interval = (gradient_angle_or_pattern_height % 65535.0f) / 255.0f;
             let pattern_height = pattern_width + pattern_interval;
@@ -539,7 +535,7 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
         }
         case 3u: {
             // checkerboard
-            let size = background.gradient_angle_or_pattern_height;
+            let size = gradient_angle_or_pattern_height;
             let relative_position = position - bounds.origin;
 
             let x_index = floor(relative_position.x / size);
@@ -570,26 +566,28 @@ struct Quad {
 }
 
 // Carries everything the fragment stage reads, so it never loads the quad: a load per pixel from
-// instance storage is what tiled mobile GPUs are slowest at. Fifteen vectors is GLES 3's minimum.
+// instance storage is what tiled mobile GPUs are slowest at. Eleven vectors, as many as the
+// shadows' stage that PowerVR's GL takes: its limit is not documented.
 struct QuadVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) @interpolate(flat) border_color: vec4<f32>,
-    @location(1) @interpolate(flat) background_solid: vec4<f32>,
-    @location(2) @interpolate(flat) background_color0: vec4<f32>,
-    @location(3) @interpolate(flat) background_color1: vec4<f32>,
+    // The solid background, or a linear gradient's first stop.
+    @location(1) @interpolate(flat) color_a: vec4<f32>,
+    // A linear gradient's second stop.
+    @location(2) @interpolate(flat) color_b: vec4<f32>,
     // Min and max corners of the area that is all background at full coverage; empty when none.
-    @location(4) @interpolate(flat) solid_rect: vec4<f32>,
-    @location(5) @interpolate(flat) bounds: vec4<f32>,
-    @location(6) @interpolate(flat) corner_radii: vec4<f32>,
-    @location(7) @interpolate(flat) border_widths: vec4<f32>,
-    @location(8) @interpolate(flat) content_mask: vec4<f32>,
-    @location(9) @interpolate(flat) content_radii: vec4<f32>,
-    @location(10) @interpolate(flat) content_fade0: vec4<f32>,
-    @location(11) @interpolate(flat) content_fade1: vec4<f32>,
-    // x: background tag | color space << 8 | border style << 16; y: the gradient angle or
-    // pattern height's bits. Integers, as a flat float may flush such bits to zero.
-    @location(12) @interpolate(flat) params: vec4<u32>,
-    @location(13) gradient_t: f32,
+    @location(3) @interpolate(flat) solid_rect: vec4<f32>,
+    @location(4) @interpolate(flat) bounds: vec4<f32>,
+    @location(5) @interpolate(flat) content_mask: vec4<f32>,
+    // Half floats: the corner radii, then the border widths (top, right, bottom, left).
+    @location(6) @interpolate(flat) shape: vec4<u32>,
+    // x, y: the mask's corner radii as half floats; z: background tag | color space << 8 |
+    // border style << 16; w: the gradient angle or pattern height's bits. Integers, as a flat
+    // float may flush such bits to zero.
+    @location(7) @interpolate(flat) params: vec4<u32>,
+    @location(8) @interpolate(flat) content_fade0: vec4<f32>,
+    @location(9) @interpolate(flat) content_fade1: vec4<f32>,
+    @location(10) gradient_t: f32,
 }
 
 fn bounds_vec(bounds: Bounds) -> vec4<f32> {
@@ -600,57 +598,72 @@ fn corners_vec(c: Corners) -> vec4<f32> {
     return vec4<f32>(c.top_left, c.top_right, c.bottom_right, c.bottom_left);
 }
 
-// The varyings of `quad` at `unit_vertex`, all but the solid area.
-fn quad_vertex(unit_vertex: vec2<f32>, quad: Quad) -> QuadVarying {
+fn pack_corners(c: Corners) -> vec2<u32> {
+    return vec2<u32>(pack2x16float(vec2<f32>(c.top_left, c.top_right)), pack2x16float(vec2<f32>(c.bottom_right, c.bottom_left)));
+}
+
+fn unpack_corners(packed: vec2<u32>) -> Corners {
+    let a = unpack2x16float(packed.x);
+    let b = unpack2x16float(packed.y);
+    return Corners(a.x, a.y, b.x, b.y);
+}
+
+// The varyings of a quad at `unit_vertex`, all but the solid area. Fields, not a `Quad`: that
+// holds an array, which PowerVR's GLSL refuses to pass.
+fn quad_vertex(unit_vertex: vec2<f32>, bounds: Bounds, mask: Bounds, radii: Corners, borders: Edges,
+    mask_radii: Corners, fade: Fade, border_color: Hsla, border_style: u32, tag: u32, color_space: u32,
+    angle: f32, solid: Hsla, stop0: LinearColorStop, stop1: LinearColorStop) -> QuadVarying {
     var out = QuadVarying();
-    out.position = to_device_position(unit_vertex, quad.bounds);
-    let gradient = prepare_gradient_color(
-        quad.background.tag,
-        quad.background.color_space,
-        quad.background.solid,
-        quad.background.colors
-    );
-    out.background_solid = gradient.solid;
-    out.background_color0 = gradient.color0;
-    out.background_color1 = gradient.color1;
-    out.border_color = hsla_to_rgba(quad.border_color);
-    out.bounds = bounds_vec(quad.bounds);
-    out.corner_radii = corners_vec(quad.corner_radii);
-    out.border_widths = vec4<f32>(quad.border_widths.top, quad.border_widths.right,
-        quad.border_widths.bottom, quad.border_widths.left);
-    out.content_mask = bounds_vec(quad.content_mask);
-    out.content_radii = corners_vec(quad.content_radii);
-    let fade = quad.content_fade;
+    out.position = to_device_position(unit_vertex, bounds);
+    let gradient = prepare_gradient_color(tag, color_space, solid, stop0.color, stop1.color);
+    out.color_a = select(gradient.solid, gradient.color0, tag == 1u);
+    out.color_b = gradient.color1;
+    out.border_color = hsla_to_rgba(border_color);
+    out.bounds = bounds_vec(bounds);
+    out.content_mask = bounds_vec(mask);
+    out.shape = vec4<u32>(pack_corners(radii),
+        pack2x16float(vec2<f32>(borders.top, borders.right)), pack2x16float(vec2<f32>(borders.bottom, borders.left)));
+    out.params = vec4<u32>(pack_corners(mask_radii),
+        (tag & 0xffu) | ((color_space & 0xffu) << 8u) | ((border_style & 0xffu) << 16u), bitcast<u32>(angle));
     out.content_fade0 = vec4<f32>(fade.top, fade.top_len, fade.bottom, fade.bottom_len);
     out.content_fade1 = vec4<f32>(fade.left, fade.left_len, fade.right, fade.right_len);
-    out.params = vec4<u32>(
-        (quad.background.tag & 0xffu) | ((quad.background.color_space & 0xffu) << 8u) | ((quad.border_style & 0xffu) << 16u),
-        bitcast<u32>(quad.background.gradient_angle_or_pattern_height), 0u, 0u);
-    if (quad.background.tag == 1u) {
-        let position = unit_vertex * quad.bounds.size + quad.bounds.origin;
-        out.gradient_t = linear_gradient_t(quad.background, position, quad.bounds);
+    if (tag == 1u) {
+        let position = unit_vertex * bounds.size + bounds.origin;
+        out.gradient_t = linear_gradient_t(angle, stop0.percentage, stop1.percentage, position, bounds);
     }
     return out;
 }
 
 // The quad as far as the fragment stage reads it; the colors it needs come prepared.
-fn varying_quad(input: QuadVarying) -> Quad {
-    var quad = Quad();
-    quad.border_style = (input.params.x >> 16u) & 0xffu;
+struct QuadFrag {
+    border_style: u32,
+    bounds: Bounds,
+    content_mask: Bounds,
+    content_radii: Corners,
+    content_fade: Fade,
+    tag: u32,
+    color_space: u32,
+    gradient_angle_or_pattern_height: f32,
+    corner_radii: Corners,
+    border_widths: Edges,
+}
+
+fn varying_quad(input: QuadVarying) -> QuadFrag {
+    var quad: QuadFrag;
+    quad.border_style = (input.params.z >> 16u) & 0xffu;
     quad.bounds = Bounds(input.bounds.xy, input.bounds.zw);
     quad.content_mask = Bounds(input.content_mask.xy, input.content_mask.zw);
-    let r = input.content_radii;
-    quad.content_radii = Corners(r.x, r.y, r.z, r.w);
+    quad.content_radii = unpack_corners(input.params.xy);
     let f0 = input.content_fade0;
     let f1 = input.content_fade1;
     quad.content_fade = Fade(f0.x, f0.y, f0.z, f0.w, f1.x, f1.y, f1.z, f1.w);
-    quad.background.tag = input.params.x & 0xffu;
-    quad.background.color_space = (input.params.x >> 8u) & 0xffu;
-    quad.background.gradient_angle_or_pattern_height = bitcast<f32>(input.params.y);
-    let c = input.corner_radii;
-    quad.corner_radii = Corners(c.x, c.y, c.z, c.w);
-    let b = input.border_widths;
-    quad.border_widths = Edges(b.x, b.y, b.z, b.w);
+    quad.tag = input.params.z & 0xffu;
+    quad.color_space = (input.params.z >> 8u) & 0xffu;
+    quad.gradient_angle_or_pattern_height = bitcast<f32>(input.params.w);
+    quad.corner_radii = unpack_corners(input.shape.xy);
+    let tr = unpack2x16float(input.shape.z);
+    let bl = unpack2x16float(input.shape.w);
+    quad.border_widths = Edges(tr.x, tr.y, bl.x, bl.y);
     return quad;
 }
 
@@ -694,8 +707,11 @@ fn quad_solid_rect(tag: u32, bounds: Bounds, radii: Corners, borders: Edges,
 fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> QuadVarying {
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let quad = load_quad(instance_id);
-    var out = quad_vertex(unit_vertex, quad);
-    out.solid_rect = quad_solid_rect(quad.background.tag, quad.bounds, quad.corner_radii,
+    let bg = quad.background;
+    var out = quad_vertex(unit_vertex, quad.bounds, quad.content_mask, quad.corner_radii, quad.border_widths,
+        quad.content_radii, quad.content_fade, quad.border_color, quad.border_style, bg.tag, bg.color_space,
+        bg.gradient_angle_or_pattern_height, bg.solid, bg.colors[0], bg.colors[1]);
+    out.solid_rect = quad_solid_rect(bg.tag, quad.bounds, quad.corner_radii,
         quad.border_widths, quad.content_mask, quad.content_radii, quad.content_fade);
     return out;
 }
@@ -704,25 +720,25 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
 fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     let point = input.position.xy;
     if (all(point > input.solid_rect.xy) && all(point < input.solid_rect.zw)) {
-        return blend_color(input.background_solid, 1.0);
+        return blend_color(input.color_a, 1.0);
     }
     let quad = varying_quad(input);
     return masked(quad_color(input, quad), mask_alpha(input.position.xy, quad.content_mask, quad.content_radii, quad.content_fade));
 }
 
-fn quad_color(input: QuadVarying, quad: Quad) -> vec4<f32> {
+fn quad_color(input: QuadVarying, quad: QuadFrag) -> vec4<f32> {
     // Alpha clip first, since we don't have `clip_distance`.
     if (any(distance_from_clip_rect_impl(input.position.xy, quad.content_mask) < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
     var background_color: vec4<f32>;
-    if (quad.background.tag == 1u) {
-        background_color = linear_gradient_at(quad.background.color_space, input.gradient_t,
-            input.background_color0, input.background_color1);
+    if (quad.tag == 1u) {
+        background_color = linear_gradient_at(quad.color_space, input.gradient_t,
+            input.color_a, input.color_b);
     } else {
-        background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
-            input.background_solid, input.background_color0, input.background_color1);
+        background_color = gradient_color(quad.tag, quad.gradient_angle_or_pattern_height,
+            input.position.xy, quad.bounds, input.color_a);
     }
 
     let unrounded = quad.corner_radii.top_left == 0.0 &&
@@ -1290,7 +1306,8 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
     var out = PathRasterizationVarying();
     out.position = to_device_position_impl(v.xy_position);
     out.st_position = v.st_position;
-    let prepared = prepare_gradient_color(background.tag, background.color_space, background.solid, background.colors);
+    let prepared = prepare_gradient_color(background.tag, background.color_space, background.solid,
+        background.colors[0].color, background.colors[1].color);
     out.solid = prepared.solid;
     out.color0 = prepared.color0;
     out.color1 = prepared.color1;
@@ -1298,7 +1315,8 @@ fn vs_path_rasterization(@builtin(vertex_index) vertex_id: u32) -> PathRasteriza
     out.params = vec4<u32>((background.tag & 0xffu) | ((background.color_space & 0xffu) << 8u),
         bitcast<u32>(background.gradient_angle_or_pattern_height), 0u, 0u);
     if (background.tag == 1u) {
-        out.gradient_t = linear_gradient_t(background, v.xy_position, v.bounds);
+        out.gradient_t = linear_gradient_t(background.gradient_angle_or_pattern_height,
+            background.colors[0].percentage, background.colors[1].percentage, v.xy_position, v.bounds);
     }
     return out;
 }
@@ -1322,15 +1340,12 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         let distance = f / length(gradient);
         alpha = saturate(0.5 - distance);
     }
-    var background = Background();
-    background.tag = input.params.x & 0xffu;
-    background.color_space = (input.params.x >> 8u) & 0xffu;
-    background.gradient_angle_or_pattern_height = bitcast<f32>(input.params.y);
+    let tag = input.params.x & 0xffu;
     var color: vec4<f32>;
-    if (background.tag == 1u) {
-        color = linear_gradient_at(background.color_space, input.gradient_t, input.color0, input.color1);
+    if (tag == 1u) {
+        color = linear_gradient_at((input.params.x >> 8u) & 0xffu, input.gradient_t, input.color0, input.color1);
     } else {
-        color = gradient_color(background, input.position.xy, bounds, input.solid, input.color0, input.color1);
+        color = gradient_color(tag, bitcast<f32>(input.params.y), input.position.xy, bounds, input.solid);
     }
     return vec4<f32>(color.rgb * color.a * alpha, color.a * alpha);
 }
