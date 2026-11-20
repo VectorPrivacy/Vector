@@ -1398,6 +1398,10 @@ struct PolySpriteVarying {
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) sprite_id: u32,
     @location(3) clip_distances: vec4<f32>,
+    // As `QuadVarying::solid_rect`: where neither rounding nor the mask touches the image.
+    @location(4) @interpolate(flat) solid_rect: vec4<f32>,
+    @location(5) @interpolate(flat) opacity: f32,
+    @location(6) @interpolate(flat) grayscale: u32,
 }
 
 @vertex
@@ -1410,12 +1414,24 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.sprite_id = instance_id;
     out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    out.solid_rect = quad_solid_rect(0u, sprite.bounds, sprite.corner_radii, Edges(0.0, 0.0, 0.0, 0.0),
+        sprite.content_mask, sprite.content_radii, sprite.content_fade);
+    out.opacity = sprite.opacity;
+    out.grayscale = sprite.grayscale;
     return out;
 }
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let point = input.position.xy;
+    if (all(point > input.solid_rect.xy) && all(point < input.solid_rect.zw)) {
+        var color = sample;
+        if (input.grayscale != 0u) {
+            color = vec4<f32>(vec3<f32>(dot(color.rgb, GRAYSCALE_FACTORS)), sample.a);
+        }
+        return blend_color(color, input.opacity);
+    }
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
