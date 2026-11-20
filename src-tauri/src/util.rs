@@ -29,12 +29,14 @@ pub use vector_core::simd::hex::{
 
 pub use crate::simd::has_alpha_transparency;
 
-/// Extract all HTTPS URLs from a string
-pub fn extract_https_urls(text: &str) -> Vec<String> {
+/// The first `max` HTTPS URLs in a string. Bounded, since a run of bare `https://` names one
+/// URL per byte, each running to the end of the text.
+pub fn extract_https_urls(text: &str, max: usize) -> Vec<String> {
     let mut urls = Vec::new();
     let mut start_idx = 0;
 
-    while let Some(https_idx) = text[start_idx..].find("https://") {
+    while urls.len() < max {
+        let Some(https_idx) = text[start_idx..].find("https://") else { break };
         let abs_start = start_idx + https_idx;
         let url_text = &text[abs_start..];
 
