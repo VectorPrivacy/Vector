@@ -3,7 +3,7 @@
 //! the UI thread raises, since raising can call back into the adapter.
 
 use crate::bridge;
-use accesskit::{ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
+use accesskit::{ActionHandler, ActionRequest, ActivationHandler, Role, TreeUpdate};
 use accesskit_android::{Adapter, PlatformAction, QueuedEvents};
 use gpui::A11yCallbacks;
 use jni::JNIEnv;
@@ -62,7 +62,8 @@ pub(crate) fn init(callbacks: A11yCallbacks) {
 }
 
 /// From GPUI's thread, after each frame while a screen reader is on.
-pub(crate) fn update(tree: TreeUpdate) {
+pub(crate) fn update(mut tree: TreeUpdate) {
+    hint_empty_fields(&mut tree);
     let mut shared = shared();
     let Some(events) = shared.adapter.update_if_active(|| tree) else { return };
     shared.queued.push(events);
@@ -70,6 +71,20 @@ pub(crate) fn update(tree: TreeUpdate) {
     drop(shared);
     if first {
         bridge::a11y_raise();
+    }
+}
+
+/// accesskit_android drops placeholders, so an empty field is named by its own.
+fn hint_empty_fields(tree: &mut TreeUpdate) {
+    for (_, node) in &mut tree.nodes {
+        if matches!(node.role(), Role::TextInput | Role::MultilineTextInput | Role::SearchInput)
+            && node.label().is_none()
+            && node.value().is_none_or(str::is_empty)
+            && let Some(placeholder) = node.placeholder()
+        {
+            let placeholder = placeholder.to_owned();
+            node.set_label(placeholder);
+        }
     }
 }
 

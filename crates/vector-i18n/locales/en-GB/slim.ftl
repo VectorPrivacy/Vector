@@ -5,6 +5,11 @@ slim-filter-communities = Communities
 slim-add-friend = Add Friend
 slim-bookmark = Bookmark
 slim-search = Search...
+slim-switch-profile = Switch profile
+slim-clear-search = Clear search
+slim-scan = Scan a QR code
+slim-new = New
+slim-back = Back
 slim-hide-communities = Hide communities
 slim-show-communities = Show communities
 # $query is what was typed.

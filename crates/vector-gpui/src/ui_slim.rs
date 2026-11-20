@@ -280,6 +280,7 @@ impl VectorApp {
                     // .nav-back-btn
                     div()
                         .id("chat-back-btn")
+                        .aria_label(t::slim_back())
                         .absolute()
                         .left(px(5.))
                         .top(px(10.))
@@ -435,6 +436,7 @@ impl VectorApp {
             .child(
                 div()
                     .id("cc-account")
+                    .aria_label(t::slim_switch_profile())
                     .h(px(40.))
                     .pr(px(2.))
                     .flex()
@@ -484,6 +486,7 @@ impl VectorApp {
                         d.child(
                             div()
                                 .id("cc-search-clear")
+                                .aria_label(t::slim_clear_search())
                                 .size(px(26.))
                                 .flex_shrink_0()
                                 .rounded_full()
@@ -502,11 +505,12 @@ impl VectorApp {
                         )
                     }),
             )
-            .child(btn("cc-scan", "ui/cc-scan.svg").on_click(cx.listener(|app, _, window, cx| {
+            .child(btn("cc-scan", "ui/cc-scan.svg").aria_label(t::slim_scan()).on_click(cx.listener(|app, _, window, cx| {
                 app.open_qr_scanner(window, cx);
             })))
             .child(
                 btn("cc-new", "ui/cc-plus.svg")
+                    .aria_label(t::slim_new())
                     .ml(px(-4.))
                     .on_click(cx.listener(|app, _, _, cx| app.slim_new_menu(cx)))
                     .child({
@@ -576,6 +580,7 @@ impl VectorApp {
         let on = on_community.clone();
         let door = div()
             .id("cc-rail-messages")
+            .aria_label(t::rail_messages())
             .relative()
             .size(px(45.))
             .mx_auto()
