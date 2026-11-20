@@ -160,6 +160,8 @@ pub fn init(packs: Option<PathBuf>) {
         vector_i18n::set_language(&tag);
     }
     gpui::set_layout_rtl(vector_i18n::is_rtl());
+    #[cfg(target_os = "android")]
+    crate::android::send_strings();
 }
 
 /// Switches every window to `tag` at once and keeps it for next launch.
@@ -167,6 +169,8 @@ pub fn set(tag: &str, cx: &mut gpui::App) {
     vector_i18n::set_language(tag);
     gpui::set_layout_rtl(vector_i18n::is_rtl());
     device::set(KEY, vector_i18n::language());
+    #[cfg(target_os = "android")]
+    crate::android::send_strings();
     cx.refresh_windows();
 }
 

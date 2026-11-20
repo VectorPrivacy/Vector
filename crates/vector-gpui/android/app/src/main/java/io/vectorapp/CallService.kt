@@ -52,7 +52,7 @@ class CallService : Service() {
         /** The call as the notification should show it, whether or not the service runs yet. */
         @JvmStatic
         fun show(name: String, avatarPath: String, muted: Boolean, video: Boolean, activeMs: Long) {
-            shown = Shown(name, avatarPath, muted, video, System.currentTimeMillis() - activeMs, if (video) "Video call" else "Call")
+            shown = Shown(name, avatarPath, muted, video, System.currentTimeMillis() - activeMs, if (video) Strings.t("android-call-video", "Video call") else Strings.t("android-call-voice", "Call"))
             running?.post()
         }
 
@@ -67,6 +67,16 @@ class CallService : Service() {
         @JvmStatic
         fun clear() {
             shown = null
+        }
+
+        @JvmStatic
+        fun channel(context: Context) {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            val channel = NotificationChannel(CHANNEL_ID, Strings.t("android-channel-calls", "Calls"), NotificationManager.IMPORTANCE_LOW).apply {
+                description = Strings.t("android-channel-calls-about", "Shown while you're in a call")
+                setShowBadge(false)
+            }
+            manager.createNotificationChannel(channel)
         }
 
         @JvmStatic
@@ -110,12 +120,8 @@ class CallService : Service() {
                 return START_NOT_STICKY
             }
         }
-        val manager = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(CHANNEL_ID, "Calls", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "Shown while you're in a call"
-            setShowBadge(false)
-        }
-        manager.createNotificationChannel(channel)
+        Strings.init(this)
+        channel(this)
         val notification = build()
         // Listen-only (no microphone permission) can't claim the microphone type.
         val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -167,9 +173,9 @@ class CallService : Service() {
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
         val call = shown ?: return builder
-            .setContentTitle("In a call")
-            .setContentText("Tap to return to Vector")
-            .addAction(0, "Leave", leave)
+            .setContentTitle(Strings.t("android-call-ongoing", "In a call"))
+            .setContentText(Strings.t("android-call-return", "Tap to return to Vector"))
+            .addAction(0, Strings.t("android-call-leave", "Leave"), leave)
             .build()
         val mute = PendingIntent.getService(
             this, 2,
@@ -181,12 +187,12 @@ class CallService : Service() {
         }.build()
         return builder
             .setContentTitle(call.name)
-            .setContentText(if (call.muted) "Muted" else call.detail)
+            .setContentText(if (call.muted) Strings.t("android-call-muted", "Muted") else call.detail)
             .setWhen(call.since)
             .setUsesChronometer(true)
             .setShowWhen(true)
             .setStyle(NotificationCompat.CallStyle.forOngoingCall(person, leave).setIsVideo(call.video))
-            .addAction(0, if (call.muted) "Unmute" else "Mute", mute)
+            .addAction(0, if (call.muted) Strings.t("android-call-unmute", "Unmute") else Strings.t("android-call-mute", "Mute"), mute)
             .build()
     }
 

@@ -33,6 +33,71 @@ pub fn cache_dir() -> Option<&'static PathBuf> {
     DIR.get_or_init(|| folder("getCacheDir")).as_ref()
 }
 
+/// The shell's own text in the app's language, kept by `io.vectorapp.Strings` for its
+/// notifications, channels and prompts.
+pub fn send_strings() {
+    use crate::t;
+    use jni::objects::{JClass, JValue};
+    let table: [(&str, gpui::SharedString); 37] = [
+        ("android-call-incoming", t::android_call_incoming()),
+        ("android-call-incoming-video", t::android_call_incoming_video()),
+        ("android-call-missed", t::android_call_missed()),
+        ("android-call-decline", t::android_call_decline()),
+        ("android-call-answer", t::android_call_answer()),
+        ("android-call-voice", t::android_call_voice()),
+        ("android-call-video", t::android_call_video()),
+        ("android-call-muted", t::android_call_muted()),
+        ("android-call-mute", t::android_call_mute()),
+        ("android-call-unmute", t::android_call_unmute()),
+        ("android-call-ongoing", t::android_call_ongoing()),
+        ("android-call-return", t::android_call_return()),
+        ("android-call-leave", t::android_call_leave()),
+        ("android-notify-someone", t::android_notify_someone()),
+        ("android-notify-me", t::android_notify_me()),
+        ("android-notify-reply", t::android_notify_reply()),
+        ("android-notify-mark-read", t::android_notify_mark_read()),
+        ("android-service-listening", t::android_service_listening()),
+        ("android-service-tagline-watch", t::android_service_tagline_watch()),
+        ("android-service-tagline-miss", t::android_service_tagline_miss()),
+        ("android-service-tagline-standby", t::android_service_tagline_standby()),
+        ("android-channel-ring", t::android_channel_ring()),
+        ("android-channel-ring-about", t::android_channel_ring_about()),
+        ("android-channel-missed", t::android_channel_missed()),
+        ("android-channel-missed-about", t::android_channel_missed_about()),
+        ("android-channel-calls", t::android_channel_calls()),
+        ("android-channel-calls-about", t::android_channel_calls_about()),
+        ("android-channel-messages", t::android_channel_messages()),
+        ("android-channel-messages-about", t::android_channel_messages_about()),
+        ("android-channel-service", t::android_channel_service()),
+        ("android-channel-service-about", t::android_channel_service_about()),
+        ("android-open-with", t::android_open_with()),
+        ("android-share", t::android_share()),
+        ("android-biometric-use", t::android_biometric_use()),
+        ("android-biometric-screen-lock", t::android_biometric_screen_lock()),
+        ("android-biometric-enable", t::android_biometric_enable()),
+        ("android-biometric-unlock", t::android_biometric_unlock()),
+    ];
+    let json = serde_json::Value::Object(table.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v.as_ref()))).collect()).to_string();
+    let sent = utils::with_android_context(|env, ctx| {
+        let err = |e: jni::errors::Error| format!("{e:?}");
+        let loader = env.call_method(ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]).and_then(|v| v.l()).map_err(err)?;
+        let name = env.new_string("io.vectorapp.Strings").map_err(err)?;
+        let class = env
+            .call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])
+            .and_then(|v| v.l())
+            .map_err(err)?;
+        let json = env.new_string(&json).map_err(err)?;
+        let out = env.call_static_method(&JClass::from(class), "set", "(Landroid/content/Context;Ljava/lang/String;)V", &[JValue::Object(ctx), JValue::Object(&json)]);
+        if out.is_err() {
+            let _ = env.exception_clear();
+        }
+        out.map(drop).map_err(err)
+    });
+    if let Err(e) = sent {
+        log::warn!("android strings: {e}");
+    }
+}
+
 /// Calls a static `VectorBatteryHelper` method taking the context and maybe a flag; a void one
 /// reads as false.
 fn battery_helper(method: &str, sig: &str, flag: Option<bool>) -> bool {

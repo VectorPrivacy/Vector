@@ -47,6 +47,7 @@ class VectorNotificationService : Service() {
             groupName: String,
             groupAvatarPath: String,
         ) {
+            Strings.init(context)
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val isGroup = groupName.isNotEmpty()
             val historyKey = chatId.ifEmpty { title }
@@ -76,14 +77,14 @@ class VectorNotificationService : Service() {
             val history = synchronized(chatMessageHistory) {
                 val h = chatMessageHistory.getOrPut(historyKey) { mutableListOf() }
                 h.add(ChatMessage(
-                    if (isGroup) senderName.ifEmpty { "Someone" } else senderName.ifEmpty { title },
+                    if (isGroup) senderName.ifEmpty { Strings.t("android-notify-someone", "Someone") } else senderName.ifEmpty { title },
                     avatarPath, body, System.currentTimeMillis()
                 ))
                 while (h.size > 8) h.removeAt(0)
                 h.toList()
             }
 
-            val messagingStyle = NotificationCompat.MessagingStyle(Person.Builder().setName("Me").build())
+            val messagingStyle = NotificationCompat.MessagingStyle(Person.Builder().setName(Strings.t("android-notify-me", "Me")).build())
             if (isGroup) {
                 messagingStyle.setConversationTitle(groupName)
                 messagingStyle.setGroupConversation(true)
@@ -121,7 +122,7 @@ class VectorNotificationService : Service() {
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
                 val remoteInput = androidx.core.app.RemoteInput.Builder(NotificationActionReceiver.REPLY_KEY)
-                    .setLabel("Reply")
+                    .setLabel(Strings.t("android-notify-reply", "Reply"))
                     .build()
                 val replyIntent = Intent(context, NotificationActionReceiver::class.java).apply {
                     action = NotificationActionReceiver.ACTION_REPLY
@@ -132,10 +133,10 @@ class VectorNotificationService : Service() {
                     context, notificationId * 2 + 1, replyIntent,
                     PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
-                val replyAction = NotificationCompat.Action.Builder(R.drawable.ic_notification, "Reply", replyPending)
+                val replyAction = NotificationCompat.Action.Builder(R.drawable.ic_notification, Strings.t("android-notify-reply", "Reply"), replyPending)
                     .addRemoteInput(remoteInput)
                     .build()
-                builder.addAction(R.drawable.ic_notification, "Mark Read", markReadPending)
+                builder.addAction(R.drawable.ic_notification, Strings.t("android-notify-mark-read", "Mark Read"), markReadPending)
                 builder.addAction(replyAction)
             }
 
@@ -174,10 +175,11 @@ class VectorNotificationService : Service() {
         /** Both channels, before anything posts to them. */
         @JvmStatic
         fun createChannels(context: Context) {
+            Strings.init(context)
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(
-                NotificationChannel(SERVICE_CHANNEL_ID, "Background Service", NotificationManager.IMPORTANCE_MIN).apply {
-                    description = "Keeps Vector connected for real-time messages"
+                NotificationChannel(SERVICE_CHANNEL_ID, Strings.t("android-channel-service", "Background Service"), NotificationManager.IMPORTANCE_MIN).apply {
+                    description = Strings.t("android-channel-service-about", "Keeps Vector connected for real-time messages")
                     setShowBadge(false)
                 }
             )
@@ -189,8 +191,8 @@ class VectorNotificationService : Service() {
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build()
             manager.createNotificationChannel(
-                NotificationChannel(MESSAGES_CHANNEL_ID, "Messages", NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "New message notifications"
+                NotificationChannel(MESSAGES_CHANNEL_ID, Strings.t("android-channel-messages", "Messages"), NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = Strings.t("android-channel-messages-about", "New message notifications")
                     setSound(prelude, audio)
                     enableVibration(true)
                 }
@@ -204,7 +206,11 @@ class VectorNotificationService : Service() {
     }
 
     private val serviceTagline: String by lazy {
-        listOf("Keeping watch", "You won't miss a thing", "Standing by").random()
+        listOf(
+            Strings.t("android-service-tagline-watch", "Keeping watch"),
+            Strings.t("android-service-tagline-miss", "You won't miss a thing"),
+            Strings.t("android-service-tagline-standby", "Standing by"),
+        ).random()
     }
 
     override fun onCreate() {
@@ -227,7 +233,8 @@ class VectorNotificationService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val body = android.text.SpannableStringBuilder()
-            .append("Listening for messages · ")
+            .append(Strings.t("android-service-listening", "Listening for messages"))
+            .append(" · ")
             .append(serviceTagline, android.text.style.StyleSpan(android.graphics.Typeface.ITALIC), android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         return NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setContentTitle("Vector")

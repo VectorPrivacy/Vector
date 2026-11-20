@@ -45,8 +45,9 @@ object IncomingCall {
 
     @JvmStatic
     fun ring(context: Context, callId: String, npub: String, name: String, avatarPath: String, video: Boolean) {
+        Strings.init(context)
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        channels(manager)
+        channels(context)
         ringing = Ringing(callId, npub, name)
         val show = activity(context, callId, npub, false, 20)
         val answer = activity(context, callId, npub, true, 21)
@@ -64,7 +65,7 @@ object IncomingCall {
         val builder = NotificationCompat.Builder(context, RING_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(name)
-            .setContentText(if (video) "Incoming video call" else "Incoming call")
+            .setContentText(if (video) Strings.t("android-call-incoming-video", "Incoming video call") else Strings.t("android-call-incoming", "Incoming call"))
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -79,7 +80,8 @@ object IncomingCall {
         if (fullScreen) {
             builder.setStyle(NotificationCompat.CallStyle.forIncomingCall(person, decline, answer))
         } else {
-            builder.addAction(0, "Decline", decline).addAction(0, "Answer", answer)
+            builder.addAction(0, Strings.t("android-call-decline", "Decline"), decline)
+                .addAction(0, Strings.t("android-call-answer", "Answer"), answer)
         }
         val notification = builder.build()
         // Rings until answered, declined or withdrawn, as a phone does.
@@ -97,10 +99,11 @@ object IncomingCall {
         val r = ringing ?: return
         if (r.callId != callId) return
         ringing = null
+        Strings.init(context)
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         manager.cancel(RING_ID)
         if (!missed) return
-        channels(manager)
+        channels(context)
         val open = PendingIntent.getActivity(
             context, ("missed:" + r.npub).hashCode(),
             Intent(context, MainActivity::class.java)
@@ -111,7 +114,7 @@ object IncomingCall {
         val missedCall = NotificationCompat.Builder(context, MISSED_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(r.name)
-            .setContentText("Missed call")
+            .setContentText(Strings.t("android-call-missed", "Missed call"))
             .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
             .setAutoCancel(true)
             .setContentIntent(open)
@@ -158,10 +161,12 @@ object IncomingCall {
         }
     }
 
-    private fun channels(manager: NotificationManager) {
-        if (manager.getNotificationChannel(RING_CHANNEL) == null) {
-            val ring = NotificationChannel(RING_CHANNEL, "Incoming calls", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Rings when someone calls you"
+    @JvmStatic
+    fun channels(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        run {
+            val ring = NotificationChannel(RING_CHANNEL, Strings.t("android-channel-ring", "Incoming calls"), NotificationManager.IMPORTANCE_HIGH).apply {
+                description = Strings.t("android-channel-ring-about", "Rings when someone calls you")
                 setSound(
                     RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
                     AudioAttributes.Builder()
@@ -175,9 +180,9 @@ object IncomingCall {
             }
             manager.createNotificationChannel(ring)
         }
-        if (manager.getNotificationChannel(MISSED_CHANNEL) == null) {
-            val missed = NotificationChannel(MISSED_CHANNEL, "Missed calls", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                description = "Calls you didn't answer"
+        run {
+            val missed = NotificationChannel(MISSED_CHANNEL, Strings.t("android-channel-missed", "Missed calls"), NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = Strings.t("android-channel-missed-about", "Calls you didn't answer")
             }
             manager.createNotificationChannel(missed)
         }

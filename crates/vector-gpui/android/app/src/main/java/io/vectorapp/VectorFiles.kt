@@ -149,7 +149,7 @@ object VectorFiles {
                 setDataAndType(uri, mime)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            val chooser = Intent.createChooser(view, "Open with").apply {
+            val chooser = Intent.createChooser(view, Strings.t("android-open-with", "Open with")).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)
@@ -215,7 +215,7 @@ object VectorFiles {
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            val chooser = Intent.createChooser(send, "Share").apply {
+            val chooser = Intent.createChooser(send, Strings.t("android-share", "Share")).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(chooser)

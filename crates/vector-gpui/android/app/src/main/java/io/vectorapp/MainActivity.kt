@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Strings.init(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         view = GpuiView(this)
         setContentView(view)

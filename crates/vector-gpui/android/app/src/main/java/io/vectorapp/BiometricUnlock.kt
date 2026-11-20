@@ -96,7 +96,7 @@ object BiometricUnlock {
             }
             if (bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 == BiometricManager.BIOMETRIC_SUCCESS
-            ) "Use biometrics" else "Use screen lock"
+            ) Strings.t("android-biometric-use", "Use biometrics") else Strings.t("android-biometric-screen-lock", "Use screen lock")
         } catch (_: Exception) {
             ""
         }
@@ -126,7 +126,7 @@ object BiometricUnlock {
                 // Keystore generates the IV (randomized encryption stays at its
                 // required default) — never supply one on encrypt.
                 cipher.init(Cipher.ENCRYPT_MODE, secret)
-                prompt(activity, requestId, cipher, "Enable Biometric Unlock") { c ->
+                prompt(activity, requestId, cipher, Strings.t("android-biometric-enable", "Enable Biometric Unlock")) { c ->
                     val ct = c.doFinal(keyBytes)
                     keyBytes.fill(0)
                     val iv = c.iv
@@ -175,7 +175,7 @@ object BiometricUnlock {
                 val ct = blob.copyOfRange(12, blob.size)
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, secret, GCMParameterSpec(GCM_TAG_BITS, iv))
-                prompt(activity, requestId, cipher, "Unlock Vector") { c ->
+                prompt(activity, requestId, cipher, Strings.t("android-biometric-unlock", "Unlock Vector")) { c ->
                     val plain = c.doFinal(ct)
                     try {
                         nativeOnBiometricKey(requestId, plain)
