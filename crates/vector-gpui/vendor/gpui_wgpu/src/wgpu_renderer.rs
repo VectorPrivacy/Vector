@@ -266,6 +266,8 @@ pub struct WgpuRenderer {
     observed_error_generation: u64,
     last_surface_error: Option<String>,
     needs_redraw: bool,
+    /// The last frame's surface acquire, recording and submit, and present.
+    frame_timing: [std::time::Duration; 3],
 }
 
 impl WgpuRenderer {
@@ -519,6 +521,7 @@ impl WgpuRenderer {
             observed_error_generation: 0,
             last_surface_error: None,
             needs_redraw: false,
+            frame_timing: Default::default(),
         })
     }
 }
@@ -1202,6 +1205,7 @@ impl WgpuRenderer {
             self.failed_frame_count = 0;
         }
 
+        let started = std::time::Instant::now();
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1229,6 +1233,7 @@ impl WgpuRenderer {
             width: DevicePixels(frame.texture.width() as i32),
             height: DevicePixels(frame.texture.height() as i32),
         };
+        let acquired = std::time::Instant::now();
         let frame_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1245,8 +1250,15 @@ impl WgpuRenderer {
             return false;
         }
 
+        let submitted = std::time::Instant::now();
         core.resources.queue.present(frame);
+        self.frame_timing = [acquired - started, submitted - acquired, submitted.elapsed()];
         true
+    }
+
+    /// The last frame's surface acquire, recording and submit, and present.
+    pub fn frame_timing(&self) -> [std::time::Duration; 3] {
+        self.frame_timing
     }
 }
 

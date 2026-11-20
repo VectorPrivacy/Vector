@@ -23,7 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::{c_long, c_void};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The surface as wgpu takes it.
 #[derive(Clone, Debug)]
@@ -88,6 +88,11 @@ pub(crate) struct WindowState {
     capslock: Cell<bool>,
     frame_pending: Cell<bool>,
     force_next_frame: Cell<bool>,
+    /// The last draw's time, its acquire, submit and present, and its scene's quads, shadows,
+    /// paths, glyphs and images.
+    drawn: Cell<Option<(Duration, [Duration; 3], [usize; 5])>>,
+    /// When a slow frame was last logged, and how many have gone unlogged since.
+    slow: Cell<(Option<Instant>, u32)>,
     input_handler: CallbackSlot<PlatformInputHandler>,
     /// The field as the keyboard's copy last stood, when both sides agreed.
     field: RefCell<Option<Field>>,
@@ -133,6 +138,8 @@ impl AndroidWindow {
             capslock: Cell::new(false),
             frame_pending: Cell::new(false),
             force_next_frame: Cell::new(true),
+            drawn: Cell::new(None),
+            slow: Cell::new((None, 0)),
             input_handler: CallbackSlot::default(),
             field: RefCell::new(None),
             ime_serial: Cell::new(0),
@@ -180,12 +187,38 @@ impl WindowState {
             return;
         }
         let force_render = self.force_next_frame.replace(false);
+        let started = Instant::now();
         self.callbacks.request_frame.with(|callback| {
             callback(RequestFrameOptions {
                 force_render,
                 ..Default::default()
             })
         });
+        self.note_frame(started.elapsed());
+    }
+
+    /// A slow frame, at most once a second: how long it took, how much of that was the renderer,
+    /// and what it drew.
+    fn note_frame(&self, took: Duration) {
+        const SLOW: Duration = Duration::from_millis(100);
+        let Some((drawing, [acquire, submit, present], [quads, shadows, paths, glyphs, images])) = self.drawn.take() else { return };
+        if took < SLOW {
+            return;
+        }
+        let (last, unlogged) = self.slow.get();
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            self.slow.set((last, unlogged + 1));
+            return;
+        }
+        self.slow.set((Some(Instant::now()), 0));
+        log::info!(
+            "gpui_android: slow frame {} ms, {} ms of it rendering (acquire {}, record and submit {}, present {}; {quads} quads, {shadows} shadows, {paths} paths, {glyphs} glyphs, {images} images); {unlogged} more slow since the last line",
+            took.as_millis(),
+            drawing.as_millis(),
+            acquire.as_millis(),
+            submit.as_millis(),
+            present.as_millis()
+        );
     }
 
     fn redraw_all(&self) {
@@ -580,7 +613,10 @@ impl PlatformWindow for AndroidWindow {
             log::error!("gpui_android: the GPU could not recover: {error:#}");
             return;
         }
+        let started = Instant::now();
         renderer.draw(scene);
+        let counts = [scene.quads.len(), scene.shadows.len(), scene.paths.len(), scene.monochrome_sprites.len(), scene.polychrome_sprites.len()];
+        self.0.drawn.set(Some((started.elapsed(), renderer.frame_timing(), counts)));
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| log::info!("gpui_android: first frame drawn"));
     }

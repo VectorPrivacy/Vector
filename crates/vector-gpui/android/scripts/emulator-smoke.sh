@@ -26,7 +26,7 @@ if [ -n "$pid" ]; then adb logcat -d --pid="$pid"; else tail -400 "$out/logcat.t
 adb logcat -d -b crash || true
 echo "::endgroup::"
 echo "::group::test log file"
-adb shell 'ls -la /sdcard/Download/Vector/ /sdcard/Android/media/io.vectorapp.gpui/ 2>/dev/null; head -40 /sdcard/Download/Vector/vector-gpui-debug.log 2>/dev/null' || true
+adb shell 'ls -la /sdcard/Download/Vector/ /sdcard/Android/media/io.vectorapp.gpui/ 2>/dev/null; for f in /sdcard/Download/Vector/vector-gpui-debug-*.log; do echo "== $f"; head -40 "$f"; done 2>/dev/null' || true
 echo "::endgroup::"
 # A tap where the login screen's first button sits, to see touches arrive.
 size=$(adb shell wm size | sed 's/.*: //' | tr -d '\r')
