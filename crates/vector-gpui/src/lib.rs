@@ -33,6 +33,8 @@ mod textdiff;
 #[cfg(test)]
 mod atlas_border;
 #[cfg(test)]
+mod scene_cull;
+#[cfg(test)]
 mod textfuzz;
 #[cfg(test)]
 mod tree_audit;

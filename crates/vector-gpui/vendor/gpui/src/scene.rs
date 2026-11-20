@@ -201,6 +201,65 @@ impl Scene {
             order(sprite.order) | sprite.tile.texture_id.index as u64
         });
         sort_stable(&mut self.surfaces, keys, |surface| order(surface.order));
+        self.cull_covered();
+    }
+
+    /// Drops what a later opaque rectangle hides whole. Everything draws blended, so a tiled
+    /// GPU can't discard hidden pixels itself, and each stacked full-window background costs a
+    /// window of fill.
+    fn cull_covered(&mut self) {
+        const MAX_COVERS: usize = 4;
+        let mut covers = smallvec::SmallVec::<[(DrawOrder, Bounds<ScaledPixels>); MAX_COVERS]>::new();
+        for quad in &self.quads {
+            let Some(rect) = quad.opaque_rect() else { continue };
+            let area = rect.size.width.0 * rect.size.height.0;
+            // Small covers hide little and cost a check per primitive.
+            if area < 128.0 * 128.0 {
+                continue;
+            }
+            let smallest = covers
+                .iter()
+                .enumerate()
+                .min_by(|a, b| area_of(&a.1.1).total_cmp(&area_of(&b.1.1)))
+                .map(|(i, c)| (i, area_of(&c.1)));
+            match smallest {
+                _ if covers.len() < MAX_COVERS => covers.push((quad.order, rect)),
+                Some((i, least)) if least < area => covers[i] = (quad.order, rect),
+                _ => {}
+            }
+        }
+        if covers.is_empty() {
+            return;
+        }
+        let hidden = |order: DrawOrder, bounds: Bounds<ScaledPixels>| {
+            covers.iter().any(|(above, cover)| order < *above && encloses(cover, &bounds))
+        };
+        self.shadows.retain(|s| {
+            let reach = s.bounds.dilate(ScaledPixels(3.0 * s.blur_radius.0)).union(&s.element_bounds);
+            !hidden(s.order, reach.intersect(&s.content_mask.bounds))
+        });
+        self.quads.retain(|q| !hidden(q.order, q.bounds.intersect(&q.content_mask.bounds)));
+        // Paths and surfaces may ignore their mask: only their own bounds are safe.
+        self.paths.retain(|p| !hidden(p.order, p.bounds));
+        self.monochrome_sprites.retain(|g| {
+            // A transformed glyph can leave its bounds; its mask still clips it.
+            let extent = if g.transformation == TransformationMatrix::unit() {
+                g.bounds.intersect(&g.content_mask.bounds)
+            } else {
+                g.content_mask.bounds
+            };
+            !hidden(g.order, extent)
+        });
+        self.subpixel_sprites.retain(|g| {
+            let extent = if g.transformation == TransformationMatrix::unit() {
+                g.bounds.intersect(&g.content_mask.bounds)
+            } else {
+                g.content_mask.bounds
+            };
+            !hidden(g.order, extent)
+        });
+        self.polychrome_sprites.retain(|i| !hidden(i.order, i.bounds.intersect(&i.content_mask.bounds)));
+        self.surfaces.retain(|v| !hidden(v.order, v.bounds));
     }
 
     /// Whether no two path batches overlap, so a renderer can rasterize every path into one
@@ -651,6 +710,51 @@ pub struct Quad {
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+}
+
+impl Quad {
+    /// The whole device pixels this quad paints fully opaque, if it is a solid, square-cornered
+    /// fill under a plain rectangular mask. A border blends over an opaque fill and stays opaque.
+    fn opaque_rect(&self) -> Option<Bounds<ScaledPixels>> {
+        let mask = &self.content_mask;
+        let square = |c: &Corners<ScaledPixels>| {
+            c.top_left.0 == 0.0 && c.top_right.0 == 0.0 && c.bottom_right.0 == 0.0 && c.bottom_left.0 == 0.0
+        };
+        let fade = &mask.fade;
+        if !self.background.as_solid().is_some_and(|c| c.a >= 1.0)
+            || !square(&self.corner_radii)
+            || !square(&mask.corner_radii)
+            || fade.top_len.0 > 0.0
+            || fade.bottom_len.0 > 0.0
+            || fade.left_len.0 > 0.0
+            || fade.right_len.0 > 0.0
+        {
+            return None;
+        }
+        // Edge pixels a fractional bound only partly covers are antialiased, so not opaque.
+        let clip = self.bounds.intersect(&mask.bounds);
+        let (x0, y0) = (clip.origin.x.0.ceil(), clip.origin.y.0.ceil());
+        let (x1, y1) = ((clip.origin.x.0 + clip.size.width.0).floor(), (clip.origin.y.0 + clip.size.height.0).floor());
+        (x1 > x0 && y1 > y0).then(|| Bounds {
+            origin: point(ScaledPixels(x0), ScaledPixels(y0)),
+            size: size(ScaledPixels(x1 - x0), ScaledPixels(y1 - y0)),
+        })
+    }
+}
+
+fn area_of(b: &Bounds<ScaledPixels>) -> f32 {
+    b.size.width.0 * b.size.height.0
+}
+
+/// Whether `inner` lies inside `outer`; an empty `inner` draws nothing and counts as inside.
+fn encloses(outer: &Bounds<ScaledPixels>, inner: &Bounds<ScaledPixels>) -> bool {
+    if inner.size.width.0 <= 0.0 || inner.size.height.0 <= 0.0 {
+        return true;
+    }
+    inner.origin.x.0 >= outer.origin.x.0
+        && inner.origin.y.0 >= outer.origin.y.0
+        && inner.origin.x.0 + inner.size.width.0 <= outer.origin.x.0 + outer.size.width.0
+        && inner.origin.y.0 + inner.size.height.0 <= outer.origin.y.0 + outer.size.height.0
 }
 
 impl From<Quad> for Primitive {
