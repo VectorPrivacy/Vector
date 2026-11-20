@@ -21,8 +21,10 @@ use ndk::native_window::NativeWindow;
 use raw_window_handle as rwh;
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_long, c_void};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::panic::AssertUnwindSafe;
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The surface as wgpu takes it.
@@ -88,6 +90,11 @@ pub(crate) struct WindowState {
     capslock: Cell<bool>,
     frame_pending: Cell<bool>,
     force_next_frame: Cell<bool>,
+    /// A frame is being drawn; a frame asked for meanwhile is placed when it ends.
+    drawing: Cell<bool>,
+    again: Cell<bool>,
+    /// When the last frame ended, and how long it took.
+    last_frame: Cell<Option<(Instant, Duration)>>,
     /// The last draw's time, its acquire, submit and present, and its scene's quads, shadows,
     /// paths, glyphs and images.
     drawn: Cell<Option<(Duration, [Duration; 3], [usize; 5])>>,
@@ -108,12 +115,15 @@ struct FrameStats {
     since: Option<Instant>,
     /// Per frame, in tenths of a millisecond: layout and paint, rendering, and presenting.
     times: Vec<[u16; 3]>,
+    /// Frames drawn without waiting for vsync.
+    early: usize,
 }
 
 impl FrameStats {
     const EVERY: Duration = Duration::from_secs(5);
 
-    fn add(&mut self, took: Duration, drawing: Duration, present: Duration) {
+    fn add(&mut self, took: Duration, drawing: Duration, present: Duration, early: bool) {
+        self.early += usize::from(early);
         let tenths = |d: Duration| (d.as_micros() / 100).min(u16::MAX as u128) as u16;
         let since = *self.since.get_or_insert_with(Instant::now);
         self.times.push([tenths(took.saturating_sub(drawing)), tenths(drawing), tenths(present)]);
@@ -122,7 +132,7 @@ impl FrameStats {
             return;
         }
         let n = self.times.len();
-        let mut line = format!("gpui_android: {n} frames in {:.1} s", elapsed.as_secs_f32());
+        let mut line = format!("gpui_android: {n} frames in {:.1} s ({} without waiting for vsync)", elapsed.as_secs_f32(), self.early);
         for (i, name) in ["layout and paint", "rendering", "of it presenting"].iter().enumerate() {
             self.times.sort_unstable_by_key(|t| t[i]);
             let ms = |t: u16| t as f32 / 10.;
@@ -130,6 +140,7 @@ impl FrameStats {
         }
         log::info!("{line}");
         self.times.clear();
+        self.early = 0;
         self.since = None;
     }
 }
@@ -138,15 +149,30 @@ thread_local! {
     static FRAME_WINDOW: RefCell<Weak<WindowState>> = const { RefCell::new(Weak::new()) };
 }
 
+/// Wakes the looper for a frame that should not wait for vsync.
+static FRAME_WAKE: OnceLock<OwnedFd> = OnceLock::new();
+
+pub(crate) fn frame_wake_fd() -> RawFd {
+    FRAME_WAKE.get_or_init(bridge::new_eventfd).as_raw_fd()
+}
+
 unsafe extern "C" fn on_frame(_frame_time_nanos: c_long, _data: *mut c_void) {
-    // A panic cannot unwind into the Choreographer: it would abort the process.
-    let drawn = std::panic::catch_unwind(|| {
-        if let Some(window) = FRAME_WINDOW.with(|w| w.borrow().upgrade()) {
+    draw_pending(false);
+}
+
+/// Draws the frame `schedule_frame` asked for, from the choreographer or, when `early`, the
+/// looper.
+pub(crate) fn draw_pending(early: bool) {
+    let Some(window) = FRAME_WINDOW.with(|w| w.borrow().upgrade()) else { return };
+    if !window.frame_pending.replace(false) {
+        return;
+    }
+    // A panic cannot unwind into the Choreographer or the looper: it would abort the process.
+    if std::panic::catch_unwind(AssertUnwindSafe(|| window.request_frame(early))).is_err() {
+        window.drawing.set(false);
+        if window.again.take() {
             window.frame_pending.set(false);
-            window.request_frame();
         }
-    });
-    if drawn.is_err() {
         log::error!("gpui_android: a frame panicked; skipping it");
     }
 }
@@ -178,6 +204,9 @@ impl AndroidWindow {
             capslock: Cell::new(false),
             frame_pending: Cell::new(false),
             force_next_frame: Cell::new(true),
+            drawing: Cell::new(false),
+            again: Cell::new(false),
+            last_frame: Cell::new(None),
             drawn: Cell::new(None),
             slow: Cell::new((None, 0)),
             frames: RefCell::new(FrameStats::default()),
@@ -205,11 +234,30 @@ impl WindowState {
         }
     }
 
-    /// Asks the choreographer for the next vsync, once.
+    fn vsync(&self) -> Duration {
+        Duration::from_secs_f32(1. / self.display().refresh_hz.max(1.))
+    }
+
+    /// Asks for the next frame, once: at the next vsync while frames keep up, at once after
+    /// idle or an overrun, when waiting for vsync would only add latency.
     pub(crate) fn schedule_frame(&self) {
         if self.frame_pending.replace(true) {
             return;
         }
+        if self.drawing.get() {
+            self.again.set(true);
+            return;
+        }
+        let vsync = self.vsync();
+        let late = self.last_frame.get().is_none_or(|(ended, took)| took >= vsync || ended.elapsed() >= vsync);
+        if late {
+            bridge::signal(frame_wake_fd());
+        } else {
+            self.next_vsync();
+        }
+    }
+
+    fn next_vsync(&self) {
         // SAFETY: GPUI's thread has a looper, which the choreographer needs; the callback
         // takes no data.
         unsafe {
@@ -223,27 +271,38 @@ impl WindowState {
         }
     }
 
-    fn request_frame(&self) {
+    fn request_frame(&self, early: bool) {
         if self.surface.borrow().is_none() || self.visibility.get() == WindowVisibility::Hidden {
             return;
         }
         let force_render = self.force_next_frame.replace(false);
         let started = Instant::now();
+        self.drawing.set(true);
         self.callbacks.request_frame.with(|callback| {
             callback(RequestFrameOptions {
                 force_render,
                 ..Default::default()
             })
         });
-        self.note_frame(started.elapsed());
+        self.drawing.set(false);
+        let took = started.elapsed();
+        self.last_frame.set(Some((Instant::now(), took)));
+        self.note_frame(took, early);
+        if self.again.take() {
+            if took >= self.vsync() {
+                bridge::signal(frame_wake_fd());
+            } else {
+                self.next_vsync();
+            }
+        }
     }
 
     /// A slow frame, at most once a second: how long it took, how much of that was the renderer,
     /// and what it drew.
-    fn note_frame(&self, took: Duration) {
+    fn note_frame(&self, took: Duration, early: bool) {
         const SLOW: Duration = Duration::from_millis(100);
         let Some((drawing, [acquire, submit, present], [quads, shadows, paths, glyphs, images])) = self.drawn.take() else { return };
-        self.frames.borrow_mut().add(took, drawing, present);
+        self.frames.borrow_mut().add(took, drawing, present, early);
         if took < SLOW {
             return;
         }

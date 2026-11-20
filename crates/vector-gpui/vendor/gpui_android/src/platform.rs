@@ -284,6 +284,17 @@ impl Platform for AndroidPlatform {
             log::error!("gpui_android: could not watch the bridge");
             return;
         }
+        // SAFETY: the frame eventfd lives for the process.
+        let frame_fd = unsafe { BorrowedFd::borrow_raw(crate::window::frame_wake_fd()) };
+        let registered = looper.add_fd_with_callback(frame_fd, FdEvent::INPUT, |fd, _| {
+            bridge::clear_wake(fd.as_raw_fd());
+            crate::window::draw_pending(true);
+            true
+        });
+        if registered.is_err() {
+            log::error!("gpui_android: could not watch the frame wake");
+            return;
+        }
         self.0.finish_launching.replace(Some(on_finish_launching));
         // Events queued before the looper watched them.
         for event in bridge::take_events() {
