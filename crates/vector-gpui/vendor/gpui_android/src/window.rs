@@ -93,11 +93,45 @@ pub(crate) struct WindowState {
     drawn: Cell<Option<(Duration, [Duration; 3], [usize; 5])>>,
     /// When a slow frame was last logged, and how many have gone unlogged since.
     slow: Cell<(Option<Instant>, u32)>,
+    frames: RefCell<FrameStats>,
     input_handler: CallbackSlot<PlatformInputHandler>,
     /// The field as the keyboard's copy last stood, when both sides agreed.
     field: RefCell<Option<Field>>,
     ime_serial: Cell<i32>,
     callbacks: Callbacks,
+}
+
+/// Drawn frames since the last summary line, which comes every few seconds while frames keep
+/// coming: where the time of a typical frame goes, not only of the slow ones.
+#[derive(Default)]
+struct FrameStats {
+    since: Option<Instant>,
+    /// Per frame, in tenths of a millisecond: layout and paint, rendering, and presenting.
+    times: Vec<[u16; 3]>,
+}
+
+impl FrameStats {
+    const EVERY: Duration = Duration::from_secs(5);
+
+    fn add(&mut self, took: Duration, drawing: Duration, present: Duration) {
+        let tenths = |d: Duration| (d.as_micros() / 100).min(u16::MAX as u128) as u16;
+        let since = *self.since.get_or_insert_with(Instant::now);
+        self.times.push([tenths(took.saturating_sub(drawing)), tenths(drawing), tenths(present)]);
+        let elapsed = since.elapsed();
+        if elapsed < Self::EVERY {
+            return;
+        }
+        let n = self.times.len();
+        let mut line = format!("gpui_android: {n} frames in {:.1} s", elapsed.as_secs_f32());
+        for (i, name) in ["layout and paint", "rendering", "of it presenting"].iter().enumerate() {
+            self.times.sort_unstable_by_key(|t| t[i]);
+            let ms = |t: u16| t as f32 / 10.;
+            line += &format!("; {name} p50 {:.1} ms, p90 {:.1}, max {:.1}", ms(self.times[n / 2][i]), ms(self.times[n * 9 / 10][i]), ms(self.times[n - 1][i]));
+        }
+        log::info!("{line}");
+        self.times.clear();
+        self.since = None;
+    }
 }
 
 thread_local! {
@@ -146,6 +180,7 @@ impl AndroidWindow {
             force_next_frame: Cell::new(true),
             drawn: Cell::new(None),
             slow: Cell::new((None, 0)),
+            frames: RefCell::new(FrameStats::default()),
             input_handler: CallbackSlot::default(),
             field: RefCell::new(None),
             ime_serial: Cell::new(0),
@@ -208,6 +243,7 @@ impl WindowState {
     fn note_frame(&self, took: Duration) {
         const SLOW: Duration = Duration::from_millis(100);
         let Some((drawing, [acquire, submit, present], [quads, shadows, paths, glyphs, images])) = self.drawn.take() else { return };
+        self.frames.borrow_mut().add(took, drawing, present);
         if took < SLOW {
             return;
         }

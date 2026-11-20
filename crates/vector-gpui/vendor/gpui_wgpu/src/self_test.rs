@@ -59,6 +59,7 @@ impl WgpuRenderer {
             texture.destroy();
         }
 
+        lines.push(coverage(current, width as f32 * height as f32));
         let empty = finished(Scene::default());
         for (name, scene) in [("clear, to the screen", &empty), ("this frame, to the screen", current)] {
             let times = time(|| {
@@ -75,6 +76,29 @@ impl WgpuRenderer {
         self.needs_redraw = true;
         lines
     }
+}
+
+/// How many screens' worth of pixels the frame shades, by kind: overdraw on a GPU that pays per
+/// pixel. Opaque quads are the part a smaller layer stack could drop.
+fn coverage(scene: &Scene, screen: f32) -> String {
+    fn area(bounds: Bounds<ScaledPixels>, mask: &ContentMask<ScaledPixels>) -> f32 {
+        let b = bounds.intersect(&mask.bounds);
+        b.size.width.0.max(0.0) * b.size.height.0.max(0.0)
+    }
+    let sum = |it: &mut dyn Iterator<Item = f32>| it.sum::<f32>() / screen;
+    let opaque = sum(&mut scene.quads.iter().filter(|q| q.background.as_solid().is_some_and(|c| c.a >= 1.0)).map(|q| area(q.bounds, &q.content_mask)));
+    let quads = sum(&mut scene.quads.iter().map(|q| area(q.bounds, &q.content_mask)));
+    let shadows = sum(&mut scene.shadows.iter().map(|s| {
+        let margin = ScaledPixels(3.0 * s.blur_radius.0);
+        area(s.bounds.dilate(margin), &s.content_mask)
+    }));
+    let glyphs = sum(&mut scene.monochrome_sprites.iter().map(|g| area(g.bounds, &g.content_mask)));
+    let images = sum(&mut scene.polychrome_sprites.iter().map(|i| area(i.bounds, &i.content_mask)));
+    let paths = sum(&mut scene.paths.iter().map(|p| area(p.bounds, &p.content_mask)));
+    format!(
+        "this frame shades {:.2} screens: quads {quads:.2} ({opaque:.2} opaque), shadows {shadows:.2}, glyphs {glyphs:.2}, images {images:.2}, paths {paths:.2}",
+        quads + shadows + glyphs + images + paths
+    )
 }
 
 fn wait(device: &wgpu::Device) {
