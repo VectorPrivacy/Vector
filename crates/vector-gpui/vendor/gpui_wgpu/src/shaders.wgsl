@@ -62,14 +62,6 @@ fn apply_alpha_correction3(a: vec3<f32>, b: vec3<f32>, g: vec4<f32>) -> vec3<f32
     return a + a * (1.0 - a) * correction;
 }
 
-fn apply_contrast_and_gamma_correction(sample: f32, color: vec3<f32>, enhanced_contrast_factor: f32, gamma_ratios: vec4<f32>) -> f32 {
-    let enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
-    let brightness = color_brightness(color);
-
-    let contrasted = enhance_contrast(sample, enhanced_contrast);
-    return apply_alpha_correction(contrasted, brightness, gamma_ratios);
-}
-
 fn apply_contrast_and_gamma_correction3(sample: vec3<f32>, color: vec3<f32>, enhanced_contrast_factor: f32, gamma_ratios: vec4<f32>) -> vec3<f32> {
     let enhanced_contrast = light_on_dark_contrast(enhanced_contrast_factor, color);
 
@@ -1510,6 +1502,8 @@ struct MonoSpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) color: vec4<f32>,
+    // The contrast and brightness the gamma correction takes: per sprite, not per pixel.
+    @location(2) @interpolate(flat) correction: vec2<f32>,
     @location(3) clip_distances: vec4<f32>,
     @location(4) @interpolate(flat) mask_bounds: vec4<f32>,
     @location(5) @interpolate(flat) mask_radii: vec4<f32>,
@@ -1527,6 +1521,10 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
+    out.correction = vec2<f32>(
+        light_on_dark_contrast(gamma_params.grayscale_enhanced_contrast, out.color.rgb),
+        color_brightness(out.color.rgb),
+    );
     out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
     out.mask_bounds = vec4<f32>(sprite.content_mask.origin, sprite.content_mask.size);
     out.mask_radii = vec4<f32>(sprite.content_radii.top_left, sprite.content_radii.top_right, sprite.content_radii.bottom_right, sprite.content_radii.bottom_left);
@@ -1548,7 +1546,7 @@ fn varying_mask_alpha(point: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>, fad
 @fragment
 fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
     let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
-    let alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, gamma_params.grayscale_enhanced_contrast, gamma_params.gamma_ratios);
+    let alpha_corrected = apply_alpha_correction(enhance_contrast(sample, input.correction.x), input.correction.y, gamma_params.gamma_ratios);
 
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
