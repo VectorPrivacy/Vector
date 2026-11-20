@@ -28,7 +28,7 @@ pub fn strip(
                     paint(t, &mut buf, k as f32);
                     let end = times.get(i + 1).copied().unwrap_or(period);
                     let ms = ((end - t) * 1000.).round().max(1.) as u32;
-                    image::Frame::from_parts(to_bgra(buf), 0, 0, image::Delay::from_numer_denom_ms(ms, 1))
+                    image::Frame::from_parts(crate::media::to_bgra(buf), 0, 0, image::Delay::from_numer_denom_ms(ms, 1))
                 });
                 Arc::new(RenderImage::new(frames.collect::<Vec<_>>()))
             })
@@ -96,9 +96,3 @@ fn erfc(x: f32) -> f32 {
     if x >= 0. { e } else { 2. - e }
 }
 
-fn to_bgra(mut buf: image::RgbaImage) -> image::RgbaImage {
-    for px in buf.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
-    buf
-}
