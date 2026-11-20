@@ -1,0 +1,8 @@
+Vector 0.5.2.
+- Locked Channels, where only those who can post reach the readers
+- A role opens its channels in about a second, and Community joins in under one
+- Choose where join and leave messages go, and where new members land
+- Stereo calls, and one bad connection no longer drags down a whole Voice Channel
+- See whose connection is struggling, on their tile in a call
+- Undo and redo, edit history as a timeline, formatting shortcuts and rich paste
+- Dozens of fixes, Android most of all
