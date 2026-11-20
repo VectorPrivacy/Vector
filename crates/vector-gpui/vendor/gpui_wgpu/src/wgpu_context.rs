@@ -749,7 +749,8 @@ impl WgpuContext {
         let required_usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         let bgra_features = adapter.get_texture_format_features(wgpu::TextureFormat::Bgra8Unorm);
         let rgba_features = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
-        #[cfg(target_family = "wasm")]
+        // wgpu makes GL's Bgra8Unorm an RGBA8 texture fed BGRA, which GLES refuses: every upload
+        // fails and images draw as nothing. RGBA with swizzled uploads works on every GL.
         if adapter.get_info().backend == wgpu::Backend::Gl
             && rgba_features.allowed_usages.contains(required_usages)
         {
