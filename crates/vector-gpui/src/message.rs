@@ -25,7 +25,7 @@ pub mod types {
     }
 
     /// The desktop's picker cache, read before a content URI: uri -> (bytes, extension, name,
-    /// size, when cached). Pickers here hand over files, so it stays empty.
+    /// size, when cached). Pickers here hand over files, held here only while one compresses.
     #[cfg(target_os = "android")]
     #[allow(clippy::type_complexity)]
     pub static ANDROID_FILE_CACHE: std::sync::LazyLock<
@@ -84,7 +84,39 @@ pub fn savings_percent(c: &types::CachedCompressedImage) -> u32 {
 
 /// A picked image compressed as a default send would: resized, stripped and re-encoded.
 pub fn precompress(path: &std::path::Path) -> Result<types::CachedCompressedImage, String> {
-    compression::compress_image_internal(&path.to_string_lossy()).map(crate::jxl::outbound)
+    let key = path.to_string_lossy().into_owned();
+    #[cfg(target_os = "android")]
+    let _held = Held::new(&key)?;
+    compression::compress_image_internal(&key).map(crate::jxl::outbound)
+}
+
+/// The desktop's Android path reads its picker cache before a content URI; a picked file here is
+/// a path, so it sits in that cache while it compresses.
+#[cfg(target_os = "android")]
+struct Held(String);
+
+#[cfg(target_os = "android")]
+impl Held {
+    fn new(key: &str) -> Result<Self, String> {
+        // i18n-exempt: logged, never shown
+        let bytes = std::fs::read(key).map_err(|e| format!("Failed to read file: {e}"))?;
+        let path = std::path::Path::new(key);
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let size = bytes.len() as u64;
+        types::ANDROID_FILE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_owned(), (std::sync::Arc::new(bytes), ext, name, size, std::time::Instant::now()));
+        Ok(Self(key.to_owned()))
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Drop for Held {
+    fn drop(&mut self) {
+        types::ANDROID_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
 }
 
 /// The desktop client's send processing, then this client's JPEG XL. Uncompressed, the picture

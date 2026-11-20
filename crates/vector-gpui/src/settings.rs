@@ -834,9 +834,9 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
     };
     let look = crate::kit::SelectLook { lead: Some(std::rc::Rc::new(lead)), check: ACCENT, priority: 2 };
     let (toggle, pick) = (on.clone(), on.clone());
-    crate::kit::select_look(
+    div().w(px(230.)).min_w(px(120.)).flex_shrink(1.).child(crate::kit::select_look(
         "theme-picker",
-        230.,
+        f32::INFINITY,
         16.,
         &choices,
         &[],
@@ -845,7 +845,8 @@ fn theme_picker(s: &Settings, on: &OnAct) -> AnyElement {
         look,
         move |w, cx| toggle(Act::Select("theme"), w, cx),
         move |v, w, cx| pick(Act::Pick("theme", v), w, cx),
-    )
+    ))
+    .into_any_element()
 }
 
 /// A row for the toggle `key`, grouped or not.
@@ -988,10 +989,10 @@ fn language_block(s: &Settings, on: &OnAct) -> AnyElement {
             .gap(px(8.))
             .text_color(c(0xb2b2b2))
             .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(c(0xFCA559)))
-            .child(text)
+            .child(div().flex_1().min_w_0().child(text))
     };
     let status: Option<AnyElement> = if l.checking {
-        Some(div().flex().items_center().gap(px(8.)).text_color(c(0xb2b2b2)).child(spinner("lang-check")).child(t::language_checking()).into_any_element())
+        Some(div().flex().items_center().gap(px(8.)).text_color(c(0xb2b2b2)).child(spinner("lang-check")).child(div().flex_1().min_w_0().child(t::language_checking())).into_any_element())
     } else if let Some(e) = &l.error {
         Some(
             div()
@@ -999,7 +1000,7 @@ fn language_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .items_center()
                 .justify_between()
                 .gap(px(12.))
-                .child(warn(t::language_check_failed(e.as_str())))
+                .child(warn(t::language_check_failed(e.as_str())).flex_1().min_w_0())
                 .child(small_button("lang-retry", t::language_retry(), || Act::LanguagesRetry, on))
                 .into_any_element(),
         )
@@ -1024,7 +1025,7 @@ fn language_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .hover(|d| d.text_color(c(ACCENT)))
                 .on_click(click(on, || Act::HelpTranslate))
                 .child(svg().path("icons/globe.svg").size(px(16.)).flex_shrink_0().text_color(c(PRIMARY)))
-                .child(t::language_help_translate()),
+                .child(div().min_w_0().child(t::language_help_translate())),
         )
         .into_any_element()
 }
@@ -3172,9 +3173,9 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
         })
         .collect();
     let disabled: Vec<&str> = v.models.iter().filter(|m| v.memory_mb < m.ram as u64).map(|m| m.name).collect();
-    let select = crate::kit::select_with(
+    let select = div().w(px(230.)).min_w(px(120.)).flex_shrink(1.).child(crate::kit::select_with(
         "whisper-model",
-        230.,
+        f32::INFINITY,
         12.,
         &choices,
         &disabled,
@@ -3192,7 +3193,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
             let on = on.clone();
             move |v, w, cx| on(Act::Pick("whisper-model", v), w, cx)
         },
-    );
+    ));
     let trash = current.filter(|m| m.downloaded && !busy).map(|_| {
         div()
             .id("delete-model")
@@ -3224,7 +3225,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
             .gap(px(8.))
             .text_color(c(0xb2b2b2))
             .child(div().size(px(7.)).rounded_full().flex_shrink_0().bg(c(0xFCA559)))
-            .child(text)
+            .child(div().flex_1().min_w_0().child(text))
             .into_any_element()
     };
     let status: Option<AnyElement> = if let Some(d) = &v.download {
@@ -3272,7 +3273,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .items_center()
                 .justify_between()
                 .child(label)
-                .child(div().flex().items_center().gap(px(8.)).children(trash).child(select)),
+                .child(div().flex().items_center().gap(px(8.)).min_w_0().flex_shrink(1.).children(trash).child(select)),
         )
         .child(div().mt(px(8.)).min_h(px(24.)).text_size(px(14.)).line_height(px(24.)).children(status));
     let action: Option<AnyElement> = if busy {

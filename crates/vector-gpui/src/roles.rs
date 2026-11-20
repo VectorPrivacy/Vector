@@ -943,7 +943,7 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                 .collect();
                 let (t, pk) = (on.clone(), on.clone());
                 display = display
-                    .child(div().mt(px(10.)).child(crate::kit::select_look("role-access", 400., 14., &choices, &[], e.draft.channel_id.as_deref().unwrap_or(""), r.access_open, crate::kit::SelectLook { priority: crate::commsettings::LIST_PRIORITY, ..Default::default() }, move |w, cx| t(CsAct::Role(Act::AccessOpen), w, cx), move |v, w, cx| pk(CsAct::Role(Act::Access(v)), w, cx))))
+                    .child(div().mt(px(10.)).w(px(400.)).max_w_full().child(crate::kit::select_look("role-access", f32::INFINITY, 14., &choices, &[], e.draft.channel_id.as_deref().unwrap_or(""), r.access_open, crate::kit::SelectLook { priority: crate::commsettings::LIST_PRIORITY, ..Default::default() }, move |w, cx| t(CsAct::Role(Act::AccessOpen), w, cx), move |v, w, cx| pk(CsAct::Role(Act::Access(v)), w, cx))))
                     .child(hint(t::roles_access_hint()).mt(px(10.)));
             } else {
                 display = display.child(

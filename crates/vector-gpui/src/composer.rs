@@ -110,6 +110,8 @@ pub struct TextInput {
     subs: std::cell::RefCell<(SharedString, std::rc::Rc<[Sub]>)>,
     /// An autocomplete is open: its keys go to it as `Nav`.
     nav: bool,
+    /// A tap outside leaves it focused: its frame decides instead.
+    held: bool,
     edges: bool,
     colors: Option<bool>,
     chip: bool,
@@ -2203,6 +2205,14 @@ impl Render for TextInput {
             .id("text-input")
             .role(role)
             .aria_placeholder(self.placeholder.clone())
+            .when(cfg!(target_os = "android") && !self.held, |d| {
+                // A tap elsewhere drops the keyboard, as a page blurs its field.
+                d.on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    if this.focus_handle.is_focused(window) {
+                        window.blur(cx);
+                    }
+                }))
+            })
             .when(!self.look.masked, |d| d.aria_value(self.content.clone()))
             .flex()
             .key_context("TextInput")
@@ -2344,6 +2354,7 @@ impl TextInput {
             max_chars: None,
             subs: Default::default(),
             nav: false,
+            held: false,
             edges: false,
             colors: None,
             chip: false,
@@ -2486,6 +2497,12 @@ impl TextInput {
     /// Draws stock emoji as Twemoji art.
     pub fn twemoji(mut self) -> Self {
         self.twemoji = true;
+        self
+    }
+
+    /// A tap outside doesn't blur it; the frame around it decides.
+    pub fn held(mut self) -> Self {
+        self.held = true;
         self
     }
 

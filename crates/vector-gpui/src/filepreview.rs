@@ -280,7 +280,9 @@ impl FilePreview {
         let compressed = compress_offered.then(|| {
             let (file, flag) = (path.clone(), cancel.clone());
             let task = cx.background_executor().spawn(async move {
-                crate::shared::cancel::scoped(flag, || crate::message::precompress(&file)).ok()
+                crate::shared::cancel::scoped(flag, || crate::message::precompress(&file))
+                    .inspect_err(|e| log::warn!("precompress {}: {e}", file.display()))
+                    .ok()
             });
             let shared = task.shared();
             let watch = shared.clone();

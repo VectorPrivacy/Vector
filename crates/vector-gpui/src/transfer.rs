@@ -646,6 +646,10 @@ impl SecurityFlow {
                 as Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>
         });
         let mut body = card("xfer-card").child(head("icons/devices.svg", title.into(), close));
+        // The code and its copy button share one line on a phone too: a monospace glyph is ~0.6em.
+        let room = (f32::from(window.viewport_size().width) - 32.).min(440.) - 42. - 30. - 8. - 38.;
+        let glyphs = x.code.chars().count().max(1) as f32;
+        let code_size = ((room - glyphs * 0.32) / (glyphs * 0.62)).clamp(11., 16.);
         let link = |id: &'static str,
                     text: SharedString,
                     enabled: bool,
@@ -810,7 +814,7 @@ impl SecurityFlow {
                                         .cursor_pointer()
                                         .on_click(on(Self::copy_code))
                                         .font_family(crate::markdown::MONO)
-                                        .text_size(px(16.))
+                                        .text_size(px(code_size))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child(crate::kit::spaced(x.code.as_ref(), 0.32)),
                                 )

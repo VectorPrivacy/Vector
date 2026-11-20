@@ -31,7 +31,8 @@ use crate::theme::*;
 use crate::timeline;
 use chrono::TimeZone;
 
-pub(crate) const CHROME_H: f32 = 32.;
+/// The title strip; Android has none, so what hangs under it starts at the top.
+pub(crate) const CHROME_H: f32 = if cfg!(target_os = "android") { 0. } else { 32. };
 pub(crate) const RAIL_W: f32 = 201.;
 /// The collapsed rail, its border included.
 pub(crate) const RAIL_SLIM_W: f32 = 73.;
@@ -718,6 +719,7 @@ impl VectorApp {
         let input = cx.new(|cx| {
             let mut t = TextInput::new(t::composer_placeholder(), cx)
                 .multiline(px(126.))
+                .held()
                 .twemoji()
                 .decorated()
                 .spellchecked();
@@ -962,6 +964,15 @@ impl VectorApp {
         {
             let app = cx.entity().downgrade();
             window.on_system_back(cx, move |window, cx| {
+                let security = app.upgrade().map(|a| a.read(cx).security.clone());
+                if security.is_some_and(|s| s.update(cx, |f, cx| f.back(cx))) {
+                    return;
+                }
+                // A field or the message list keeps Escape for itself; Back is for layers.
+                // i18n-exempt: key context names
+                if window.context_stack().iter().any(|k| k.contains("TextInput") || k.contains("Timeline")) {
+                    window.blur(cx);
+                }
                 // The layer a keyboard's Escape would close, then the step a back arrow takes.
                 if window.dispatch_keystroke(gpui::Keystroke::parse("escape").expect("a key name"), cx) {
                     return;
@@ -7624,6 +7635,9 @@ impl VectorApp {
 impl VectorApp {
     /// `.chrome-update`: a find is announced in the title strip until it is acted on.
     fn update_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if cfg!(target_os = "android") {
+            return None;
+        }
         let version = match (&self.updates.phase, &self.updates.found) {
             (crate::settings::UpdPhase::Available, Some((v, _))) => v.clone(),
             _ => return None,
@@ -10741,6 +10755,9 @@ fn composer(
         None
     };
     let bar = if replying { Some(mode) } else { held.as_ref() };
+    // A tap off the frame drops the keyboard, as a page blurs its field; its own buttons keep it.
+    let blur_out = cfg!(target_os = "android") && picker.is_none() && attach.is_none() && popup.is_none();
+    let typing = input.clone();
     let mut boxed = div()
         .child(
             gpui::canvas(move |b, _, _| measure.set(Some(b)), |_, _, _, _| {})
@@ -10750,6 +10767,13 @@ fn composer(
                 .size_full(),
         )
         .relative()
+        .when(blur_out, |d| {
+            d.on_mouse_down_out(move |_, window, cx| {
+                if typing.read(cx).focus_handle(cx).is_focused(window) {
+                    window.blur(cx);
+                }
+            })
+        })
         .flex_shrink_0()
         .px(px(8.))
         .pt(px(5. + 34. * opened + if commanding { 34. } else { 0. }))

@@ -334,6 +334,33 @@ impl SecurityFlow {
         cx.notify();
     }
 
+    /// Android's Back on the topmost card: closes what can close, and holds the rest.
+    pub fn back(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some((_, tx)) = self.confirm.take() {
+            let _ = tx.send(false);
+            cx.notify();
+            return true;
+        }
+        if let Some(p) = &self.prompt {
+            if p.mode != Mode::Checking {
+                self.answer(None, cx);
+            }
+            return true;
+        }
+        if self.migration.is_some() {
+            return true;
+        }
+        if self.xfer.is_some() {
+            self.close_transfer(cx);
+            return true;
+        }
+        if self.keys.is_some() {
+            self.close_keys(cx);
+            return true;
+        }
+        false
+    }
+
     // ── The keys card ──────────────────────────────────────────────────────────
 
     fn close_keys(&mut self, cx: &mut Context<Self>) {
@@ -1090,11 +1117,14 @@ pub(crate) fn head_tinted(
                 .aria_label(t::dialog_close())
                 .group("vcard-x")
                 .self_start()
-                .w(px(23.7))
-                .h(px(22.))
+                // A finger-sized target around the same small glyph.
+                .w(px(23.7 + 20.))
+                .h(px(22. + 22.))
+                .m(px(-11.))
+                .mx(px(-10.))
                 .flex()
                 .justify_center()
-                .pt(px(6.))
+                .pt(px(6. + 11.))
                 .cursor_pointer()
                 .on_click(close)
                 .child(
