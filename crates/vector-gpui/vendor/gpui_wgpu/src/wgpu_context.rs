@@ -522,6 +522,13 @@ impl WgpuContext {
             BACKENDS.get_or_init(|| backends);
             return make(backends);
         }
+        // `adb shell setprop debug.vector.gpu gl` (or `gl-lean`) draws any phone the PowerVR way.
+        #[cfg(target_os = "android")]
+        if android_property(c"debug.vector.gpu").starts_with("gl") {
+            log::info!("debug.vector.gpu: drawing with GL");
+            BACKENDS.get_or_init(|| wgpu::Backends::GL);
+            return make(wgpu::Backends::GL);
+        }
         #[cfg(target_os = "android")]
         if android_powervr() {
             log::info!("PowerVR: drawing with GL, without loading its Vulkan driver");
@@ -922,20 +929,25 @@ mod tests {
 /// broken Vulkan driver can hang in instance creation, before any adapter can be looked at.
 #[cfg(target_os = "android")]
 fn android_powervr() -> bool {
+    [c"ro.hardware.vulkan", c"ro.hardware.egl"].iter().any(|key| {
+        let value = android_property(key).to_ascii_lowercase();
+        log::info!("{}={value}", key.to_string_lossy());
+        value.contains("powervr")
+    })
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn android_property(key: &std::ffi::CStr) -> String {
     use std::ffi::{CStr, c_char, c_int};
     unsafe extern "C" {
         fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
     }
-    [c"ro.hardware.vulkan", c"ro.hardware.egl"].iter().any(|key| {
-        let mut value = [0 as c_char; 92];
-        // SAFETY: PROP_VALUE_MAX (92) bytes is the most the call writes, NUL included.
-        let value = unsafe {
-            __system_property_get(key.as_ptr(), value.as_mut_ptr());
-            CStr::from_ptr(value.as_ptr())
-        }
-        .to_string_lossy()
-        .to_ascii_lowercase();
-        log::info!("{}={value}", key.to_string_lossy());
-        value.contains("powervr")
-    })
+    let mut value = [0 as c_char; 92];
+    // SAFETY: PROP_VALUE_MAX (92) bytes is the most the call writes, NUL included.
+    unsafe {
+        __system_property_get(key.as_ptr(), value.as_mut_ptr());
+        CStr::from_ptr(value.as_ptr())
+    }
+    .to_string_lossy()
+    .into_owned()
 }

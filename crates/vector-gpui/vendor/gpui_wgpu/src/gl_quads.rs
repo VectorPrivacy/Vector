@@ -36,6 +36,11 @@ pub(crate) fn pipeline(
         LEAN => return build("quads", "vs_quad_lean", "fs_quad", &lean_module(device)),
         _ => {}
     }
+    if forced_lean() {
+        log::warn!("quads: the lean vertex stage, as asked");
+        CHOSEN.store(LEAN, Ordering::Relaxed);
+        return build("quads", "vs_quad_lean", "fs_quad", &lean_module(device));
+    }
     let (pipeline, error) = caught(device, || build("quads", "vs_quad", "fs_quad", stock));
     let Some(error) = error else {
         CHOSEN.store(STOCK, Ordering::Relaxed);
@@ -54,6 +59,15 @@ pub(crate) fn pipeline(
     }
     CHOSEN.store(LEAN, Ordering::Relaxed);
     pipeline
+}
+
+/// Lets a GPU that takes `vs_quad` reproduce what a refusing one draws: `debug.vector.gpu=gl-lean`
+/// on Android, `VECTOR_GL_LEAN=1` elsewhere.
+fn forced_lean() -> bool {
+    #[cfg(target_os = "android")]
+    return crate::wgpu_context::android_property(c"debug.vector.gpu") == "gl-lean";
+    #[cfg(not(target_os = "android"))]
+    std::env::var_os("VECTOR_GL_LEAN").is_some()
 }
 
 fn lean_module(device: &wgpu::Device) -> wgpu::ShaderModule {
