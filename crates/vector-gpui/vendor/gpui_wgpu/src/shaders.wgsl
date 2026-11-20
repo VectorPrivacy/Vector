@@ -598,13 +598,44 @@ fn corners_vec(c: Corners) -> vec4<f32> {
     return vec4<f32>(c.top_left, c.top_right, c.bottom_right, c.bottom_left);
 }
 
+// Half floats by hand: `pack2x16float` needs a capability some Vulkan drivers lack. For the
+// non-negative lengths these carry; anything under 2^-14 is zero.
+fn half_bits(v: f32) -> u32 {
+    let b = bitcast<u32>(max(v, 0.0));
+    let e = i32((b >> 23u) & 0xffu) - 112;
+    if (e <= 0) {
+        return 0u;
+    }
+    if (e >= 31) {
+        return 0x7bffu;
+    }
+    let m = b & 0x7fffffu;
+    return min(((u32(e) << 10u) | (m >> 13u)) + ((m >> 12u) & 1u), 0x7bffu);
+}
+
+fn half_value(h: u32) -> f32 {
+    let e = (h >> 10u) & 0x1fu;
+    if (e == 0u) {
+        return 0.0;
+    }
+    return bitcast<f32>(((e + 112u) << 23u) | ((h & 0x3ffu) << 13u));
+}
+
+fn pack_halves(a: f32, b: f32) -> u32 {
+    return half_bits(a) | (half_bits(b) << 16u);
+}
+
+fn unpack_halves(packed: u32) -> vec2<f32> {
+    return vec2<f32>(half_value(packed & 0xffffu), half_value(packed >> 16u));
+}
+
 fn pack_corners(c: Corners) -> vec2<u32> {
-    return vec2<u32>(pack2x16float(vec2<f32>(c.top_left, c.top_right)), pack2x16float(vec2<f32>(c.bottom_right, c.bottom_left)));
+    return vec2<u32>(pack_halves(c.top_left, c.top_right), pack_halves(c.bottom_right, c.bottom_left));
 }
 
 fn unpack_corners(packed: vec2<u32>) -> Corners {
-    let a = unpack2x16float(packed.x);
-    let b = unpack2x16float(packed.y);
+    let a = unpack_halves(packed.x);
+    let b = unpack_halves(packed.y);
     return Corners(a.x, a.y, b.x, b.y);
 }
 
@@ -622,7 +653,7 @@ fn quad_vertex(unit_vertex: vec2<f32>, bounds: Bounds, mask: Bounds, radii: Corn
     out.bounds = bounds_vec(bounds);
     out.content_mask = bounds_vec(mask);
     out.shape = vec4<u32>(pack_corners(radii),
-        pack2x16float(vec2<f32>(borders.top, borders.right)), pack2x16float(vec2<f32>(borders.bottom, borders.left)));
+        pack_halves(borders.top, borders.right), pack_halves(borders.bottom, borders.left));
     out.params = vec4<u32>(pack_corners(mask_radii),
         (tag & 0xffu) | ((color_space & 0xffu) << 8u) | ((border_style & 0xffu) << 16u), bitcast<u32>(angle));
     out.content_fade0 = vec4<f32>(fade.top, fade.top_len, fade.bottom, fade.bottom_len);
@@ -661,8 +692,8 @@ fn varying_quad(input: QuadVarying) -> QuadFrag {
     quad.color_space = (input.params.z >> 8u) & 0xffu;
     quad.gradient_angle_or_pattern_height = bitcast<f32>(input.params.w);
     quad.corner_radii = unpack_corners(input.shape.xy);
-    let tr = unpack2x16float(input.shape.z);
-    let bl = unpack2x16float(input.shape.w);
+    let tr = unpack_halves(input.shape.z);
+    let bl = unpack_halves(input.shape.w);
     quad.border_widths = Edges(tr.x, tr.y, bl.x, bl.y);
     return quad;
 }
