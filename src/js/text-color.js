@@ -475,10 +475,27 @@ function tcMarkSpans(text, spans) {
     const atomic = [...text.matchAll(TC_ATOMIC)].map((m) => [m.index, m.index + m[0].length])
         .concat(times.filter((t) => t.to <= n).map((t) => [index[t.from], index[t.to]]));
     const lineStart = (at) => at === 0 || text[at - 1] === '\n';
+    // Look-backs by position, so walking an edge along a long line stays linear: the last
+    // newline, `](`, `<` and `>` at or before each index, and where its run of quote marks starts.
+    const len = text.length;
+    const prevNl = new Int32Array(len), prevLp = new Int32Array(len), prevLt = new Int32Array(len), prevGt = new Int32Array(len);
+    const quotedFrom = new Int32Array(len + 1);
+    const nextNl = new Int32Array(len + 1).fill(-1);
+    for (let i = 0; i < len; i++) {
+        const c = text[i];
+        prevNl[i] = c === '\n' ? i : i ? prevNl[i - 1] : -1;
+        prevLp[i] = c === ']' && text[i + 1] === '(' ? i : i ? prevLp[i - 1] : -1;
+        prevLt[i] = c === '<' ? i : i ? prevLt[i - 1] : -1;
+        prevGt[i] = c === '>' ? i : i ? prevGt[i - 1] : -1;
+        quotedFrom[i + 1] = c === ' ' || c === '\t' || c === '>' ? quotedFrom[i] : i + 1;
+    }
+    for (let i = len - 1; i >= 0; i--) nextNl[i] = text[i] === '\n' ? i : nextNl[i + 1];
+    // `text.lastIndexOf('\n', from)`, whose start clamps to 0.
+    const lastNl = (from) => (len ? prevNl[Math.min(Math.max(from, 0), len - 1)] : -1);
     const lineOf = (at) => {
-        const s = text.lastIndexOf('\n', at - 1) + 1;
-        const e = text.indexOf('\n', at);
-        return [s, e < 0 ? text.length : e];
+        const s = lastNl(at - 1) + 1;
+        const e = at < len ? nextNl[Math.max(at, 0)] : -1;
+        return [s, e < 0 ? len : e];
     };
     // A sentinel touching a URL joins it for the linkifier, so an edge in or against
     // an atomic run moves past the whole word around it, and the blanks beside it.
@@ -509,12 +526,14 @@ function tcMarkSpans(text, spans) {
         if (c === undefined || !SIGNIFICANT.test(c)) return false;
         if (c === '!') return text[at + 1] === '[' || text[at - 1] === '<';
         if (c === '(') return text[at - 1] === ']';
-        if (c === ')') return text.lastIndexOf('](', at) > text.lastIndexOf('\n', at);
+        if (c === ')') return prevLp[at] > prevNl[at];
         if (c === '#') return (at === 0 || /[\s#-]/.test(text[at - 1])) && (at + 1 >= text.length || /[\s#]/.test(text[at + 1]));
         if (c === '<') return HTML_OPEN.test(text[at + 1] ?? '');
         if (c === '>') {
-            const before = text.slice(text.lastIndexOf('\n', at - 1) + 1, at);
-            return /^[ \t>]*$/.test(before) || /<[A-Za-z/!?][^<>]*$/.test(before);
+            // `before` is the line up to here: all quote marks, or its last `<` opens a tag still open.
+            const s = lastNl(at - 1) + 1;
+            const lt = at ? prevLt[at - 1] : -1;
+            return quotedFrom[at] <= s || (lt >= s && lt + 1 < at && HTML_OPEN.test(text[lt + 1]) && prevGt[at - 1] < lt);
         }
         return true;
     };
