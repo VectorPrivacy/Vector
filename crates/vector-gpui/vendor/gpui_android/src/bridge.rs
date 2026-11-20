@@ -394,6 +394,16 @@ pub(crate) fn set_clipboard(text: &str) {
     });
 }
 
+/// Asks the UI thread to raise the accessibility events GPUI's updates queued.
+pub(crate) fn a11y_raise() {
+    with_env(|env, class| env.call_static_method(class, "a11yRaise", "()V", &[]).map(drop));
+}
+
+/// Tells Android the accessibility tree changed wholesale, so a screen reader asks again.
+pub(crate) fn a11y_changed() {
+    with_env(|env, class| env.call_static_method(class, "a11yChanged", "()V", &[]).map(drop));
+}
+
 pub(crate) fn clipboard() -> Option<String> {
     with_env(|env, class| {
         let value = env

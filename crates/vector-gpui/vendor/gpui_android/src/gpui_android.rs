@@ -7,6 +7,7 @@
 //! that thread once the activity starts, and which runs the app as a desktop `main` would.
 #![cfg(target_os = "android")]
 
+mod a11y;
 mod bridge;
 mod dispatcher;
 mod display;

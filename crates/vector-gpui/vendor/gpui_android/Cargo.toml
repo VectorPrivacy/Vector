@@ -10,6 +10,8 @@ path = "src/gpui_android.rs"
 doctest = false
 
 [target.'cfg(target_os = "android")'.dependencies]
+accesskit = "0.24.1"
+accesskit_android = "0.7.5"
 anyhow = "1.0.86"
 calloop = "0.14.3"
 futures = "0.3.34"

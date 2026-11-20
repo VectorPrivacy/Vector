@@ -6,9 +6,13 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
+import android.view.View
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.OnBackPressedCallback
 import io.vectorapp.MainActivity
 import java.lang.ref.WeakReference
@@ -64,6 +68,21 @@ object Bridge {
     @JvmStatic external fun nativeImeAction(action: Int)
     /** The picker for `id` closed: its files' cached copies, or null when cancelled. */
     @JvmStatic external fun nativePicked(id: Int, paths: Array<String>?)
+
+    /** GPUI's accessibility tree, served as virtual views of `host` (gpui_android/src/a11y.rs). */
+    @JvmStatic external fun nativeA11yNode(host: View, id: Int): AccessibilityNodeInfo?
+    @JvmStatic external fun nativeA11yFocus(host: View, kind: Int): AccessibilityNodeInfo?
+    @JvmStatic external fun nativeA11yAction(host: View, id: Int, action: Int, arguments: Bundle?): Boolean
+    @JvmStatic external fun nativeA11yHover(host: View, action: Int, x: Float, y: Float): Boolean
+    @JvmStatic external fun nativeA11yRaise(host: View)
+    /** Every accessibility service is off. */
+    @JvmStatic external fun nativeA11yOff()
+
+    @JvmStatic fun a11yRaise() = ui { nativeA11yRaise(it.view) }
+
+    @JvmStatic fun a11yChanged() = ui {
+        it.view.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+    }
 
     @JvmStatic fun showKeyboard() = ui { it.view.showKeyboard() }
 

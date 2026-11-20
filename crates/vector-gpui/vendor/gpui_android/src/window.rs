@@ -746,6 +746,14 @@ impl PlatformWindow for AndroidWindow {
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 
+    fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        crate::a11y::init(callbacks);
+    }
+
+    fn a11y_tree_update(&self, tree_update: gpui::accesskit::TreeUpdate) {
+        crate::a11y::update(tree_update);
+    }
+
     fn insets(&self) -> WindowInsets {
         self.0.current_insets()
     }

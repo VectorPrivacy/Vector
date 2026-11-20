@@ -3,6 +3,7 @@ package io.vectorapp.gpui
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
+import android.os.Bundle
 import android.text.InputType
 import android.text.Selection
 import android.text.SpannableStringBuilder
@@ -12,6 +13,9 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.accessibility.AccessibilityManager
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeProvider
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -29,11 +33,33 @@ class GpuiView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     private var serial = 0
     private var reported: List<Any>? = null
     private val composing = UnderlineSpan()
+    private val access = context.getSystemService(AccessibilityManager::class.java)
+
+    private val nodes = object : AccessibilityNodeProvider() {
+        override fun createAccessibilityNodeInfo(virtualViewId: Int): AccessibilityNodeInfo? =
+            Bridge.nativeA11yNode(this@GpuiView, virtualViewId)
+
+        override fun findFocus(focus: Int): AccessibilityNodeInfo? = Bridge.nativeA11yFocus(this@GpuiView, focus)
+
+        override fun performAction(virtualViewId: Int, action: Int, arguments: Bundle?) =
+            Bridge.nativeA11yAction(this@GpuiView, virtualViewId, action, arguments)
+    }
 
     init {
         holder.addCallback(this)
         isFocusable = true
         isFocusableInTouchMode = true
+        access?.addAccessibilityStateChangeListener { on -> if (!on) Bridge.nativeA11yOff() }
+    }
+
+    override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider = nodes
+
+    /** Explore by touch arrives as hover; a mouse's hover, with no screen reader on, is not for it. */
+    override fun dispatchHoverEvent(event: MotionEvent): Boolean {
+        if (access?.isTouchExplorationEnabled == true && Bridge.nativeA11yHover(this, event.action, event.x, event.y)) {
+            return true
+        }
+        return super.dispatchHoverEvent(event)
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) = Bridge.nativeSurfaceCreated(holder.surface)
