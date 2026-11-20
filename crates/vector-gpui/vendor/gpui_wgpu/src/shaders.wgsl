@@ -690,8 +690,14 @@ fn varying_quad(input: QuadVarying) -> QuadFrag {
     return quad;
 }
 
+// Inset 1 - 1/sqrt(2) of a radius, the rect's corner lies on the arc's midpoint, so it is inside
+// every corner whatever the border does to the inner radius: the margin covers antialiasing.
+fn round_inset(radius: f32) -> f32 {
+    return select(0.5, 0.2929 * radius + 1.0, radius > 0.0);
+}
+
 fn solid_inset(border: f32, radius0: f32, radius1: f32) -> f32 {
-    return max(select(border + 0.5, 0.0, border == 0.0), max(radius0, radius1)) + 0.5;
+    return select(border + 0.5, 0.0, border == 0.0) + round_inset(max(radius0, radius1));
 }
 
 // Where `fs_quad` would return the solid background unmasked, conservatively, so the fragment
@@ -708,7 +714,7 @@ fn quad_solid_rect(tag: u32, bounds: Bounds, radii: Corners, borders: Edges,
         solid_inset(borders.right, radii.top_right, radii.bottom_right),
         solid_inset(borders.bottom, radii.bottom_left, radii.bottom_right));
     let mask_radius = max(max(mask_radii.top_left, mask_radii.top_right), max(mask_radii.bottom_right, mask_radii.bottom_left));
-    let mask_inset = select(0.5, mask_radius + 1.0, mask_radius > 0.0);
+    let mask_inset = round_inset(mask_radius) + select(0.0, 0.5, mask_radius > 0.0);
     lo = max(lo, mask.origin + mask_inset);
     hi = min(hi, mask.origin + mask.size - mask_inset);
     if (fade.top_len > 0.0) {
