@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Vector themed-icon (monochrome) layer.
+     108dp adaptive-icon canvas; mark is 52 tall, centred, inside the 66dp safe zone.
+     The launcher replaces the colour; only shape and alpha are used. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.10587"
+        android:scaleY="0.10587"
+        android:translateX="26.896"
+        android:translateY="26.896">
+        <!-- Bottom chevron -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillAlpha="0.25"
+            android:pathData="M397.597 296.797 l-110.404 100.329 c-17.689 16.074 -44.696 16.074 -62.385 0 l-110.404 -100.329 c-.032 -.029 -.059 -.063 -.093 -.094 v71.293 c0 12.3 5.2 24.123 14.265 32.435 l97.682 89.573 c8.139 7.463 18.7 11.572 29.743 11.572 s21.604 -4.11 29.743 -11.572 l97.682 -89.573 c9.066 -8.313 14.265 -20.135 14.265 -32.435 v-71.293 c-.032 .029 -.059 .063 -.093 .094 h0 Z" />
+        <!-- Middle chevron -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillAlpha="0.57"
+            android:pathData="M397.597 177.965 l-110.404 100.329 c-17.689 16.074 -44.696 16.074 -62.385 0 l-110.404 -100.329 c-.032 -.029 -.059 -.063 -.093 -.094 v71.293 c0 12.3 5.2 24.123 14.265 32.435 l97.682 89.573 c8.139 7.463 18.7 11.572 29.743 11.572 s21.604 -4.11 29.743 -11.572 l97.682 -89.573 c9.066 -8.313 14.265 -20.135 14.265 -32.435 v-71.293 c-.032 .029 -.059 .063 -.093 .094 h0 Z" />
+        <!-- Top V -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M362.442 10.435 c-18.461 .476 -32.94 16.115 -32.94 34.583 v57.86 c0 9.703 -4.072 18.961 -11.222 25.519 l-31.455 28.843 c-8.729 8.005 -19.761 12.025 -30.825 12.148 -11.064 -.124 -22.097 -4.144 -30.825 -12.148 l-31.455 -28.843 c-7.152 -6.558 -11.222 -15.816 -11.222 -25.519 v-57.86 c0 -18.467 -14.478 -34.106 -32.94 -34.583 -19.093 -.493 -34.726 14.838 -34.726 33.82 v84.254 c0 12.3 5.2 24.123 14.265 32.435 l97.682 89.573 c8.007 7.342 18.371 11.383 29.221 11.511 10.849 -.13 21.213 -4.169 29.221 -11.511 l97.682 -89.573 c9.065 -8.313 14.265 -20.134 14.265 -32.435 V44.255 c0 -18.982 -15.633 -34.313 -34.726 -33.82 h0 Z" />
+        <!-- Dot -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M211.341 78.148 a44.659 44.659 0 1 0 89.318 0 a44.659 44.659 0 1 0 -89.318 0 z" />
+    </group>
+</vector>

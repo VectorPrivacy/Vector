@@ -396,6 +396,8 @@ function createFallbackComposer(host) {
     const ta = document.createElement('textarea');
     ta.id = 'chat-input';
     ta.placeholder = 'Enter message...';
+    // A textarea's own undo history ends at any write to `value`.
+    ta.load = (v) => { ta.value = v; };
     host.appendChild(ta);
     return ta;
 }

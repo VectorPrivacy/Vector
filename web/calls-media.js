@@ -5,11 +5,19 @@ import { call_audio_frame, call_audio_level, call_audio_pull, call_audio_ready, 
 
 const RATE = 48000;
 const FRAME = 960;
+/** A played frame's length: FRAME stereo frames, interleaved left then right. */
+const OUT = FRAME * 2;
 const FRAME_US = 20000;
 /** A slot the speaker asked for that has nothing yet. */
 const NONE = new Float32Array(0);
 
 let call = null;
+/** Decoders open in stereo where the engine supports it. A mono decode plays on both sides. */
+let decodeChannels = 1;
+if (typeof AudioDecoder === 'function') {
+    AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: RATE, numberOfChannels: 2 })
+        .then((r) => { if (r.supported) decodeChannels = 2; }, () => {});
+}
 /** The page video worker's link: `{ id, port }`. */
 let link = null;
 
@@ -185,7 +193,7 @@ function makeEncoder() {
 function makeDecoder() {
     const dec = new AudioDecoder({
         output: (data) => {
-            const pcm = toMono48k(data);
+            const pcm = toStereo48k(data);
             data.close();
             const slot = call?.decoding.shift();
             if (!slot) return;
@@ -197,40 +205,51 @@ function makeDecoder() {
             console.warn('[calls] decoder:', e?.message ?? e);
             if (call?.dec !== dec) return;
             call.dec = null;
-            for (const slot of call.decoding.splice(0)) slot.pcm = new Float32Array(FRAME);
+            for (const slot of call.decoding.splice(0)) slot.pcm = new Float32Array(OUT);
             flush();
         },
     });
-    dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: 1 });
+    dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: decodeChannels });
     return dec;
 }
 
-/** Whatever layout and rate the decoder chose, as mono floats at the call's rate. */
-function toMono48k(data) {
+/** One channel of a decoded frame as floats, whatever layout the decoder chose. */
+function plane(data, c) {
     const n = data.numberOfFrames;
-    let pcm = new Float32Array(n);
+    const out = new Float32Array(n);
     try {
-        data.copyTo(pcm, { planeIndex: 0, format: 'f32-planar' });
+        data.copyTo(out, { planeIndex: c, format: 'f32-planar' });
     } catch (_) {
         const interleaved = data.format === 'f32' || data.format === 's16';
         const stride = interleaved ? data.numberOfChannels : 1;
         const raw = data.format.startsWith('s16') ? new Int16Array(n * stride) : new Float32Array(n * stride);
-        data.copyTo(raw, { planeIndex: 0 });
+        data.copyTo(raw, { planeIndex: interleaved ? 0 : c });
         const scale = raw instanceof Int16Array ? 1 / 32768 : 1;
-        for (let i = 0; i < n; i++) pcm[i] = raw[i * stride] * scale;
+        const at = interleaved ? c : 0;
+        for (let i = 0; i < n; i++) out[i] = raw[i * stride + at] * scale;
     }
-    if (data.sampleRate !== RATE && data.sampleRate > 0) {
-        const out = new Float32Array(Math.round((n * RATE) / data.sampleRate));
-        const step = data.sampleRate / RATE;
-        for (let i = 0; i < out.length; i++) {
-            const t = i * step;
-            const j = Math.min(n - 1, Math.floor(t));
-            const b = pcm[Math.min(n - 1, j + 1)];
-            out[i] = pcm[j] + (b - pcm[j]) * (t - j);
-        }
-        pcm = out;
+    return out;
+}
+
+/** Whatever layout and rate the decoder chose, as interleaved stereo at the call's rate. A
+ *  mono decode plays the same on both sides. */
+function toStereo48k(data) {
+    const n = data.numberOfFrames;
+    const l = plane(data, 0);
+    const r = data.numberOfChannels > 1 ? plane(data, 1) : l;
+    const resample = data.sampleRate !== RATE && data.sampleRate > 0;
+    const len = resample ? Math.round((n * RATE) / data.sampleRate) : n;
+    const step = resample ? data.sampleRate / RATE : 1;
+    const out = new Float32Array(len * 2);
+    for (let i = 0; i < len; i++) {
+        const t = i * step;
+        const j = Math.min(n - 1, Math.floor(t));
+        const k = Math.min(n - 1, j + 1);
+        const f = t - j;
+        out[i * 2] = l[j] + (l[k] - l[j]) * f;
+        out[i * 2 + 1] = r[j] + (r[k] - r[j]) * f;
     }
-    return pcm;
+    return out;
 }
 
 function onMic(pcm) {
@@ -266,11 +285,11 @@ function pull(ahead) {
                 call.dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: call.dts, data: r.d }));
                 call.dts += FRAME_US;
             } else {
-                slot.pcm = new Float32Array(FRAME);
+                slot.pcm = new Float32Array(OUT);
             }
             break;
         case 2:
-            slot.pcm = new Float32Array(FRAME);
+            slot.pcm = new Float32Array(OUT);
             break;
         case 3:
             slot.pcm = conceal(r.run);
@@ -285,9 +304,9 @@ function pull(ahead) {
  *  first missing frame is the last one fading to nothing, and any after it are silence. */
 function conceal(run) {
     const last = call.last;
-    const out = new Float32Array(last?.length ?? FRAME);
+    const out = new Float32Array(last?.length ?? OUT);
     if (!last || run > 1) return out;
-    for (let i = 0; i < out.length; i++) out[i] = last[i] * (1 - i / out.length);
+    for (let i = 0; i < out.length; i++) out[i] = last[i] * (1 - (i >> 1) / (out.length >> 1));
     return out;
 }
 
@@ -314,7 +333,7 @@ function dropPeer(slot) {
 function makePeerDecoder(peer) {
     const dec = new AudioDecoder({
         output: (data) => {
-            const pcm = toMono48k(data);
+            const pcm = toStereo48k(data);
             data.close();
             peer.last = pcm;
             voice_audio_level(peer.slot, level(pcm));
@@ -330,7 +349,7 @@ function makePeerDecoder(peer) {
             for (const job of peer.decoding.splice(0)) done(job.slot);
         },
     });
-    dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: 1 });
+    dec.configure({ codec: 'opus', sampleRate: RATE, numberOfChannels: decodeChannels });
     return dec;
 }
 
@@ -365,7 +384,7 @@ function voicePull(ahead) {
         flush();
         return;
     }
-    slot.mix = new Float32Array(FRAME);
+    slot.mix = new Float32Array(OUT);
     for (const x of r.e) {
         const peer = peerOf(x.s);
         if (x.k === 1) {
@@ -380,7 +399,7 @@ function voicePull(ahead) {
         } else if (x.k === 3 && peer.last && x.run <= 1) {
             // The last frame fading to nothing, as a 1:1 call conceals.
             const last = peer.last;
-            for (let i = 0; i < slot.mix.length && i < last.length; i++) slot.mix[i] += last[i] * x.g * (1 - i / last.length);
+            for (let i = 0; i < slot.mix.length && i < last.length; i++) slot.mix[i] += last[i] * x.g * (1 - (i >> 1) / (last.length >> 1));
         }
     }
     done(slot);
@@ -398,6 +417,6 @@ function flush() {
         if (!c.voice) call_audio_level(true, level(pcm));
         const gain = c.speakerGain * c.volume;
         if (gain !== 1) for (let i = 0; i < pcm.length; i++) pcm[i] = Math.max(-1, Math.min(1, pcm[i] * gain));
-        c.spk?.postMessage({ pcm }, [pcm.buffer]);
+        c.spk?.postMessage({ pcm, ch: 2 }, [pcm.buffer]);
     }
 }

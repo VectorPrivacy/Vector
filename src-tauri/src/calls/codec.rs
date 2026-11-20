@@ -1,4 +1,4 @@
-//! Opus for calls: one 20 ms mono frame per packet at the engine rate.
+//! Opus for calls: one 20 ms frame per packet at the engine rate, sent mono, played stereo.
 
 use super::rate::START_KBPS;
 use super::{ENGINE_RATE, FRAME};
@@ -54,39 +54,17 @@ impl ShareEncoder {
     }
 }
 
-pub struct ShareDecoder(opus::Decoder);
-
-impl ShareDecoder {
-    pub fn new() -> Result<Self, String> {
-        opus::Decoder::new(ENGINE_RATE, opus::Channels::Stereo)
-            .map(Self)
-            .map_err(|e| format!("opus share decoder: {e}"))
-    }
-
-    /// Decodes one packet into one interleaved stereo frame; returns frames per channel.
-    pub fn decode(&mut self, packet: &[u8], out: &mut [i16]) -> Result<usize, String> {
-        self.0.decode(packet, out, false).map_err(|e| format!("opus share decode: {e}"))
-    }
-
-    pub fn decode_fec(&mut self, next: &[u8], out: &mut [i16]) -> Result<usize, String> {
-        self.0.decode(next, out, true).map_err(|e| format!("opus share fec: {e}"))
-    }
-
-    pub fn conceal(&mut self, out: &mut [i16]) -> Result<usize, String> {
-        self.0.decode(&[], out, false).map_err(|e| format!("opus share plc: {e}"))
-    }
-}
-
+/// Stereo for whatever it is sent: a mono packet decodes to the same sound on both sides.
 pub struct Decoder(opus::Decoder);
 
 impl Decoder {
     pub fn new() -> Result<Self, String> {
-        opus::Decoder::new(ENGINE_RATE, opus::Channels::Mono)
+        opus::Decoder::new(ENGINE_RATE, opus::Channels::Stereo)
             .map(Self)
             .map_err(|e| format!("opus decoder: {e}"))
     }
 
-    /// Decodes one packet into one frame.
+    /// Decodes one packet into one interleaved stereo frame (FRAME * 2 samples); returns frames per channel.
     pub fn decode(&mut self, packet: &[u8], out: &mut [i16]) -> Result<usize, String> {
         self.0.decode(packet, out, false).map_err(|e| format!("opus decode: {e}"))
     }
@@ -114,9 +92,10 @@ mod tests {
         let mut pkt = vec![0u8; 400];
         let n = enc.encode(&frame, &mut pkt).unwrap();
         assert!(n > 0 && n < 200, "packet {n} bytes");
-        let mut out = vec![0i16; FRAME];
+        let mut out = vec![0i16; FRAME * 2];
         assert_eq!(dec.decode(&pkt[..n], &mut out).unwrap(), FRAME);
-        let mut plc = vec![0i16; FRAME];
+        assert!(out.chunks(2).all(|lr| lr[0] == lr[1]), "a mono packet plays the same on both sides");
+        let mut plc = vec![0i16; FRAME * 2];
         assert_eq!(dec.conceal(&mut plc).unwrap(), FRAME);
     }
 }

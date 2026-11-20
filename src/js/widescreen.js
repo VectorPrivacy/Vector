@@ -127,13 +127,18 @@ function wsChannelForCommunity(communityId) {
     return arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c))?.id || null;
 }
 
+/** A blocked sender or a waiting request is not a conversation to be returned to. */
+function wsDmIsHome(chat) {
+    return !!chat && !chatIsGroup(chat) && !getProfile(chat.id)?.is_blocked && !chatIsRequest(chat);
+}
+
 /** The logo is the way home to DMs: reopen the last one, which flips the pane
- *  back to the DM list with it. With no DMs yet, land on the list itself. */
+ *  back to the DM list with it. With none the Messages tab lists, land on the list itself. */
 function wsOpenDmHome() {
-    const known = wsLastDm && arrChats.some(c => c.id === wsLastDm);
-    const target = known ? wsLastDm : arrChats.find(c =>
-        c.chat_type !== 'Community' && c.id !== strPubkey && c.messages?.length)?.id;
-    if (target) openChat(target);
+    const last = arrChats.find(c => c.id === wsLastDm);
+    const target = wsDmIsHome(last) ? last : arrChats.find(c =>
+        chatIsVisibleInList(c) && wsDmIsHome(c) && !chatIsArchived(c));
+    if (target) openChat(target.id);
     else closeChat();
 }
 

@@ -813,7 +813,7 @@ function stashComposerDraft() {
         strCurrentReplyReference = '';
         VectorSvelte.cancelReply();
     }
-    domChatMessageInput.value = '';
+    domChatMessageInput.load('');
     autoResizeChatInput();
     syncSendMicToInput();
 }
@@ -875,7 +875,7 @@ function startEditMessage(messageId, content, { focus = true } = {}) {
 
     // Populate the input with the message content; the chrome (cancel button,
     // placeholder, send button) follows the edit mode.
-    domChatMessageInput.value = content;
+    domChatMessageInput.load(content);
     VectorSvelte.startEdit(messageId, content);
     VectorSvelte.setDraftEmpty(false, false);
     VectorSvelte.flushSync();
@@ -901,7 +901,7 @@ function cancelEdit() {
     // The composer goes back to what it held before the edit; the chrome follows the mode back to idle.
     const held = editHeldDraft;
     editHeldDraft = null;
-    domChatMessageInput.value = held?.text || '';
+    domChatMessageInput.load(held?.text || '');
     VectorSvelte.cancelEdit();
     VectorSvelte.setDraftEmpty(!domChatMessageInput.value.trim(), false);
     VectorSvelte.flushSync();
@@ -1277,6 +1277,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
     // prior chat — re-entering a chat counts as "I've read up to here".
     chatPinnedToBottom = true;
     _userScrolledAway = false;   // fresh open lands at the live tail; release any prior latch
+    VectorSvelte.dropScrollReturn();
     clearUnreadBelow();
     clearUnreadDivider();
     syncBackendActiveChat();
@@ -1487,7 +1488,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
                 startEditMessage(draft.edit.id, draft.edit.original, { focus: false });
                 editHeldDraft = draft.held || null;
             }
-            domChatMessageInput.value = draft?.text || '';
+            domChatMessageInput.load(draft?.text || '');
             autoResizeChatInput();
             // A drafted reply returns with its text, while its target still exists.
             if (draft?.replyRef && !strCurrentReplyReference && chat.messages.some(m => m.id === draft.replyRef)) {
@@ -1521,7 +1522,7 @@ async function openChat(contact, { reread = true, fade = true } = {}) {
             // then the user captions/confirms the send in the preview UI.
             openFilePreview(share.uris[0], contact, '').catch(e => console.error('[Share] preview failed:', e));
         } else if (share.text) {
-            domChatMessageInput.value = share.text;
+            domChatMessageInput.load(share.text);
             // A programmatic value set doesn't fire 'input', so derive mic/send here.
             syncSendMicToInput();
             autoResizeChatInput();

@@ -285,7 +285,10 @@ while let Some(speech) = call.listen().await {             // 20 ms frames, per 
 ```
 
 A bot must be listening (`run` or `on_event`) to join a call. Play a file with
-`vector_sdk::voice::decode_with_ffmpeg(path)` then `call.say_and_wait(&pcm)`.
+`vector_sdk::voice::decode_with_ffmpeg(path)` then `call.say_and_wait(&pcm)`, or keep it stereo
+with `decode_stereo_with_ffmpeg` and `say_stereo_and_wait`: listeners hear both sides.
+`call.set_bitrate(kbps)` sets the Opus bitrate (64 kbit/s by default, 8 to 320); each listener
+gets their own copy, so upload grows with the call.
 
 A call ends when a moderator disconnects or moves the bot: `listen()` returns `None` and `say`
 returns false. A move says where it sent the bot, to follow if you like:

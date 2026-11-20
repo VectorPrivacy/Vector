@@ -127,13 +127,13 @@ function initEmojiShortcodeSelector(textarea) {
     }
 
     // --- Detect ':' trigger on every input ---
-    function onInput() {
+    function onInput(e) {
         if (skipNextInput) { skipNextInput = false; return; }
         const val = textarea.value;
         const caret = textarea.selectionStart;
 
-        // A custom emoji of the same name keeps its code.
-        const done = /(?<!:):([a-z]+):$/.exec(val.slice(Math.max(0, caret - 16), caret));
+        // A custom emoji of the same name keeps its code, and an undone conversion stays undone.
+        const done = !e?.inputType?.startsWith('history') && /(?<!:):([a-z]+):$/.exec(val.slice(Math.max(0, caret - 16), caret));
         const symbol = done && TEXT_SYMBOL_CODES[done[1]];
         if (symbol && !searchCustomEmojis(done[1]).some(e => e.shortcode.toLowerCase().replace(/~\d+$/, '') === done[1])) {
             const from = caret - done[0].length;

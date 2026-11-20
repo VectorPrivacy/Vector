@@ -65,17 +65,20 @@ async fn speaker(lab: Lab) {
     let c1 = v1.join_voice().await.expect("into the stage");
     let c2 = v2.join_voice().await.expect("into the lounge as well");
     checks.note("in two calls at once", "stage and lounge");
+    // The lounge gets stereo at a raised rate; b hears it through a mono decoder, as older clients do.
+    checks.check("lounge at 128 kbit/s", c2.set_bitrate(128) == 128 && c2.bitrate() == 128, "set_bitrate");
+    let wide: Vec<i16> = tone(660.0, 1500).into_iter().flat_map(|s| [s, s / 2]).collect();
     lab.wait("b-listening", 300).await.expect("b listening");
     tokio::time::sleep(Duration::from_secs(1)).await;
     let mut said = true;
     for _ in 0..3 {
         c1.say(&tone(440.0, 1500));
-        c2.say(&tone(660.0, 1500));
+        c2.say_stereo(&wide);
         let (said1, said2) = tokio::join!(c1.finished(), c2.finished());
         said &= said1 && said2;
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
-    checks.check("said into both, in real time", said, "three tones each");
+    checks.check("said into both, in real time", said, "three tones each, the lounge's in stereo");
     lab.put("a-said", "1");
     lab.wait("b-heard", 120).await;
     c2.leave().await;

@@ -4,11 +4,10 @@
 
 use super::codec::Decoder;
 use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
-use super::media::{capture_thread, level_of, now_ms, MediaStats, Outbound, FLAG_MUTED, FLAG_SHARE, play_ahead};
-use super::resample::Resampler;
+use super::media::{capture_thread, level_of, now_ms, MediaStats, Outbound, StereoOut, FLAG_MUTED, FLAG_SHARE, play_ahead};
 use super::ring::SpscRing;
 use super::transport::unpack;
-use super::{ENGINE_RATE, FRAME};
+use super::FRAME;
 use crate::audio_engine::{AudioEngine, LiveLink};
 use iroh::endpoint::Connection;
 use std::collections::HashMap;
@@ -45,9 +44,9 @@ impl VoiceEngine {
         let mixer = AudioEngine::get()?;
         let out_rate = mixer.device_sample_rate()?;
         let link = Arc::new(LiveLink {
-            play: SpscRing::new(out_rate as usize),
+            play: SpscRing::new(out_rate as usize * 2),
             tap: SpscRing::new(out_rate as usize),
-            gain: AtomicU32::new(super::settings::speaker_gain().to_bits()),
+            gain: AtomicU32::new(1f32.to_bits()),
             share_play: SpscRing::new(out_rate as usize * 2),
             share_tap: SpscRing::new(out_rate as usize),
             share_gain: AtomicU32::new(1f32.to_bits()),
@@ -224,19 +223,18 @@ struct Voicing {
 }
 
 fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[u8; 32], Peer>>>, stop: Arc<AtomicBool>, deafened: Arc<AtomicBool>) {
-    let mut rs = Resampler::new(ENGINE_RATE, out_rate);
+    let mut out = StereoOut::new(out_rate);
     let mut decoders: HashMap<[u8; 32], Voicing> = HashMap::new();
-    let mut pcm = [0i16; FRAME];
-    let mut mix = [0i32; FRAME];
-    let mut mix_f32 = [0f32; FRAME];
-    let mut resampled = Vec::with_capacity(4096);
+    let mut pcm = [0i16; FRAME * 2];
+    let mut mix = [0i32; FRAME * 2];
+    let mut mix_f32 = [0f32; FRAME * 2];
     // This frame's decoded peers, mixed once we know whether a priority speaker is talking.
-    let mut heard: Vec<(f32, bool, [i16; FRAME])> = Vec::new();
+    let mut heard: Vec<(f32, bool, [i16; FRAME * 2])> = Vec::new();
     let mut duck = 1.0f32;
     let mut priority_heard: Option<std::time::Instant> = None;
 
     while !stop.load(Ordering::Relaxed) {
-        if link.play.len() >= play_ahead(out_rate) {
+        if link.play.len() >= play_ahead(out_rate) * 2 {
             std::thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -315,9 +313,7 @@ fn playout_thread(link: Arc<LiveLink>, out_rate: u32, peers: Arc<Mutex<HashMap<[
         for (dst, m) in mix_f32.iter_mut().zip(mix.iter()) {
             *dst = if silent { 0.0 } else { soft_clip(*m as f32 / 32768.0) };
         }
-        rs.process(&mix_f32, &mut resampled);
-        link.play.push(&resampled);
-        resampled.clear();
+        out.push(&mix_f32, &link.play);
     }
 }
 

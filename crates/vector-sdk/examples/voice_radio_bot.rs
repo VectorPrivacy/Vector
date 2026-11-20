@@ -2,10 +2,10 @@
 //! as you name: one process, many calls.
 //!
 //! ```sh
-//! VECTOR_NSEC=nsec1... cargo run -p vector_sdk --features voice --example voice_radio_bot -- song.mp3 <voice channel id> [<another>…]
+//! VECTOR_NSEC=nsec1... RADIO_KBPS=128 cargo run -p vector_sdk --features voice --example voice_radio_bot -- song.mp3 <voice channel id> [<another>…]
 //! ```
 //!
-//! Any format `ffmpeg` reads works; it must be on the PATH.
+//! Any format `ffmpeg` reads works; it must be on the PATH. `RADIO_KBPS` is optional.
 
 use vector_sdk::VectorBot;
 
@@ -21,8 +21,10 @@ async fn main() -> vector_sdk::Result<()> {
         builder = builder.nsec(nsec);
     }
     let bot = builder.build().await?;
-    let track = vector_sdk::voice::decode_with_ffmpeg(&file).await?;
-    println!("radio online as {}: {:.0}s of {file}", bot.npub(), track.len() as f32 / vector_sdk::voice::SAMPLE_RATE as f32);
+    let kbps = std::env::var("RADIO_KBPS").ok().and_then(|k| k.parse().ok()).unwrap_or(vector_sdk::voice::DEFAULT_KBPS);
+    let track = vector_sdk::voice::decode_stereo_with_ffmpeg(&file).await?;
+    assert!(track.len() >= vector_sdk::voice::FRAME * 2, "{file} holds no audio");
+    println!("radio online as {}: {:.0}s of {file}", bot.npub(), track.len() as f32 / 2.0 / vector_sdk::voice::SAMPLE_RATE as f32);
 
     // Listening is how each call finds who's in it.
     let listener = bot.clone();
@@ -31,11 +33,11 @@ async fn main() -> vector_sdk::Result<()> {
     let mut stations = Vec::new();
     for id in &channels {
         let mut call = bot.channel(id).join_voice().await?;
-        println!("on air in {id}");
+        println!("on air in {id} at {} kbit/s", call.set_bitrate(kbps));
         let (bot, track) = (bot.clone(), track.clone());
         stations.push(tokio::spawn(async move {
             loop {
-                while call.say_and_wait(&track).await {}
+                while call.say_stereo_and_wait(&track).await {}
                 // A moderator moved the bot, or disconnected it: follow a move, stop otherwise.
                 let Some(to) = call.moved_to() else {
                     println!("off air in {}", call.channel_id());
@@ -44,6 +46,7 @@ async fn main() -> vector_sdk::Result<()> {
                 match bot.channel(&to).join_voice().await {
                     Ok(next) => {
                         println!("moved to {to}");
+                        next.set_bitrate(kbps);
                         call = next;
                     }
                     Err(e) => return println!("couldn't follow the move to {to}: {e}"),
