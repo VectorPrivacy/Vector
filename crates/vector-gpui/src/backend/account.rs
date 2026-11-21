@@ -185,6 +185,10 @@ pub async fn standby() -> bool {
         && db::get_signer_type().unwrap_or_else(|_| "local".into()) == "local"
         && db::get_pkey().ok().flatten().is_some_and(|k| k.starts_with("nsec1"));
     if !plain {
+        if state::is_encryption_enabled_fast() {
+            // spawn-detached: watches until any sign-in, then stops; it owns no account state.
+            tokio::spawn(locked_watch());
+        }
         return false;
     }
     if let Err(e) = unlock(None).await {
@@ -194,6 +198,58 @@ pub async fn standby() -> bool {
     connect().await;
     super::sync::notifs();
     true
+}
+
+/// A PIN account can't be read without its PIN: a client with no key, on the account's own
+/// network, notices gift wraps for it and says only that something came, as Tauri does.
+#[cfg(target_os = "android")]
+async fn locked_watch() {
+    use vector_core::transport::{self, prefs, prelogin};
+    let Some(me) = db::get_current_account().ok().and_then(|n| PublicKey::from_bech32(&n).ok()) else {
+        return;
+    };
+    transport::set_preference(prelogin::effective(&prefs::stored_kind()));
+    if transport::preference().is_none() {
+        return;
+    }
+    if transport::preference().is_some_and(|k| k != transport::Kind::Clearnet)
+        && let Err(e) = super::transport::start_for_active_account().await
+    {
+        vector_core::log_warn!("[standby] network start failed: {e}");
+    }
+    super::transport::wait_for_active_network().await;
+    let client = vector_core::nostr_client_builder().monitor(Monitor::new(64)).build();
+    super::network::add_configured_relays(&client).await;
+    client.connect().await;
+    // A relay that replays history stops at NIP-59's backdating window.
+    let since = vector_core::clock::timestamp().as_secs().saturating_sub(2 * 24 * 3600);
+    let filter = Filter::new().pubkey(me).kind(Kind::GiftWrap).since(Timestamp::from_secs(since)).limit(0);
+    let Ok(sub) = client.subscribe(filter).await.map(|o| o.value) else {
+        client.disconnect().await;
+        return;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut last: Option<std::time::Instant> = None;
+    let mut notes = client.notifications();
+    while let Some(n) = futures::StreamExt::next(&mut notes).await {
+        // Signed in: the account's own client takes over.
+        if vector_core::my_public_key().is_some() {
+            break;
+        }
+        let ClientNotification::Event { subscription_id, event, .. } = n else { continue };
+        if subscription_id != sub || !seen.insert(event.id) {
+            continue;
+        }
+        if seen.len() > 1000 {
+            seen.clear();
+        }
+        // No ledger to tell new mail from a replay: one notice per half minute.
+        if last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(30)) {
+            last = Some(std::time::Instant::now());
+            super::notify::pushed_unknown();
+        }
+    }
+    client.disconnect().await;
 }
 
 /// Make `npub` the account in use and open its database; why not, kept for the user.
