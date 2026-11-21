@@ -4,6 +4,7 @@
 pub mod account;
 pub mod actions;
 pub mod archive;
+pub mod pasted;
 pub mod attachments;
 pub mod chatlist;
 pub mod badges;

@@ -84,6 +84,10 @@ pub fn savings_percent(c: &types::CachedCompressedImage) -> u32 {
 
 /// A picked image compressed as a default send would: resized, stripped and re-encoded.
 pub fn precompress(path: &std::path::Path) -> Result<types::CachedCompressedImage, String> {
+    if let Some(bytes) = crate::backend::pasted::get(path) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        return compression::compress_bytes_internal(bytes, &ext, None).map(crate::jxl::outbound);
+    }
     let key = path.to_string_lossy().into_owned();
     #[cfg(target_os = "android")]
     let _held = Held::new(&key)?;

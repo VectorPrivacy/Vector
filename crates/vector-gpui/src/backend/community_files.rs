@@ -79,6 +79,10 @@ async fn prepare(
         let bytes = Arc::try_unwrap(pc.bytes.clone()).unwrap_or_else(|a| (*a).clone());
         return prepare_bytes(bytes, &name, false, false, None).await;
     }
+    if let Some(b) = super::pasted::get(path) {
+        let bytes = Arc::try_unwrap(b).unwrap_or_else(|a| (*a).clone());
+        return prepare_bytes(bytes, &name, compress, keep_metadata, precompressed).await;
+    }
     if !IMAGE_EXTS.contains(&extension.as_str()) {
         return prepare_path(path.to_path_buf(), name).await;
     }

@@ -53,6 +53,7 @@ pub fn work_slot() -> std::io::Result<PathBuf> {
 
 /// A working copy goes once it has sent or been dismissed.
 pub fn forget(path: &Path) {
+    super::pasted::forget(path);
     let root = work_dir();
     if let Some(dir) = path.parent().filter(|d| d.starts_with(&root) && *d != root) {
         let _ = std::fs::remove_dir_all(dir);

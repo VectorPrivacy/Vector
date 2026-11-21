@@ -11464,16 +11464,7 @@ impl VectorApp {
             crate::composer::Pasted::Paths(p) => {
                 return self.open_paths_preview(p.clone(), window, cx);
             }
-            crate::composer::Pasted::Image { bytes, ext } => {
-                let Ok(dir) = backend::archive::work_slot() else {
-                    return;
-                };
-                let path = dir.join(format!("pasted_image.{ext}"));
-                if std::fs::write(&path, bytes).is_err() {
-                    return;
-                }
-                path
-            }
+            crate::composer::Pasted::Image { bytes, ext } => backend::pasted::hold(bytes.clone(), ext),
         };
         self.open_file_preview(path, window, cx);
     }
@@ -11528,7 +11519,7 @@ impl VectorApp {
         if self.live {
             // `checkUploadBlocked`: a file no enabled media server would take is refused before
             // its preview, with each server's reason. Asking also warms the upload connection.
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let size = backend::pasted::len(&path).unwrap_or(0);
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
             let rx = backend::run(async move {
                 let mime = vector_core::crypto::mime_from_extension(&ext);

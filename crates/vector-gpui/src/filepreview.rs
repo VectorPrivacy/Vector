@@ -271,7 +271,7 @@ impl FilePreview {
         if spoiler {
             stem = stem[8..].to_string();
         }
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let size = crate::backend::pasted::len(&path).unwrap_or(0);
         let is_image = IMAGE_EXTS.contains(&ext.as_str());
         let video = crate::message::offers_video_compression(&ext, size);
         let compress_offered = video || (is_image && size > MIN_COMPRESS_SIZE);
@@ -338,7 +338,7 @@ impl FilePreview {
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
-                        crate::pic::read(&file)
+                        crate::backend::pasted::read(&file)
                             .ok()
                             .and_then(|b| crate::media::decode(&b, &e, (1600, 1600)))
                     })
