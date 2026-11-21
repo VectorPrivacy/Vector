@@ -11621,7 +11621,7 @@ impl VectorApp {
             let Some(com) = store.community(&id) else {
                 return;
             };
-            let last = last_channels(&store.my_npub).remove(&id).filter(|ch| com.channel(ch).is_some_and(|c| !c.is_voice() && c.visible()));
+            let last = last_channels(&store.my_npub).remove(&id).filter(|ch| com.channel(ch).is_some_and(|c| c.visible()));
             (
                 to.or(last).or_else(|| com.landing().map(|c| c.channel_id.clone())),
                 com.members.clone(),
