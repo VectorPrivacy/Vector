@@ -527,28 +527,38 @@ impl VectorApp {
                 .when(flat && drawer, |d| {
                     d.child(div().flex_shrink_0().relative().top(px(NAV_H * (1. - p))).child(self.slim_navbar(store, cx)))
                 });
+            let left = (p - 1.) * (span + DRAWER_SHADOW);
+            // Translucent fill is what a tiled phone GPU pays for: the shade covers only what the
+            // drawer leaves showing, and its shadow is a strip at the edge, not a blurred box.
+            let edge = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(left + span))
+                .w(px(DRAWER_SHADOW))
+                .bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(gpui::black().opacity(0.3), 0.),
+                    gpui::linear_color_stop(gpui::black().opacity(0.), 1.),
+                ));
             let drawer_el = div()
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .left(px((p - 1.) * (span + DRAWER_SHADOW)))
+                .left(px(left))
                 .w(px(span))
                 .flex()
                 .occlude()
-                .shadow(vec![gpui::BoxShadow {
-                    color: gpui::black().opacity(0.5),
-                    offset: gpui::point(px(4.), px(0.)),
-                    blur_radius: px(24.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }])
                 .on_scroll(Self::drawer_listener(cx))
                 .child(col);
             // On its way away, a tap is for the conversation coming back, not the shade leaving it.
             let shade = div()
                 .id("cc-drawer-shade")
                 .absolute()
-                .inset_0()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .left(px((left + span).max(0.)))
                 .bg(gpui::black().opacity(0.55))
                 .opacity(p)
                 .on_scroll(Self::drawer_listener(cx))
@@ -566,6 +576,7 @@ impl VectorApp {
                 .flex()
                 .child(chat)
                 .child(shade)
+                .child(edge)
                 .child(drawer_el)
                 .into_any_element();
         }
