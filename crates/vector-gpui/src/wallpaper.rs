@@ -49,6 +49,8 @@ pub struct Wallpaper {
     /// The edit bar's fade: whether it is coming in, and since when.
     pub edit: Option<(bool, Instant)>,
     shown: Option<(Key, Arc<RenderImage>)>,
+    /// The chats' bakes before it, newest last, so going back to one paints on the first frame.
+    recent: Vec<(Key, Arc<RenderImage>)>,
     running: Option<Key>,
     queued: Option<Key>,
     /// The last two pictures decoded, so going back to a chat paints at once.
@@ -66,6 +68,9 @@ pub struct Wallpaper {
 /// How long the pane must hold a size before the picture is baked again for it.
 pub const SETTLE: Duration = Duration::from_millis(180);
 
+/// Bakes kept besides the one shown: each is a pane-sized bitmap.
+const RECENT: usize = 3;
+
 /// The work to start: bake `key` from its picture, decoded already or not.
 pub struct Job {
     pub key: Key,
@@ -76,19 +81,28 @@ impl Wallpaper {
     /// The image to paint for `want`: the one baked for it, or the last while it bakes.
     pub fn image(&self, want: Option<&Key>) -> Option<Arc<RenderImage>> {
         let want = want?;
+        let same = |k: &Key| k.path == want.path && k.ts == want.ts;
         self.shown
             .as_ref()
-            .filter(|(k, _)| k.path == want.path && k.ts == want.ts)
+            .filter(|(k, _)| same(k))
+            .or_else(|| self.recent.iter().rev().find(|(k, _)| same(k)))
             .map(|(_, i)| i.clone())
     }
 
     /// Ask for `want`; returns work to start when nothing is baking.
     pub fn want(&mut self, want: Option<Key>) -> Option<Job> {
         let Some(want) = want else {
-            self.shown = None;
+            self.keep_shown();
             self.queued = None;
             return None;
         };
+        if let Some(i) = self.recent.iter().position(|(k, _)| *k == want) {
+            let back = self.recent.remove(i);
+            self.keep_shown();
+            self.shown = Some(back);
+            self.queued = None;
+            return None;
+        }
         if self.shown.as_ref().is_some_and(|(k, _)| *k == want) || self.running.as_ref() == Some(&want) || self.failed.as_ref() == Some(&want) {
             self.queued = None;
             return None;
@@ -143,11 +157,26 @@ impl Wallpaper {
             }
         }
         match image {
-            Some(image) => self.shown = Some((key, image)),
+            Some(image) => {
+                if self.shown.as_ref().is_some_and(|(k, _)| k.path != key.path || k.ts != key.ts) {
+                    self.keep_shown();
+                }
+                self.shown = Some((key, image));
+            }
             None => self.failed = Some(key),
         }
         let next = self.queued.take()?;
         Some(self.start(next))
+    }
+
+    /// The shown bake moves to the recent ones, replacing an older bake of the same picture.
+    fn keep_shown(&mut self) {
+        let Some((key, image)) = self.shown.take() else { return };
+        self.recent.retain(|(k, _)| k.path != key.path || k.ts != key.ts);
+        self.recent.push((key, image));
+        if self.recent.len() > RECENT {
+            self.recent.remove(0);
+        }
     }
 
     pub fn previewing(&self) -> bool {
@@ -176,15 +205,25 @@ impl Wallpaper {
     }
 }
 
+/// How far below the pane's size a bake can sit: blurred, a picture the GPU stretches back up
+/// looks the same, at a fraction of the blur, dim and upload.
+fn bake_scale(blur: u8) -> f32 {
+    match blur {
+        0 => 1.,
+        1..=3 => 0.5,
+        _ => 0.25,
+    }
+}
+
 /// Decode, cover the pane (scaled 2% so the blurred edge falls outside), blur and dim.
 pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderImage>>) {
     let _trim = crate::trim::OnDrop;
     let Job { key, decoded } = job;
-    let (w, h) = (key.size.0.max(1), key.size.1.max(1));
+    let (pw, ph) = (key.size.0.max(1), key.size.1.max(1));
     let src = match decoded {
         Some(d) => Some(d),
-        None => match crate::pic::read(&key.path).map_err(|e| e.to_string()).and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string())) {
-            Ok(i) => Some(Arc::new(shrink(i.to_rgba8(), w, h))),
+        None => match crate::pic::read(&key.path).map_err(|e| e.to_string()).and_then(|b| decode(&b, pw, ph)) {
+            Ok(i) => Some(Arc::new(i)),
             Err(e) => {
                 vector_core::log_warn!("[Wallpaper] {} unreadable: {e}", key.path.display());
                 None
@@ -192,6 +231,8 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
         },
     };
     let Some(src) = src else { return (key, None, None) };
+    let f = bake_scale(key.blur);
+    let (w, h) = (((pw as f32 * f).round() as u32).max(1), ((ph as f32 * f).round() as u32).max(1));
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     let scale = (w as f32 / sw).max(h as f32 / sh) * 1.02;
     let (cw, ch) = ((w as f32 / scale).min(sw), (h as f32 / scale).min(sh));
@@ -199,7 +240,7 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     let crop = image::imageops::crop_imm(&*src, cx, cy, cw.round() as u32, ch.round() as u32).to_image();
     let mut out = gpui::resample(&crop, w, h, image::imageops::FilterType::Triangle);
     if key.blur > 0 {
-        out = image::imageops::fast_blur(&out, key.blur as f32);
+        out = image::imageops::fast_blur(&out, key.blur as f32 * f);
     }
     let k = key.dim.clamp(0, 100) as u32;
     for p in out.pixels_mut() {
@@ -212,16 +253,30 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     (key, Some(src), Some(image))
 }
 
-/// The decoded picture is kept for re-bakes; a photo far larger than the pane it covers
-/// keeps only what a blurred cover of that pane can show.
-fn shrink(img: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
-    let (sw, sh) = (img.width() as f32, img.height() as f32);
-    let keep = (w as f32 / sw).max(h as f32 / sh) * 1.5;
-    if keep >= 1. {
-        return img;
+/// The picture as kept for re-bakes: a photo far larger than the `w`×`h` pane it covers keeps
+/// only what a cover of that pane can show, and a JPEG decodes straight to that size.
+fn decode(bytes: &[u8], w: u32, h: u32) -> Result<image::RgbaImage, String> {
+    let keep = |sw: u32, sh: u32| (w as f32 / sw as f32).max(h as f32 / sh as f32) * 1.5;
+    if image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg) {
+        let need = |sw: u32, sh: u32| {
+            let k = keep(sw, sh);
+            if k >= 1. {
+                return Some(((sw, sh), None));
+            }
+            let t = (((sw as f32 * k).round() as u32).max(1), ((sh as f32 * k).round() as u32).max(1));
+            Some((t, Some(t)))
+        };
+        if let Some((img, _, _)) = gpui::jpeg_into(bytes, need, |_, _, w, h| (0, 0, w, h), image::imageops::FilterType::Triangle, false) {
+            return Ok(img);
+        }
     }
-    let (nw, nh) = ((sw * keep).round().max(1.) as u32, (sh * keep).round().max(1.) as u32);
-    gpui::resample(&img, nw, nh, image::imageops::FilterType::Triangle)
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?.to_rgba8();
+    let k = keep(img.width(), img.height());
+    if k >= 1. {
+        return Ok(img);
+    }
+    let (nw, nh) = (((img.width() as f32 * k).round() as u32).max(1), ((img.height() as f32 * k).round() as u32).max(1));
+    Ok(gpui::resample(&img, nw, nh, image::imageops::FilterType::Triangle))
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;
@@ -405,4 +460,87 @@ pub fn preview_bar(blur: u8, dim: u8, dragging: Rc<Cell<Option<bool>>>, on: &OnA
                 .child(row(true, "icons/eye-off.svg", blur, (0, 30)))
                 .child(row(false, "icons/bulb.svg", dim, (10, 100))),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(name: &str) -> Key {
+        Key { path: PathBuf::from(name), ts: 1, blur: 5, dim: 50, size: (100, 80) }
+    }
+
+    fn pic() -> Arc<RenderImage> {
+        Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]))
+    }
+
+    fn bake_now(w: &mut Wallpaper, k: &Key) {
+        let job = w.want(Some(k.clone())).expect("a bake starts");
+        assert!(w.baked(job.key, None, Some(pic())).is_none());
+    }
+
+    #[test]
+    fn going_back_to_a_chat_paints_its_bake_at_once() {
+        let mut w = Wallpaper::default();
+        let (a, b) = (key("a.jpg"), key("b.jpg"));
+        bake_now(&mut w, &a);
+        bake_now(&mut w, &b);
+        assert!(w.want(Some(a.clone())).is_none(), "no rebake");
+        assert!(w.image(Some(&a)).is_some());
+        assert!(w.want(None).is_none());
+        assert!(w.image(Some(&a)).is_some(), "a chat with no wallpaper keeps the others");
+        assert!(w.want(Some(b.clone())).is_none());
+        assert!(w.image(Some(&b)).is_some());
+    }
+
+    fn photo(w: u32, h: u32) -> PathBuf {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 256) as u8]));
+        let path = std::env::temp_dir().join(format!("vector-wallpaper-{w}x{h}-{}.jpg", std::process::id()));
+        img.save(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_blurred_bake_sits_below_the_pane_and_covers_it() {
+        let path = photo(1600, 1200);
+        for (blur, side) in [(0u8, (700u32, 450u32)), (2, (350, 225)), (5, (175, 113))] {
+            let key = Key { path: path.clone(), ts: 1, blur, dim: 50, size: (700, 450) };
+            let (_, decoded, image) = bake(Job { key, decoded: None });
+            let image = image.expect("baked");
+            let size = image.size(0);
+            assert_eq!((size.width.0 as u32, size.height.0 as u32), side, "blur {blur}");
+            let d = decoded.unwrap();
+            assert!(d.width() < 1600 && d.width() as f32 >= 700. * 1.5 - 2., "kept {}x{}", d.width(), d.height());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "timing; run with --ignored --nocapture"]
+    fn bake_time() {
+        let path = photo(4000, 3000);
+        for blur in [0u8, 5, 20] {
+            let key = Key { path: path.clone(), ts: 1, blur, dim: 50, size: (1400, 900) };
+            let t = Instant::now();
+            let (_, decoded, _) = bake(Job { key: key.clone(), decoded: None });
+            let first = t.elapsed();
+            let t = Instant::now();
+            let _ = bake(Job { key, decoded });
+            eprintln!("blur {blur}: first {first:?}, rebake {:?}", t.elapsed());
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn only_a_few_bakes_are_kept() {
+        let mut w = Wallpaper::default();
+        let keys: Vec<Key> = (0..RECENT + 2).map(|i| key(&format!("{i}.jpg"))).collect();
+        for k in &keys {
+            bake_now(&mut w, k);
+        }
+        assert!(w.image(Some(&keys[0])).is_none());
+        for k in &keys[1..] {
+            assert!(w.image(Some(k)).is_some());
+        }
+    }
 }
