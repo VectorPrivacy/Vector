@@ -135,9 +135,13 @@ class GpuiView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
         return true
     }
 
-    override fun onCheckIsTextEditor() = true
+    /** A GPUI field has focus. Without one a stray key mustn't bring the keyboard back. */
+    private var editing = false
 
-    override fun onCreateInputConnection(info: EditorInfo): InputConnection {
+    override fun onCheckIsTextEditor() = editing
+
+    override fun onCreateInputConnection(info: EditorInfo): InputConnection? {
+        if (!editing) return null
         val action = options shr 4 and 0xF
         var type = InputType.TYPE_CLASS_TEXT
         if (options and 1 != 0) type = type or InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
@@ -166,12 +170,20 @@ class GpuiView(context: Context) : SurfaceView(context), SurfaceHolder.Callback 
     }
 
     fun showKeyboard() {
+        if (!editing) {
+            editing = true
+            imm.restartInput(this)
+        }
         requestFocus()
         imm.showSoftInput(this, 0)
     }
 
     fun hideKeyboard() {
         imm.hideSoftInputFromWindow(windowToken, 0)
+        if (editing) {
+            editing = false
+            imm.restartInput(this)
+        }
     }
 
     fun setInputOptions(options: Int) {
