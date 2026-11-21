@@ -150,7 +150,9 @@ arrive.seq = 0xC0FFEE
 
 
 fx = json.load(open(args.fixtures))
-chats = [c["id"] for c in fx.get("chats", []) if c.get("messages")][:6]
+# A 3D preview's turntable runs until animations sleep, by design, so its chat never rests.
+spins = lambda c: any(a.get("extension") in ("glb", "gltf") for m in c["messages"] for a in m.get("attachments") or [])
+chats = [c["id"] for c in fx.get("chats", []) if c.get("messages") and not spins(c)][:6]
 longest = max((c for c in fx.get("chats", []) if c.get("messages")), key=lambda c: len(c["messages"]), default=None)
 communities = [c["community_id"] for c in fx.get("communities", [])][:2]
 
