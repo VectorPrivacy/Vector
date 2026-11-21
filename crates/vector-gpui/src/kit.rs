@@ -1185,6 +1185,21 @@ impl Settle {
         self.fresh(key, true)
     }
 
+    /// Whether this is `row`'s first draw, marking it drawn. Ask once per row and frame, before
+    /// its parts: every part drawn with that first draw fills in place.
+    pub fn first_draw(&mut self, row: &str) -> bool {
+        if self.0.contains_key(row) {
+            return false;
+        }
+        self.0.insert(row.to_string(), Settled::Done);
+        true
+    }
+
+    /// `key` drawn with its row's first draw: it is simply there.
+    pub fn fill(&mut self, key: &str) {
+        self.0.entry(key.to_string()).or_insert(Settled::Done);
+    }
+
     /// `row` drawn again as if for the first time: what it holds now fills in place.
     pub fn forget(&mut self, row: &str) {
         self.0.remove(row);
@@ -2258,6 +2273,22 @@ pub fn context_menu(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_reaction_drawn_with_its_message_fills_in_place() {
+        let mut s = super::Settle::default();
+        let chips = ["m1/a", "m1/b", "m1/c"];
+        assert!(s.first_draw("m1"));
+        for c in chips {
+            s.fill(c);
+        }
+        for c in chips {
+            assert!(!s.arrived("m1", c), "{c} was there when the message first drew");
+        }
+        // Drawn again: not a first draw, and a reaction added now still pops in.
+        assert!(!s.first_draw("m1"));
+        assert!(s.arrived("m1", "m1/d"), "a reaction arriving on a drawn message pops in");
+    }
+
     #[test]
     fn a_name_shows_on_one_line_as_a_page_shows_it() {
         use std::borrow::Cow;

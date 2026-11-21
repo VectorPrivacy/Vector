@@ -1765,8 +1765,10 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             None => groups.push((&r.emoji, 1, mine, r.emoji_url.as_deref())),
         }
     }
+    // Decided once for the row: asked per chip, the first chip's ask would mark the row drawn
+    // and every later chip would seem to arrive on a drawn row.
+    let first_draw = ctx.media.borrow_mut().settle.first_draw(&m.id);
     if groups.is_empty() {
-        ctx.media.borrow_mut().settle.arrived(&m.id, &m.id);
         return None;
     }
     let mut row = div()
@@ -1816,7 +1818,12 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             move |_: &gpui::MouseUpEvent, w: &mut Window, cx: &mut App| act(&id, Act::ReactionPress(e.clone(), false), w, cx)
         };
         let key = crate::reactpop::chip_key(&m.id, emoji_str);
-        let entering = ctx.media.borrow_mut().settle.arrived(&m.id, &key);
+        let entering = if first_draw {
+            ctx.media.borrow_mut().settle.fill(&key);
+            false
+        } else {
+            ctx.media.borrow_mut().settle.arrived(&m.id, &key)
+        };
         let chip = div()
                 .id(SharedString::from(format!("{}-r-{emoji_str}", m.id)))
                 .relative()
