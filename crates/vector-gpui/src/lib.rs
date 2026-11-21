@@ -41,6 +41,7 @@ mod tree_audit;
 mod payaddr;
 mod reactpop;
 mod rekey;
+mod route;
 mod relayinfo;
 mod golinks;
 mod scrollbar;

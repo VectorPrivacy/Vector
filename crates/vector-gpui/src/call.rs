@@ -473,6 +473,8 @@ pub enum Act {
     PrefOpen(Option<(usize, bool)>),
     ChangeScreen,
     ShareAudio(bool),
+    /// Where a phone plays the call.
+    Route(String),
 }
 
 /// The pictures this frame shows, from the video worker.
@@ -566,6 +568,11 @@ fn mic_btn(call: &Call, on: &OnAct) -> impl IntoElement {
                 .size(px(18.7))
                 .text_color(if off { c(ACCENT) } else { white_a(0.88) }),
         )
+}
+
+fn route_btn(id: &'static str, on: &OnAct) -> Option<impl IntoElement> {
+    let o = on.clone();
+    crate::route::button(id, move |r, w, cx| o(Act::Route(r), w, cx))
 }
 
 fn hangup_btn(on: &OnAct) -> impl IntoElement {
@@ -1354,7 +1361,7 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
                 )
                 .child(status),
         )
-        .when(!ended, |d| d.children(crate::callpics::buttons(call, seen, on)).child(mic_btn(call, on)).child(hangup_btn(on)));
+        .when(!ended, |d| d.children(crate::callpics::buttons(call, seen, on)).children(route_btn("call-route", on)).child(mic_btn(call, on)).child(hangup_btn(on)));
     let pictures = crate::callpics::showing(call);
     let wide = (f32::from(win.width) - 24.).min(480.);
     let body = div()

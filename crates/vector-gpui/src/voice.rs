@@ -322,6 +322,8 @@ pub enum Act {
     Pick(String),
     HideScreen,
     Expand,
+    /// Where a phone plays the call.
+    Route(String),
 }
 
 pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
@@ -479,6 +481,11 @@ fn mic_btn(s: &Session, on: &OnAct) -> impl IntoElement {
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(click(on, Act::Mic))
         .child(icon(if off { "icons/mic-off.svg" } else { "icons/mic-on.svg" }, 18.7, tint))
+}
+
+fn route_btn(id: &'static str, on: &OnAct) -> Option<impl IntoElement> {
+    let on = on.clone();
+    crate::route::button(id, move |r, w, cx| on(Act::Route(r), w, cx))
 }
 
 fn deafen_btn(s: &Session, on: &OnAct) -> impl IntoElement {
@@ -984,6 +991,7 @@ pub fn stage(
                     on,
                 ))
             })
+            .children(route_btn("voice-stage-route", on))
             .child(mic_btn(s, on))
             .child(deafen_btn(s, on))
             .child(leave_btn(on)),
@@ -1223,6 +1231,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
             d.child(video_btn("voice-camera", "icons/video.svg", 18.7, s.camera, Act::Camera(!s.camera), on))
                 .child(video_btn("voice-share", "ui/call-screen.svg", 20., s.sharing, Act::Share(!s.sharing), on))
         })
+        .children(route_btn("voice-bar-route", on))
         .child(mic_btn(s, on))
         .child(deafen_btn(s, on))
         .child(leave_btn(on));

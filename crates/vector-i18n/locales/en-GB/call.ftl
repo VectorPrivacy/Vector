@@ -44,6 +44,12 @@ call-mic-open-settings = Open Settings
 call-mute = Mute microphone
 call-unmute = Unmute microphone
 call-hang-up = Hang up
+# Where a phone plays the call; each tap moves it to the next.
+call-sound-earpiece = Sound: Phone
+call-sound-headset = Sound: Headset
+call-sound-speaker = Sound: Speaker
+call-sound-bluetooth = Sound: Bluetooth
+call-route-unavailable = That isn't available right now
 call-accept = Accept
 call-decline = Decline
 call-open-channel = Open the channel

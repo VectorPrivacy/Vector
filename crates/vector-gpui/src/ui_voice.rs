@@ -111,6 +111,7 @@ impl VectorApp {
                 }
             }
             Act::Mic => self.voice_mic(cx),
+            Act::Route(r) => self.call_cmd(async move { crate::route::set(&r) }, cx),
             Act::Deafen => {
                 let Some(s) = self.voice.session.as_ref() else { return };
                 let on = !s.deafened;

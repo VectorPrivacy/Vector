@@ -3687,6 +3687,11 @@ impl VectorApp {
                 self.show_toast(&t::call_no_video(), cx);
             }
             "audio_devices_changed" => self.reload_devices(cx),
+            "call_route" => {
+                crate::pane::notify(&self.panes.chrome, cx);
+                crate::pane::notify(&self.panes.chat, cx);
+                self.notify_side(cx);
+            }
             "player_refused" => {
                 let msg = payload.get("msg").and_then(Value::as_str).unwrap_or_default().to_string();
                 let why = match payload.get("code").and_then(Value::as_i64).unwrap_or(0) {
@@ -17607,6 +17612,7 @@ impl VectorApp {
                 self.call_cmd(backend::calls::hangup(), cx);
             }
             Act::Mic if self.call.mic_off => self.mic_access(cx),
+            Act::Route(r) => self.call_cmd(async move { crate::route::set(&r) }, cx),
             Act::Mic => {
                 let on = !self.call.muted;
                 self.call.muted = on;
