@@ -3692,6 +3692,12 @@ impl VectorApp {
             }
             "audio_devices_changed" => self.reload_devices(cx),
             "share_received" => self.share_arrived(cx),
+            "badge_tilt" => {
+                if let (Some(card), Some((x, y))) = (self.badge_card.as_mut(), crate::tilt::current()) {
+                    card.tilt = gpui::point(x, y);
+                    cx.notify();
+                }
+            }
             "call_route" => {
                 crate::pane::notify(&self.panes.chrome, cx);
                 crate::pane::notify(&self.panes.chat, cx);
@@ -7365,7 +7371,10 @@ impl VectorApp {
             .children(self.qr_view(window, cx))
             .children(self.qr_scanner_view(window, cx))
             .children(self.search_view(window, cx))
-            .children(self.badge_card.as_ref().map(|card| {
+            .children({
+                crate::tilt::want(self.badge_card.is_some());
+                self.badge_card.as_ref()
+            }.map(|card| {
                 if card.opened.elapsed().as_secs_f32() < 0.45 {
                     window.request_animation_frame();
                 }
@@ -7380,6 +7389,7 @@ impl VectorApp {
                             use crate::badgecard::Ev;
                             match ev {
                                 Ev::Close => app.badge_card = None,
+                                Ev::Pointer(_) | Ev::Leave if crate::tilt::current().is_some() => {}
                                 Ev::Pointer(p) => {
                                     if let Some(card) = app.badge_card.as_mut() {
                                         let x =

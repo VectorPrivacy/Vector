@@ -18,3 +18,4 @@
 -keep class io.vectorapp.VectorUpdates { *; }
 -keep class io.vectorapp.VectorPush { *; }
 -keep class io.vectorapp.VectorPushService { *; }
+-keep class io.vectorapp.gpui.Tilt { *; }
