@@ -224,7 +224,10 @@ pub fn run() {
     log::info!("starting {}", env!("CARGO_PKG_VERSION"));
     jxl_oxide::integration::register_image_decoding_hook();
     let fixtures = args.fixtures.as_ref().map(|f| {
-        let store = data::Store::from_fixtures(f).expect("fixtures");
+        let store = data::Store::from_fixtures(f).unwrap_or_else(|e| {
+            eprintln!("fixtures {}: {e}", f.display());
+            std::process::exit(2)
+        });
         let open = args.open.clone().or_else(|| {
             std::env::var("VECTOR_OPEN_FIRST")
                 .ok()
