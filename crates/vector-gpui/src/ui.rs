@@ -3757,6 +3757,7 @@ impl VectorApp {
                         chat.wallpaper_dim = d as u8;
                     }
                 }
+                self.sweep_wallpapers(cx);
             }
             "wallpaper_upload_progress" => {
                 if self.wallpaper.busy {
@@ -9384,11 +9385,16 @@ impl VectorApp {
     /// What the open chat's wallpaper layer should show: a staged pick, else the chat's own
     /// unless backgrounds are off or it is a request's.
     fn wallpaper_key(&self) -> Option<crate::wallpaper::Key> {
+        self.wallpaper_look().map(|(k, _)| k)
+    }
+
+    /// The open chat's wallpaper and how far it is dimmed (100 = not at all).
+    fn wallpaper_look(&self) -> Option<(crate::wallpaper::Key, u8)> {
         let id = self.open.as_ref()?;
         let b = self.chat_box.get()?;
         let size = (f32::from(b.size.width).round() as u32, f32::from(b.size.height).round() as u32);
         if let Some(p) = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref()) {
-            return Some(crate::wallpaper::Key { path: p.path.clone(), ts: p.ts, blur: p.blur, dim: p.dim, size });
+            return Some((crate::wallpaper::Key { path: p.path.clone(), ts: p.ts, blur: p.blur, size, stored: false }, p.dim.min(100)));
         }
         let store = self.store.borrow();
         let chat = store.chat(id)?;
@@ -9396,18 +9402,46 @@ impl VectorApp {
         if !self.chat_bg || streaming || chat.wallpaper_path.is_empty() || store.is_request(chat) {
             return None;
         }
-        Some(crate::wallpaper::Key {
+        let key = crate::wallpaper::Key {
             path: store.media_root.join(&chat.wallpaper_path),
             ts: chat.wallpaper_ts,
             blur: chat.wallpaper_blur.min(30),
-            dim: chat.wallpaper_dim.min(100),
             size,
-        })
+            stored: true,
+        };
+        Some((key, chat.wallpaper_dim.min(100)))
+    }
+
+    /// Clear away the bakes of wallpapers no chat shows any more (see [`crate::wallpaper::sweep`]).
+    fn sweep_wallpapers(&mut self, cx: &mut Context<Self>) {
+        let live: Vec<crate::wallpaper::Key> = {
+            let store = self.store.borrow();
+            store
+                .chats
+                .iter()
+                .filter(|c| !c.wallpaper_path.is_empty())
+                .map(|c| crate::wallpaper::Key {
+                    path: store.media_root.join(&c.wallpaper_path),
+                    ts: c.wallpaper_ts,
+                    blur: c.wallpaper_blur.min(30),
+                    size: (0, 0),
+                    stored: true,
+                })
+                .collect()
+        };
+        let home = vector_core::db::account_dir(&self.store.borrow().my_npub).ok().map(|d| crate::wallpaper::account_bakes(&d.join("wallpapers")));
+        let disk = crate::wallpaper::sweep(&mut self.wallpaper, &live, home);
+        cx.background_executor().spawn(async move { disk() }).detach();
     }
 
     fn sync_wallpaper(&mut self, cx: &mut Context<Self>) {
         if self.chat_box.get().is_none() && self.open.is_some() {
             return;
+        }
+        // Once the chats are in: swept against none, every bake would go.
+        if !self.wallpaper.swept_once && self.open.is_some() {
+            self.wallpaper.swept_once = true;
+            self.sweep_wallpapers(cx);
         }
         let want = self.wallpaper_key();
         let waiting = want.is_some();
@@ -10192,7 +10226,9 @@ impl VectorApp {
             ))
         });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
-        let paper = self.wallpaper.image(self.wallpaper_key().as_ref());
+        let look = self.wallpaper_look();
+        let paper = self.wallpaper.image(look.as_ref().map(|(k, _)| k));
+        let shade = look.map_or(0., |(_, dim)| 1. - f32::from(dim) / 100.);
         let slim_com = channel.and_then(|_| store.community_of(&id)).filter(|_| self.is_slim);
         let header = if let (Some(ch), Some(com)) = (channel, slim_com) {
             crate::community::slim_header(store, com, ch, self.chat_menu_btn.clone(), on_community).into_any_element()
@@ -10291,9 +10327,12 @@ impl VectorApp {
             )
             // Cover, as baked: a bake for the old size holds its framing while the new one runs.
             .children(paper.clone().map(|image| {
-                div().absolute().inset_0().overflow_hidden().child(
-                    crate::pic::img(gpui::ImageSource::Render(image)).size_full().object_fit(gpui::ObjectFit::Cover),
-                )
+                div()
+                    .absolute()
+                    .inset_0()
+                    .overflow_hidden()
+                    .child(crate::pic::img(gpui::ImageSource::Render(image)).size_full().object_fit(gpui::ObjectFit::Cover))
+                    .when(shade > 0., |d| d.child(div().absolute().inset_0().bg(gpui::black().opacity(shade))))
             }))
             .child(div().relative().flex_shrink_0().child(header).children(edit_bar))
             .children(stage)
