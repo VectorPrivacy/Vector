@@ -17,6 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CRATE = os.path.dirname(HERE)
 ANSWER = os.path.join(tempfile.gettempdir(), "vector-devctl.json")
 BASELINE = os.path.join(CRATE, "reference", "onscreen-baseline.json")
+# The app's own data dir: without one a devctl build would hand `dev:` to a running Vector.
+# Short, as a Unix socket path on macOS caps at 104 bytes.
+DATA = os.path.join(tempfile.gettempdir(), "vfx-onscreen")
 # Memory at rest may grow this much over the baseline before the check fails.
 MEM_SLACK = 1.15
 
@@ -41,7 +44,7 @@ def dev(cmd, wait=True):
             os.remove(ANSWER)
         except OSError:
             pass
-    subprocess.run([args.bin, "dev:" + cmd], env=env, capture_output=True, timeout=30)
+    subprocess.run([args.bin, "--data-dir", DATA, "dev:" + cmd], env=env, capture_output=True, timeout=30)
     if not wait:
         return None
     for _ in range(100):
@@ -151,9 +154,38 @@ chats = [c["id"] for c in fx.get("chats", []) if c.get("messages")][:6]
 longest = max((c for c in fx.get("chats", []) if c.get("messages")), key=lambda c: len(c["messages"]), default=None)
 communities = [c["community_id"] for c in fx.get("communities", [])][:2]
 
-subprocess.run(["pkill", "-xf", f"{args.bin} --fixtures {args.fixtures} --size {W}x{H}"], capture_output=True)
+subprocess.run(["pkill", "-f", f"{args.bin} --fixtures"], capture_output=True)
+shutil.rmtree(DATA, ignore_errors=True)
 log = tempfile.NamedTemporaryFile("w+", prefix="onscreen-", suffix=".log", delete=False)
-app = subprocess.Popen([args.bin, "--fixtures", args.fixtures, "--size", f"{W}x{H}"], env=env, stdout=log, stderr=subprocess.STDOUT, cwd=CRATE)
+if MAC:
+    # A bare binary started from a shell may not take the front, and an occluded window draws
+    # nothing; a bundle LaunchServices starts may. It reads a temporary copy of the fixtures: a
+    # new bundle reading ~/Documents raises a privacy prompt.
+    stage = tempfile.mkdtemp(prefix="onscreen-app-")
+    ref = os.path.join(stage, "reference")
+    shutil.copytree(os.path.dirname(os.path.abspath(args.fixtures)), ref)
+    fixtures = os.path.join(ref, os.path.basename(args.fixtures))
+    bundle = os.path.join(stage, "OnscreenTest.app")
+    os.makedirs(os.path.join(bundle, "Contents", "MacOS"))
+    shutil.copy2(args.bin, os.path.join(bundle, "Contents", "MacOS", "OnscreenTest"))
+    with open(os.path.join(bundle, "Contents", "Info.plist"), "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+                "<key>CFBundleExecutable</key><string>OnscreenTest</string>"
+                "<key>CFBundleIdentifier</key><string>io.vectorapp.onscreen-test</string>"
+                "<key>CFBundlePackageType</key><string>APPL</string>"
+                "<key>NSHighResolutionCapable</key><true/></dict></plist>")
+    subprocess.run(["codesign", "-s", "-", "--force", bundle], capture_output=True)
+    app = subprocess.Popen(["open", "-n", "-W", "--stdout", log.name, "--stderr", log.name, bundle, "--args",
+                            "--fixtures", fixtures, "--size", f"{W}x{H}", "--data-dir", DATA], env=env, cwd=CRATE)
+    for _ in range(60):
+        if os.path.exists(os.path.join(DATA, "gpui.sock")):
+            break
+        time.sleep(0.5)
+    subprocess.run(["open", "-a", bundle])
+    time.sleep(1.5)
+else:
+    app = subprocess.Popen([args.bin, "--fixtures", args.fixtures, "--size", f"{W}x{H}", "--data-dir", DATA],
+                           env=env, stdout=log, stderr=subprocess.STDOUT, cwd=CRATE)
 try:
     wid = window_of(app.pid)
     focus(wid)
@@ -292,6 +324,8 @@ finally:
         app.wait(5)
     except subprocess.TimeoutExpired:
         app.kill()
+    # On macOS `app` is `open -W`; the app itself is found by its data dir.
+    subprocess.run(["pkill", "-f", "data-dir " + DATA], capture_output=True)
     log.seek(0)
     panics = [l for l in log.read().splitlines() if "panicked at" in l]
     check("no panics", not panics, panics[0] if panics else "")
