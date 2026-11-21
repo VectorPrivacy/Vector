@@ -30,6 +30,13 @@ impl VectorApp {
     }
 
     fn bar_event(&mut self, ev: Ev, _window: &mut Window, cx: &mut Context<Self>) {
+        // A held mic owns the pointer: a slide over the track is the recorder's.
+        if matches!(self.rec.state, crate::recorder::State::Pending | crate::recorder::State::Recording) {
+            if self.bar.hover.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
         let bar = &mut self.bar;
         let th = bar.track_h();
         match ev {

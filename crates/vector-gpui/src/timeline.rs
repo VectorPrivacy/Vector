@@ -1765,8 +1765,8 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             None => groups.push((&r.emoji, 1, mine, r.emoji_url.as_deref())),
         }
     }
+    let seen = ctx.media.borrow_mut().settle.row(&m.id);
     if groups.is_empty() {
-        ctx.media.borrow_mut().settle.arrived(&m.id, &m.id);
         return None;
     }
     let mut row = div()
@@ -1816,7 +1816,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
             move |_: &gpui::MouseUpEvent, w: &mut Window, cx: &mut App| act(&id, Act::ReactionPress(e.clone(), false), w, cx)
         };
         let key = crate::reactpop::chip_key(&m.id, emoji_str);
-        let entering = ctx.media.borrow_mut().settle.arrived(&m.id, &key);
+        let entering = ctx.media.borrow_mut().settle.part(seen, &key);
         let chip = div()
                 .id(SharedString::from(format!("{}-r-{emoji_str}", m.id)))
                 .relative()

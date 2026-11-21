@@ -524,7 +524,14 @@ pub fn sidebar(
                     let on = on.clone();
                     move |e, w, cx| on(Act::BannerMenu(e.position), w, cx)
                 })
-                .child(banner_art(path, width))
+                .child(match store.banner_pics.get(&path).filter(|(fit, _)| *fit >= crate::pic::fit(width)) {
+                    Some((_, image)) => gpui::img(image.clone())
+                        .w(px(width))
+                        .h(px(width * 70. / 238.))
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .into_any_element(),
+                    None => banner_art(path, width).into_any_element(),
+                })
         });
     let head = div()
         .flex_none()

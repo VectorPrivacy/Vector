@@ -3620,6 +3620,7 @@ impl VectorApp {
                 if let Some(ids) = payload.get("ids").and_then(|v| serde_json::from_value(v.clone()).ok()) {
                     self.store.borrow_mut().hidden_banners = ids;
                 }
+                self.prefetch_banners(cx);
             }
             "rail_layout_updated" => self.rail_event(&payload, cx),
             "voice_state" | "voice_levels" | "voice_presence" => self.voice_event(name, &payload, cx),
@@ -4436,12 +4437,21 @@ impl VectorApp {
         // History beyond the boot's last message comes from the database.
         let chat_id = id.to_string();
         messaging::set_active_chat(Some(chat_id.clone()));
+        let ready = self.media.borrow().linked_ready();
         let rx = backend::run(async move {
             let views = messaging::message_views(chat_id.clone(), 200, 0).await;
             // Newest first: the page's newest message from someone else.
             let theirs = views.as_ref().ok().and_then(|v| v.iter().find(|m| !m.mine)).map(|m| m.id.clone());
-            messaging::mark_as_read(chat_id, theirs).await;
-            views
+            let (_, pics) = futures::join!(
+                messaging::mark_as_read(chat_id, theirs),
+                async {
+                    match &views {
+                        Ok(v) => crate::media::held_linked(v, &ready).await,
+                        Err(_) => Vec::new(),
+                    }
+                }
+            );
+            (views, pics)
         });
         cx.spawn(async move |this, cx| {
             let res = rx.await;
@@ -4449,10 +4459,11 @@ impl VectorApp {
                 if this.open.as_ref() != Some(&id) {
                     return;
                 }
-                let Ok(Ok(mut views)) = res else {
+                let Ok((Ok(mut views), pics)) = res else {
                     this.opening = None;
                     return;
                 };
+                this.media.borrow_mut().take_linked(pics);
                 views.reverse();
                 views.sort_by_key(|m| m.at);
                 if views.len() < 200 {
@@ -10827,6 +10838,7 @@ fn composer(
     let commanding = form.is_some();
     let locked = lock.is_some();
     let busy = !locked && matches!(rec.state, R::Recording | R::Locked | R::Preview | R::Cancelled);
+    let back = rec.back_fade();
     let previewing = rec.state == R::Preview;
     let hides_mic = matches!(rec.state, R::Recording | R::Locked | R::Preview);
     let icon = |path: &'static str| {
@@ -11030,14 +11042,14 @@ fn composer(
                         crate::recorder::strip(rec)
                     })
                 })
-                .when(!busy && !commanding && !locked, |d| d.child(if editing {
+                .when(!busy && !commanding && !locked, |d| d.child(div().flex_none().opacity(back).child(if editing {
                     cancel("edit-cancel", 23., cx)
                         .w(px(38.))
                         .h(px(45.))
                         .into_any_element()
                 } else {
                     attach_button(attach.is_some(), attach_turned, cx).into_any_element()
-                }))
+                })))
                 .when_some(form, |d, form| d.child(div().flex_1().min_w_0().child(form)))
                 .when_some(lock, |d, lock| d.child(
                     div()
@@ -11058,6 +11070,7 @@ fn composer(
                         .min_w_0()
                         .py(px(12.))
                         .pr(px(10.))
+                        .opacity(back)
                         .when(busy, |d| d.absolute().invisible().size_0())
                         .child(input),
                 ))
@@ -11068,6 +11081,7 @@ fn composer(
                         "icons/smile-face.svg"
                     })
                     .id("composer-emoji")
+                    .opacity(back)
                     .aria_label(t::composer_emoji())
                     .cursor_pointer()
                     .on_click(
@@ -16522,6 +16536,8 @@ impl VectorApp {
                 this.store.borrow_mut().communities = list;
                 this.store.borrow_mut().hidden_banners = hidden;
                 this.resolve_art(None, cx);
+                this.prefetch_banners(cx);
+                this.prefetch_rosters(cx);
                 if let Some((id, n)) = named {
                     this.store.borrow_mut().nicknames.insert(id, n);
                 }

@@ -24,13 +24,15 @@ pub fn img_face(source: impl Into<ImageSource>, px: f32) -> Stateful<gpui::Img> 
     fitted(source.into(), px, gpui::SQUARE)
 }
 
+/// The pixels a decode for a picture drawn at most `px` points a side is held to.
+pub fn fit(px: f32) -> u32 {
+    ((px * 2.).ceil() as u32).min(BIGGEST as u32 * 2).max(64).next_power_of_two()
+}
+
 fn fitted(source: ImageSource, px: f32, how: &str) -> Stateful<gpui::Img> {
     let svg = matches!(&source, ImageSource::Resource(Resource::Embedded(n)) if n.ends_with(".svg"));
     // An SVG is cheap to rasterise at exactly its drawn size, where a decode is shared.
-    let fit = match ((px * 2.).ceil() as u32).min(BIGGEST as u32 * 2) {
-        n if svg => n,
-        n => n.max(64).next_power_of_two(),
-    };
+    let fit = if svg { ((px * 2.).ceil() as u32).min(BIGGEST as u32 * 2) } else { fit(px) };
     let source = sealed(source, fit, how);
     let id = match &source {
         ImageSource::Render(image) => ElementId::NamedInteger("pic".into(), image.id.0 as u64),

@@ -104,6 +104,24 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+/// [`image`] when this device already holds it: never a download.
+pub async fn held_image(url: &str) -> Option<Vec<u8>> {
+    if !url.to_ascii_lowercase().starts_with("https://") {
+        return None;
+    }
+    let held = vector_core::media::url_key("inline-image", url);
+    if vector_core::media::resident(&held)
+        && let Some((bytes, _)) = vector_core::media::held_bytes(&held).await
+    {
+        return Some(bytes);
+    }
+    let path = kept(url)?;
+    tokio::task::spawn_blocking(move || vector_core::vcache::read(&path).ok().map(|b| b.to_vec()))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// The picture a message links to, as bytes ready to decode, or `None` when it isn't one.
 pub async fn image(url: String) -> Option<Vec<u8>> {
     if !url.to_ascii_lowercase().starts_with("https://")
@@ -111,20 +129,10 @@ pub async fn image(url: String) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let held = vector_core::media::url_key("inline-image", &url);
-    if vector_core::media::resident(&held)
-        && let Some((bytes, _)) = vector_core::media::held_bytes(&held).await
-    {
+    if let Some(bytes) = held_image(&url).await {
         return Some(bytes);
     }
-    if let Some(path) = kept(&url) {
-        return tokio::task::spawn_blocking(move || {
-            vector_core::vcache::read(&path).ok().map(|b| b.to_vec())
-        })
-        .await
-        .ok()
-        .flatten();
-    }
+    let held = vector_core::media::url_key("inline-image", &url);
     let _permit = DOWNLOADS.acquire().await.ok()?;
     let bytes = fetch(&url).await.ok()?;
     let mut ext = sniff(&bytes)?;

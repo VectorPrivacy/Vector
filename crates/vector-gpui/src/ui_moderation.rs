@@ -671,7 +671,96 @@ impl VectorApp {
             let Ok(art) = rx.await else { return };
             this.update(cx, |app, cx| {
                 app.store.borrow_mut().art.extend(art);
+                app.prefetch_banners(cx);
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Each Community's banner decoded at the list's width, so its first open draws it.
+    pub(super) fn prefetch_banners(&mut self, cx: &mut Context<Self>) {
+        let fit = crate::pic::fit(if self.is_slim { 512. } else { super::list_w() });
+        let (wanted, gone) = {
+            let mut store = self.store.borrow_mut();
+            let live: HashSet<std::path::PathBuf> = store
+                .communities
+                .iter()
+                .filter(|c| !store.hidden_banners.contains(&c.community_id))
+                .filter_map(|c| store.banner(&c.community_id))
+                .collect();
+            let mut gone = Vec::new();
+            store.banner_pics.retain(|p, (_, image)| {
+                let keep = live.contains(p);
+                if !keep {
+                    gone.push(image.clone());
+                }
+                keep
+            });
+            let wanted: Vec<_> = live.into_iter().filter(|p| store.banner_pics.get(p).is_none_or(|(f, _)| *f < fit)).collect();
+            (wanted, gone)
+        };
+        for image in gone {
+            cx.drop_image(image, None);
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let decode = cx.background_executor().spawn(async move {
+            wanted
+                .into_iter()
+                .filter_map(|path| {
+                    let bytes = crate::pic::read(&path).ok()?;
+                    let ext = crate::backend::inline::sniff(&bytes).unwrap_or("png");
+                    let (image, ..) = crate::media::decode(&bytes, ext, (fit, fit))?;
+                    Some((path, (fit, std::sync::Arc::new(image))))
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let pics = decode.await;
+            this.update(cx, |app, cx| {
+                let mut store = app.store.borrow_mut();
+                for (path, pic) in pics {
+                    if let Some((_, old)) = store.banner_pics.insert(path, pic) {
+                        cx.drop_image(old, None);
+                    }
+                }
+                drop(store);
+                app.notify_side(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Each Community's roster read ahead, so a first open counts its members at once.
+    pub(super) fn prefetch_rosters(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = {
+            let store = self.store.borrow();
+            store.communities.iter().map(|c| c.community_id.clone()).filter(|id| !store.rosters.contains_key(id)).collect()
+        };
+        if !self.live || ids.is_empty() {
+            return;
+        }
+        let rx = backend::run(async move {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                let roster = backend::community::roster_only(id.clone()).await;
+                out.push((id, roster));
+            }
+            out
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(read) = rx.await else { return };
+            this.update(cx, |app, _| {
+                let mut store = app.store.borrow_mut();
+                for (id, roster) in read {
+                    if store.community(&id).is_some() {
+                        store.rosters.entry(id).or_insert(roster);
+                    }
+                }
             })
             .ok();
         })

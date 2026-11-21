@@ -343,6 +343,20 @@ impl Media {
         l
     }
 
+    /// The link pictures ready to draw, by URL.
+    pub fn linked_ready(&self) -> HashSet<String> {
+        self.linked.iter().filter(|(_, l)| matches!(l, Linked::Ready { .. })).map(|(u, _)| u.clone()).collect()
+    }
+
+    /// Pictures decoded ahead of the rows that show them.
+    pub fn take_linked(&mut self, pics: Vec<(String, Linked)>) {
+        let now = std::time::Instant::now();
+        for (url, l) in pics {
+            self.used.insert((2, url.clone()), now);
+            self.linked.insert(url, l);
+        }
+    }
+
     /// The messages waiting on pictures that have settled since the last ask.
     pub fn take_settled_rows(&mut self) -> Vec<String> {
         let mut out = Vec::new();
@@ -737,7 +751,10 @@ pub fn pump<V: 'static>(
             };
             {
                 let mut m = media.borrow_mut();
-                m.linked.insert(url.clone(), slot);
+                // Decoded ahead meanwhile: that copy may already be on the GPU.
+                if !matches!(m.linked.get(&url), Some(Linked::Ready { .. })) {
+                    m.linked.insert(url.clone(), slot);
+                }
                 m.linked_settled.push(url);
                 m.pressed = true;
             }
@@ -745,6 +762,32 @@ pub fn pump<V: 'static>(
         })
         .detach();
     }
+}
+
+/// The link card pictures and icons of the newest `messages` (newest first) that this device already
+/// holds and `ready` lacks, decoded: a page lands with them drawn instead of reflowing a frame on.
+pub async fn held_linked(messages: &[vector_core::types::Message], ready: &HashSet<String>) -> Vec<(String, Linked)> {
+    const NEWEST: usize = 30;
+    const MOST: usize = 8;
+    let mut urls: Vec<String> = Vec::new();
+    'scan: for m in messages.iter().take(NEWEST) {
+        let Some(meta) = m.preview_metadata.as_ref() else { continue };
+        for url in [&meta.og_image, &meta.favicon].into_iter().flatten() {
+            if !ready.contains(url) && !urls.contains(url) {
+                urls.push(url.clone());
+            }
+            if urls.len() == MOST {
+                break 'scan;
+            }
+        }
+    }
+    let jobs = urls.into_iter().map(|url| async move {
+        let bytes = crate::backend::inline::held_image(&url).await?;
+        let ext = crate::backend::inline::sniff(&bytes).unwrap_or("png");
+        let (image, w, h) = tokio::task::spawn_blocking(move || decode(&bytes, ext, LINKED_MAX)).await.ok()??;
+        Some((url, Linked::Ready { image: Arc::new(image), w, h }))
+    });
+    futures::future::join_all(jobs).await.into_iter().flatten().collect()
 }
 
 pub fn to_bgra(mut buf: image::RgbaImage) -> image::RgbaImage {

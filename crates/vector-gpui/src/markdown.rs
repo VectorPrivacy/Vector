@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{FontWeight, Hsla, SharedString};
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::emoji;
@@ -1443,7 +1443,7 @@ fn run(b: &mut Builder, chunks: &[(bool, String)]) {
     for (sub, text) in chunks {
         if *sub {
             b.open_para(ParaKind::Sub);
-            for ev in Parser::new_ext(text, opts) {
+            for ev in TextMergeStream::new(Parser::new_ext(text, opts)) {
                 match ev {
                     Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {}
                     ev => b.event(ev),
@@ -1452,7 +1452,8 @@ fn run(b: &mut Builder, chunks: &[(bool, String)]) {
             b.flush_para();
             continue;
         }
-        let mut events = Parser::new_ext(text, opts).peekable();
+        // Merged: the parser splits text at every `_` or `*` it might have used, which cut bare URLs.
+        let mut events = TextMergeStream::new(Parser::new_ext(text, opts)).peekable();
         while let Some(ev) = events.next() {
             // A markdown link that may not render as one shows its source.
             if let Event::Start(Tag::Link {
@@ -1643,6 +1644,8 @@ mod custom_tests {
             Kind::LinkTip(url, tip) if url.as_ref() == "https://evil.io/npub1x" && tip.as_ref() == "https://evil.io/•••x"
         )));
         assert!(kinds("[https://a.io/](https://a.io)").iter().all(|k| !matches!(k, Kind::LinkTip(..))));
+        let url = "https://yakihonne.com/article/s/_@nostrcompass.org/76fa9c6ade9c73f6";
+        assert!(kinds(url).iter().all(|k| matches!(k, Kind::Link(u) if u.as_ref() == url)), "an underscore stays inside a bare URL");
     }
 }
 

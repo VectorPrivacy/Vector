@@ -1172,15 +1172,20 @@ impl Settle {
         matches!(seen, Settled::At(_))
     }
 
-    /// `key`, a part of `row`, is drawn: whether it arrived after the row first drew and is
-    /// still entering. One drawn with its row fills in place.
-    pub fn arrived(&mut self, row: &str, key: &str) -> bool {
-        let row_seen = self.0.contains_key(row);
-        if !row_seen {
-            self.0.insert(row.to_string(), Settled::Done);
+    /// `row` is drawn: whether it was drawn before. Ask once per draw, before its parts.
+    pub fn row(&mut self, row: &str) -> bool {
+        if self.0.contains_key(row) {
+            return true;
         }
+        self.0.insert(row.to_string(), Settled::Done);
+        false
+    }
+
+    /// `key`, a part of a row that `row` answered `seen` for, is drawn: whether it arrived
+    /// after the row first drew and is still entering. One drawn with its row fills in place.
+    pub fn part(&mut self, seen: bool, key: &str) -> bool {
         if !self.0.contains_key(key) {
-            self.0.insert(key.to_string(), if row_seen { Settled::Loading } else { Settled::Done });
+            self.0.insert(key.to_string(), if seen { Settled::Loading } else { Settled::Done });
         }
         self.fresh(key, true)
     }
@@ -1356,7 +1361,8 @@ pub fn inert() -> gpui::Div {
 pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<AnyElement> {
     // `.popup-container`'s `transition: background-color 0.2s ease`.
     let (_, shown) = gone.track_for(open.then_some(&()), 0.2, bezier(0.25, 0.1, 0.25, 1.), window)?;
-    (shown < 1.).then(|| {
+    // Not `shown < 1.`: the first frame after the close is at 1, and skipping it flashes undimmed.
+    (!open).then(|| {
         gpui::deferred(div().absolute().inset_0().bg(ca(0, 0, 0, 0.85 * shown)).child(inert()))
             .with_priority(15)
             .into_any_element()
@@ -2307,5 +2313,15 @@ mod tests {
         );
         assert_eq!(super::around("Open the <hub>Hub</hub>", "hub"), (format!("Open the{nb}"), "Hub".to_string(), String::new()));
         assert_eq!(super::around("no span", "hub"), ("no span".to_string(), String::new(), String::new()));
+    }
+
+    #[test]
+    fn every_chip_drawn_with_its_message_fills_in_place() {
+        let mut settle = super::Settle::default();
+        let seen = settle.row("m1");
+        assert!(!["a", "b", "c"].iter().any(|k| settle.part(seen, k)));
+        let seen = settle.row("m1");
+        assert!(settle.part(seen, "d"), "a reaction that lands later pops in");
+        assert!(!settle.part(seen, "a"));
     }
 }

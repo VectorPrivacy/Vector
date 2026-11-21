@@ -321,6 +321,8 @@ pub struct Store {
     pub nicknames: HashMap<String, HashMap<String, String>>,
     /// Each community's last roster read: members, admins, unlisted.
     pub rosters: HashMap<String, Roster>,
+    /// Community banners decoded ahead of their first sight, by file: the decode's fit and pixels.
+    pub banner_pics: HashMap<PathBuf, (u32, std::sync::Arc<gpui::RenderImage>)>,
     /// Each community's running Timeouts, npub → its span.
     pub timeouts: HashMap<String, HashMap<String, Timeout>>,
     /// Per channel, the authors seen there who can't send in it.
@@ -543,6 +545,7 @@ impl Store {
             pivx_price: None,
             nicknames: f.nicknames,
             rosters: HashMap::new(),
+            banner_pics: HashMap::new(),
             timeouts: f.timeouts,
             send_denied: f.send_denied,
             react_denied: f.react_denied,
@@ -623,6 +626,7 @@ impl Store {
             pivx_price: None,
             nicknames: HashMap::new(),
             rosters: HashMap::new(),
+            banner_pics: HashMap::new(),
             timeouts: HashMap::new(),
             send_denied: HashMap::new(),
             react_denied: HashMap::new(),

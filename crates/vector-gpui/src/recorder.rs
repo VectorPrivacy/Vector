@@ -55,6 +55,10 @@ pub struct Recorder {
     cancelled: Option<Instant>,
     /// The dot easing home after a drag.
     returning: Option<(Instant, f32, f32)>,
+    /// The dot fading out after a cancel.
+    dot_out: Option<Instant>,
+    /// The composer's own controls fading back in after the recorder let go of the row.
+    back: Option<Instant>,
     // The preview's playback.
     pub source: Option<u32>,
     pub duration: u64,
@@ -62,8 +66,6 @@ pub struct Recorder {
     start_pos: u64,
     play_started: Option<Instant>,
     paused_at: u64,
-    /// Bumped when the composer's controls come back, for their fade.
-    pub fade: u64,
     /// The chosen Whisper model is here, so the preview offers dictation.
     pub can_dictate: bool,
     pub dictating: bool,
@@ -85,13 +87,14 @@ impl Default for Recorder {
             lock_fading: None,
             cancelled: None,
             returning: None,
+            dot_out: None,
+            back: None,
             source: None,
             duration: 0,
             playing: false,
             start_pos: 0,
             play_started: None,
             paused_at: 0,
-            fade: 0,
             can_dictate: false,
             dictating: false,
         }
@@ -216,9 +219,15 @@ impl Recorder {
 
     pub fn cancel(&mut self) {
         self.reset_drag();
+        self.dot_out = Some(Instant::now());
+        self.source = None;
+        // Still waiting on the microphone: the row never became the recorder's.
+        if self.state == State::Pending {
+            self.state = State::Idle;
+            return;
+        }
         self.state = State::Cancelled;
         self.cancelled = Some(Instant::now());
-        self.source = None;
     }
 
     pub fn idle(&mut self) {
@@ -226,9 +235,22 @@ impl Recorder {
         *self = Recorder {
             press: self.press,
             tooltip: self.tooltip,
-            fade: self.fade + back as u64,
+            returning: self.returning,
+            dot_out: self.dot_out,
+            back: if back { Some(Instant::now()) } else { self.back },
             ..Recorder::default()
         };
+    }
+
+    /// `.chat-input-fade-in`: the composer's controls, 0.2 s ease after the recorder lets go.
+    pub fn back_fade(&self) -> f32 {
+        self.back.map_or(1., |t| crate::kit::bezier(0.25, 0.1, 0.25, 1.)((t.elapsed().as_secs_f32() / 0.2).min(1.)))
+    }
+
+    /// The dot's opacity as it leaves: `None` once it's gone.
+    fn dot_leaving(&self) -> Option<f32> {
+        let p = self.dot_out?.elapsed().as_secs_f32() / 0.15;
+        (p < 1.).then_some(1. - p)
     }
 
     pub fn preview(&mut self, source: u32, duration: u64) {
@@ -294,6 +316,8 @@ impl Recorder {
         matches!(self.state, State::Pending | State::Recording | State::Locked | State::Cancelled)
             || (self.state == State::Preview && self.playing)
             || self.returning.is_some_and(|(t, _, _)| t.elapsed().as_millis() < 160)
+            || self.dot_out.is_some_and(|t| t.elapsed().as_millis() < 160)
+            || self.back.is_some_and(|t| t.elapsed().as_millis() < 220)
             || self.tooltip.is_some_and(|t| t.elapsed().as_millis() < 2200)
     }
 
@@ -432,7 +456,10 @@ pub fn strip(r: &Recorder) -> AnyElement {
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .child(row.relative().left(gpui::relative(-p)).opacity(1. - p))
+            .child({
+                let e = crate::kit::bezier(0.25, 0.1, 0.25, 1.)(p);
+                row.relative().left(gpui::relative(-e)).opacity(1. - e)
+            })
             .into_any_element(),
         None => row.into_any_element(),
     }
@@ -440,7 +467,8 @@ pub fn strip(r: &Recorder) -> AnyElement {
 
 /// `.voice-recorder-red-circle`: over the mic while recording; a stop square once locked.
 pub fn dot(r: &Recorder, on: On) -> Option<AnyElement> {
-    if !matches!(r.state, State::Pending | State::Recording | State::Locked) {
+    let fading = r.dot_leaving().filter(|_| matches!(r.state, State::Idle | State::Cancelled));
+    if !matches!(r.state, State::Pending | State::Recording | State::Locked) && fading.is_none() {
         return None;
     }
     let locked = r.state == State::Locked;
@@ -471,6 +499,7 @@ pub fn dot(r: &Recorder, on: On) -> Option<AnyElement> {
                     .size(px(side))
                     .rounded(px(if locked { 6. } else { side / 2. }))
                     .bg(c(RED))
+                    .when_some(fading, |d, o| d.opacity(o))
                     .when(ring > 0., |d| {
                         d.shadow(vec![gpui::BoxShadow {
                             color: ca(255, 68, 68, 0.4 * (1. - ring)),
@@ -759,6 +788,23 @@ pub fn tracker(on: On) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_before_the_microphone_opens_never_shows_the_recorder() {
+        let mut r = Recorder::default();
+        r.press(point(px(500.), px(700.)));
+        assert_eq!(r.moved(point(px(390.), px(700.))), Effect::Cancel);
+        r.cancel();
+        assert_eq!(r.state, State::Idle);
+        assert!(!r.busy());
+        assert!(r.animating(), "the dot still fades out");
+        r.press(point(px(500.), px(700.)));
+        r.recording();
+        r.cancel();
+        assert_eq!(r.state, State::Cancelled);
+        r.idle();
+        assert!(r.back_fade() < 0.5, "the composer fades back in");
+    }
 
     #[test]
     fn a_leftward_drag_cancels_and_an_upward_one_locks() {

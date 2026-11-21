@@ -465,7 +465,10 @@ impl ChannelEditor {
         if own {
             permissions.push(anchor("ch-lock", t::channel_editor_section_lock, t::channel_editor_section_lock_keys));
         }
-        permissions.push(anchor("ch-targets", t::channel_editor_section_targets, t::channel_editor_section_targets_keys));
+        // A synced channel shows only its category's link.
+        if !(self.perms_open() && self.perms.as_ref().is_some_and(|p| p.synced)) {
+            permissions.push(anchor("ch-targets", t::channel_editor_section_targets, t::channel_editor_section_targets_keys));
+        }
         if own {
             permissions.extend(GROUPS.iter().map(|(id, title, keys, _)| anchor(id, *title, *keys)));
         }
