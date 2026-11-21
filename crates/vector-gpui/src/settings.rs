@@ -124,7 +124,7 @@ pub fn categories(offers: &Offers) -> Vec<Category> {
     out.push(Category {
         id: "danger",
         label: t::settings_page_danger,
-        icon: "warning",
+        icon: "vector_warning",
         danger: true,
         anchors: vec![
             anchor("advanced", t::settings_section_advanced, t::settings_section_advanced_keys),
@@ -3961,14 +3961,7 @@ pub fn section_nav(
                 .on_click(move |_, w, cx| pick(id, w, cx))
                 .child(
                     svg()
-                        .path(SharedString::from(format!(
-                            "icons/{}.svg",
-                            if cat.icon == "warning" {
-                                "vector_warning"
-                            } else {
-                                cat.icon
-                            }
-                        )))
+                        .path(SharedString::from(format!("icons/{}.svg", cat.icon)))
                         .size(px(17.))
                         .flex_shrink_0()
                         .text_color(icon)

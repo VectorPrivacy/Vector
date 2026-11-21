@@ -147,7 +147,7 @@ fn cat_row(cat: &Category, first: bool, open: bool, s: &Settings, on: &OnAct) ->
         .cursor_pointer()
         .when(!first, |d| d.border_t_1().border_color(c(ROW_EDGE)))
         .on_click(click(on, move || Act::Fold(id)))
-        .child(svg().path(SharedString::from(format!("icons/{}.svg", if cat.danger { "vector_warning" } else { cat.icon }))).size(px(24.)).flex_shrink_0().text_color(ink))
+        .child(svg().path(SharedString::from(format!("icons/{}.svg", cat.icon))).size(px(24.)).flex_shrink_0().text_color(ink))
         .child(
             div()
                 .flex_1()
