@@ -426,6 +426,45 @@ pub async fn add_configured_relays(client: &Client) {
     client.connect().await;
 }
 
+/// One relay for a window-less service, as Tauri's background sync: a custom relay that reads
+/// first, then the enabled defaults, each given the connect budget before the next is tried.
+/// One socket wakes the radio far less than the whole pool, and senders reach every inbox relay.
+#[cfg(target_os = "android")]
+pub async fn connect_one(client: &Client) -> bool {
+    let disabled = disabled_default_relays().unwrap_or_default();
+    let mut candidates: Vec<(String, RelayCapabilities)> = load_custom_relays()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.enabled && c.mode != "write")
+        .map(|c| (c.url, capabilities_for_mode(&c.mode)))
+        .collect();
+    for url in DEFAULT_RELAYS.iter().filter(|d| !disabled.iter().any(|x| x.eq_ignore_ascii_case(d))) {
+        if !candidates.iter().any(|(c, _)| c.eq_ignore_ascii_case(url)) {
+            candidates.push((url.to_string(), capabilities_for_mode(&default_relay_mode())));
+        }
+    }
+    if candidates.is_empty() {
+        let caps = capabilities_for_mode(&default_relay_mode());
+        candidates.extend(DEFAULT_RELAYS.iter().map(|u| (u.to_string(), caps)));
+    }
+    let polls = vector_core::relay_connect_timeout(Duration::from_secs(10)).as_millis() / 500;
+    for (url, caps) in candidates {
+        if client.add_managed_relay(url.as_str()).capabilities(caps).await.is_err() {
+            continue;
+        }
+        client.connect().await;
+        for _ in 0..polls {
+            vector_core::rt::time::sleep(Duration::from_millis(500)).await;
+            if client.relays().await.values().any(|r| r.status() == RelayStatus::Connected) {
+                add_relay_log(&url, "info", "Background: the one relay while no window is open"); // i18n-exempt: relay log, copied for bug reports
+                return true;
+            }
+        }
+        let _ = client.remove_relay(url.as_str()).await;
+    }
+    false
+}
+
 /// The Relays tab IS the kind 10050 list: apply a newer published copy
 /// locally, then merge-publish any outbound diff.
 pub async fn reconcile_dm_relay_list() {

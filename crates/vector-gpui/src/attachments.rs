@@ -422,13 +422,6 @@ fn blur_size(meta: &vector_core::types::ImageMetadata) -> (f32, f32) {
     )
 }
 
-fn device(ctx: &Ctx, w: f32, h: f32) -> (u32, u32) {
-    (
-        (w * ctx.scale).round() as u32,
-        (h * ctx.scale).round() as u32,
-    )
-}
-
 /// `ThumbhashAttachment`: the blur at the size the picture will take, under its download
 /// ring or a Download box. None when there is no blur, so the caller shows a file box.
 fn blur(

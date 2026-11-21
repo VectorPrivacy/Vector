@@ -195,10 +195,23 @@ pub async fn standby() -> bool {
         vector_core::log_warn!("[standby] sign-in failed: {e}");
         return false;
     }
-    connect().await;
+    {
+        let _one = OPENING.lock().await;
+        let Some(client) = state::nostr_client() else {
+            return false;
+        };
+        if client.relays().await.is_empty() {
+            db::current_session().scoped::<OneRelay, std::sync::atomic::AtomicBool>().store(true, std::sync::atomic::Ordering::SeqCst);
+            super::network::connect_one(&client).await;
+            super::network::start_relay_monitor(&client);
+        }
+    }
     super::sync::notifs();
     true
 }
+
+/// The pool holds only standby's one relay: a window's sign-in adds the rest.
+struct OneRelay;
 
 /// A PIN account can't be read without its PIN: a client with no key, on the account's own
 /// network, notices gift wraps for it and says only that something came, as Tauri does.
@@ -744,7 +757,8 @@ pub async fn connect() -> bool {
     let Some(client) = state::nostr_client() else {
         return false;
     };
-    if !client.relays().await.is_empty() {
+    let one = db::current_session().scoped::<OneRelay, std::sync::atomic::AtomicBool>().swap(false, std::sync::atomic::Ordering::SeqCst);
+    if !one && !client.relays().await.is_empty() {
         return false;
     }
     super::network::add_configured_relays(&client).await;
