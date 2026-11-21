@@ -143,7 +143,7 @@ fn resample(samples: Vec<f32>, from: u32, to: u32) -> Vec<f32> {
 }
 
 fn load_raw(path: &Path) -> Result<Vec<f32>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read cache file: {e}"))?; // i18n-exempt: logged only
+    let bytes = vector_core::vcache::read(path).map_err(|e| format!("Failed to read cache file: {e}"))?; // i18n-exempt: logged only
     if bytes.len() % 4 != 0 {
         return Err("Invalid cache file size".into()); // i18n-exempt: logged only
     }
@@ -285,6 +285,6 @@ pub fn import(source: &Path, sounds_dir: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to create sounds cache dir: {e}"))?; // i18n-exempt: logged only
     let dest = sounds_dir.join(format!("{stem}_{rate}.raw"));
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    std::fs::write(&dest, bytes).map_err(|e| format!("Failed to write cache file: {e}"))?; // i18n-exempt: logged only
+    vector_core::vcache::write(&dest, &bytes).map_err(|e| format!("Failed to write cache file: {e}"))?; // i18n-exempt: logged only
     Ok(dest)
 }
