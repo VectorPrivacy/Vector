@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{FontWeight, Hsla, SharedString};
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::emoji;
@@ -1443,7 +1443,7 @@ fn run(b: &mut Builder, chunks: &[(bool, String)]) {
     for (sub, text) in chunks {
         if *sub {
             b.open_para(ParaKind::Sub);
-            for ev in Parser::new_ext(text, opts) {
+            for ev in TextMergeStream::new(Parser::new_ext(text, opts)) {
                 match ev {
                     Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {}
                     ev => b.event(ev),
@@ -1452,7 +1452,8 @@ fn run(b: &mut Builder, chunks: &[(bool, String)]) {
             b.flush_para();
             continue;
         }
-        let mut events = Parser::new_ext(text, opts).peekable();
+        // One Text per run: an `_` that opens no emphasis still splits it, and a URL with it.
+        let mut events = TextMergeStream::new(Parser::new_ext(text, opts)).peekable();
         while let Some(ev) = events.next() {
             // A markdown link that may not render as one shows its source.
             if let Event::Start(Tag::Link {
@@ -1643,6 +1644,37 @@ mod custom_tests {
             Kind::LinkTip(url, tip) if url.as_ref() == "https://evil.io/npub1x" && tip.as_ref() == "https://evil.io/•••x"
         )));
         assert!(kinds("[https://a.io/](https://a.io)").iter().all(|k| !matches!(k, Kind::LinkTip(..))));
+    }
+
+    #[test]
+    fn a_url_with_an_underscore_is_one_link() {
+        let revealed = HashSet::new();
+        let ctx = Ctx {
+            base: Look::new("Rubik", 15., 21., gpui::white()), // i18n-exempt: font name
+            revealed: &revealed,
+            custom: None,
+            now: 0.,
+            mention: None,
+            tags: &[],
+            mask: None,
+            colors: &[],
+            go: None,
+        };
+        let links = |src: &str| -> Vec<String> {
+            let blocks = parse(src, &ctx);
+            let Block::Para(p) = &blocks[0] else { panic!() };
+            p.atoms
+                .iter()
+                .filter_map(|a| match a {
+                    Atom::Text { kind: Kind::Link(u), .. } => Some(u.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let url = "https://yakihonne.com/article/s/_@nostrcompass.org/76fa9c6ade9c73f6";
+        assert!(links(url).iter().all(|u| u == url) && !links(url).is_empty());
+        assert!(links(&format!("see {url} now")).iter().all(|u| u == url));
+        assert!(links("https://a.io/x_y_z").iter().all(|u| u == "https://a.io/x_y_z"));
     }
 }
 
