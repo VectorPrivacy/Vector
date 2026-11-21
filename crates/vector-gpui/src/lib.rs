@@ -31,6 +31,7 @@ mod pings;
 mod pins;
 mod search;
 mod pickers;
+mod picked;
 mod edithistory;
 mod textdiff;
 #[cfg(test)]

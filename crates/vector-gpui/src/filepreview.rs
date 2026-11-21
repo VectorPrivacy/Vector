@@ -252,20 +252,17 @@ impl FilePreview {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
+        let own = crate::picked::name(&path);
+        let edited = own.is_some();
+        let name = own.unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string());
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let mut stem = if ext.is_empty() {
-            name.clone()
-        } else {
-            name[..name.len() - ext.len() - 1].to_string()
+        let mut stem = match name.rsplit_once('.') {
+            Some((stem, e)) if !ext.is_empty() && e.eq_ignore_ascii_case(&ext) => stem.to_string(),
+            _ => name.clone(),
         };
         let spoiler = stem.to_uppercase().starts_with("SPOILER_");
         if spoiler {
@@ -379,7 +376,7 @@ impl FilePreview {
             receiver,
             reply,
             stem,
-            edited: false,
+            edited,
             ext,
             size,
             image: None,

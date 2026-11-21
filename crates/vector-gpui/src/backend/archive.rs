@@ -54,6 +54,7 @@ pub fn work_slot() -> std::io::Result<PathBuf> {
 /// A working copy goes once it has sent or been dismissed.
 pub fn forget(path: &Path) {
     super::pasted::forget(path);
+    crate::picked::release(path);
     let root = work_dir();
     if let Some(dir) = path.parent().filter(|d| d.starts_with(&root) && *d != root) {
         let _ = std::fs::remove_dir_all(dir);
@@ -155,8 +156,10 @@ fn collect(paths: &[PathBuf]) -> Result<(String, Vec<Item>, u64), String> {
             continue;
         };
         // The user chose these roots, so an alias is followed; the walk still skips symlinks inside.
-        let Ok(source) = std::fs::canonicalize(picked) else {
-            continue;
+        let source = match std::fs::canonicalize(picked) {
+            Ok(source) => source,
+            Err(_) if crate::picked::is_held(picked) => picked.clone(),
+            Err(_) => continue,
         };
         let Ok(meta) = std::fs::metadata(&source) else {
             continue;
@@ -199,6 +202,8 @@ pub fn zip_paths(
     use zip::write::SimpleFileOptions;
 
     let (name, items, total) = collect(paths)?;
+    // Zipped from picks held in memory, the zip is held there too.
+    let memory = items.iter().any(|i| crate::picked::is_held(&i.source));
     let file_name = format!("{name}.zip");
     let path = work_slot()
         .map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?
@@ -207,7 +212,7 @@ pub fn zip_paths(
 
     let run = || -> Result<(u32, u32, Vec<Entry>), String> {
         let file =
-            std::fs::File::create(&path).map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?;
+            crate::picked::create(&path, memory).map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?;
         let mut zw = zip::ZipWriter::new(BufWriter::new(file));
         // Level 2: zlib-rs's level 1 is deflate_quick (up to ~20% larger); 2 still beats C zlib's 1.
         let options = SimpleFileOptions::default()
@@ -236,7 +241,7 @@ pub fn zip_paths(
             }
             // Re-checked at zip time: a file swapped for a link since the walk is skipped.
             match std::fs::symlink_metadata(&item.source) {
-                Ok(m) if m.file_type().is_symlink() => continue,
+                Ok(m) if m.file_type().is_symlink() && !crate::picked::is_held(&item.source) => continue,
                 Err(_) => continue,
                 _ => {}
             }
@@ -270,7 +275,11 @@ pub fn zip_paths(
             .map_err(|e| crate::t::preview_zip_finish_failed(e.to_string()).to_string())?;
         Ok((files, dirs, entries))
     };
-    match run() {
+    let done = run();
+    for p in paths {
+        crate::picked::release(p);
+    }
+    match done {
         Ok((file_count, dir_count, entries)) => {
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             Ok(Zipped {

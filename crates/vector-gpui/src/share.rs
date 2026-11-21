@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Shared {
-    /// Copies in the app's cache, readable by path.
+    /// Readable by path: held in memory where the system allows, else copies in the cache.
     pub files: Vec<PathBuf>,
     pub text: String,
 }
