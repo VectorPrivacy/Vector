@@ -153,6 +153,8 @@ fn arrangeable(
     let mut wrap = div()
         .id(id.clone())
         .relative()
+        // A grid cell's width, so a long title ellipsizes inside it.
+        .when(!list, |d| d.w_full().min_w_0())
         .on_mouse_down(gpui::MouseButton::Right, move |e, w, cx| {
             cx.stop_propagation();
             menu_on(Act::Menu(e.position, key.clone(), folder.clone()), w, cx);
@@ -858,6 +860,7 @@ fn tile(
         .id(id)
         .when_some(tip, |d, t| d.tip(t))
         .group(group.clone())
+        .w_full()
         .min_w_0()
         .flex()
         .flex_col()
