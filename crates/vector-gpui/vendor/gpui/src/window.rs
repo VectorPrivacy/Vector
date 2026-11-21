@@ -5269,6 +5269,13 @@ impl Window {
             border_style: quad.border_style,
         };
 
+        // Nothing to see still costs a blend per pixel: a hover fill eased to zero, say.
+        let bw = &quad.border_widths;
+        let no_border = quad.border_color.a <= 0. || bw.top.0 <= 0. && bw.right.0 <= 0. && bw.bottom.0 <= 0. && bw.left.0 <= 0.;
+        if quad.background.is_transparent() && no_border {
+            return;
+        }
+
         // A zoomed quad's strips would clip to unzoomed bounds; a strip can't carry a rounded mask.
         if !quad.background.is_transparent()
             || self.next_frame.scene.zoom.is_some()

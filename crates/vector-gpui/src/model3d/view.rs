@@ -184,7 +184,7 @@ impl View {
     }
 
     /// One frame: true while it moves on its own. `runs` is false while it is off screen, the
-    /// window is in the background, or a full-screen view stands in front of it.
+    /// window is in the background or idle, or a full-screen view stands in front of it.
     pub fn tick(&mut self, runs: bool) -> bool {
         self.poll();
         let now = Instant::now();

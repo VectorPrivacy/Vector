@@ -169,7 +169,7 @@ impl Models {
         let mut next = self.sighted.values().any(|(_, last)| now - *last < GAP).then_some(Duration::ZERO);
         for v in self.views.values_mut() {
             let on_screen = v.seen.is_some_and(|t| now - t < Duration::from_millis(250));
-            if v.tick(on_screen && self.active && !self.front) && on_screen {
+            if v.tick(on_screen && self.active && !self.front && !gpui::animations_asleep()) && on_screen {
                 next = Some(next.map_or(v.due(), |n| n.min(v.due())));
             }
             self.retired.append(&mut v.retired);
