@@ -4,6 +4,7 @@
 
 use crate::kit::Tipped as _;
 use crate::lang::LangFonts as _;
+use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::AnimationExt;
@@ -32,6 +33,10 @@ pub struct StartMenu {
     /// Accounts: this device's accounts take the pins' place.
     pub picking: bool,
     pub selected: usize,
+    /// The results pane, scrolled to keep a stepped selection in view.
+    pub scroll: gpui::ScrollHandle,
+    /// A keyboard step moved the selection: bring it into view once laid out.
+    pub reveal: Rc<Cell<bool>>,
 }
 
 impl StartMenu {
@@ -713,6 +718,31 @@ fn results(sm: &StartMenu, store: &Store, query: &str, on: &OnAct) -> AnyElement
                             .size(px(16.))
                             .text_color(c(if pinned { PRIMARY } else { 0xffffff })),
                     ),
+            );
+        }
+        if selected {
+            let (scroll, reveal) = (sm.scroll.clone(), sm.reveal.clone());
+            row = row.relative().child(
+                gpui::canvas(
+                    move |b, w, _| {
+                        if reveal.replace(false) {
+                            let view = scroll.bounds();
+                            let mut off = scroll.offset();
+                            if b.top() < view.top() {
+                                off.y += view.top() - b.top();
+                            } else if b.bottom() > view.bottom() {
+                                off.y -= b.bottom() - view.bottom();
+                            } else {
+                                return;
+                            }
+                            scroll.set_offset(off);
+                            w.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
             );
         }
         list = list.child(row);
@@ -1452,6 +1482,7 @@ pub fn render(sm: &StartMenu, store: &Store, window: &Window, on: &OnAct, cx: &A
         .pl(px(24.))
         .pr(px(14.))
         .overflow_y_scroll()
+        .track_scroll(&sm.scroll)
         .flex()
         .flex_col()
         .child(body);

@@ -2056,6 +2056,8 @@ impl VectorApp {
             adding: false,
             picking: false,
             selected: 0,
+            scroll: Default::default(),
+            reveal: Default::default(),
         });
         cx.notify();
     }
@@ -2613,6 +2615,7 @@ impl VectorApp {
                 let n = crate::startmenu::hits(sm, &self.store.borrow(), &query).len();
                 if n > 0 {
                     sm.selected = (sm.selected as i32 + d).rem_euclid(n as i32) as usize;
+                    sm.reveal.set(true);
                 }
             }
             Act::Pick(ix) => {
@@ -9391,8 +9394,8 @@ impl VectorApp {
     /// The open chat's wallpaper and how far it is dimmed (100 = not at all).
     fn wallpaper_look(&self) -> Option<(crate::wallpaper::Key, u8)> {
         let id = self.open.as_ref()?;
-        let b = self.chat_box.get()?;
-        let size = (f32::from(b.size.width).round() as u32, f32::from(b.size.height).round() as u32);
+        // Before the pane's first layout the size is unknown (0×0): a saved bake can still show.
+        let size = self.chat_box.get().map_or((0, 0), |b| (f32::from(b.size.width).round() as u32, f32::from(b.size.height).round() as u32));
         if let Some(p) = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref()) {
             return Some((crate::wallpaper::Key { path: p.path.clone(), ts: p.ts, blur: p.blur, size, stored: false }, p.dim.min(100)));
         }
@@ -9435,9 +9438,6 @@ impl VectorApp {
     }
 
     fn sync_wallpaper(&mut self, cx: &mut Context<Self>) {
-        if self.chat_box.get().is_none() && self.open.is_some() {
-            return;
-        }
         // Once the chats are in: swept against none, every bake would go.
         if !self.wallpaper.swept_once && self.open.is_some() {
             self.wallpaper.swept_once = true;

@@ -64,6 +64,8 @@ pub struct Wallpaper {
     sized: Option<((u32, u32), Instant)>,
     /// A wake is set for when the resize settles.
     pub waking: bool,
+    /// The last wallpaper looked for on disk, not looked for again every frame.
+    looked: Option<Key>,
     /// This session's first sweep, for what a crash or another client left behind.
     pub swept_once: bool,
 }
@@ -110,9 +112,25 @@ impl Wallpaper {
             self.queued = None;
             return None;
         }
-        let resized = self.shown.as_ref().is_some_and(|(k, _)| {
-            k.path == want.path && k.ts == want.ts && k.blur == want.blur
-        });
+        let same = |k: &Key| k.path == want.path && k.ts == want.ts && k.blur == want.blur;
+        // A saved bake is a small read: taken here, the wallpaper is in the first frame that wants it.
+        if want.stored && !self.shown.as_ref().is_some_and(|(k, _)| same(k)) && !self.looked.as_ref().is_some_and(|k| same(k)) {
+            self.looked = Some(want.clone());
+            if let Some(found) = saved_bake(&want) {
+                self.keep_shown();
+                let exact = found.0 == want;
+                self.shown = Some(found);
+                if exact {
+                    self.queued = None;
+                    return None;
+                }
+            }
+        }
+        // Not laid out yet: only a saved bake can show.
+        if want.size == (0, 0) {
+            return None;
+        }
+        let resized = self.shown.as_ref().is_some_and(|(k, _)| same(k));
         let now = Instant::now();
         let since = match self.sized {
             Some((size, at)) if size == want.size => at,
@@ -324,6 +342,32 @@ fn load_bake(file: &Path, w: u32, h: u32) -> Option<image::RgbaImage> {
         return None;
     }
     image::RgbaImage::from_raw(w, h, px.to_vec())
+}
+
+/// `key`'s saved bake at its size, else its newest at any size (the GPU stretches it until a
+/// bake for this size lands).
+fn saved_bake(key: &Key) -> Option<(Key, Arc<RenderImage>)> {
+    let picked = bake_file(key).filter(|f| key.size != (0, 0) && f.exists()).map(|f| (f, bake_size(key))).or_else(|| {
+        let tag = source_tag(key);
+        let dir = bakes_dir(&key.path)?;
+        std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let (w, h) = name.strip_prefix(tag.as_str())?.strip_suffix(".bgra")?.split_once('x')?;
+                let at = e.metadata().and_then(|m| m.modified()).ok()?;
+                Some((at, e.path(), (w.parse().ok()?, h.parse().ok()?)))
+            })
+            .max_by_key(|(at, _, _)| *at)
+            .map(|(_, f, size)| (f, size))
+    })?;
+    let (file, (w, h)) = picked;
+    let img = load_bake(&file, w, h)?;
+    let f = bake_scale(key.blur);
+    let size = if (w, h) == bake_size(key) { key.size } else { ((w as f32 / f).round() as u32, (h as f32 / f).round() as u32) };
+    let found = Key { size, ..key.clone() };
+    Some((found, Arc::new(RenderImage::new(vec![image::Frame::new(img)]))))
 }
 
 /// Written whole or not at all, then the picture's other sizes past the newest few go.
@@ -672,6 +716,30 @@ mod tests {
         bake(Job { key: key(3, 9, (400, 300)), decoded: None });
         sweep(&mut w, &[], Some(account_bakes(&root)))();
         assert_eq!(bakes(), 0, "a removed wallpaper's bakes go");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn a_saved_bake_shows_in_the_first_frame_even_before_layout() {
+        let root = std::env::temp_dir().join(format!("vector-wallpaper-first-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = photo("first", 900, 600);
+        let a = root.join("a.jpg");
+        std::fs::copy(&src, &a).unwrap();
+        let key = |size: (u32, u32)| Key { path: a.clone(), ts: 4, blur: 6, size, stored: true };
+        bake(Job { key: key((400, 300)), decoded: None });
+
+        let mut w = Wallpaper::default();
+        assert!(w.want(Some(key((0, 0)))).is_none(), "no bake before layout");
+        assert!(w.image(Some(&key((0, 0)))).is_some(), "the saved bake shows at once");
+        let mut w = Wallpaper::default();
+        assert!(w.want(Some(key((400, 300)))).is_none(), "its own size needs no bake");
+        assert!(w.image(Some(&key((400, 300)))).is_some());
+        let mut w = Wallpaper::default();
+        assert!(w.want(Some(key((480, 360)))).is_none(), "another size shows stretched while it settles");
+        assert!(w.image(Some(&key((480, 360)))).is_some());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(src);
     }
