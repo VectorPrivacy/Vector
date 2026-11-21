@@ -326,7 +326,10 @@ pub async fn send_file(
             Ok(_) => return Err(crate::t::file_empty().into()),
             Err(e) => return Err(crate::t::file_metadata_failed(e.to_string()).to_string()),
         }
-        let source = vector_core::sending::FileSource::Path(path);
+        let source = match super::archive::sealed_bytes(&path) {
+            Some(b) => vector_core::sending::FileSource::Bytes(Arc::new(b)),
+            None => vector_core::sending::FileSource::Path(path),
+        };
         return vector_core::sending::send_file_dm_from(
             &receiver,
             source,
@@ -343,8 +346,7 @@ pub async fn send_file(
     }
     let (ext, file) = (extension.clone(), path.clone());
     let processed = tokio::task::spawn_blocking(move || {
-        let bytes =
-            Arc::new(std::fs::read(&file).map_err(|e| crate::t::file_read_failed(e.to_string()).to_string())?);
+        let bytes = Arc::new(crate::pic::read(&file).map_err(|e| crate::t::file_read_failed(e.to_string()).to_string())?);
         let out = crate::message::process_image_for_send(
             bytes,
             &ext,
@@ -412,6 +414,9 @@ pub fn has_metadata(path: &std::path::Path) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+    if let Some(b) = super::archive::sealed_bytes(path) {
+        return crate::shared::image::image_bytes_have_metadata(&b, &ext);
+    }
     if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
         return std::fs::File::open(path)
             .ok()

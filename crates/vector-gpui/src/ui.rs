@@ -11469,7 +11469,8 @@ impl VectorApp {
                     return;
                 };
                 let path = dir.join(format!("pasted_image.{ext}"));
-                if std::fs::write(&path, bytes).is_err() {
+                // Sealed: a pasted picture never touches disk readable, and is never written plain.
+                if vector_core::vcache::write(&path, bytes).is_err() {
                     return;
                 }
                 path
@@ -11528,7 +11529,7 @@ impl VectorApp {
         if self.live {
             // `checkUploadBlocked`: a file no enabled media server would take is refused before
             // its preview, with each server's reason. Asking also warms the upload connection.
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let size = backend::archive::plain_len(&path);
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
             let rx = backend::run(async move {
                 let mime = vector_core::crypto::mime_from_extension(&ext);

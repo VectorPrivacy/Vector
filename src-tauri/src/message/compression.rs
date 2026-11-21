@@ -313,7 +313,9 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
             return super::video_compression::compress_file(file_path);
         }
 
-        let file_data = std::fs::read(file_path)
+        // A sealed working copy (a pasted picture) reads as its plaintext; any other file as is.
+        let file_data = vector_core::vcache::read(std::path::Path::new(file_path))
+            .map(|mut b| std::mem::take(&mut *b))
             .map_err(|e| format!("Failed to read file: {}", e))?;
         (Arc::new(file_data), extension)
     };

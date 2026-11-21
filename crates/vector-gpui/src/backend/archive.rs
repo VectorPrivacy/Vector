@@ -51,6 +51,21 @@ pub fn work_slot() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// A working copy's plaintext when it was written sealed; none for a file as the user picked it.
+pub fn sealed_bytes(path: &Path) -> Option<Vec<u8>> {
+    vector_core::vcache::is_sealed(path)
+        .then(|| vector_core::vcache::read(path).ok().map(|mut b| std::mem::take(&mut *b)))
+        .flatten()
+}
+
+/// A file's size as sent: a sealed working copy's plaintext, any other file's length.
+pub fn plain_len(path: &Path) -> u64 {
+    match sealed_bytes(path) {
+        Some(b) => b.len() as u64,
+        None => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+    }
+}
+
 /// A working copy goes once it has sent or been dismissed.
 pub fn forget(path: &Path) {
     let root = work_dir();
@@ -285,5 +300,36 @@ pub fn zip_paths(
             forget(&path);
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod sealed_tests {
+    use super::*;
+
+    #[test]
+    fn a_pasted_picture_is_sealed_on_disk_and_read_whole_by_the_send_path() {
+        crate::bakes::test_data_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pasted_image.png");
+        let img = image::RgbaImage::from_fn(64, 48, |x, y| image::Rgba([x as u8 * 4, y as u8 * 5, 90, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        vector_core::vcache::write(&path, &png).unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        assert!(vector_core::vcache::is_sealed(&path));
+        assert!(!raw.windows(4).any(|w| w == b"IHDR"));
+        assert_eq!(sealed_bytes(&path).as_deref(), Some(png.as_slice()));
+        assert_eq!(plain_len(&path), png.len() as u64);
+        assert_eq!(crate::pic::read(&path).unwrap(), png);
+        assert!(!crate::backend::messaging::has_metadata(&path));
+        let pc = crate::message::precompress(&path).unwrap();
+        assert_eq!(pc.original_size, png.len() as u64);
+
+        let plain = dir.path().join("picked.png");
+        std::fs::write(&plain, &png).unwrap();
+        assert!(sealed_bytes(&plain).is_none());
+        assert_eq!(plain_len(&plain), png.len() as u64);
     }
 }

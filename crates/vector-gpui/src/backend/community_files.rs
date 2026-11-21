@@ -80,6 +80,9 @@ async fn prepare(
         return prepare_bytes(bytes, &name, false, false, None).await;
     }
     if !IMAGE_EXTS.contains(&extension.as_str()) {
+        if let Some(bytes) = super::archive::sealed_bytes(path) {
+            return prepare_bytes(bytes, &name, false, false, None).await;
+        }
         return prepare_path(path.to_path_buf(), name).await;
     }
     let source = path.to_path_buf();
