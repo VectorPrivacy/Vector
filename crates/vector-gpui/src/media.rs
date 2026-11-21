@@ -155,7 +155,7 @@ pub struct Media {
     pub audio: crate::audio::Audio,
     pub videos: crate::video::Videos,
     pub models: crate::model3d::stage::Models,
-    thumbs: HashMap<(String, u32, u32), Option<Arc<RenderImage>>>,
+    thumbs: HashMap<String, Option<Arc<RenderImage>>>,
     images: HashMap<String, Slot>,
     /// Spoiler pictures tapped open, by attachment id.
     pub revealed: HashSet<String>,
@@ -276,19 +276,16 @@ impl Media {
         })
     }
 
-    /// A thumbhash's blur, stretched bilinearly to `px` device pixels on the CPU: the GPU's
-    /// sampler would bleed the atlas around a ~32px tile into its edges.
-    pub fn thumb(&mut self, hash: &str, px: (u32, u32)) -> Option<Arc<RenderImage>> {
+    /// A thumbhash's blur at its own ~32 px, for the GPU to stretch: draw it with
+    /// `ObjectFit::Fill`. Its tile is edge padded, so the sampler never reads a neighbour.
+    pub fn thumb(&mut self, hash: &str) -> Option<Arc<RenderImage>> {
         if hash.is_empty() {
             return None;
         }
-        self.used.insert((0, format!("{hash}\u{0}{}\u{0}{}", px.0, px.1)), std::time::Instant::now());
+        self.used.insert((0, hash.to_string()), std::time::Instant::now());
         self.thumbs
-            .entry((hash.to_string(), px.0, px.1))
-            .or_insert_with(|| {
-                self.pressed = true;
-                decode_thumbhash(hash, px).map(Arc::new)
-            })
+            .entry(hash.to_string())
+            .or_insert_with(|| decode_thumbhash(hash).map(Arc::new))
             .clone()
     }
 
@@ -465,12 +462,7 @@ impl Media {
     /// The cached picture under a `used` key, left in place.
     fn peek(&self, key: &(u8, String)) -> Option<&Arc<RenderImage>> {
         match key.0 {
-            0 => {
-                let mut parts = key.1.split('\u{0}');
-                let (Some(h), Some(w), Some(t)) = (parts.next(), parts.next(), parts.next()) else { return None };
-                let (Ok(w), Ok(t)) = (w.parse(), t.parse()) else { return None };
-                self.thumbs.get(&(h.to_string(), w, t))?.as_ref()
-            }
+            0 => self.thumbs.get(&key.1)?.as_ref(),
             1 => match self.images.get(&key.1)? {
                 Slot::Ready { image, .. } => Some(image),
                 _ => None,
@@ -506,12 +498,7 @@ impl Media {
     /// The cached picture under a `used` key, removed; `None` while it is still loading.
     fn take(&mut self, key: &(u8, String)) -> Option<Option<Arc<RenderImage>>> {
         Some(match key.0 {
-            0 => {
-                let mut parts = key.1.split('\u{0}');
-                let (Some(h), Some(w), Some(t)) = (parts.next(), parts.next(), parts.next()) else { return Some(None) };
-                let (Ok(w), Ok(t)) = (w.parse(), t.parse()) else { return Some(None) };
-                self.thumbs.remove(&(h.to_string(), w, t)).flatten()
-            }
+            0 => self.thumbs.remove(&key.1).flatten(),
             1 => match self.images.get(&key.1)? {
                 Slot::Ready { .. } => match self.images.remove(&key.1) {
                     Some(Slot::Ready { image, .. }) => Some(image),
@@ -786,16 +773,11 @@ pub fn swap_red_blue(bytes: &mut [u8]) {
     }
 }
 
-pub fn decode_thumbhash(hash: &str, px: (u32, u32)) -> Option<RenderImage> {
+/// A thumbhash's blur at the size it encodes (at most 32 px a side).
+pub fn decode_thumbhash(hash: &str) -> Option<RenderImage> {
     let bytes = fast_thumbhash::base91_decode(hash).ok()?;
     let (w, h, rgba) = fast_thumbhash::thumb_hash_to_rgba(&bytes).ok()?;
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
-    let buf = gpui::resample(
-        &buf,
-        px.0.clamp(1, 4096),
-        px.1.clamp(1, 4096),
-        FilterType::Triangle,
-    );
     Some(RenderImage::new(vec![Frame::new(to_bgra(buf))]))
 }
 

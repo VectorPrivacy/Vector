@@ -311,7 +311,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
     if veiled
         && let Some(meta) = meta
         && let (w, h) = within(ctx, blur_size(meta))
-        && let Some(thumb) = media.thumb(&meta.thumbhash, device(ctx, w, h))
+        && let Some(thumb) = media.thumb(&meta.thumbhash)
     {
         return Some(
             div()
@@ -321,7 +321,7 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                 .h(px(h))
                 .cursor_pointer()
                 .on_click(act(ctx, m, Act::RevealMedia(att.id.clone())))
-                .child(img(thumb).size_full().rounded(px(8.)))
+                .child(img(thumb).size_full().object_fit(gpui::ObjectFit::Fill).rounded(px(8.)))
                 .child(
                     div()
                         .absolute()
@@ -444,7 +444,7 @@ fn blur(
         .as_ref()
         .filter(|i| i.width > 0 && i.height > 0)?;
     let (w, h) = within(ctx, blur_size(meta));
-    let thumb = media.thumb(&meta.thumbhash, device(ctx, w, h))?;
+    let thumb = media.thumb(&meta.thumbhash)?;
     let downloading = phase == Phase::Downloading;
     let running = media.transfers.contains_key(&att.id);
     let opacity = if downloading {
@@ -488,7 +488,7 @@ fn blur(
             .relative()
             .w(px(w))
             .h(px(h))
-            .child(img(thumb).size_full().rounded(px(8.)).opacity(opacity))
+            .child(img(thumb).size_full().object_fit(gpui::ObjectFit::Fill).rounded(px(8.)).opacity(opacity))
             .child(
                 div()
                     .absolute()

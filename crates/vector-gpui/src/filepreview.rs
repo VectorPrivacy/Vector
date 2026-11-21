@@ -540,7 +540,7 @@ impl FilePreview {
                     let hash = crate::util::generate_thumbhash_from_image(
                         &image::DynamicImage::ImageRgba8(rgba),
                     )?;
-                    crate::media::decode_thumbhash(&hash, (w.min(900), h.min(900)))
+                    crate::media::decode_thumbhash(&hash)
                 })
                 .await;
             this.update(cx, |p, cx| {
@@ -868,7 +868,7 @@ impl Render for FilePreview {
                         .h(px(dh))
                         .rounded(px(8.))
                         .overflow_hidden()
-                        .child(img(shown).size_full().rounded(px(8.)))
+                        .child(img(shown).size_full().object_fit(gpui::ObjectFit::Fill).rounded(px(8.)))
                         .when(self.spoiler && dw >= 80. && dh >= 60., |d| {
                             d.child(
                                 div()

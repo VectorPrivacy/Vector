@@ -873,7 +873,7 @@ impl EmojiPicker {
                             .thumbs
                             .entry(gif.id.clone())
                             .or_insert_with(|| {
-                                crate::media::decode_thumbhash(h, (device, device)).map(Arc::new)
+                                crate::media::decode_thumbhash(h).map(Arc::new)
                             })
                             .clone(),
                         None => None,

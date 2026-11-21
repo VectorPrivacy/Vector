@@ -420,7 +420,7 @@ fn thumb(media: &mut crate::media::Media, root: &std::path::Path, att: &vector_c
         let meta = att.img_meta.as_ref()?;
         let (w, h) = (meta.width.max(1), meta.height.max(1));
         let shown_w = (crate::search::THUMB_H * w as f32 / h as f32).clamp(crate::search::THUMB_W.0, crate::search::THUMB_W.1);
-        let image = media.thumb(&meta.thumbhash, device(shown_w, crate::search::THUMB_H))?;
+        let image = media.thumb(&meta.thumbhash)?;
         Some(Thumb { image, w, h, open: None, video })
     };
     if video {
