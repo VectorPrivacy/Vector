@@ -1,0 +1,1 @@
+Fox.glb from the Khronos glTF Sample Assets: model by PixelMannen (CC0), rigging and animation by @tomkranis (CC-BY 4.0).

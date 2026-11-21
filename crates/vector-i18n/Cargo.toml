@@ -1,0 +1,32 @@
+[package]
+name = "vector-i18n"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Vector's app text: the built-in en-GB catalogue, language packs, and typed lookups"
+build = "build.rs"
+
+# Its own root until it joins the crates workspace with the GPUI client.
+[workspace]
+
+[dependencies]
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
+intl-memoizer = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# Signing indexes, for the `publish` tool only.
+nostr = { version = "0.45.7", optional = true, default-features = false, features = ["std", "os-rng"] }
+sha2 = { version = "0.10", optional = true }
+
+[features]
+sign = ["dep:nostr", "dep:sha2"]
+
+[build-dependencies]
+fluent-syntax = "0.12"
+
+# SecretKey's Drop zeroizes with volatile writes in Vector's fork, as in the app.
+[patch.crates-io]
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }

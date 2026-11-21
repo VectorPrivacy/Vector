@@ -1,0 +1,1 @@
+(() => { setTimeout(() => openSettings(), 300); })();

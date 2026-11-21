@@ -27,7 +27,7 @@
 use super::document::Normalize;
 use super::types::caps;
 use std::collections::BTreeSet;
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// Shortcodes that render as an image for this community: the bundle's pinned
 /// Unicode list plus the policy's declared `emoji_codes`. Community-scoped,
@@ -61,14 +61,28 @@ fn is_skeleton_alpha(c: char) -> bool {
 }
 
 /// NFC → full case-fold → strip default-ignorables → NFC.
+///
+/// ASCII is already NFC, carries no default-ignorable and folds to its lowercase, so it takes
+/// one pass; other text skips each NFC pass a quick check proves a no-op. Either way the
+/// result is the full definition's, byte for byte.
 pub fn fold(text: &str) -> String {
-    let nfc: String = text.nfc().collect();
-    let folded: String = nfc
-        .chars()
-        .filter(|c| !is_default_ignorable(*c))
-        .flat_map(|c| c.to_lowercase())
-        .collect();
-    folded.nfc().collect()
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
+    let nfc: std::borrow::Cow<str> = if is_nfc_quick(text.chars()) == IsNormalized::Yes {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(text.nfc().collect())
+    };
+    let mut folded = String::with_capacity(nfc.len());
+    for c in nfc.chars().filter(|c| !is_default_ignorable(*c)) {
+        folded.extend(c.to_lowercase());
+    }
+    if is_nfc_quick(folded.chars()) == IsNormalized::Yes {
+        folded
+    } else {
+        folded.nfc().collect()
+    }
 }
 
 /// A `:name:` token: `:` then 1+ of `[A-Za-z0-9_+-]` then `:` (the pinned
@@ -89,6 +103,9 @@ fn shortcode_at(s: &str, open: usize) -> Option<(&str, usize)> {
 
 /// `skeleton` with community-scoped shortcode resolution.
 pub fn skeleton(text: &str, codes: &EmojiCodes) -> String {
+    if text.is_ascii() {
+        return ascii_skeleton(text, codes);
+    }
     // Resolution runs BEFORE folding: the token grammar is ASCII, so ordering
     // cannot change what resolves, and working on the raw text keeps the name
     // boundaries intact.
@@ -113,6 +130,31 @@ pub fn skeleton(text: &str, codes: &EmojiCodes) -> String {
         i += ch.len_utf8();
     }
     fold(&kept).chars().filter(|c| is_skeleton_alpha(*c)).collect()
+}
+
+/// [`skeleton`] of ASCII text in one pass: folding ASCII is lowercasing it, and of ASCII only
+/// letters are Alphabetic without a Numeric_Type.
+fn ascii_skeleton(text: &str, codes: &EmojiCodes) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut keep = |s: &str| out.extend(s.bytes().filter(u8::is_ascii_alphabetic).map(|b| b.to_ascii_lowercase() as char));
+    let bytes = text.as_bytes();
+    let (mut i, mut from) = (0usize, 0usize);
+    while i < bytes.len() {
+        if bytes[i] == b':' {
+            if let Some((name, next)) = shortcode_at(text, i) {
+                keep(&text[from..i]);
+                if !codes.resolves(name) && name.len() >= caps::MIN_SKELETON_LEN {
+                    keep(name);
+                }
+                i = next;
+                from = next;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    keep(&text[from..]);
+    out
 }
 
 /// Apply a declared normalizer. `Confusables` is declared in the bundle but its
@@ -187,6 +229,57 @@ mod tests {
         assert_eq!(skeleton("ratio 3:1 today", &e), skeleton("ratio 3 1 today", &e));
         assert_eq!(skeleton(":unclosed", &e), "unclosed");
         assert_eq!(skeleton("::", &e), "");
+    }
+
+    /// The bundle's definitions as first written, before the fast paths: what `fold` and
+    /// `skeleton` must keep returning, byte for byte.
+    fn fold_reference(text: &str) -> String {
+        let nfc: String = text.nfc().collect();
+        let folded: String = nfc.chars().filter(|c| !is_default_ignorable(*c)).flat_map(|c| c.to_lowercase()).collect();
+        folded.nfc().collect()
+    }
+
+    fn skeleton_reference(text: &str, codes: &EmojiCodes) -> String {
+        let mut kept = String::with_capacity(text.len());
+        let mut i = 0usize;
+        while i < text.len() {
+            if text.as_bytes()[i] == b':' {
+                if let Some((name, next)) = shortcode_at(text, i) {
+                    if !codes.resolves(name) && name.chars().count() >= caps::MIN_SKELETON_LEN {
+                        kept.push_str(name);
+                    }
+                    i = next;
+                    continue;
+                }
+            }
+            let ch = text[i..].chars().next().unwrap();
+            kept.push(ch);
+            i += ch.len_utf8();
+        }
+        fold_reference(&kept).chars().filter(|c| is_skeleton_alpha(*c)).collect()
+    }
+
+    #[test]
+    fn fast_paths_match_the_bundle_definitions() {
+        const PIECES: &[&str] = &[
+            "a", "Z", "q", "9", "0", " ", ":", "::", ":fire:", ":vector_logo:", ":buycheapcoinsnow:", ":+1:", "_", "-",
+            "+", "!", "\n", "é", "e\u{0301}", "ẞ", "ß", "ﬁ", "İ", "Σ", "ς", "\u{200B}", "\u{200D}", "\u{FE0F}", "\u{00AD}",
+            "👋", "👨\u{200D}👩", "한", "\u{1100}\u{1161}", "Å", "A\u{030A}", "Ⅷ", "٣", "ｆｕｌｌ", "\u{0345}", "ΐ", "ǅ", "ﬀ",
+        ];
+        let codes = EmojiCodes::from_policy([&"vector_logo".to_string()]);
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..30000 {
+            let len = (next() % 14) as usize;
+            let text: String = (0..len).map(|_| PIECES[(next() % PIECES.len() as u64) as usize]).collect();
+            assert_eq!(fold(&text), fold_reference(&text), "fold {text:?}");
+            assert_eq!(skeleton(&text, &codes), skeleton_reference(&text, &codes), "skeleton {text:?}");
+        }
     }
 
     #[test]

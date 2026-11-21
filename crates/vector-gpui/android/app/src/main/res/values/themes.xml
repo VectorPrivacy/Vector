@@ -1,0 +1,10 @@
+<resources>
+    <!-- The client draws everything, edge to edge; the window shows its background until
+         the first frame. -->
+    <style name="Theme.Vector" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/vector_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

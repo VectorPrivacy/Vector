@@ -118,6 +118,9 @@ struct ClientOptions {
     /// Never direct: a fetch decided while an anonymity network was chosen, that the user must
     /// never make from this device's own address.
     no_direct: bool,
+    /// HTTP/1.1 only: each request on a connection of its own, which an unread body holds back
+    /// by TCP alone. Over HTTP/2 it would fill the window every stream on the connection shares.
+    http1_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -167,7 +170,7 @@ pub fn build_http_client_for(
     Ok(HttpClient {
         owner: crate::db::current_session_id(),
         lane,
-        opts: ClientOptions { timeout, read_timeout, follow_redirects, no_direct: false },
+        opts: ClientOptions { timeout, read_timeout, follow_redirects, no_direct: false, http1_only: false },
     })
 }
 
@@ -178,7 +181,7 @@ pub fn shared_http_client() -> std::sync::Arc<HttpClient> {
     std::sync::Arc::new(HttpClient {
         owner: crate::db::current_session_id(),
         lane: Lane::Shared,
-        opts: ClientOptions { timeout: Some(DEFAULT_SHARED_TIMEOUT), read_timeout: None, follow_redirects: true, no_direct: false },
+        opts: ClientOptions { timeout: Some(DEFAULT_SHARED_TIMEOUT), read_timeout: None, follow_redirects: true, no_direct: false, http1_only: false },
     })
 }
 
@@ -212,31 +215,38 @@ pub fn rebuild_shared_http_client() -> Result<(), String> {
 /// Only builds requests: `Req::send` executes on the client the current egress gives.
 fn template() -> &'static reqwest::Client {
     static T: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    T.get_or_init(|| client_builder().build().expect("a plain reqwest client always builds"))
+    T.get_or_init(|| client_builder(false).build().expect("a plain reqwest client always builds"))
 }
 
-/// Ring with the webpki roots, offering h2 before HTTP/1.1, with a session store of its own.
+/// Ring with the webpki roots, offering h2 before HTTP/1.1 (or HTTP/1.1 alone), with a session
+/// store of its own.
 ///
 /// Built per pooled client, never cloned from a shared one: a clone shares the session store,
 /// and a resumed ticket would tie this account and lane to another's requests to that server.
 #[cfg(not(target_arch = "wasm32"))]
-fn tls_config() -> rustls::ClientConfig {
+fn tls_config(http1_only: bool) -> rustls::ClientConfig {
     let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
     let mut cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .expect("ring supports TLS 1.2 and 1.3")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    cfg.alpn_protocols = if http1_only { vec![b"http/1.1".to_vec()] } else { vec![b"h2".to_vec(), b"http/1.1".to_vec()] };
     cfg
 }
 
 #[allow(clippy::disallowed_methods)]
-fn client_builder() -> reqwest::ClientBuilder {
+fn client_builder(http1_only: bool) -> reqwest::ClientBuilder {
     #[cfg(not(target_arch = "wasm32"))]
-    return reqwest::Client::builder().tls_backend_preconfigured(tls_config());
+    return {
+        let b = reqwest::Client::builder().tls_backend_preconfigured(tls_config(http1_only));
+        if http1_only { b.http1_only() } else { b }
+    };
     #[cfg(target_arch = "wasm32")]
-    return reqwest::Client::builder();
+    return {
+        let _ = http1_only;
+        reqwest::Client::builder()
+    };
 }
 
 impl HttpClient {
@@ -284,12 +294,18 @@ impl HttpClient {
     pub fn without_direct(&self) -> HttpClient {
         HttpClient { opts: ClientOptions { no_direct: true, ..self.opts }, ..self.clone() }
     }
+
+    /// The same client on HTTP/1.1 alone: for several long bodies read in turn, each left unread
+    /// a while (a streamed video's byte ranges).
+    pub fn http1_only(&self) -> HttpClient {
+        HttpClient { opts: ClientOptions { http1_only: true, ..self.opts }, ..self.clone() }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_pooled(opts: ClientOptions, proxy: Option<String>) -> Result<reqwest::Client, String> {
     use crate::transport::{budget, Op};
-    let mut builder = client_builder()
+    let mut builder = client_builder(opts.http1_only)
         // Kept connections: idle ones stay a while so a burst of small
         // fetches to one host (an edge, a Blossom server) rides one or a
         // few connections, and HTTP/2 multiplexes on them where offered.
@@ -340,7 +356,7 @@ fn build_pooled(opts: ClientOptions, proxy: Option<String>) -> Result<reqwest::C
 
 #[cfg(target_arch = "wasm32")]
 fn build_pooled(_opts: ClientOptions, _proxy: Option<String>) -> Result<reqwest::Client, String> {
-    client_builder().build().map_err(|e| format!("HTTP client build failed: {e}"))
+    client_builder(false).build().map_err(|e| format!("HTTP client build failed: {e}"))
 }
 
 /// The pooled client for this decision, built and cached unless the epoch moved meanwhile.
@@ -1338,11 +1354,22 @@ mod tls_tests {
 
     #[test]
     fn clients_build_on_ring_with_h2_offered_first() {
-        let cfg = tls_config();
+        let cfg = tls_config(false);
         assert_eq!(cfg.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);
-        let opts = ClientOptions { timeout: None, read_timeout: None, follow_redirects: true, no_direct: false };
+        let opts = ClientOptions { timeout: None, read_timeout: None, follow_redirects: true, no_direct: false, http1_only: false };
         build_pooled(opts, None).expect("a pooled client builds");
         template();
+    }
+
+    #[test]
+    fn an_http1_client_offers_only_http1_and_pools_apart() {
+        assert_eq!(tls_config(true).alpn_protocols, [b"http/1.1".to_vec()]);
+        let opts = ClientOptions { timeout: None, read_timeout: None, follow_redirects: true, no_direct: false, http1_only: true };
+        build_pooled(opts, None).expect("an HTTP/1.1 client builds");
+        let c = build_http_client_with_options(None, None, true).unwrap();
+        assert!(!c.opts.http1_only);
+        assert!(c.http1_only().opts.http1_only);
+        assert_ne!(c.opts, c.http1_only().opts, "h1 and h2 clients never share a pool");
     }
 }
 

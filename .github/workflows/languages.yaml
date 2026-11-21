@@ -1,0 +1,126 @@
+name: 'languages'
+# Builds every language in crates/vector-i18n/locales, signs the index with the language key,
+# and publishes both: packs to Blossom and to the `languages` release (by hash), then the index
+# beside them and on Vector's relays. The GPUI client reads releases/download/languages/index.json,
+# and the relays when it can't.
+#
+# Nothing is published until the VECTOR_LANGUAGES_KEY secret exists ("Publishing" in
+# crates/vector-i18n/TRANSLATING.md).
+
+on:
+  push:
+    branches: [gpui, master]
+    paths:
+      - 'crates/vector-i18n/locales/**'
+      - 'crates/vector-i18n/src/**'
+      - '.github/workflows/languages.yaml'
+  pull_request:
+    paths:
+      - 'crates/vector-i18n/locales/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Publishes from either branch write the same release, so they take turns.
+concurrency:
+  group: languages-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
+jobs:
+  # Every language against English, in the job summary: a broken message fails the check.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Coverage
+        working-directory: crates/vector-i18n
+        run: |
+          set -o pipefail
+          { echo '```'; cargo run --quiet --locked --bin vector-i18n -- status; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Not gated on the check: a broken language keeps its last good pack, and the rest still ship.
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      VECTOR_LANGUAGES_KEY: ${{ secrets.VECTOR_LANGUAGES_KEY }}
+      VECTOR_LANGUAGES_OLD_KEY: ${{ secrets.VECTOR_LANGUAGES_OLD_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Is the language key set?
+        id: key
+        run: |
+          if [ -z "$VECTOR_LANGUAGES_KEY" ]; then
+            echo "::notice::VECTOR_LANGUAGES_KEY isn't set, so nothing is published."
+            echo "set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "set=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.key.outputs.set == 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.key.outputs.set == 'true'
+
+      - name: Build and sign
+        id: build
+        if: steps.key.outputs.set == 'true'
+        working-directory: crates/vector-i18n
+        run: |
+          mkdir -p ../../prev
+          gh release download languages --pattern index.json --dir ../../prev --repo "$GITHUB_REPOSITORY" || true
+          cargo build --release --features sign --bin vector-i18n
+          # A broken language keeps its last good pack listed; the job still fails at the end.
+          set +e
+          ./target/release/vector-i18n publish ../../out locales --previous ../../prev/index.json
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      # Packs go up before the index that names them, so the index never points at a missing file.
+      - name: Packs to Blossom
+        if: steps.key.outputs.set == 'true'
+        continue-on-error: true
+        run: |
+          # The app's DEFAULT_BLOSSOM_SERVERS, which it tries in this order.
+          for f in out/*.vpack; do
+            for s in https://magnitude.vectorapp.io https://blossom.ditto.pub https://blossom.primal.net https://blossom.data.haus; do
+              auth=$(crates/vector-i18n/target/release/vector-i18n blossom-auth "$f")
+              if curl -fsS -o /dev/null -X PUT --data-binary @"$f" -H "Authorization: $auth" -H "Content-Type: application/octet-stream" "$s/upload"; then
+                echo "$s has $(basename "$f")"
+              else
+                echo "::warning::$s refused $(basename "$f")"
+              fi
+            done
+          done
+
+      - name: Packs and index to the release
+        if: steps.key.outputs.set == 'true'
+        run: |
+          # `--prerelease` and `--latest=false` keep this off /releases/latest, which the updater reads.
+          if ! gh release view languages --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create languages --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+              --title 'Language packs' \
+              --notes 'Signed language packs for the Vector app, published by CI. The app downloads and checks these itself.'
+          fi
+          have=$(gh release view languages --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          for f in out/*.vpack; do
+            grep -qx "$(basename "$f")" <<< "$have" || gh release upload languages "$f" --repo "$GITHUB_REPOSITORY"
+          done
+          gh release upload languages out/index.json --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Index to relays
+        if: steps.key.outputs.set == 'true'
+        continue-on-error: true
+        run: |
+          pip install --quiet websockets
+          # The app's TRUSTED_RELAYS, where it looks when the release can't be reached.
+          python3 crates/vector-i18n/scripts/broadcast.py out/index.json \
+            wss://jskitty.com/nostr wss://asia.vectorapp.io/nostr wss://nostr.computingcache.com wss://relay.ditto.pub
+
+      - name: Broken translations
+        if: steps.key.outputs.set == 'true' && steps.build.outputs.status != '0'
+        run: |
+          echo "::error::A language has broken messages: its last good pack stays listed. See 'Build and sign'."
+          exit 1

@@ -1,0 +1,15 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " un ",
+  "list_pair": " un ",
+  "dates": {
+    "months": ["janvāris", "februāris", "marts", "aprīlis", "maijs", "jūnijs", "jūlijs", "augusts", "septembris", "oktobris", "novembris", "decembris"],
+    "months_short": ["janv.", "febr.", "marts", "apr.", "maijs", "jūn.", "jūl.", "aug.", "sept.", "okt.", "nov.", "dec."],
+    "weekdays": ["svētdiena", "pirmdiena", "otrdiena", "trešdiena", "ceturtdiena", "piektdiena", "sestdiena"],
+    "weekdays_short": ["svētd.", "pirmd.", "otrd.", "trešd.", "ceturtd.", "piektd.", "sestd."],
+    "am_pm": ["priekšp.", "pēcp."],
+    "patterns": ["d.MM.y.", "dd.MM.y.", "y. 'g'. d. MMM", "y. 'gada' d. MMMM", "EEEE, y. 'gada' d. MMMM", "d. MMM", "E, d. MMM", "E, y. 'g'. d. MMM", "ccc"],
+    "date_time": "{0} {1}"
+  }
+}

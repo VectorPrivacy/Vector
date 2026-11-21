@@ -22,6 +22,13 @@ on:
       - src-tauri/gen/android/**
       - .github/workflows/fdroid.yaml
       - .github/workflows/fdroid-build.yaml
+      - crates/vector-gpui/scripts/fdroid-build.sh
+      - crates/vector-gpui/android/**
+      - crates/vector-gpui/Cargo.toml
+      - crates/vector-gpui/Cargo.lock
+
+permissions:
+  contents: read
 
 concurrency:
   group: fdroid-${{ github.ref }}
@@ -81,3 +88,47 @@ jobs:
           path: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
           if-no-files-found: error
 
+  # The GPUI client's flavour, from its own recipe: the app v0.6 ships on F-Droid.
+  gpui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Android NDK
+        run: |
+          sdkmanager --install "ndk;29.0.14206865"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
+
+      - name: Prepare (network stage)
+        run: crates/vector-gpui/scripts/fdroid-build.sh prepare
+
+      - name: Build
+        run: crates/vector-gpui/scripts/fdroid-build.sh build
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: Vector-GPUI-fdroid-unsigned
+          path: crates/vector-gpui/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

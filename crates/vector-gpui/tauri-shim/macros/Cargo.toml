@@ -1,0 +1,10 @@
+[package]
+name = "vector-tauri-shim-macros"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Tauri's command attribute as a no-op, for the desktop client's modules in the GPUI build."
+publish = false
+
+[lib]
+proc-macro = true

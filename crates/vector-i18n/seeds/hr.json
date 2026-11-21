@@ -1,0 +1,16 @@
+{
+  "decimal": ",",
+  "group": ".",
+  "list_last": " i ",
+  "list_pair": " i ",
+  "dates": {
+    "months": ["siječnja", "veljače", "ožujka", "travnja", "svibnja", "lipnja", "srpnja", "kolovoza", "rujna", "listopada", "studenoga", "prosinca"],
+    "months_short": ["sij", "velj", "ožu", "tra", "svi", "lip", "srp", "kol", "ruj", "lis", "stu", "pro"],
+    "weekdays": ["nedjelja", "ponedjeljak", "utorak", "srijeda", "četvrtak", "petak", "subota"],
+    "weekdays_short": ["ned", "pon", "uto", "sri", "čet", "pet", "sub"],
+    "am_pm": ["AM", "PM"],
+    "patterns": ["dd. MM. y.", "dd. MM. y.", "d. MMM y.", "d. MMMM y.", "EEEE, d. MMMM y.", "d. MMM", "E, d. MMM", "E, d. MMM y.", "ccc"],
+    "times": ["hh:mm a", "hh:mm:ss a", "HH:mm", "HH:mm:ss"],
+    "date_time": "{0} {1}"
+  }
+}

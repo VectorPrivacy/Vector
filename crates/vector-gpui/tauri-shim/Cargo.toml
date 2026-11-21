@@ -1,0 +1,18 @@
+[package]
+name = "vector-tauri-shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "The slice of Tauri's API the desktop client's shared audio and call modules speak, for the GPUI build."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+url = "2.5.7"
+vector-tauri-shim-macros = { path = "macros" }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1.49.0", features = ["rt"] }
+http = "1.3"

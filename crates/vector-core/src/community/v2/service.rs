@@ -1947,6 +1947,32 @@ pub(crate) fn record_epoch_minter(cid_hex: &str, epoch: u64, rotator_hex: &str) 
     }
 }
 
+/// When each epoch's rotation was sent, by its rotator's clock (ms): what an audit dates a
+/// Refounding from when its seed snapshot never arrived.
+pub(crate) fn epoch_minted_at(cid_hex: &str) -> std::collections::BTreeMap<u64, u64> {
+    crate::db::settings::get_sql_setting(format!("v2_minted_at:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Remember when `epoch`'s rotation was sent. The earliest wins: a retried Refounding's
+/// later chunks don't move it.
+pub(crate) fn record_epoch_minted_at(cid_hex: &str, epoch: u64, at_ms: u64) {
+    if at_ms == 0 {
+        return;
+    }
+    let mut m = epoch_minted_at(cid_hex);
+    if m.get(&epoch).is_some_and(|held| *held <= at_ms) {
+        return;
+    }
+    m.insert(epoch, at_ms);
+    if let Ok(v) = serde_json::to_string(&m) {
+        let _ = crate::db::settings::set_sql_setting(format!("v2_minted_at:{cid_hex}"), v);
+    }
+}
+
 /// Keep `epoch`'s Control Plane address, so its history reads back once the plane has moved on.
 pub(crate) fn archive_control_address(cid_hex: &str, epoch: u64, control_pk: Option<&PublicKey>) {
     let Some(pk) = control_pk else { return };
@@ -5604,6 +5630,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         // Recorded here so the local fold agrees with every follower's without
         // waiting to adopt our own rotation back off the wire.
         record_epoch_minter(&cid_hex, new_epoch.0, &my_pk.to_hex());
+        record_epoch_minted_at(&cid_hex, new_epoch.0, now_ms());
         if sever {
             // Severing: the mark persists FIRST (a crash between it and the revoke
             // must retry, not forget — B4), then my own links are tombstoned. Other
@@ -15712,7 +15739,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                         .await
                         {
                             // Strictly lower only. Equal = the branch we already hold.
-                            Advance::Adopt { new_key, control_pk, control_root, severed, rotator } if new_key < held_before => {
+                            Advance::Adopt { new_key, control_pk, control_root, severed, rotator, at_ms } if new_key < held_before => {
                                 crate::log_warn!(
                                     "[v2:follow {}] same-epoch fork at epoch {} — converging DOWN onto the canonical sibling",
                                     &cid_hex[..8.min(cid_hex.len())], cur.root_epoch.0
@@ -15722,6 +15749,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                                 cur.control_root = control_root;
                                 // Everything the sibling carries, as if it had been adopted first.
                                 record_epoch_minter(&cid_hex, cur.root_epoch.0, &rotator.to_hex());
+                                record_epoch_minted_at(&cid_hex, cur.root_epoch.0, at_ms);
                                 if severed {
                                     severed_hops.push(cur.root_epoch.0);
                                     // Recorded now: a walk that fails later must not forget it.
@@ -15845,12 +15873,13 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                 let next = Epoch(held_epoch.0.saturating_add(1));
                 let batches = vec![(base, Some((held_epoch, held_key)))];
                 match advance_scope(&batches, RekeyScope::Root, cur.id(), &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
-                    Advance::Adopt { new_key, control_pk, control_root, severed, rotator } => {
+                    Advance::Adopt { new_key, control_pk, control_root, severed, rotator, at_ms } => {
                         // CORD-02 §5: this npub's snapshot — and only this npub's —
                         // seeds the new epoch's Guestbook. Recorded from the rotation
                         // this device just VERIFIED and adopted, so a snapshot can
                         // never nominate its own author.
                         record_epoch_minter(&cid_hex, next.0, &rotator.to_hex());
+                        record_epoch_minted_at(&cid_hex, next.0, at_ms);
                         // Record the HOP that was severed, not the walk's final head:
                         // the mark drives both the link condemnation line and the
                         // rescue re-stamp, and a multi-step walk would otherwise
@@ -16004,7 +16033,7 @@ enum Advance {
     /// pair is the BLOB's, never inherited: a legacy 72-byte blob carries
     /// neither (that epoch's Control folds at the legacy address), and channel
     /// rotations never carry any.
-    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool, rotator: PublicKey },
+    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool, rotator: PublicKey, at_ms: u64 },
     /// A complete owner rotation at `next_epoch` dropped my blob — I'm removed, as of `at_ms`.
     Removed { at_ms: u64 },
     /// No owner rotation extends my held epoch (yet) — keep the current key.
@@ -16016,6 +16045,46 @@ enum Advance {
 }
 
 /// Fetch + parse every seal-verified 3303 chunk at a rekey plane address.
+/// Where a base rotation may have landed beside the address this client follows: the epoch
+/// after next at the held root, and the next epoch at each archived root. Read-only, paged off
+/// the relays, so a strand shows whether the rotation exists anywhere this member could read.
+pub async fn probe_base_rekey_addresses<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<serde_json::Value, String> {
+    let cid_hex = community.id().to_hex();
+    let next = Epoch(community.root_epoch.0.saturating_add(1));
+    let mut candidates = vec![
+        (format!("e{} @ held root e{}", next.0, community.root_epoch.0), base_rekey_group_key(&community.community_root, community.id(), next)),
+        (format!("e{} @ held root e{}", next.0 + 1, community.root_epoch.0), base_rekey_group_key(&community.community_root, community.id(), Epoch(next.0 + 1))),
+    ];
+    for (epoch, root) in crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default() {
+        if root != community.community_root {
+            candidates.push((format!("e{} @ archived root e{}", epoch.0 + 1, epoch.0), base_rekey_group_key(&root, community.id(), Epoch(epoch.0 + 1))));
+            candidates.push((format!("e{} @ archived root e{}", next.0, epoch.0), base_rekey_group_key(&root, community.id(), next)));
+        }
+    }
+    let mut out = Vec::with_capacity(candidates.len());
+    for (label, group) in candidates {
+        let entry = match plane_wraps_paged(transport, &community.relays, &group).await {
+            Ok(wraps) => {
+                let chunks: Vec<rekey::RekeyChunk> = wraps.iter().filter_map(|w| stream::open_wrap(w, &group).ok()).filter_map(|o| rekey::parse_rekey_chunk(&o).ok()).collect();
+                let rotations: Vec<serde_json::Value> = rekey::collect_rotations(&chunks)
+                    .iter()
+                    .map(|r| serde_json::json!({
+                        "rotator": r.rotator.to_hex(),
+                        "prev_epoch": r.prev_epoch.0,
+                        "new_epoch": r.new_epoch.0,
+                        "scope_is_root": r.scope.id32() == RekeyScope::Root.id32(),
+                        "complete": r.is_complete(),
+                    }))
+                    .collect();
+                serde_json::json!({ "address": label, "plane_pk": group.pk_hex(), "wraps": wraps.len(), "chunks": chunks.len(), "rotations": rotations })
+            }
+            Err(e) => serde_json::json!({ "address": label, "plane_pk": group.pk_hex(), "error": e }),
+        };
+        out.push(entry);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
 async fn fetch_rekey_chunks<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, group: &GroupKey) -> Result<Vec<rekey::RekeyChunk>, String> {
     // A rekey plane address is community_root-derived, so ANY member can seal junk 3303s
     // there: a flood, or a large community's own multi-chunk rotation, could bury the genuine
@@ -16150,6 +16219,8 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     // Parallel to `winner_severed`: whose Refounding this delivery came from. The
     // snapshot authority for the adopted epoch (CORD-02 §5) is exactly this npub.
     let mut winner_rotator: Vec<PublicKey> = Vec::new();
+    // Parallel too: when that rotation was sent, by its rotator's clock.
+    let mut winner_at: Vec<u64> = Vec::new();
     let mut saw_complete_candidate = false;
     // The latest complete rotation considered: a removal dates from it.
     let mut removed_at: u64 = 0;
@@ -16217,6 +16288,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
                     winners.push(d);
                     winner_severed.push(scope.id32() == RekeyScope::Root.id32() && r.severed);
                     winner_rotator.push(r.rotator);
+                    winner_at.push(r.at_ms);
                     opened_one = true;
                     break;
                 }
@@ -16248,6 +16320,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
             control_root: w.control_root,
             severed: winner_severed[idx],
             rotator: winner_rotator[idx],
+            at_ms: winner_at[idx],
         };
     }
     // A rotation that delivered NO blob to anyone removed nobody. Read literally it
@@ -23001,6 +23074,33 @@ mod tests {
             crate::db::community::list_public_invites(&crate::simd::hex::bytes_to_hex_32(&updated.id().0)).unwrap().is_empty(),
             "and the local record goes with it",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lockdown_without_its_snapshot_is_dated_when_it_was_sent_not_when_adopted() {
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "LockdownDate", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The owner locks down; no seed snapshot follows. Its chunks say 2,000 s.
+        let new_root = [0xD7; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated
+            .expect("the owner's lockdown is adopted");
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&updated.id().0);
+        assert_eq!(epoch_minted_at(&cid_hex).get(&updated.root_epoch.0), Some(&2_000_000), "the rotation's own time is kept");
+
+        // This device records the lockdown again much later (a re-sync, a fresh login).
+        add_sever_mark(&cid_hex, updated.root_epoch.0, now_ms() / 1000);
+        let log = audit_log(&bed.relay, &updated).await.unwrap();
+        let entry = log.entries.iter().find(|e| e.action == "keys_rotate").expect("the lockdown shows");
+        assert_eq!(entry.at, 2_000_000, "dated when the rotator sent it, the same on every device");
     }
 
     #[tokio::test(flavor = "multi_thread")]

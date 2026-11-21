@@ -164,10 +164,16 @@ pub fn all() -> Result<Vec<([u8; 32], String, bool)>, String> {
         .prepare("SELECT hash, file, missing_at IS NOT NULL FROM media_store")
         .map_err(|e| format!("list media: {e}"))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .query_map([], |r| {
+            let hash = match r.get_ref(0)?.as_str() {
+                Ok(h) => hex_to_bytes_32_checked(h),
+                Err(_) => hex_to_bytes_32_checked(&r.get::<_, String>(0)?),
+            };
+            Ok((hash, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))
+        })
         .map_err(|e| format!("list media: {e}"))?
         .flatten()
-        .filter_map(|(hash, file, missing)| hex_to_bytes_32_checked(&hash).map(|h| (h, file, missing)))
+        .filter_map(|(hash, file, missing)| hash.map(|h| (h, file, missing)))
         .collect();
     Ok(rows)
 }

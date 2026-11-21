@@ -975,20 +975,21 @@ pub fn load_all_packs() -> Result<Vec<EmojiPack>, String> {
              ORDER BY pack_addr, position ASC"
         ).map_err(|e| format!("prepare items: {}", e))?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                PackEmoji {
-                    shortcode: row.get(1)?,
-                    url: row.get(2)?,
-                    sha256: row.get(3)?,
-                },
-            ))
-        }).map_err(|e| format!("query items: {}", e))?;
-
-        for r in rows {
-            let (addr, emoji) = r.map_err(|e| format!("row item: {}", e))?;
-            if let Some(p) = packs.get_mut(&addr) {
+        let mut rows = stmt.query([]).map_err(|e| format!("query items: {}", e))?;
+        let item = |row: &rusqlite::Row| -> rusqlite::Result<PackEmoji> {
+            Ok(PackEmoji { shortcode: row.get(1)?, url: row.get(2)?, sha256: row.get(3)? })
+        };
+        // The address is only a lookup key, so it is borrowed from the row rather than copied.
+        while let Some(row) = rows.next().map_err(|e| format!("row item: {}", e))? {
+            let pack = match row.get_ref(0).map_err(|e| format!("row item: {}", e))?.as_str() {
+                Ok(addr) => packs.get_mut(addr),
+                Err(_) => {
+                    row.get::<_, String>(0).map_err(|e| format!("row item: {}", e))?;
+                    None
+                }
+            };
+            let emoji = item(row).map_err(|e| format!("row item: {}", e))?;
+            if let Some(p) = pack {
                 p.emojis.push(emoji);
             }
         }

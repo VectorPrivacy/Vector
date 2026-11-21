@@ -1,0 +1,258 @@
+name: GPUI Android
+
+# The GPUI client for Android phones, compiled with the runner's NDK: its platform
+# (crates/vector-gpui/vendor/gpui_android) and the client itself. Its own concurrency group, so
+# it never waits behind or replaces a desktop build.
+on:
+  push:
+    branches: [gpui]
+    paths:
+      - 'crates/vector-gpui/**'
+      - 'crates/vector-i18n/**'
+      - 'crates/vector-core/**'
+      - 'crates/vector-calls/**'
+      - 'src-tauri/src/**'
+      - '.github/workflows/gpui-android.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpui-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.98.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: platform
+          # Expected to fail until the client's desktop-only dependencies are ported.
+          - name: client
+            experimental: true
+    name: check (${{ matrix.name }})
+    continue-on-error: ${{ matrix.experimental || false }}
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/vector-gpui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android
+          components: clippy
+
+      - name: NDK toolchain
+        run: |
+          ndk="$ANDROID_NDK_LATEST_HOME"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "ANDROID_NDK_ROOT=$ndk"
+            echo "ANDROID_NDK=$ndk"
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android26-clang"
+            echo "CXX_aarch64_linux_android=$bin/aarch64-linux-android26-clang++"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android26-clang"
+          } >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> target
+          key: android-aarch64-${{ matrix.name }}
+
+      # Warnings fail only in our own platform crates: -D warnings would reach the vendored ones too.
+      - name: Clippy
+        if: matrix.name == 'platform'
+        shell: bash
+        run: |
+          cargo clippy --locked -p gpui_platform -p gpui_android --target aarch64-linux-android \
+            --message-format short 2>&1 | tee clippy.log
+          ! grep -E '^vendor/gpui_(android|platform)/.*: (warning|error)' clippy.log
+
+      - name: Check
+        if: matrix.name == 'client'
+        run: cargo check --locked --keep-going --lib --target aarch64-linux-android --no-default-features --features tor,i2p --message-format short
+
+  # The app around the client: Kotlin, manifest and resources, which need no Rust to compile.
+  shell:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/vector-gpui/android
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
+
+      - name: Compile
+        run: ./gradlew --no-daemon :app:compileDebugKotlin :app:compileReleaseKotlin
+
+  # The phone app: a debug APK for arm64 phones, which installs beside an installed Vector.
+  apk:
+    needs: shell
+    # Expected to fail until the client links for Android.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: crates/vector-gpui/android
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> target
+          key: android-apk
+
+      # One debug key across runs, so a test APK installs over the last one without an
+      # uninstall (which wipes the app's data). The secret holds it for good; the cache is
+      # evicted once the repo's caches pass 10 GB, and Gradle then makes a new key.
+      - name: Debug key
+        id: debug-key
+        env:
+          KEYSTORE: ${{ secrets.GPUI_ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            mkdir -p ~/.android
+            printf '%s' "$KEYSTORE" | base64 -d > ~/.android/debug.keystore
+            echo "secret=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GPUI_ANDROID_DEBUG_KEYSTORE is not set: this APK's key lasts only as long as the Actions cache"
+          fi
+
+      - if: steps.debug-key.outputs.secret != '1'
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: gpui-android-debug-keystore-v1
+
+      - name: Build
+        run: ./gradlew --no-daemon :app:assembleDebug -PvectorNdk="$(basename "$ANDROID_NDK_LATEST_HOME")"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vector-gpui-android-arm64-debug
+          path: crates/vector-gpui/android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+  # The app on emulated phones (x86_64, software GPU): what it shows after launch, and its log.
+  # Android 11 without Vulkan is the GLES path phones with PowerVR GPUs draw with.
+  emulator:
+    needs: shell
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { api: 34, gpu: vulkan, features: '' }
+          - { api: 30, gpu: gles, features: '-feature -Vulkan' }
+    name: emulator (API ${{ matrix.api }}, ${{ matrix.gpu }})
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-linux-android
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # Google's copy of Maven Central ahead of every repository: Central's CDN answers some
+      # runners 404. An init script, since F-Droid's scanner refuses unknown repositories.
+      - name: Maven mirror
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/mirror.gradle <<'EOF'
+          beforeSettings { settings ->
+              def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+              settings.pluginManagement.repositories.maven { url = mirror }
+              settings.dependencyResolutionManagement.repositories.maven { url = mirror }
+          }
+          EOF
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/vector-gpui -> target
+          key: android-emulator
+
+      - name: Build
+        working-directory: crates/vector-gpui/android
+        run: ./gradlew --no-daemon :app:assembleDebug -PvectorAbis=x86_64 -PvectorNdk="$(basename "$ANDROID_NDK_LATEST_HOME")"
+
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim ${{ matrix.features }}
+          disable-animations: true
+          script: crates/vector-gpui/android/scripts/emulator-smoke.sh crates/vector-gpui/android/app/build/outputs/apk/debug/app-debug.apk smoke
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vector-gpui-android-emulator-${{ matrix.api }}
+          path: smoke/
+          retention-days: 14

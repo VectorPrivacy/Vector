@@ -1,0 +1,15 @@
+{
+  "decimal": ",",
+  "group": ".",
+  "list_last": " i ",
+  "list_pair": " i ",
+  "dates": {
+    "months": ["de gener", "de febrer", "de març", "d’abril", "de maig", "de juny", "de juliol", "d’agost", "de setembre", "d’octubre", "de novembre", "de desembre"],
+    "months_short": ["de gen.", "de febr.", "de març", "d’abr.", "de maig", "de juny", "de jul.", "d’ag.", "de set.", "d’oct.", "de nov.", "de des."],
+    "weekdays": ["diumenge", "dilluns", "dimarts", "dimecres", "dijous", "divendres", "dissabte"],
+    "weekdays_short": ["dg.", "dl.", "dt.", "dc.", "dj.", "dv.", "ds."],
+    "am_pm": ["a. m.", "p. m."],
+    "patterns": ["d/M/y", "dd/MM/y", "d MMM 'del' y", "d MMMM 'del' y", "EEEE, d MMMM 'del' y", "d MMM", "E, d MMM", "E, d MMM y", "ccc"],
+    "times": ["h:mm a", "h:mm:ss a", "H:mm", "H:mm:ss"]
+  }
+}

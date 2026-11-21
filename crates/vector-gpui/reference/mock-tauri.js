@@ -1,0 +1,169 @@
+// A stand-in backend for the Tauri frontend: boots it through the debug hot-reload path with
+// the fixture data, so the reference render needs no Rust, no account and no network.
+(() => {
+    const FIX = window.__VECTOR_FIXTURES__;
+    const answers = {
+        get_platform_features: { transcription: !!window.__REF_TRANSCRIPT__, notification_sounds: true, os: 'linux', is_mobile: false, debug_mode: true, media_url: null, self_update: false, share_audio: false, players: false },
+        debug_hot_reload_sync: { success: true, npub: FIX.npub, profiles: FIX.profiles, chats: FIX.chats, pinned: FIX.pinned || [] },
+        get_storage_info: { total_bytes: 41300000, type_distribution: { jpg: 9200000, png: 3100000, mp4: 21000000, mp3: 1400000, '/cache': 4100000, pdf: 2500000 } }, get_theme: 'vector', get_notification_settings: { global_mute: false, sound: { type: 'Default' }, mute_everyone: false }, get_encryption_status: { enabled: true, security_type: 'pin' }, audio_devices_list: { inputs: ['Built-in Microphone', 'USB Headset'], outputs: ['Built-in Speakers', 'USB Headset'], default_input: 'Built-in Microphone', default_output: 'Built-in Speakers', prefs: { input: null, output: null } }, call_audio_settings_get: { auto_gain: true, echo_cancel: true, noise_suppress: false, mic_volume: 0.8, speaker_volume: 1 }, realtime_direct_get: false, get_start_layout: { v: 1, nodes: [{ type: 'item', key: 'dm/npub190vqdjtlpcq27xslcveglfmr4ynfwg7gmw86cnun4acakxrdd6gqnp929a' }, { type: 'item', key: 'settings/audio' }, { type: 'item', key: 'requests' }, { type: 'folder', id: 'f1', name: 'Work', keys: ['dm/npub1sxmr0k8u6trd5c6eu6trzyapzux7090ykujmsng7pdx0m8k93n5sd02fwn', 'dm/npub1fsndjp6vylvfahjeyuxq4s2tw8s8rv2j89ge7a28fvhnhf35s86sg3uctf'] }] }, export_keys: { nsec: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5', seed_phrase: 'abandon ability able about above absent absorb abstract absurd abuse access accident' }, verify_credential: null, transfer_start: { id: 1, code: '7-orbit-lemon-stage', qr: 'Vector transfer code: 7-orbit-lemon-stage' }, get_archived_chats: FIX.archived || {}, list_emoji_packs: [], get_relays: [{ url: 'wss://jskitty.com/nostr', status: 'connected', is_default: true, is_custom: false, enabled: true, mode: 'both' }, { url: 'wss://asia.vectorapp.io/nostr', status: 'connected', is_default: true, is_custom: false, enabled: true, mode: 'both' }, { url: 'wss://nostr.computingcache.com', status: 'connecting', is_default: true, is_custom: false, enabled: true, mode: 'both' }, { url: 'wss://relay.ditto.pub', status: 'disabled', is_default: true, is_custom: false, enabled: false, mode: 'both' }, { url: 'wss://relay.example.org', status: 'disconnected', is_default: false, is_custom: true, enabled: true, mode: 'read' }], get_blossom_servers_config: [{ url: 'https://magnitude.vectorapp.io', is_default: true, is_custom: false, enabled: true, status: { state: 'online', label: 'Online', tone: 'connected', latency_ms: 84 } }, { url: 'https://blossom.ditto.pub', is_default: true, is_custom: false, enabled: true, status: { state: 'untested', label: 'Untested', tone: 'disabled', latency_ms: null } }, { url: 'https://blossom.primal.net', is_default: true, is_custom: false, enabled: false, status: { state: 'disabled', label: 'Disabled', tone: 'disabled', latency_ms: null } }], get_accounts: [{ npub: FIX.npub }], get_current_account: FIX.npub,
+    };
+    const msgs = (id) => (FIX.chats.find((c) => c.id === id)?.messages || []).slice().sort((a, b) => a.at - b.at);
+    const fns = {
+        audio_load: ({ path }) => ({ id: 7, duration_ms: String(path).includes("golden") ? 9000 : 7400, waveform_fps: 20, bins: 32 }),
+        audio_play: () => 2400,
+        audio_pause: () => 2400,
+        audio_probe: ({ path }) => (String(path).includes("loop") ? 12000 : String(path).includes("golden") ? 9000 : String(path).includes("northern") ? 32000 : 7400),
+        get_audio_metadata: ({ path }) => String(path).includes("northern")
+            ? { title: "Northern Lines (Deluxe Edition)", artist: "Mira Vale", album: "Northern Lines (Deluxe Edition)", cover_art: "/__ref/media/album-cover.png", lyrics: null, year: 2024,
+                chapters: [[0, 6000, "Arrival"], [6000, 13000, "Glass Harbour"], [13000, 19000, "Signal Fire (Live)"], [19000, 25000, "Cold Front"], [25000, null, "Departure - Remastered 2024"]]
+                    .map(([start_ms, end_ms, title]) => ({ start_ms, end_ms, title })) }
+            : (String(path).includes("golden")
+            ? { title: "Golden Hour", artist: "Mira Vale", album: "Coastlines", cover_art: "/__ref/media/cover.png", lyrics: { synced: true, lines: [
+                [500, "Light on the water"], [2200, "Gold in your hair"], [4000, ""], [5200, "We drove till the coastline"], [7000, "Ran out of air"],
+            ].map(([at_ms, text]) => ({ at_ms, text, words: [] })) }, year: null, chapters: [] }
+            : null),
+        list_models: () => [
+            ['tiny', 'Lowest Quality - Fastest', 44, 310, false], ['base', 'Base Quality - Fast', 82, 360, false],
+            ['small', 'Good Quality - Fast', 264, 620, true], ['medium', 'High Quality - Moderate', 823, 1320, true],
+            ['large-v3', 'Highest Quality - Slowest', 1080, 2400, true],
+        ].map(([name, display_name, size, ram_required, supports_translate]) => ({ model: { name, display_name, size, ram_required, supports_translate }, downloaded: name === 'small' && window.__TYPE__ !== 'missing' })),
+        get_device_memory: () => 2 * 1024 * 1024 * 1024,
+        reauthorize_bunker: () => 'nostrconnect://4f3c1b7a9e2d8f6c5b4a3e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807?relay=wss%3A%2F%2Fjskitty.com%2Fnostr&secret=8c1e4a&name=Vector',
+        get_pending_reauth_result: null,
+        start_nostrconnect_session: () => 'nostrconnect://4f3c1b7a9e2d8f6c5b4a3e2d1c0b9a8f7e6d5c4b3a2918f7e6d5c4b3a291807?relay=wss%3A%2F%2Fjskitty.com%2Fnostr&secret=8c1e4a&name=Vector',
+        check_account_downgrade: () => (window.__TYPE__ === 'downgrade' ? { db_schema: 90, supported_schema: 87, last_app_version: '0.6.0-2' } : null),
+        get_bunker_status: () => (window.__SIGNER__ ? { remote_npub: window.__SIGNER__, remote_pubkey_hex: '' } : null),
+        get_sql_setting: (a) => ((window.__SQL__ || {})[a?.key] ?? null),
+        transcribe: () => ({ lang: 'ru', language: 'ru', confidence: 0.9, sections: [
+            [0, 'Привет, это Ана.'], [1800, 'Я буду дома около семи,'], [4200, 'купи, пожалуйста, хлеб по дороге.'],
+        ].map(([at, text]) => ({ at, text, confidence: 0.9 })) }),
+        get_self_destruct_timer: () => (window.__TYPE__ === 'timer' ? 3600 : null),
+        get_synced_settings: () => ({ advanced: (window.__SQL__ || {}).advanced === 'true', players: true, streamer: { on: window.__TYPE__ === 'streamer', seed: '00112233445566778899aabbccddeeff', notif: 'none', hide_wallpapers: true } }),
+        get_chat_message_count: ({ chatId }) => msgs(chatId).length,
+        get_message_views: ({ chatId, limit = 50, offset = 0 }) => msgs(chatId).reverse().slice(offset, offset + limit),
+        get_messages_around: ({ chatId, anchorId, before = 0, after = 0 }) => {
+            const all = msgs(chatId); const i = all.findIndex((m) => m.id === anchorId);
+            return i < 0 ? all.slice(-before) : all.slice(Math.max(0, i - before + 1), i + after + 1);
+        },
+        get_message_position: ({ chatId, messageId }) => {
+            const all = msgs(chatId); const i = all.findIndex((m) => m.id === messageId);
+            return i < 0 ? null : { newer: all.length - 1 - i, total: all.length };
+        },
+        get_message_time_at: ({ chatId, newer }) => msgs(chatId).reverse()[newer]?.at ?? null,
+        get_unread_counts: () => Object.fromEntries(FIX.chats.map((c) => {
+            const i = c.messages.findIndex((m) => m.id === c.last_read);
+            return [c.id, c.messages.slice(i + 1).filter((m) => !m.mine).length];
+        })),
+        mark_as_read: ({ chatId, messageId }) => { const c = FIX.chats.find((x) => x.id === chatId); if (c && messageId) c.last_read = messageId; return null; },
+        create_account: () => ({ public: FIX.npub, existing: false }), login: () => { throw 'Invalid nsec'; },
+        generate_thumbhash_preview: ({ npub, msgId }) => {
+            const m = msgs(npub).find((x) => x.id === msgId);
+            const hash = m?.attachments?.find((a) => a.img_meta)?.img_meta?.thumbhash;
+            if (!hash || !FIX.thumbs?.[hash]) throw 'No thumbhash';
+            return FIX.thumbs[hash];
+        },
+        voice_present: ({ channelId }) => FIX.voice?.present?.[channelId] || [], voice_state: () => FIX.voice?.session || null, voice_powers: () => ({ mute: true, deafen: true, move: true }),
+        get_system_events: () => [], pivx_get_chat_payments: () => [], get_message_delete_meta_bulk: () => [],
+        get_chat_commands: ({ chatId }) => { const b = (FIX.bot_commands || {})[chatId] || []; return { bots: b.length, commands: b, fresh: true }; }, list_communities: () => FIX.communities || [], get_community: ({ communityId }) => (FIX.communities || []).find((c) => c.community_id === communityId), get_hidden_banners: () => [], cache_community_image: ({ communityId, isBanner }) => { const c = (FIX.communities || []).find((x) => x.community_id === communityId); return (isBanner ? c?.banner : c?.icon) || null; },
+        get_community_capabilities: () => Object.fromEntries(['manage_metadata','manage_channels','create_invite','kick','ban','manage_messages','manage_roles','manage_admin_role','pin_messages','control_write','moderate_members','view_audit_log','manage_nicknames','change_nickname'].map((k) => [k, true])),
+        get_community_members: ({ communityId }) => ((FIX.communities || []).find((c) => c.community_id === communityId)?.members || []).map((npub, i) => ({ npub, last_active: 1794275880 - i * 600 })).concat(Object.entries((FIX.unlisted || {})[communityId] || {}).map(([npub, unlisted]) => ({ npub, unlisted }))),
+        get_channel_pins: ({ channelId }) => ({ pins: (FIX.pins || {})[channelId] || [], sealed: false, version: 1 }), sync_community_channel: () => ({ new_messages: 0, reached_start: true, oldest_ms: null }), fill_community_gap: () => 0,
+        get_relay_info: ({ url }) => (FIX.relay_info || {})[url] || { name: null, icon: null, auth: false }, get_community_timeouts: (a) => (FIX.timeouts || {})[a.communityId] || {}, get_community_mentions: () => ({ anyone: true, pingers: [], roles: [] }), get_community_admins: () => [], get_community_role_graph: () => ({ roles: [], grants: [], activated: false, readers: {} }), get_community_banlist: () => (FIX.profiles || []).filter((p) => p.name === 'frank' || p.name === 'heidi').map((p) => p.id), get_channel_send_denied: (a) => ((FIX.send_denied || {})[a.channelId] || []).filter((n) => (a.npubs || []).includes(n)), check_community_raid: () => ({ detected: !!FIX.moderation, suspects: FIX.moderation ? FIX.moderation.report.suspects : 0 }),
+        get_community_join_order: () => [],
+        get_moderation_intel: () => FIX.moderation,
+        fetch_nostr_embed: ({ reference }) => { const e = (FIX.embeds || {})[reference]; if (!e) throw 'Not found on any relay'; return e; }, cache_url_image: ({ url }) => url, list_emoji_packs: () => Object.values(FIX.packs || {}), refresh_emoji_packs: () => Object.values(FIX.packs || {}), get_theme_slot_anchor: () => '', fetch_emoji_pack_by_naddr: ({ naddr }) => { const p = (FIX.packs || {})[naddr]; if (!p) throw 'Pack not found'; return p; }, get_or_cache_image: ({ url }) => url.replace('https://ref.invalid/', ''),
+        policy_presets: () => FIX.policy_presets, list_community_policies: () => ({ policies: [], using_builtin: true }),
+        get_community_roles_view: () => FIX.roles_view,
+        get_channel_permissions: () => FIX.channel_perms,
+        get_community_audit_log: () => FIX.audit || { entries: [], compacted: false },
+        debug_v2_control_report: () => FIX.sync_report.control,
+        debug_v2_explain_base_rekey: () => FIX.sync_report.epoch,
+        create_community: ({ name }) => ({ community_id: 'f'.repeat(64), channel_id: 'e'.repeat(64), channel_name: 'general', owner_npub: FIX.npub, name }),
+        create_public_invite: () => 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20),
+        list_public_invites: () => [{ url: 'https://vectorapp.io/invite/' + 'Ab3'.repeat(20), token: 'tok1', label: 'Reddit', join_count: 3 }, { url: 'https://vectorapp.io/invite/' + 'Zx9'.repeat(20), token: 'tok2', label: null, join_count: 0 }],
+        get_community_invite_summary: () => ({ is_public: true, creators: [{ npub: FIX.npub, count: 2 }] }),
+        list_community_invites: () => FIX.invites || [],
+        preview_public_invite: () => ({ name: 'Night Owls', description: 'Late-night builders, ships and shenanigans.', icon: null, community_id: 'c'.repeat(64) }),
+        get_notify_prefs: ({ communityId, scopeIds }) => [...new Set([communityId, ...(scopeIds || [])].filter(Boolean))].map((scope_id) => ({ scope_id, level: null, effective_level: scope_id === communityId ? 'mentions' : 'mentions', muted: false, mute_until: 0, suppress_everyone: false, everyone_muted_globally: false })), get_emoji_usage: () => [],
+        cache_android_file: ({ filePath }) => {
+            const name = filePath.split('/').pop();
+            return { size: (window.__FILE_SIZES__ || {})[name] || 0, name, extension: name.split('.').pop() };
+        },
+        blossom_upload_verdict: () => ({ likely: true, reasons: [] }),
+        get_blossom_server_snapshot: ({ url }) => { const d = FIX.server_demo?.[url] || {}; return { info: d.info || null, stats: d.stats || null, status: d.status }; },
+        get_blossom_server_info: ({ url }) => FIX.server_demo?.[url]?.info || null,
+        get_blossom_server_stats: ({ url }) => { const d = FIX.server_demo?.[url] || {}; return { stats: d.stats || null, status: d.status }; },
+        get_blossom_server_capabilities: ({ url }) => FIX.server_demo?.[url]?.caps || [],
+        pivx_get_wallet_balance: () => FIX.pivx?.balance ?? 0,
+        pivx_get_price: () => FIX.pivx?.price ? { value: FIX.pivx.price.value, currency: FIX.pivx.price.currency } : null,
+        pivx_get_preferred_currency: () => (FIX.pivx?.price?.currency || 'usd').toUpperCase(),
+        pivx_get_currencies: () => (FIX.pivx?.currencies || []).map((c) => ({ currency: c })),
+        pivx_get_wallet_address: () => null,
+        pivx_refresh_balances: () => FIX.pivx?.promos || [],
+        pivx_create_promo: () => ({ gift_code: 'PIVX-NEW00', address: FIX.pivx?.deposit_address, balance_piv: 0, status: 'pending', created_at: 0 }),
+        pivx_get_chat_payments: ({ conversationId }) => (FIX.pivx?.payments || []).filter((p) => p.conversation_id === conversationId),
+        pivx_check_address_balance: () => 1,
+        marketplace_get_cached_apps: () => FIX.marketplace || [], marketplace_fetch_apps: () => FIX.marketplace || [],
+        marketplace_get_trusted_publisher: () => 'npub1jskittyvector000000000000000000000000000000000000000000',
+        miniapp_get_history: () => (FIX.marketplace || []).filter((a) => a.installed).map((a, i) => ({ id: i + 1, name: a.name, src_url: a.local_path, attachment_ref: a.local_path, last_opened_at: Math.floor(FIX.now / 1000) - 3600 * (i * 30 + 2), open_count: 3, categories: a.categories.join(','), marketplace_id: a.id, installed_version: a.installed_version, is_favorite: false })),
+        get_compression_status: () => window.__COMPRESSION__ || null,
+        // NET_DEMO=<name>: one of the fixtures' transport states.
+        transport_set_prelogin: () => (FIX.net_demo || {})[window.__NET__]?.view || null,
+        transport_get_state: () => (FIX.net_demo || {})[window.__NET__]?.view || { supported: ['clearnet'], prelogin: 'clearnet', kind: 'clearnet', phase: 'direct', ready: true, steps: [], detail: null },
+        tor_get_state: () => (FIX.net_demo || {})[window.__NET__]?.tor || { enabled: false, running: false, supported: false, status: 'disabled', bootstrap_progress: 0, prelogin: false, multi_circuit: true, socks_proxy: null },
+        tor_get_bridges: () => ({ enabled: false, lines: '' }),
+        tor_get_engine: () => ({ external: false, port: null, found: null }),
+        tor_check_obfs4_proxy: () => ({ installed: false, path: null }),
+        tor_get_circuits: () => (FIX.net_demo || {})[window.__NET__]?.circuits || { host: null, hops: [], circuits: 0, hosts: 0 },
+        i2p_get_config: () => (FIX.net_demo || {})[window.__NET__]?.i2p || FIX.net_demo?.i2p_config,
+        transport_get_aliases: () => (FIX.net_demo || {})[window.__NET__]?.aliases || [],
+        transport_get_routes: (a) => (a?.urls || []).map((u) => ((FIX.net_demo || {})[window.__NET__]?.routes || []).find((r) => r.url === u) || ({ url: u, host: new URL(u).hostname, kind: (FIX.net_demo || {})[window.__NET__]?.view?.kind || 'clearnet', class: 'direct', text: 'Direct' })),
+        file_has_metadata: () => false,
+        list_accounts_with_metadata: () => FIX.profiles.slice(0, 3).map((p, i) => ({
+            npub: p.id, display_name: p.nickname || p.display_name || p.name || null,
+            avatar_url: null, avatar_cached: p.avatar_cached || null, has_encryption: false, last_active: 100 - i,
+        })),
+        get_max_account_tier: () => window.__ACCOUNT_TIER__ ?? 1,
+        get_my_badges: () => window.__BADGES__ || { vector: false, vector_2026: false, tier: 0, bug_hunter: 0 },
+        get_invited_users: () => window.__BADGES__?.invites || 0,
+        check_fawkes_badge: () => !!window.__BADGES__?.vector,
+        check_vector_2026_badge: () => !!window.__BADGES__?.vector_2026,
+        get_bug_hunter_tier: () => window.__BADGES__?.bug_hunter || 0,
+    };
+    // MOCK_MODE: 'app' (signed in), 'login' (no account) or 'unlock' (a PIN-locked account).
+    const MODE = window.__MOCK_MODE__ || 'app';
+    if (MODE !== 'app') {
+        delete answers.debug_hot_reload_sync;
+        fns.debug_hot_reload_sync = () => { throw 'Backend not initialized - perform normal login'; };
+        answers.get_encryption_and_key = MODE === 'login'
+            ? { account_exists: false, enabled: false, security_type: 'pin', signer_type: 'local' }
+            : { account_exists: true, enabled: true, security_type: 'pin', signer_type: 'local' };
+        answers.get_accounts = MODE === 'login' ? [] : [{ npub: FIX.npub }];
+        answers.get_current_account = MODE === 'login' ? null : FIX.npub;
+    }
+    const seen = new Set();
+    window.__mockMissed = [];
+    const invoke = async (cmd, args) => {
+        if (cmd in answers) return structuredClone(answers[cmd]);
+        if (cmd in fns) return structuredClone(fns[cmd](args || {}));
+        if (!seen.has(cmd)) { seen.add(cmd); window.__mockMissed.push(cmd); }
+        return null;
+    };
+    const noop = async () => {};
+    const win = new Proxy({}, { get: (_, k) => k === 'label' ? 'main' : (k === 'then' ? undefined : (async () => (k.startsWith('is') ? false : (k === 'innerSize' || k === 'outerSize' ? { width: innerWidth, height: innerHeight, toLogical: () => ({ width: innerWidth, height: innerHeight }) } : (k === 'scaleFactor' ? 1 : (k.startsWith('on') || k === 'listen' ? () => {} : null)))))) });
+    window.__TAURI__ = {
+        core: { invoke, convertFileSrc: (p) => '/__ref/' + p, Channel: class { constructor() { this.onmessage = null; } } },
+        event: { listen: async () => () => {}, once: async () => () => {}, emit: noop },
+        window: { getCurrentWindow: () => win, currentMonitor: async () => null, primaryMonitor: async () => null, availableMonitors: async () => [] },
+        webviewWindow: { getCurrentWebviewWindow: () => win },
+        webview: { getCurrentWebview: () => win },
+        dpi: { PhysicalSize: class {}, LogicalSize: class { constructor(w, h) { this.width = w; this.height = h; } }, PhysicalPosition: class {}, LogicalPosition: class {} },
+        app: { getVersion: async () => '0.5.1', getName: async () => 'Vector' },
+        opener: { openUrl: noop, openPath: noop, revealItemInDir: noop },
+        dialog: { open: async () => null, save: async () => null, message: noop, ask: async () => false, confirm: async () => false },
+        process: { exit: noop, relaunch: noop },
+        updater: { check: async () => null },
+        notification: { isPermissionGranted: async () => false, requestPermission: async () => 'denied', sendNotification: () => {} },
+        clipboardManager: { writeText: noop, readText: async () => '' },
+    };
+})();

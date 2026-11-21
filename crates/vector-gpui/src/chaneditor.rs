@@ -1,0 +1,1368 @@
+//! Channel Settings (`community/ChannelEditor.svelte`): Community Settings' layout over one
+//! channel or Category. Overview holds the name, topic and view; Permissions holds one
+//! overwrite per role or member, each bit allowed, denied or inherited. A Category has
+//! Permissions alone. Edits wait behind one save bar, and a close with any pending is refused.
+
+use std::rc::Rc;
+
+use gpui::prelude::*;
+use gpui::{AnyElement, App, Entity, FontWeight, ScrollHandle, SharedString, Window, div, px, svg};
+use serde_json::Value;
+
+use crate::kit::Tipped as _;
+use crate::commsettings::{block, field_head, heading, hint, input_box, lede, save_btn, short_npub, tab_strip, text_btn};
+use crate::composer::TextInput;
+use crate::data::Store;
+use crate::settings::{Anchor, Category, Label, NavOn, anchor};
+use crate::t;
+use crate::theme::*;
+
+pub const NAME_MAX: usize = 64;
+pub const TOPIC_MAX: usize = 1024;
+const PICK_MAX: usize = 100;
+const DEFAULT_TINT: u32 = 0x99aab5;
+
+pub struct Perm {
+    pub bit: u32,
+    pub name: Label,
+    pub desc: Label,
+}
+
+const fn perm(bit: u32, name: Label, desc: Label) -> Perm {
+    Perm { bit, name, desc }
+}
+
+pub const CHANNEL: &[Perm] = &[
+    perm(13, t::channel_editor_perm_view, t::channel_editor_perm_view_desc),
+    perm(14, t::channel_editor_perm_send, t::channel_editor_perm_send_desc),
+    perm(15, t::channel_editor_perm_threads, t::channel_editor_perm_threads_desc),
+    perm(16, t::channel_editor_perm_attach, t::channel_editor_perm_attach_desc),
+    perm(17, t::channel_editor_perm_react, t::channel_editor_perm_react_desc),
+    perm(18, t::channel_editor_perm_history, t::channel_editor_perm_history_desc),
+    perm(5, t::channel_editor_perm_manage, t::channel_editor_perm_manage_desc),
+];
+
+pub const VOICE: &[Perm] = &[
+    perm(19, t::channel_editor_perm_connect, t::channel_editor_perm_connect_desc),
+    perm(20, t::channel_editor_perm_speak, t::channel_editor_perm_speak_desc),
+    perm(21, t::channel_editor_perm_video, t::channel_editor_perm_video_desc),
+    perm(22, t::channel_editor_perm_priority, t::channel_editor_perm_priority_desc),
+    perm(23, t::channel_editor_perm_mute, t::channel_editor_perm_mute_desc),
+    perm(24, t::channel_editor_perm_deafen, t::channel_editor_perm_deafen_desc),
+    perm(25, t::channel_editor_perm_move, t::channel_editor_perm_move_desc),
+    perm(26, t::channel_editor_perm_timeout, t::channel_editor_perm_timeout_desc),
+];
+
+const GROUPS: [(&str, Label, Label, &[Perm]); 2] = [
+    ("perm-channel", t::channel_editor_section_perm_channel, t::channel_editor_section_perm_channel_keys, CHANNEL),
+    ("perm-voice", t::channel_editor_section_perm_voice, t::channel_editor_section_perm_voice_keys, VOICE),
+];
+
+const VIEWS: [(&str, Label, Label); 2] = [
+    ("chat", t::channel_editor_view_chat, t::channel_editor_view_chat_desc),
+    ("voice", t::channel_editor_view_voice, t::channel_editor_view_voice_desc),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tri {
+    Deny,
+    Inherit,
+    Allow,
+}
+
+pub struct Role {
+    pub id: String,
+    pub name: String,
+    pub color: u32,
+    pub position: i64,
+    /// The bits this account may set on it; `None` where it may set none.
+    pub support: Option<u64>,
+}
+
+pub struct Overwrite {
+    /// `everyone`, `role:<id>` or `member:<hex>`.
+    pub key: String,
+    pub npub: Option<String>,
+    pub allow: u64,
+    pub deny: u64,
+    pub support: Option<u64>,
+}
+
+/// `get_channel_permissions`, parsed.
+#[derive(Default)]
+pub struct Perms {
+    pub activated: bool,
+    pub can_manage: bool,
+    pub synced: bool,
+    pub category: Option<String>,
+    /// Whether syncing with the category, or stopping, swaps only rules this account may set.
+    pub can_sync: bool,
+    /// This account's key, as hex.
+    pub me: String,
+    pub everyone_support: Option<u64>,
+    pub roles: Vec<Role>,
+    pub overwrites: Vec<Overwrite>,
+    /// (hex, npub) of everyone a member overwrite can name.
+    pub members: Vec<(String, String)>,
+    /// What this account may set on each of `members`, by hex; absent where it may set none.
+    pub member_support: std::collections::HashMap<String, u64>,
+}
+
+fn bits(v: &Value) -> u64 {
+    held(v).unwrap_or(0)
+}
+
+/// A bit set that may be null.
+fn held(v: &Value) -> Option<u64> {
+    v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64())
+}
+
+impl Perms {
+    pub fn parse(v: &Value) -> Self {
+        let str_of = |v: &Value| v.as_str().map(String::from);
+        Self {
+            activated: v["activated"].as_bool().unwrap_or(false),
+            can_manage: v["can_manage"].as_bool().unwrap_or(false),
+            synced: !v["synced"].is_null() && v["synced"] != Value::Bool(false),
+            category: str_of(&v["category"]),
+            can_sync: v["can_sync"].as_bool().unwrap_or(false),
+            me: str_of(&v["me"]).unwrap_or_default(),
+            everyone_support: held(&v["everyone_support"]),
+            roles: v["roles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| Role {
+                    id: str_of(&r["role_id"]).unwrap_or_default(),
+                    name: str_of(&r["name"]).map(|n| crate::kit::one_line(&n).into_owned()).unwrap_or_default(),
+                    color: r["color"].as_u64().unwrap_or(0) as u32,
+                    position: r["position"].as_i64().unwrap_or(0),
+                    support: held(&r["support"]),
+                })
+                .collect(),
+            overwrites: v["overwrites"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|o| {
+                    let kind = o["kind"].as_str().unwrap_or("everyone");
+                    Overwrite {
+                        key: match o["id"].as_str() {
+                            Some(id) if kind != "everyone" => format!("{kind}:{id}"),
+                            _ => "everyone".into(),
+                        },
+                        npub: str_of(&o["npub"]),
+                        allow: bits(&o["allow"]),
+                        deny: bits(&o["deny"]),
+                        support: held(&o["support"]),
+                    }
+                })
+                .collect(),
+            members: v["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| Some((str_of(&m["id"])?, str_of(&m["npub"])?)))
+                .collect(),
+            member_support: v["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| Some((str_of(&m["id"])?, held(&m["support"])?)))
+                .collect(),
+        }
+    }
+
+    /// What this account may set for `key`: the bits from its roles strictly above it, while
+    /// Manage Roles is among them. The backend judges a save by the same rule.
+    pub fn support(&self, key: &str) -> Option<u64> {
+        if key == "everyone" {
+            return self.everyone_support;
+        }
+        match key.split_once(':') {
+            Some(("role", id)) => self.roles.iter().find(|r| r.id == id)?.support,
+            Some((_, id)) => match self.overwrites.iter().find(|o| o.key == key) {
+                Some(o) => o.support,
+                None => self.member_support.get(id).copied(),
+            },
+            None => None,
+        }
+    }
+
+    /// A save restates the whole rule, so one bit this account can't vouch for leaves it as is.
+    pub fn editable(&self, key: &str) -> bool {
+        let Some(held) = self.support(key) else { return false };
+        let (allow, deny) = self.stored(key);
+        (allow | deny) & !held == 0
+    }
+
+    pub fn stored(&self, key: &str) -> (u64, u64) {
+        self.overwrites
+            .iter()
+            .find(|o| o.key == key)
+            .map_or((0, 0), |o| (o.allow, o.deny))
+    }
+
+    fn open(&self) -> bool {
+        self.activated && self.can_manage
+    }
+}
+
+pub struct Saved {
+    pub name: String,
+    pub topic: String,
+    pub view: String,
+}
+
+pub struct ChannelEditor {
+    pub community: String,
+    pub channel: String,
+    pub is_category: bool,
+    pub primary: bool,
+    pub section: &'static str,
+    pub anchor: Option<&'static str>,
+    pub search: Entity<TextInput>,
+    pub scroll: ScrollHandle,
+    pub name: Entity<TextInput>,
+    pub topic: Entity<TextInput>,
+    pub view: String,
+    pub private: bool,
+    pub saved: Saved,
+    pub perms: Option<Perms>,
+    pub target: String,
+    pub draft: (u64, u64),
+    pub busy: bool,
+    pub error: Option<String>,
+    /// A refused close or switch: the bar says why until this passes.
+    pub warn_until: Option<std::time::Instant>,
+    pub warn_switch: bool,
+    pub adding: bool,
+    pub add_closed: Option<std::time::Instant>,
+    pub add_query: Entity<TextInput>,
+}
+
+const LOCK_BITS: [u32; 3] = [14, 17, 19];
+
+pub enum Act {
+    Close,
+    Section(&'static str),
+    Anchor(&'static str, &'static str),
+    /// The wheel moved on from an anchor jumped to.
+    Scrolled,
+    ClearSearch,
+    View(&'static str),
+    Private(bool),
+    Sync(bool),
+    Target(String),
+    Bit(u32, Tri),
+    Lock(bool),
+    ToggleAdd,
+    CloseAdd,
+    Pick(String),
+    Reset,
+    Save,
+    Delete,
+}
+
+fn click_wheel(on: &OnAct) -> impl Fn(&gpui::ScrollEvent, &mut Window, &mut App) + 'static {
+    let on = on.clone();
+    move |_, w, cx| on(Act::Scrolled, w, cx)
+}
+
+pub type OnAct = Rc<dyn Fn(Act, &mut Window, &mut App)>;
+
+fn click(on: &OnAct, act: impl Fn() -> Act + 'static) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+    let on = on.clone();
+    move |_, w, cx| on(act(), w, cx)
+}
+
+pub struct Target {
+    pub key: String,
+    pub label: String,
+    pub color: Option<u32>,
+    /// A member's npub, empty where it isn't known.
+    pub member: Option<String>,
+    pub set: bool,
+}
+
+/// Who a member target names: their name, else the start of their key.
+fn member_label(store: &Store, npub: Option<&str>, hex: &str) -> String {
+    match npub {
+        Some(n) if store.profiles.get(n).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty()) => store.name(n),
+        Some(n) => short_npub(n),
+        None => format!("{}…", &hex[..hex.len().min(10)]),
+    }
+}
+
+impl ChannelEditor {
+    pub fn overview_dirty(&self, cx: &App) -> bool {
+        let name = self.name.read(cx).text() != self.saved.name;
+        if self.is_category {
+            return name;
+        }
+        name || self.topic.read(cx).text() != self.saved.topic || self.view != self.saved.view
+    }
+
+    pub fn overwrite_dirty(&self) -> bool {
+        self.perms.as_ref().is_some_and(|p| p.stored(&self.target) != self.draft)
+    }
+
+    pub fn dirty(&self, cx: &App) -> bool {
+        self.overview_dirty(cx) || self.overwrite_dirty()
+    }
+
+    pub fn warn(&self) -> bool {
+        self.warn_until.is_some_and(|t| std::time::Instant::now() < t)
+    }
+
+    pub fn valid(&self, cx: &App) -> bool {
+        let name = self.name.read(cx).text();
+        !name.trim().is_empty()
+            && name.len() <= NAME_MAX
+            && (self.is_category || self.topic.read(cx).text().len() <= TOPIC_MAX)
+    }
+
+    fn perms_open(&self) -> bool {
+        self.perms.as_ref().is_some_and(Perms::open)
+    }
+
+    fn syncable(&self) -> bool {
+        self.perms_open()
+            && !self.is_category
+            && self.perms.as_ref().is_some_and(|p| p.synced || p.category.is_some())
+    }
+
+    pub fn bit(&self, bit: u32) -> Tri {
+        let b = 1u64 << bit;
+        if self.draft.0 & b != 0 {
+            Tri::Allow
+        } else if self.draft.1 & b != 0 {
+            Tri::Deny
+        } else {
+            Tri::Inherit
+        }
+    }
+
+    pub fn set_bit(&mut self, bit: u32, to: Tri) {
+        let b = 1u64 << bit;
+        let (mut allow, mut deny) = self.draft;
+        allow &= !b;
+        deny &= !b;
+        match to {
+            Tri::Allow => allow |= b,
+            Tri::Deny => deny |= b,
+            Tri::Inherit => {}
+        }
+        self.draft = (allow, deny);
+    }
+
+    /// Whether @everyone may post, react and join calls nowhere here, so every write takes the
+    /// channel's writer key and nothing anyone else sends reaches its readers.
+    pub fn locked(&self) -> bool {
+        let deny = if self.target == "everyone" {
+            self.draft.1
+        } else {
+            self.perms.as_ref().map_or(0, |p| p.stored("everyone").1)
+        };
+        LOCK_BITS.iter().all(|b| deny & (1 << b) != 0)
+    }
+
+    pub fn can_lock(&self) -> bool {
+        let Some(p) = self.perms.as_ref() else { return false };
+        let held = p.support("everyone").unwrap_or(0);
+        p.editable("everyone") && LOCK_BITS.iter().all(|b| held & (1 << b) != 0)
+    }
+
+    pub fn can_touch(&self, bit: u32) -> bool {
+        let Some(p) = self.perms.as_ref() else { return false };
+        let b = 1u64 << bit;
+        p.editable(&self.target) && p.support(&self.target).is_some_and(|held| held & b == b)
+    }
+
+    /// Why the open target can't be changed, when it can't.
+    pub fn read_only_why(&self) -> Option<SharedString> {
+        let p = self.perms.as_ref()?;
+        if self.target.is_empty() || p.editable(&self.target) {
+            return None;
+        }
+        Some(if p.support(&self.target).is_some() {
+            t::channel_editor_why_support()
+        } else if self.target == "everyone" {
+            t::channel_editor_why_everyone()
+        } else if self.target.strip_prefix("member:") == Some(p.me.as_str()) {
+            t::channel_editor_why_self()
+        } else if self.target.starts_with("member:") {
+            t::channel_editor_why_member()
+        } else {
+            t::channel_editor_why_role()
+        })
+    }
+
+    /// A private channel opens only to a role's or a member's allow, whatever @everyone says.
+    fn closed_to_everyone(&self, bit: u32) -> bool {
+        self.private && self.target == "everyone" && bit == 13
+    }
+
+    /// The targets with an overwrite here, @everyone last, plus whichever is open.
+    pub fn targets(&self, store: &Store) -> Vec<Target> {
+        let Some(p) = self.perms.as_ref() else { return Vec::new() };
+        let mut keys: Vec<&str> = vec!["everyone"];
+        for k in p.overwrites.iter().map(|o| o.key.as_str()).chain([self.target.as_str()]) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        let mut out: Vec<(f64, Target)> = keys
+            .into_iter()
+            .map(|key| {
+                let (allow, deny) = p.stored(key);
+                let set = allow != 0 || deny != 0;
+                if key == "everyone" {
+                    return (f64::INFINITY, Target { key: key.into(), label: "@everyone".into(), color: None, member: None, set: true });
+                }
+                let (kind, id) = key.split_once(':').unwrap_or((key, ""));
+                if kind == "role" {
+                    let role = p.roles.iter().find(|r| r.id == id);
+                    return (
+                        role.map_or(1e9, |r| r.position as f64),
+                        Target {
+                            key: key.into(),
+                            label: role.map_or_else(|| t::channel_editor_deleted_role().to_string(), |r| r.name.clone()),
+                            color: Some(role.map_or(0, |r| r.color)),
+                            member: None,
+                            set,
+                        },
+                    );
+                }
+                let npub = p
+                    .overwrites
+                    .iter()
+                    .find(|o| o.key == key)
+                    .and_then(|o| o.npub.clone())
+                    .or_else(|| p.members.iter().find(|m| m.0 == id).map(|m| m.1.clone()));
+                (2e9, Target { key: key.into(), label: member_label(store, npub.as_deref(), id), color: None, member: Some(npub.unwrap_or_default()), set })
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.into_iter().map(|(_, t)| t).collect()
+    }
+
+    pub fn sections(&self) -> Vec<Category> {
+        let activated = self.perms.as_ref().is_some_and(|p| p.activated);
+        let mut overview = vec![anchor("ch-name", t::channel_editor_section_name, t::channel_editor_section_name_keys)];
+        if !self.is_category {
+            overview.push(anchor("ch-topic", t::channel_editor_section_topic, t::channel_editor_section_topic_keys));
+            overview.push(anchor("ch-view", t::channel_editor_section_view, t::channel_editor_section_view_keys));
+            if activated {
+                overview.push(anchor("ch-private", t::channel_editor_section_private, t::channel_editor_section_private_keys));
+            }
+        }
+        let mut permissions: Vec<Anchor> = Vec::new();
+        if self.syncable() {
+            permissions.push(anchor("ch-sync", t::channel_editor_section_sync, t::channel_editor_section_sync_keys));
+        }
+        let own = self.perms_open() && !self.perms.as_ref().is_some_and(|p| p.synced);
+        if own {
+            permissions.push(anchor("ch-lock", t::channel_editor_section_lock, t::channel_editor_section_lock_keys));
+        }
+        permissions.push(anchor("ch-targets", t::channel_editor_section_targets, t::channel_editor_section_targets_keys));
+        if own {
+            permissions.extend(GROUPS.iter().map(|(id, title, keys, _)| anchor(id, *title, *keys)));
+        }
+        vec![
+            Category { id: "overview", label: t::channel_editor_page_overview, icon: "info", danger: false, anchors: overview },
+            Category { id: "permissions", label: t::channel_editor_page_permissions, icon: "shield-filled", danger: false, anchors: permissions },
+        ]
+    }
+
+    /// Roles without rules here yet, then members, each matching the picker's query.
+    pub fn addable(&self, store: &Store, cx: &App) -> (Vec<&Role>, Vec<(String, String, String)>) {
+        let Some(p) = self.perms.as_ref() else { return (Vec::new(), Vec::new()) };
+        let q = self.add_query.read(cx).text().trim().to_lowercase();
+        let taken = |key: String| key == self.target || p.overwrites.iter().any(|o| o.key == key);
+        let roles = p
+            .roles
+            .iter()
+            .filter(|r| r.support.is_some() && !taken(format!("role:{}", r.id)))
+            .filter(|r| q.is_empty() || r.name.to_lowercase().contains(&q))
+            .collect();
+        let mut members: Vec<(String, String, String)> = p
+            .members
+            .iter()
+            .filter(|(id, _)| p.member_support.contains_key(id) && !taken(format!("member:{id}")))
+            .filter_map(|(id, npub)| {
+                let named = store.profiles.get(npub.as_str()).is_some_and(|p| !p.name.is_empty() || !p.display_name.is_empty() || !p.nickname.is_empty());
+                let name = if named { store.name(npub) } else { String::new() };
+                // i18n-exempt: a search haystack, never shown
+                (q.is_empty() || format!("{name} {npub}").to_lowercase().contains(&q)).then(|| (id.clone(), npub.clone(), name))
+            })
+            .collect();
+        members.sort_by(|a, b| {
+            let ka = if a.2.is_empty() { &a.1 } else { &a.2 };
+            let kb = if b.2.is_empty() { &b.1 } else { &b.2 };
+            ka.cmp(kb)
+        });
+        (roles, members)
+    }
+}
+
+fn perm_text(name: impl IntoElement, desc: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .child(div().text_size(px(14.5)).line_height(px(24.)).text_color(c(0xe8e8e8)).child(name))
+        .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child(desc.into()))
+}
+
+fn overview(m: &ChannelEditor, narrow: bool, on: &OnAct, cx: &App) -> Vec<AnyElement> {
+    let editable = !m.busy;
+    let name_len = m.name.read(cx).text().len();
+    let name_warn = name_len > NAME_MAX || m.name.read(cx).text().trim().is_empty();
+    let mut out = vec![block(
+        true,
+        div()
+            .child(heading(t::channel_editor_section_name()))
+            .child(field_head(
+                if m.is_category { t::channel_editor_category_name() } else { t::channel_editor_channel_name() },
+                Some((name_len, NAME_MAX, name_warn)),
+            ))
+            .child(input_box(&m.name, 42., editable)),
+    )
+    .into_any_element()];
+    if m.is_category {
+        return out;
+    }
+    let topic_len = m.topic.read(cx).text().len();
+    out.push(
+        block(
+            false,
+            div()
+                .child(heading(t::channel_editor_section_topic()))
+                .child(field_head(t::channel_editor_topic_hint(), Some((topic_len, TOPIC_MAX, topic_len > TOPIC_MAX))))
+                .child(
+                    div()
+                        .h(px(114.))
+                        .px(px(13.))
+                        .py(px(11.))
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(c(0x2c2c2c))
+                        .bg(c(0x111111))
+                        .overflow_hidden()
+                        .when(!editable, |d| d.opacity(0.6))
+                        .child(m.topic.clone()),
+                ),
+        )
+        .into_any_element(),
+    );
+    let views = div().flex().when(narrow, |d| d.flex_col()).gap(px(8.)).children(VIEWS.iter().map(|&(id, name, desc)| {
+        let on_ = m.view == id;
+        div()
+            .id(SharedString::from(format!("ce-view-{id}")))
+            .map(|d| if narrow { d.w_full() } else { d.w(px((596. - 16.) / 3.)) })
+            .min_w_0()
+            .when(!narrow, |d| d.min_h(px(78.)))
+            .px(px(12.))
+            .py(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .rounded(px(10.))
+            .border_1()
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(on_, |d| d.border_color(c(PRIMARY)).bg(c(0x0f1d17)))
+            .when(!on_, |d| d.border_color(c(0x262626)).bg(c(0x0c0c0c)).hover(|d| d.bg(c(0x131313))))
+            .when(!editable, |d| d.opacity(0.6))
+            .when(editable, |d| d.cursor_pointer().on_click(click(on, move || Act::View(id))))
+            .child(div().text_size(px(14.5)).line_height(px(18.)).text_color(c(0xe8e8e8)).child(name()))
+            .child(div().text_size(px(12.5)).line_height(px(17.5)).text_color(c(0x7a7a7a)).child(desc()))
+    }));
+    out.push(
+        block(false, div().child(heading(t::channel_editor_section_view())).child(lede(t::channel_editor_opens_as_lede())).child(views))
+            .into_any_element(),
+    );
+    if m.perms.as_ref().is_some_and(|p| p.activated) {
+        let private = m.private;
+        let toggle_on = on.clone();
+        out.push(
+            block(
+                false,
+                div().child(heading(t::channel_editor_section_private())).child(
+                    div()
+                        .py(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(16.))
+                        .child(perm_text(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(svg().path("icons/locked.svg").size(px(13.)).text_color(c(0xe8e8e8)))
+                                .child(t::channel_editor_private()),
+                            if m.saved.view == "voice" { t::channel_editor_private_voice() } else { t::channel_editor_private_text() },
+                        ))
+                        .child(div().flex_shrink_0().when(m.busy, |d| d.opacity(0.4)).child(crate::settings::toggle(
+                            "ce-private",
+                            private,
+                            false,
+                            move |_, w, cx| toggle_on(Act::Private(!private), w, cx),
+                        ))),
+                ),
+            )
+            .into_any_element(),
+        );
+    }
+    out
+}
+
+fn tri(m: &ChannelEditor, p: &Perm, live: bool, on: &OnAct) -> impl IntoElement {
+    let state = m.bit(p.bit);
+    let bit = p.bit;
+    let cell = |to: Tri, first: bool| {
+        let lit = state == to;
+        let (bg, fg) = match (to, lit) {
+            (Tri::Deny, true) => (c(0x42132f), c(crate::timeline::DANGER)),
+            (Tri::Inherit, true) => (c(0x1b1b1b), c(0xcfcfcf)),
+            (Tri::Allow, true) => (c(0x0f3a29), c(PRIMARY)),
+            _ => (c(0x0c0c0c), c(0x6f6f6f)),
+        };
+        let glyph: AnyElement = match to {
+            Tri::Deny => svg().path("icons/x.svg").size(px(12.)).text_color(fg).into_any_element(),
+            Tri::Allow => svg().path("icons/check.svg").size(px(12.)).text_color(fg).into_any_element(),
+            Tri::Inherit => div().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).line_height(px(13.)).text_color(fg).child("/").into_any_element(),
+        };
+        div()
+            .id(SharedString::from(format!("ce-tri-{bit}-{to:?}")))
+            .w(px(30.))
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(bg)
+            .when(!first, |d| d.border_l_1().border_color(c(0x262626)))
+            .when(live, |d| d.cursor_pointer().on_click(click(on, move || Act::Bit(bit, to))))
+            .child(glyph)
+    };
+    div()
+        .flex()
+        .flex_shrink_0()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(c(0x262626))
+        .overflow_hidden()
+        .child(cell(Tri::Deny, true))
+        .child(cell(Tri::Inherit, false))
+        .child(cell(Tri::Allow, false))
+}
+
+fn dot(color: u32) -> impl IntoElement {
+    div()
+        .size(px(12.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(c(if color == 0 { DEFAULT_TINT } else { color }))
+        .border_1()
+        .border_color(white_a(0.15))
+}
+
+fn add_picker(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
+    let (roles, members) = m.addable(store, cx);
+    let label = |text: SharedString| {
+        div()
+            .px(px(8.))
+            .pt(px(10.))
+            .pb(px(4.))
+            .text_size(px(11.))
+            .line_height(px(13.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(c(0x7a7a7a))
+            .child(text.to_uppercase())
+    };
+    let row = |id: SharedString, lead: AnyElement, name: String, sub: Option<String>, key: String| {
+        let group = id.clone();
+        div()
+            .id(id)
+            .group(group.clone())
+            .h(px(38.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|d| d.bg(c(0x1c1c1c)))
+            .on_click(click(on, move || Act::Pick(key.clone())))
+            .child(div().w(px(22.)).flex_shrink_0().flex().items_center().justify_center().child(lead))
+            .child(div().min_w_0().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(c(0xe6e6e6)).child(name))
+            .children(sub.map(|s| div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(c(0x6a6a6a)).child(s)))
+            .child(
+                svg()
+                    .path("icons/plus.svg")
+                    .ml_auto()
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .text_color(c(ACCENT))
+                    .invisible()
+                    .group_hover(group, |d| d.visible()),
+            )
+    };
+    let mut list = div().id("ce-add-list").flex_1().min_h_0().overflow_y_scroll().px(px(6.)).pt(px(4.)).pb(px(8.));
+    let empty = roles.is_empty() && members.is_empty();
+    if !roles.is_empty() {
+        list = list.child(label(t::channel_editor_roles()));
+        for r in roles {
+            list = list.child(row(
+                SharedString::from(format!("ce-add-role-{}", r.id)),
+                dot(r.color).into_any_element(),
+                r.name.clone(),
+                None,
+                format!("role:{}", r.id),
+            ));
+        }
+    }
+    if !members.is_empty() {
+        list = list.child(label(t::channel_editor_members()));
+        let more = members.len().saturating_sub(PICK_MAX);
+        for (id, npub, name) in members.into_iter().take(PICK_MAX) {
+            let veiled = store.stream_hidden(&npub);
+            let shown = if name.is_empty() { short_npub(&npub) } else { name.clone() };
+            let sub = (!name.is_empty() && !veiled).then(|| short_npub(&npub));
+            list = list.child(row(
+                SharedString::from(format!("ce-add-member-{id}")),
+                crate::ui::avatar(store, &npub, 22.).into_any_element(),
+                shown,
+                sub,
+                format!("member:{id}"),
+            ));
+        }
+        if more > 0 {
+            list = list.child(div().px(px(8.)).py(px(14.)).text_center().text_size(px(13.)).text_color(c(0x7a7a7a)).child(t::channel_editor_search_more(more)));
+        }
+    }
+    if empty {
+        let q = m.add_query.read(cx).text().trim().to_string();
+        list = list.child(div().px(px(8.)).py(px(14.)).text_center().text_size(px(13.)).text_color(c(0x7a7a7a)).child(t::channel_editor_no_match(q)));
+    }
+    let close = on.clone();
+    gpui::deferred(
+        div()
+            .id("ce-add-pop")
+            .absolute()
+            .top(px(40.))
+            .right_0()
+            .w(px(360.))
+            .max_h(px(380.))
+            .flex()
+            .flex_col()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(c(0x2c2e2f))
+            .bg(c(0x101010))
+            .shadow(vec![gpui::BoxShadow {
+                color: ca(0, 0, 0, 0.6),
+                offset: gpui::point(px(0.), px(18.)),
+                blur_radius: px(50.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+            .overflow_hidden()
+            .occlude()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(move |_, w, cx| close(Act::CloseAdd, w, cx))
+            .child(
+                div().flex_none().p(px(10.)).border_b_1().border_color(c(0x1f1f1f)).child(
+                    div()
+                        .relative()
+                        .h(px(36.))
+                        .pl(px(34.))
+                        .pr(px(12.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(9.))
+                        .border_1()
+                        .border_color(c(0x262626))
+                        .bg(c(0x161616))
+                        .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(10.)).size(px(14.)).text_color(c(0x7a7a7a)))
+                        .child(div().flex_1().min_w_0().child(m.add_query.clone())),
+                ),
+            )
+            .child(list),
+    )
+    .with_priority(13)
+    .into_any_element()
+}
+
+fn permissions(m: &ChannelEditor, store: &Store, on: &OnAct, cx: &App) -> Vec<AnyElement> {
+    let Some(p) = m.perms.as_ref() else {
+        return vec![block(true, div().child(heading(t::channel_editor_section_targets())).child(hint(t::channel_editor_loading()))).into_any_element()];
+    };
+    if !p.open() {
+        return vec![block(
+            true,
+            div().child(heading(t::channel_editor_section_targets())).child(lede(if p.activated {
+                t::channel_editor_needs_manage_roles()
+            } else {
+                t::channel_editor_not_activated()
+            })),
+        )
+        .into_any_element()];
+    }
+    let mut out = Vec::new();
+    if m.syncable() {
+        let synced = p.synced;
+        out.push(
+            block(
+                true,
+                div().child(heading(t::channel_editor_section_sync())).child(
+                    div()
+                        .mb(px(12.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(match (synced, p.can_sync) {
+                                (true, true) => t::channel_editor_synced(),
+                                (true, false) => t::channel_editor_synced_held(),
+                                (false, true) => t::channel_editor_own(),
+                                (false, false) => t::channel_editor_own_held(),
+                            }),
+                        )
+                        .child(
+                            div()
+                                .id("ce-sync")
+                                .h(px(34.))
+                                .px(px(14.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .rounded(px(8.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(14.))
+                                .text_color(c(PRIMARY))
+                                .when(m.busy || !p.can_sync, |d| d.opacity(0.45))
+                                .when(!m.busy && p.can_sync, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Sync(!synced))))
+                                .child(if synced { t::channel_editor_stop_sync() } else { t::channel_editor_sync() }),
+                        ),
+                ),
+            )
+            .into_any_element(),
+        );
+    }
+    if p.synced {
+        return out;
+    }
+    let locked = m.locked();
+    let can_lock = m.can_lock() && !m.busy;
+    out.push(
+        block(
+            out.is_empty(),
+            div().child(heading(t::channel_editor_section_lock())).child(
+                div()
+                    .mb(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(div().flex_1().min_w_0().text_size(px(14.)).line_height(px(21.)).text_color(c(0x9a9a9a)).child(if locked {
+                        t::channel_editor_locked()
+                    } else {
+                        t::channel_editor_lock_note()
+                    }))
+                    .child(
+                        div()
+                            .id("ce-lock")
+                            .h(px(34.))
+                            .px(px(14.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .rounded(px(8.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(14.))
+                            .text_color(c(PRIMARY))
+                            .when(!can_lock, |d| d.opacity(0.45))
+                            .when(can_lock, |d| d.cursor_pointer().hover(|d| d.underline()).on_click(click(on, move || Act::Lock(!locked))))
+                            .child(if locked {
+                                t::channel_editor_unlock()
+                            } else if m.is_category {
+                                t::channel_editor_lock_category()
+                            } else {
+                                t::channel_editor_lock_channel()
+                            }),
+                    ),
+            ),
+        )
+        .into_any_element(),
+    );
+    let first = out.is_empty();
+    let targets = m.targets(store);
+    let (roles, members) = m.addable(store, cx);
+    let can_add = p.roles.iter().any(|r| !targets.iter().any(|t| t.key == format!("role:{}", r.id)))
+        || p.members.iter().any(|(id, _)| !targets.iter().any(|t| t.key == format!("member:{id}")));
+    drop((roles, members));
+    let open_label = targets.iter().find(|t| t.key == m.target).map(|t| t.label.clone());
+    let head = div()
+        .relative()
+        .mb(px(20.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .child(div().text_size(px(24.)).line_height(px(28.)).font_weight(FontWeight::BOLD).text_color(c(0xffffff)).child(t::channel_editor_section_targets()))
+        .when(can_add, |d| {
+            d.child(
+                div()
+                    .id("ce-add")
+                    .h(px(34.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(8.))
+                    .bg(c(PRIMARY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(14.))
+                    .text_color(c(0x000000))
+                    .when(m.busy, |d| d.opacity(0.45))
+                    .when(!m.busy, |d| d.cursor_pointer().hover(|d| d.opacity(0.92)).on_click(click(on, || Act::ToggleAdd)))
+                    .child(svg().path("icons/plus.svg").size(px(12.)).text_color(c(0x000000)))
+                    .child(t::channel_editor_add()),
+            )
+        })
+        .when(m.adding, |d| d.child(add_picker(m, store, on, cx)));
+    let mut rows = div().mb(px(10.)).rounded(px(12.)).border_1().border_color(c(0x262626)).overflow_hidden();
+    for (i, t) in targets.iter().enumerate() {
+        let on_ = t.key == m.target;
+        let key = t.key.clone();
+        rows = rows.child(
+            div()
+                .id(SharedString::from(format!("ce-target-{}", t.key)))
+                .h(px(if i == 0 { 46. } else { 47. }))
+                .pl(px(8.))
+                .pr(px(14.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .bg(c(if on_ { 0x171717 } else { 0x0c0c0c }))
+                .when(i > 0, |d| d.border_t_1().border_color(c(0x1e1e1e)))
+                .when(!on_, |d| d.hover(|d| d.bg(c(0x131313))))
+                .when(!m.busy, |d| d.cursor_pointer().on_click(click(on, move || Act::Target(key.clone()))))
+                .child(match t.member.as_deref() {
+                    Some(npub) => div()
+                        .size(px(18.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(if npub.is_empty() {
+                            svg().path("icons/user-circle.svg").size(px(16.)).text_color(c(0x6f6f6f)).into_any_element()
+                        } else {
+                            crate::ui::avatar(store, npub, 18.).into_any_element()
+                        })
+                        .into_any_element(),
+                    None => dot(t.color.unwrap_or(DEFAULT_TINT)).into_any_element(),
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(14.))
+                        .line_height(px(24.))
+                        .when(on_, |d| d.font_weight(FontWeight::MEDIUM))
+                        .text_color(c(if on_ { 0xffffff } else { 0xe8e8e8 }))
+                        .child(t.label.clone()),
+                )
+                .child(div().ml_auto().flex().items_center().gap(px(12.)).when(!t.set, |d| {
+                    d.child(div().flex_shrink_0().text_size(px(12.5)).line_height(px(24.)).text_color(c(0x6f6f6f)).child(t::channel_editor_no_rules()))
+                }).when(!p.editable(&t.key), |d| {
+                    // A target whose rules come from above you: shown, never editable.
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("ce-lock-{}", t.key)))
+                            .tip(t::channel_editor_cant_change())
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            .child(svg().path("icons/locked.svg").size(px(14.)).text_color(c(0x6f6f6f))),
+                    )
+                }).child(div().size(px(16.)).flex_shrink_0().flex().items_center().justify_center().when(on_, |d| {
+                    d.child(svg().path("icons/check.svg").size(px(16.)).text_color(c(PRIMARY)))
+                }))),
+        );
+    }
+    out.push(
+        block(
+            first,
+            div()
+                .child(head)
+                .child(lede(if m.is_category { t::channel_editor_category_targets() } else { t::channel_editor_targets() }))
+                .child(rows),
+        )
+        .into_any_element(),
+    );
+    let why = m.read_only_why();
+    for (gi, (_, title, _, perms)) in GROUPS.into_iter().enumerate() {
+        let mut list = div().flex().flex_col();
+        for (i, perm) in perms.iter().enumerate() {
+            let closed = m.closed_to_everyone(perm.bit);
+            let live = m.can_touch(perm.bit) && !closed && !m.busy;
+            list = list.child(
+                div()
+                    .py(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .when(i > 0, |d| d.border_t_1().border_color(c(0x1a1a1a)))
+                    .when(!m.can_touch(perm.bit) || closed, |d| d.opacity(0.5))
+                    .child(perm_text((perm.name)(), if closed { t::channel_editor_perm_closed() } else { (perm.desc)() }))
+                    .child(tri(m, perm, live, on)),
+            );
+        }
+        out.push(
+            block(
+                false,
+                div()
+                    .child(
+                        div()
+                            .mb(px(20.))
+                            .flex()
+                            .text_size(px(24.))
+                            .line_height(px(28.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(c(0xffffff))
+                            .child(title())
+                            .children(open_label.clone().map(|l| {
+                                div().ml(px(7.)).font_weight(FontWeight::NORMAL).text_color(c(0x8a8a8a)).child(t::channel_editor_for(l))
+                            })),
+                    )
+                    .children(why.clone().filter(|_| gi == 0).map(lede))
+                    .child(list),
+            )
+            .into_any_element(),
+        );
+    }
+    out
+}
+
+fn save_bar(m: &ChannelEditor, on: &OnAct, cx: &App) -> Option<AnyElement> {
+    let dirty = m.dirty(cx);
+    if !dirty && !m.busy && m.error.is_none() {
+        return None;
+    }
+    let warn = m.warn() && dirty;
+    let open = m.perms.as_ref().map(|_| m.targets_label(cx)).flatten();
+    let (text, err): (SharedString, bool) = if m.busy {
+        (t::channel_editor_saving(), false)
+    } else if warn {
+        (
+            match (m.warn_switch, open) {
+                (true, Some(target)) => t::channel_editor_save_first(target),
+                (true, None) => t::channel_editor_save_first_unnamed(),
+                (false, _) => t::channel_editor_save_before_closing(),
+            },
+            true,
+        )
+    } else if let Some(e) = m.error.as_deref() {
+        (crate::coretext::say(e).into_owned().into(), true)
+    } else {
+        (t::channel_editor_unsaved(), false)
+    };
+    let live = !m.busy && dirty;
+    Some(
+        div()
+            .absolute()
+            .bottom(px(22.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .px(px(22.))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(600.))
+                    .flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .pl(px(18.))
+                    .pr(px(10.))
+                    .py(px(10.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(if warn { c(crate::timeline::DANGER) } else { c(0x2c2c2c) })
+                    .bg(c(0x151515))
+                    .shadow(vec![gpui::BoxShadow {
+                        color: ca(0, 0, 0, 0.55),
+                        offset: gpui::point(px(0.), px(10.)),
+                        blur_radius: px(30.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(14.))
+                            .line_height(px(24.))
+                            .text_color(if err { c(crate::timeline::DANGER) } else { c(0xe6e6e6) })
+                            .child(text),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .child(text_btn("ce-reset", t::channel_editor_reset(), live, click(on, || Act::Reset)))
+                            .child(save_btn("ce-save", t::channel_editor_save(), live && m.valid(cx), click(on, || Act::Save))),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
+impl ChannelEditor {
+    fn targets_label(&self, _cx: &App) -> Option<String> {
+        let p = self.perms.as_ref()?;
+        Some(match self.target.split_once(':') {
+            None => "@everyone".into(),
+            Some(("role", id)) => p.roles.iter().find(|r| r.id == id).map_or_else(|| t::channel_editor_deleted_role().to_string(), |r| r.name.clone()),
+            Some((_, id)) => p
+                .members
+                .iter()
+                .find(|m| m.0 == id)
+                .map_or_else(|| format!("{}…", &id[..id.len().min(10)]), |m| short_npub(&m.1)),
+        })
+    }
+}
+
+/// `vw`: under 760 it is Community Settings' phone sheet, the sections a strip of tabs.
+pub fn view(m: &ChannelEditor, store: &Store, vw: f32, on: &OnAct, cx: &App) -> impl IntoElement + use<> {
+    let compact = vw <= 760.;
+    let sections = m.sections();
+    let section = sections.iter().find(|s| s.id == m.section).unwrap_or(&sections[0]);
+    // The anchor jumped to, until a wheel moves on; else the block crossing the middle, or
+    // the last once the bottom is reached.
+    let active = m.anchor.filter(|a| section.anchors.iter().any(|x| x.id == *a)).unwrap_or_else(|| {
+        let last = section.anchors.len().saturating_sub(1);
+        let h = &m.scroll;
+        let (view, y) = (h.bounds(), -h.offset().y);
+        let mid = view.top() + y + view.size.height / 2.;
+        let mut at = (0..=last).take_while(|&i| h.bounds_for_item(i).is_some_and(|b| b.top() <= mid)).last().unwrap_or(0);
+        let max = h.max_offset().y;
+        if max > px(0.) && y >= max - px(2.) {
+            at = last;
+        }
+        section.anchors[at].id
+    });
+    let glyph = if m.is_category {
+        "icons/folder.svg"
+    } else if m.saved.view == "voice" {
+        "icons/volume-max.svg"
+    } else if m.private {
+        "icons/locked.svg"
+    } else {
+        "icons/channel-hash.svg"
+    };
+    let title: SharedString = if m.saved.name.is_empty() {
+        if m.is_category { t::channel_editor_category() } else { t::channel_editor_channel() }
+    } else {
+        m.saved.name.clone().into()
+    };
+    let head = div()
+        .mx(px(10.))
+        .mb(px(17.))
+        .pb(px(16.))
+        .border_b_1()
+        .border_color(c(0x262626))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(div().ml(px(-4.)).size(px(24.)).flex_shrink_0().child(svg().path(glyph).size_full().text_color(c(0xffffff))))
+        .child(div().min_w_0().truncate().font_weight(FontWeight::BOLD).text_size(px(14.)).line_height(px(17.)).text_color(c(0xffffff)).child(title))
+        .into_any_element();
+    let footer = (m.is_category || !m.primary).then(|| {
+        let what = if m.is_category { t::channel_editor_delete_category() } else { t::channel_editor_delete_channel() };
+        div()
+            .mt(px(12.))
+            .pt(px(16.))
+            .px(px(8.))
+            .border_t_1()
+            .border_color(c(0x262626))
+            .child(
+                div()
+                    .id("ce-delete")
+                    .h(px(38.))
+                    .px(px(11.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .rounded(px(8.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(15.))
+                    .line_height(px(18.))
+                    .text_color(c(crate::timeline::DANGER))
+                    .hover(|d| d.bg(c(0x151515)))
+                    .when(m.busy, |d| d.opacity(0.45))
+                    .when(!m.busy, |d| d.cursor_pointer().on_click(click(on, || Act::Delete)))
+                    .child(svg().path("icons/trash.svg").size(px(17.)).flex_shrink_0().text_color(c(crate::timeline::DANGER)))
+                    .child(div().min_w_0().truncate().child(what)),
+            )
+            .into_any_element()
+    });
+    let (a, b, d) = (on.clone(), on.clone(), on.clone());
+    let nav_on = NavOn {
+        section: Rc::new(move |id, w, cx| a(Act::Section(id), w, cx)),
+        anchor: Rc::new(move |(s, x), w, cx| b(Act::Anchor(s, x), w, cx)),
+        clear: Rc::new(move |_, w, cx| d(Act::ClearSearch, w, cx)),
+    };
+    let nav = if compact {
+        let pick = on.clone();
+        let trash = (m.is_category || !m.primary).then(|| {
+            div()
+                .id("ce-delete")
+                .h(px(38.))
+                .px(px(11.))
+                .flex()
+                .items_center()
+                .rounded(px(8.))
+                .hover(|d| d.bg(c(0x151515)))
+                .when(m.busy, |d| d.opacity(0.45))
+                .when(!m.busy, |d| d.cursor_pointer().on_click(click(on, || Act::Delete)))
+                .child(svg().path("icons/trash.svg").size(px(17.)).text_color(c(crate::timeline::DANGER)))
+                .into_any_element()
+        });
+        tab_strip(&sections, section.id, Rc::new(move |id, w, cx| pick(Act::Section(id), w, cx)), trash)
+    } else {
+        crate::settings::section_nav(&sections, section.id, &[], active, &m.search, head, footer, 249., 0x0b0b0b, &nav_on, cx)
+    };
+    let blocks = match section.id {
+        "overview" => overview(m, vw <= 520., on, cx),
+        _ => permissions(m, store, on, cx),
+    };
+    let close = on.clone();
+    let main = div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .relative()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(50.))
+                .flex_shrink_0()
+                .pl(px(28.))
+                .pr(px(18.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(c(0x171717))
+                .child(div().text_size(px(16.)).line_height(px(19.)).text_color(c(0xffffff)).child((section.label)()))
+                .child(
+                    div()
+                        .id("ce-close")
+                        .mt(px(2.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(2.))
+                        .cursor_pointer()
+                        .group("ce-close")
+                        .on_click(move |_, w, cx| close(Act::Close, w, cx))
+                        .child(
+                            div()
+                                .size(px(32.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(c(0x4a4a4a))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(12.))
+                                .text_color(c(0x9a9a9a))
+                                .group_hover("ce-close", |d| d.text_color(c(0xffffff)).border_color(c(0x6a6a6a)))
+                                .child("✕"),
+                        )
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(9.)).line_height(px(10.)).text_color(c(0x9a9a9a)).child("ESC")), // i18n-exempt: key name
+                ),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("ce-scroll-{}", section.id)))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&m.scroll)
+                .when(m.anchor.is_some(), |d| d.on_scroll(click_wheel(on)))
+                .pt(px(12.))
+                .pb(px(140.))
+                .when(m.busy, |d| d.opacity(0.6))
+                .when(compact, |d| d.pt(px(4.)))
+                .children(blocks.into_iter().enumerate().map(|(i, b)| {
+                    let b = crate::kit::rise(("ce-content-in", i), b, 300, (0., 8., 1.), crate::kit::bezier(0.22, 1., 0.36, 1.));
+                    div().w_full().map(|d| if compact { d.px(px(18.)) } else { d.max_w(px(720.)).mx_auto().px(px(62.)) }).child(b)
+                })),
+        )
+        .children(save_bar(m, on, cx));
+    let card = div()
+        .id("ce-card")
+        .w_full()
+        .h_full()
+        .flex()
+        .when(compact, |d| d.flex_col())
+        .when(!compact, |d| d.max_w(px(1182.)).max_h(px(862.)).rounded(px(18.)).border_1().border_color(c(0x2c2e2f)))
+        .bg(c(0x050505))
+        .overflow_hidden()
+        .font_family(RUBIK)
+        .occlude()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(nav)
+        .child(main);
+    let dismiss = on.clone();
+    gpui::deferred(
+        div()
+            .id("ce-overlay")
+            .absolute()
+            .inset_0()
+            .bg(ca(0, 0, 0, 0.85))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!compact, |d| d.p(px(25.)))
+            .occlude()
+            .on_click(move |_, w, cx| dismiss(Act::Close, w, cx))
+            .child(card),
+    )
+    .with_priority(12)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perms_parse_and_targets_sort() {
+        let v = serde_json::json!({
+            "activated": true, "can_manage": true, "synced": null, "category": "ab",
+            "everyone_support": "18446744073709551615",
+            "roles": [{"role_id": "r2", "name": "Low", "color": 0, "position": 2}, {"role_id": "r1", "name": "High", "color": 5, "position": 1}],
+            "overwrites": [
+                {"kind": "everyone", "id": null, "allow": "0", "deny": "16384"},
+                {"kind": "role", "id": "r2", "allow": "16384", "deny": "0"},
+                {"kind": "role", "id": "r1", "allow": "0", "deny": "0"},
+            ],
+            "members": [],
+        });
+        let p = Perms::parse(&v);
+        assert!(p.open() && !p.synced);
+        assert_eq!(p.support("everyone"), Some(u64::MAX));
+        assert!(p.editable("everyone") && p.support("role:r1").is_none() && !p.editable("role:r1"));
+        assert_eq!(p.stored("everyone"), (0, 1 << 14));
+        assert_eq!(p.stored("role:r2"), (1 << 14, 0));
+    }
+}

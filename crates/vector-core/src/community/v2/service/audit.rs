@@ -623,13 +623,16 @@ fn guestbook_entries(community: &CommunityV2, cid_hex: &str) -> Vec<AuditEntry> 
         let changes = vec![json!({ "field": "nick", "old": (!old.is_empty()).then_some(old), "new": nick })];
         out.push(AuditEntry { id: hex(&ev.rumor_id), at: *at_ms, actor: Some(npub(actor)), action: "member_nick_update", target: Some(member(&target.to_hex())), changes, partial: false });
     }
-    // A Refounding whose seed snapshot never landed still shows, dated when this device adopted it.
+    // A Refounding whose seed snapshot never landed still shows, dated when its rotator sent it.
+    // An epoch adopted before that time was recorded falls back to when this device adopted it.
+    let minted_at = epoch_minted_at(cid_hex);
     for (epoch, rotator) in &minters {
         if rotated.contains_key(epoch) {
             continue;
         }
         if let (Some(secs), Ok(pk)) = (severed.get(epoch), PublicKey::from_hex(rotator)) {
-            rotated.insert(*epoch, (secs.saturating_mul(1000), pk));
+            let at = minted_at.get(epoch).copied().unwrap_or_else(|| secs.saturating_mul(1000));
+            rotated.insert(*epoch, (at, pk));
         }
     }
     for (epoch, (at, rotator)) in rotated {

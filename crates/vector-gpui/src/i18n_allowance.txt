@@ -1,0 +1,1 @@
+# Hard-coded English left per file (0 in all). Only ever lowered; see i18n_audit.rs.

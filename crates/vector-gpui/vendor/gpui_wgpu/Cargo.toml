@@ -1,0 +1,39 @@
+[package]
+name = "gpui_wgpu"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_wgpu.rs"
+doctest = false
+
+[features]
+default = []
+font-kit = ["dep:font-kit"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false }
+anyhow = "1.0.86"
+bytemuck = "1"
+collections = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+cosmic-text = "0.19.0"
+etagere = "0.2"
+itertools = "0.14.0"
+log = { version = "0.4", default-features = false, features = ["std"] }
+parking_lot = "0.12.1"
+profiling = "1"
+raw-window-handle = "0.6"
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+swash = "0.2.6"
+unicode-bidi = { version = "0.3.18", default-features = false, features = ["hardcoded-data"] }
+unicode-segmentation = "1.10"
+gpui_util = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", default-features = false, optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007", default-features = false, features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "cddb2f5d80dc0009b2ef6767635140cacf90a007" }

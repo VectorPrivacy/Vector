@@ -1,0 +1,29 @@
+[package]
+name = "vector-jpeg"
+version = "0.3.2"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "jpeg-decoder 0.3.2 for scaled decodes: rows out with no per-row allocation, progressive files held at the scale they decode to"
+publish = false
+
+[lib]
+name = "jpeg_decoder"
+
+[features]
+platform_independent = []
+
+[dependencies]
+memchr = "2"
+
+[dev-dependencies]
+# Its NEON path too, which this crate takes on aarch64 without asking: the same pixels either way.
+stock = { package = "jpeg-decoder", version = "0.3", default-features = false, features = ["nightly_aarch64_neon"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[[bench]]
+name = "scaled"
+harness = false
+
+[[bench]]
+name = "whole"
+harness = false

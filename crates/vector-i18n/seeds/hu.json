@@ -1,0 +1,16 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " és ",
+  "list_pair": " és ",
+  "dates": {
+    "months": ["január", "február", "március", "április", "május", "június", "július", "augusztus", "szeptember", "október", "november", "december"],
+    "months_short": ["jan.", "febr.", "márc.", "ápr.", "máj.", "jún.", "júl.", "aug.", "szept.", "okt.", "nov.", "dec."],
+    "weekdays": ["vasárnap", "hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat"],
+    "weekdays_short": ["V", "H", "K", "Sze", "Cs", "P", "Szo"],
+    "am_pm": ["de.", "du."],
+    "patterns": ["y. MM. dd.", "y. MM. dd.", "y. MMM d.", "y. MMMM d.", "y. MMMM d., EEEE", "MMM d.", "MMM d., E", "y. MMM d., E", "ccc"],
+    "times": ["a h:mm", "a h:mm:ss", "H:mm", "H:mm:ss"],
+    "date_time": "{0} {1}"
+  }
+}

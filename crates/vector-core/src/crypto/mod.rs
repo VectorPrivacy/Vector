@@ -351,6 +351,7 @@ pub fn mime_from_extension(ext: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "jxl" => "image/jxl",
         "svg" => "image/svg+xml",
         "bmp" => "image/bmp",
         "ico" => "image/x-icon",
@@ -446,6 +447,7 @@ pub fn extension_from_mime(mime: &str) -> String {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/gif" => "gif",
         "image/webp" => "webp",
+        "image/jxl" => "jxl",
         "image/svg+xml" => "svg",
         "image/bmp" | "image/x-ms-bmp" => "bmp",
         "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
@@ -728,6 +730,8 @@ pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
     match bytes[0] {
         0x89 if bytes[1..4] == [0x50, 0x4E, 0x47] => "image/png",
         0xFF if bytes[1..3] == [0xD8, 0xFF] => "image/jpeg",
+        0xFF if bytes[1] == 0x0A => "image/jxl",
+        0x00 if bytes.len() >= 12 && bytes[1..12] == *b"\0\0\x0CJXL \r\n\x87\n" => "image/jxl",
         b'G' if bytes.len() >= 6 && (bytes[..6] == *b"GIF87a" || bytes[..6] == *b"GIF89a") => "image/gif",
         b'R' if bytes.len() > 12 && bytes[..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" => "image/webp",
         0x49 if bytes[1..4] == [0x49, 0x2A, 0x00] => "image/tiff",
@@ -910,6 +914,24 @@ impl AtRestOpener {
             }
         }
         maybe_decrypt_blob(stored)
+    }
+
+    /// [`Self::open_blob_or_keep`] that opens a blob it owns in place: a failed open checks the
+    /// tag before touching the buffer, so the fallbacks still see the stored bytes.
+    pub fn open_blob_owned(&mut self, mut stored: Vec<u8>) -> Vec<u8> {
+        if stored.len() == 32 {
+            return stored;
+        }
+        if stored.len() >= NONCE_LEN + TAG_LEN {
+            if let Some(c) = self.cipher() {
+                if let Ok(len) = c.open_framed_in_place(&mut stored).map(|p| p.len()) {
+                    stored.copy_within(NONCE_LEN..NONCE_LEN + len, 0);
+                    stored.truncate(len);
+                    return stored;
+                }
+            }
+        }
+        maybe_decrypt_blob(&stored)
     }
 
     /// `maybe_decrypt` for one string, sharing the batch's cipher.

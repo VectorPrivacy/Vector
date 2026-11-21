@@ -1,0 +1,894 @@
+//! Account lifecycle: boot probe, import, create, encryption setup, unlock and connect.
+
+use std::sync::Mutex;
+
+use nostr_sdk::prelude::*;
+use vector_core::db;
+use vector_core::state::{self, MNEMONIC_SEED, PENDING_NSEC};
+use vector_core::{MY_SECRET_KEY, Profile, STATE, SignerKind};
+use zeroize::{Zeroize, Zeroizing};
+
+/// An account created or imported, held until its security step commits it.
+static PENDING_ACCOUNT: Mutex<Option<String>> = Mutex::new(None);
+/// The npub of a keypair generated this session, armed for its one empty kind-0.
+static FRESH_ACCOUNT_NPUB: Mutex<Option<String>> = Mutex::new(None);
+
+/// What boot finds on disk.
+#[derive(Debug, Clone)]
+pub struct BootInfo {
+    pub account: Option<String>,
+    pub encrypted: bool,
+    /// "pin" or "password".
+    pub security_type: String,
+    pub signer: String,
+    /// The remembered account's database is newer than this build: nothing may open it.
+    pub downgrade: Option<vector_core::db::DowngradeBlock>,
+    /// The remembered account's database would not open.
+    pub load_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Account {
+    pub npub: String,
+    pub name: Option<String>,
+    pub avatar: Option<String>,
+    pub encrypted: bool,
+    pub last_active: i64,
+}
+
+pub enum Imported {
+    /// A new identity, staged until its security step.
+    Staged(String),
+    /// An account already on this device: it is now the active one, to unlock.
+    Existing(String),
+}
+
+/// An account on disk is real once its setup committed: a stored key, or a keyless signer's
+/// identity. One abandoned before that holds neither.
+pub(super) fn is_committed(npub: &str) -> bool {
+    if !db::get_accounts()
+        .unwrap_or_default()
+        .iter()
+        .any(|n| n == npub)
+    {
+        return false;
+    }
+    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else {
+        return false;
+    };
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT 1 FROM settings WHERE key IN ('pkey', 'nip55_user_pubkey') LIMIT 1", // i18n-exempt: SQL
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Select the remembered account, or arm the welcome screen's network when there is none.
+pub fn boot() -> BootInfo {
+    if let Some(npub) = db::read_active_account_file().ok().flatten()
+        && let Ok(Some(block)) = db::inspect_downgrade(&npub)
+    {
+        return BootInfo {
+            account: None,
+            encrypted: false,
+            security_type: "pin".into(),
+            signer: "local".into(),
+            downgrade: Some(block),
+            load_error: None,
+        };
+    }
+    let mut load_error = None;
+    let account = match db::get_current_account() {
+        Ok(npub) => Some(npub),
+        Err(_) => match db::read_active_account_file().ok().flatten() {
+            Some(npub) if is_committed(&npub) => opened(&npub, &mut load_error).then_some(npub),
+            Some(_) => {
+                let _ = db::clear_active_account_file();
+                None
+            }
+            // One committed account and no marker: it is the one.
+            None => {
+                let committed: Vec<String> = db::get_accounts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|n| is_committed(n))
+                    .collect();
+                match committed.as_slice() {
+                    [only] => opened(only, &mut load_error).then(|| only.clone()),
+                    _ => None,
+                }
+            }
+        },
+    };
+    let Some(account) = account else {
+        vector_core::transport::prelogin::apply_at_boot();
+        return BootInfo {
+            account: None,
+            encrypted: false,
+            security_type: "pin".into(),
+            signer: "local".into(),
+            downgrade: None,
+            load_error,
+        };
+    };
+    state::init_encryption_enabled();
+    let mut encrypted = state::is_encryption_enabled_fast();
+    // An account older than the `encryption_enabled` row holds ciphertext with no flag: route it to
+    // the PIN screen and record it, as the desktop client does (PIN predates passwords).
+    if !encrypted && db::get_pkey().ok().flatten().is_some_and(|k| !k.starts_with("nsec1")) {
+        let _ = db::set_sql_setting("encryption_enabled".into(), "true".into());
+        if db::get_sql_setting("security_type".into()).ok().flatten().is_none() {
+            let _ = db::set_sql_setting("security_type".into(), "pin".into());
+        }
+        state::set_encryption_enabled(true);
+        encrypted = true;
+    }
+    let security_type = if encrypted {
+        db::get_sql_setting("security_type".into())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "pin".into())
+    } else {
+        "pin".into()
+    };
+    let signer = db::get_signer_type().unwrap_or_else(|_| "local".into());
+    BootInfo {
+        account: Some(account),
+        encrypted,
+        security_type,
+        signer,
+        downgrade: None,
+        load_error: None,
+    }
+}
+
+/// A process a push started: the account the app last used, opened without a window, its
+/// profiles loaded so a notification can name its sender. The window's boot finds it open.
+#[cfg(target_os = "android")]
+pub async fn open_headless() -> bool {
+    if db::get_current_account().is_ok() {
+        return true;
+    }
+    let Some(npub) = db::read_active_account_file().ok().flatten().filter(|n| is_committed(n)) else {
+        return false;
+    };
+    // A database a newer build wrote stays shut until that build opens it.
+    if !matches!(db::inspect_downgrade(&npub), Ok(None)) || !opened(&npub, &mut None) {
+        return false;
+    }
+    state::init_encryption_enabled();
+    if let Ok(profiles) = db::profiles::get_all_profiles() {
+        let mut state = vector_core::STATE.lock().await;
+        for slim in profiles {
+            let npub = slim.id.clone();
+            state.insert_or_replace_profile(&npub, slim.to_profile());
+        }
+    }
+    true
+}
+
+/// The background service with no window: the account the app last used, signed in and
+/// listening when it opens without a PIN or a signer, as the window would. False otherwise.
+#[cfg(target_os = "android")]
+pub async fn standby() -> bool {
+    // A welcome-screen sign-in owns the transport and the vault.
+    if vector_core::transport::prelogin::armed().is_some() || !open_headless().await {
+        return false;
+    }
+    let plain = !state::is_encryption_enabled_fast()
+        && db::get_signer_type().unwrap_or_else(|_| "local".into()) == "local"
+        && db::get_pkey().ok().flatten().is_some_and(|k| k.starts_with("nsec1"));
+    if !plain {
+        if state::is_encryption_enabled_fast() {
+            // spawn-detached: watches until any sign-in, then stops; it owns no account state.
+            tokio::spawn(locked_watch());
+        }
+        return false;
+    }
+    if let Err(e) = unlock(None).await {
+        vector_core::log_warn!("[standby] sign-in failed: {e}");
+        return false;
+    }
+    {
+        let _one = OPENING.lock().await;
+        let Some(client) = state::nostr_client() else {
+            return false;
+        };
+        if client.relays().await.is_empty() {
+            db::current_session().scoped::<OneRelay, std::sync::atomic::AtomicBool>().store(true, std::sync::atomic::Ordering::SeqCst);
+            super::network::connect_one(&client).await;
+            super::network::start_relay_monitor(&client);
+        }
+    }
+    super::sync::notifs();
+    true
+}
+
+/// The pool holds only standby's one relay: a window's sign-in adds the rest.
+struct OneRelay;
+
+/// A PIN account can't be read without its PIN: a client with no key, on the account's own
+/// network, notices gift wraps for it and says only that something came, as Tauri does.
+#[cfg(target_os = "android")]
+async fn locked_watch() {
+    use vector_core::transport::{self, prefs, prelogin};
+    let Some(me) = db::get_current_account().ok().and_then(|n| PublicKey::from_bech32(&n).ok()) else {
+        return;
+    };
+    transport::set_preference(prelogin::effective(&prefs::stored_kind()));
+    if transport::preference().is_none() {
+        return;
+    }
+    if transport::preference().is_some_and(|k| k != transport::Kind::Clearnet)
+        && let Err(e) = super::transport::start_for_active_account().await
+    {
+        vector_core::log_warn!("[standby] network start failed: {e}");
+    }
+    super::transport::wait_for_active_network().await;
+    let client = vector_core::nostr_client_builder().monitor(Monitor::new(64)).build();
+    super::network::add_configured_relays(&client).await;
+    client.connect().await;
+    // A relay that replays history stops at NIP-59's backdating window.
+    let since = vector_core::clock::timestamp().as_secs().saturating_sub(2 * 24 * 3600);
+    let filter = Filter::new().pubkey(me).kind(Kind::GiftWrap).since(Timestamp::from_secs(since)).limit(0);
+    let Ok(sub) = client.subscribe(filter).await.map(|o| o.value) else {
+        client.disconnect().await;
+        return;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut last: Option<std::time::Instant> = None;
+    let mut notes = client.notifications();
+    while let Some(n) = futures::StreamExt::next(&mut notes).await {
+        // Signed in: the account's own client takes over.
+        if vector_core::my_public_key().is_some() {
+            break;
+        }
+        let ClientNotification::Event { subscription_id, event, .. } = n else { continue };
+        if subscription_id != sub || !seen.insert(event.id) {
+            continue;
+        }
+        if seen.len() > 1000 {
+            seen.clear();
+        }
+        // No ledger to tell new mail from a replay: one notice per half minute.
+        if last.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(30)) {
+            last = Some(std::time::Instant::now());
+            super::notify::pushed_unknown();
+        }
+    }
+    client.disconnect().await;
+}
+
+/// Make `npub` the account in use and open its database; why not, kept for the user.
+fn opened(npub: &str, error: &mut Option<String>) -> bool {
+    match db::set_current_account(npub.to_string()).and_then(|_| db::init_database(npub)) {
+        Ok(_) => true,
+        Err(e) => {
+            *error = Some(e);
+            false
+        }
+    }
+}
+
+/// Every committed account, most recently used first.
+pub fn accounts() -> Vec<Account> {
+    let mut out: Vec<Account> = db::get_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| is_committed(n))
+        .map(|n| metadata(&n))
+        .collect();
+    out.sort_by_key(|a| std::cmp::Reverse(a.last_active));
+    out
+}
+
+fn metadata(npub: &str) -> Account {
+    let mut meta = Account {
+        npub: npub.to_string(),
+        name: None,
+        avatar: None,
+        encrypted: false,
+        last_active: 0,
+    };
+    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else {
+        return meta;
+    };
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return meta;
+    };
+    if let Ok((nickname, display, name, avatar_cached)) = conn.query_row(
+        "SELECT nickname, display_name, name, avatar_cached FROM profiles WHERE npub = ?1", // i18n-exempt: SQL
+        [npub],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
+    ) {
+        meta.name = [nickname, display, name]
+            .into_iter()
+            .find(|s| !s.is_empty());
+        meta.avatar = (!avatar_cached.is_empty()).then_some(avatar_cached);
+    }
+    let setting = |key: &str| {
+        // i18n-exempt: SQL
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+    };
+    meta.encrypted = state::resolve_encryption_enabled(
+        setting("encryption_enabled").as_deref(),
+        setting("security_type").as_deref(),
+    );
+    meta.last_active = setting("last_active")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    meta
+}
+
+pub(super) fn touch_last_active() {
+    let _ = db::set_sql_setting("last_active".into(), vector_core::clock::now_secs().to_string());
+}
+
+pub(super) fn install_client() {
+    let client = vector_core::nostr_client_builder()
+        .monitor(Monitor::new(1024))
+        .build();
+    state::set_nostr_client_if_absent(client);
+}
+
+pub(super) async fn insert_own_profile(npub: &str) {
+    let mut profile = Profile::new();
+    profile.flags.set_mine(true);
+    STATE.lock().await.insert_or_replace_profile(npub, profile);
+}
+
+fn store_identity(keys: &Keys) {
+    MY_SECRET_KEY.store_from_keys(keys, &[&vector_core::ENCRYPTION_KEY]);
+    state::set_my_public_key(keys.public_key());
+}
+
+/// Sign in with an nsec or a BIP-39 seed phrase.
+pub async fn import(mut key: String) -> Result<Imported, String> {
+    let keys = if key.starts_with("nsec") {
+        let parsed = Keys::parse(&key).map_err(|_| crate::t::login_invalid_nsec().to_string());
+        key.zeroize();
+        parsed?
+    } else {
+        let phrase = Zeroizing::new(std::mem::take(&mut key));
+        Keys::from_mnemonic(phrase.trim(), Some(""))
+            .map_err(|_| crate::t::login_invalid_seed().to_string())?
+    };
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
+    if is_committed(&npub) {
+        db::write_active_account_file(&npub)?;
+        return Ok(Imported::Existing(npub));
+    }
+    if state::nostr_client().is_some() {
+        return Err(crate::t::login_already_signed_in().into());
+    }
+    *PENDING_NSEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
+    if let Some(stale) = MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        stale.zeroize();
+    }
+    *MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    store_identity(&keys);
+    drop(keys);
+    install_client();
+    insert_own_profile(&npub).await;
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub.clone());
+    Ok(Imported::Staged(npub))
+}
+
+/// A new identity from a fresh 12-word phrase.
+pub async fn create() -> Result<String, String> {
+    let mnemonic = bip39::Mnemonic::generate(12).map_err(|e| e.to_string())?;
+    let phrase = mnemonic.to_string();
+    let keys = Keys::from_mnemonic(phrase.as_str(), None).map_err(|e| e.to_string())?;
+    *PENDING_NSEC.lock().unwrap_or_else(|e| e.into_inner()) = Some(keys.secret_key().to_bech32().map_err(|e| e.to_string())?);
+    store_identity(&keys);
+    let npub = keys.public_key().to_bech32().map_err(|e| e.to_string())?;
+    drop(keys);
+    install_client();
+    insert_own_profile(&npub).await;
+    *MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()) = Some(phrase);
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub.clone());
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub.clone());
+    Ok(npub)
+}
+
+/// Commit the pending account: its key sealed under `password`, or kept plain without one.
+pub async fn commit(
+    password: Option<Zeroizing<String>>,
+    security_type: &str,
+) -> Result<(), String> {
+    if password.as_ref().is_some_and(|p| p.trim().is_empty()) {
+        return Err(crate::t::login_password_empty().into());
+    }
+    // One derivation seals the key and the seed; the vault and the flag change only once the
+    // commit has landed, so a failed commit leaves nothing behind for a retry.
+    let sealed = match &password {
+        Some(pwd) => {
+            let kdf = vector_core::crypto::Kdf::fresh();
+            let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
+            Some((key, kdf))
+        }
+        None => None,
+    };
+    drop(password);
+    commit_with(sealed, security_type, None).await
+}
+
+/// Commit the pending account under a credential only the phone's prompt opens. Its keystore
+/// key goes again if the commit fails.
+#[cfg(target_os = "android")]
+pub async fn commit_biometric() -> Result<(), String> {
+    let npub = pending().map_or_else(db::get_current_account, Ok)?;
+    let (wrapped, key, kdf) = super::biometric::generate_and_wrap(&npub).await?;
+    let out = commit_with(Some((key, kdf)), "biometric", Some(wrapped)).await;
+    if out.is_err() {
+        super::biometric::forget_keystore(&npub);
+    }
+    out
+}
+
+/// The staged account becomes the one on disk: its database, the marker, and its network.
+pub(super) async fn open_pending() -> Result<(), String> {
+    let pending = PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(npub) = pending else { return Ok(()) };
+    // The welcome screen's network carries on into the new account's first session.
+    if !super::transport::running_prelogin() {
+        super::transport::stop_and_join_if_running().await;
+    }
+    if let Err(e) = db::init_database(&npub) {
+        let _ = super::transport::sync_to_active_account().await;
+        return Err(e);
+    }
+    db::set_current_account(npub.clone())?;
+    db::write_active_account_file(&npub)?;
+    if let Err(e) = super::transport::sync_to_active_account().await {
+        vector_core::log_warn!("[Account] network start for new account failed: {e}");
+    }
+    Ok(())
+}
+
+async fn commit_with(
+    sealed: Option<(Zeroizing<[u8; 32]>, vector_core::crypto::Kdf)>,
+    security_type: &str,
+    wrap: Option<String>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    if vector_core::signer_kind() == SignerKind::Nip55 {
+        return super::nip55::commit(sealed, security_type, wrap).await;
+    }
+    let nsec = Zeroizing::new(
+        PENDING_NSEC
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No pending key")?, // i18n-exempt: developer error
+    );
+    let seed = MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()).clone().map(Zeroizing::new);
+    let (key, kdf) = match sealed {
+        Some((key, kdf)) => (Some(key), Some(kdf)),
+        None => (None, None),
+    };
+    let seal = |plain: &str| -> Result<String, String> {
+        match &key {
+            Some(k) => vector_core::crypto::encrypt_with_key(plain, k),
+            None => Ok(plain.to_string()),
+        }
+    };
+    let stored_key = seal(&nsec)?;
+    let stored_seed = seed.as_deref().map(|s| seal(s)).transpose()?;
+    let kdf_row = kdf.as_ref().and_then(|k| k.descriptor());
+
+    open_pending().await?;
+    let encrypted = key.is_some();
+    let security = encrypted.then_some(security_type);
+    if vector_core::signer_kind() == SignerKind::Bunker {
+        let (url, remote_hex) = state::pending_bunker_setup()
+            .ok_or("Bunker setup state missing — re-run Connect Remote Signer")?; // i18n-exempt: matched by the re-pair offer
+        db::settings::commit_bunker_account_setup(
+            &stored_key,
+            encrypted,
+            security,
+            &seal(&url)?,
+            &remote_hex,
+            wrap.as_deref(),
+            kdf_row.as_deref(),
+        )?;
+        state::clear_pending_bunker_setup();
+    } else {
+        db::settings::commit_account_setup(
+            &stored_key,
+            encrypted,
+            security,
+            stored_seed.as_deref(),
+            wrap.as_deref(),
+            kdf_row.as_deref(),
+        )?;
+    }
+    if let Some(k) = &key {
+        vector_core::ENCRYPTION_KEY.set(**k, &[&MY_SECRET_KEY]);
+    }
+    for slot in [&PENDING_NSEC, &MNEMONIC_SEED] {
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = guard.as_mut() {
+            s.zeroize();
+        }
+        *guard = None;
+    }
+    state::set_encryption_enabled(encrypted);
+    touch_last_active();
+    vector_core::blossom_servers::refresh_cache();
+    stamp_fresh_account_profile();
+    Ok(())
+}
+
+/// Publish an empty kind-0 tagged `client: vector` for a keypair generated moments ago, so
+/// NIP-89 readers recognise it. Never for an imported or unlocked identity.
+fn stamp_fresh_account_profile() {
+    let armed = FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(client) = state::nostr_client() else {
+        return;
+    };
+    let current = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok());
+    if armed.is_none() || armed != current {
+        return;
+    }
+    db::spawn_bound(async move {
+        let builder =
+            EventBuilder::new(Kind::Metadata, "{}").tag(Tag::custom("client", vec!["vector"]));
+        if let Ok(event) = vector_core::sign_builder(builder).await {
+            let relays = state::active_trusted_relays().await;
+            if let Err(e) = client.send_event(&event).to(relays).await {
+                vector_core::log_warn!("[Account] new-account profile stamp failed: {e}");
+            }
+        }
+    });
+}
+
+/// The account staged for its security step, if any.
+pub(super) fn pending() -> Option<String> {
+    PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(super) fn set_pending(npub: String) {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(npub);
+}
+
+/// Forget an account that was started but never committed.
+pub fn abandon_pending() {
+    *PENDING_ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// What opens the stored key.
+enum Opener {
+    Plain,
+    Password(Zeroizing<String>),
+    /// The vault key itself, from the system's own prompt.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Key(Zeroizing<[u8; 32]>),
+}
+
+/// Unlock the stored account: its key opened under `password` when it is encrypted.
+pub async fn unlock(password: Option<Zeroizing<String>>) -> Result<String, String> {
+    open_with(password.map_or(Opener::Plain, Opener::Password)).await
+}
+
+/// Unlock with the vault key itself. A key that does not open the stored one is refused with
+/// [`super::biometric::INVALIDATED`] before the vault sees it.
+#[cfg(target_os = "android")]
+pub(super) async fn unlock_with_key(key: Zeroizing<[u8; 32]>) -> Result<String, String> {
+    open_with(Opener::Key(key)).await
+}
+
+/// The window and the background service can both open the account at boot.
+static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn open_with(opener: Opener) -> Result<String, String> {
+    let _one = OPENING.lock().await;
+    *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    state::init_encryption_enabled();
+    if let Some(pk) = vector_core::my_public_key().filter(|_| state::nostr_client().is_some()) {
+        return pk.to_bech32().map_err(|e| e.to_string());
+    }
+    {
+        use vector_core::transport::{self, kinds, prefs, prelogin, Kind};
+        let effective = prelogin::effective(&prefs::stored_kind());
+        transport::set_preference(effective);
+        // A welcome-screen instance is kept only where its kind adopts on unlock (Tor never does:
+        // its guards are install-level).
+        let adopt = transport::host::active().is_some_and(|a| {
+            a.started_prelogin()
+                && Some(a.kind) == effective
+                && kinds::factory(a.kind).is_some_and(|f| {
+                    f.adopt_on_unlock() && f.compatible(a.transport().as_ref(), &prelogin::config_for(a.kind))
+                })
+        });
+        if !adopt {
+            super::transport::stop_prelogin_service().await;
+        }
+        // Started now, awaited once the key has opened: a wrong password never waits on tunnels.
+        if effective.is_some_and(|k| k != Kind::Clearnet)
+            && let Err(e) = super::transport::start_for_active_account().await
+        {
+            vector_core::log_warn!("[Login] network auto-start failed: {e}");
+        }
+    }
+
+    let kind =
+        SignerKind::from_setting_str(&db::get_signer_type().unwrap_or_else(|_| "local".into()));
+    let bunker = matches!(kind, SignerKind::Bunker);
+    #[cfg(target_os = "android")]
+    if matches!(kind, SignerKind::Nip55) {
+        return unlock_nip55(opener).await;
+    }
+    if !matches!(kind, SignerKind::Local | SignerKind::Bunker) {
+        return Err(
+            crate::t::login_external_signer().into(),
+        );
+    }
+    let stored = db::get_pkey()?.ok_or_else(|| crate::t::login_no_private_key().to_string())?;
+    let mut nsec = match &opener {
+        Opener::Password(pwd) => {
+            // The vault takes the key only once it has opened the stored key.
+            let kdf = vector_core::crypto::Kdf::of_account()?;
+            let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
+            let nsec = vector_core::crypto::decrypt_with_key(&stored, &key)
+                .map_err(|_| "Incorrect password".to_string())?; // i18n-exempt: matched by the login screen
+            vector_core::crypto::install_unlocked_key(&key, &kdf)?;
+            match db::at_rest::upgrade_after_unlock(pwd, &key).await {
+                Ok(true) => {
+                    let _ = db::at_rest::vacuum_now();
+                }
+                Ok(false) => {}
+                Err(e) => vector_core::log_warn!("[Encryption] Salt upgrade deferred: {e}"),
+            }
+            nsec
+        }
+        Opener::Key(key) => {
+            let nsec = vector_core::crypto::decrypt_with_key(&stored, key)
+                .map_err(|_| super::biometric::INVALIDATED.to_string())?;
+            vector_core::crypto::install_unlocked_key(key, &vector_core::crypto::Kdf::of_account()?)?;
+            nsec
+        }
+        Opener::Plain => stored,
+    };
+    let keys = Keys::parse(&nsec).map_err(|_| crate::t::login_invalid_stored_key().to_string())?;
+    nsec.zeroize();
+    store_identity(&keys);
+    // A bunker account's stored key is only its client keypair: the identity is the signer's.
+    if bunker {
+        let remote = super::bunker::reconnect(&keys).await?;
+        state::set_my_public_key(remote);
+    }
+    drop(keys);
+    finish_unlock().await
+}
+
+/// An account whose identity lives in a signer app on the phone: nothing secret is stored here,
+/// so a credential opens only the local data, proven against the canary its setup wrote.
+#[cfg(target_os = "android")]
+async fn unlock_nip55(opener: Opener) -> Result<String, String> {
+    use vector_core::crypto::{Kdf, install_unlocked_key};
+    match &opener {
+        Opener::Password(pwd) => {
+            let kdf = Kdf::of_account()?;
+            let key = Zeroizing::new(vector_core::crypto::derive_key(pwd.as_str(), &kdf).await);
+            install_unlocked_key(&key, &kdf)?;
+            match db::at_rest::upgrade_after_unlock(pwd, &key).await {
+                Ok(true) => {
+                    let _ = db::at_rest::vacuum_now();
+                }
+                Ok(false) => {}
+                Err(e) => vector_core::log_warn!("[Encryption] Salt upgrade deferred: {e}"),
+            }
+        }
+        Opener::Key(key) => install_unlocked_key(key, &Kdf::of_account()?)
+            .map_err(|_| super::biometric::INVALIDATED.to_string())?,
+        Opener::Plain => {}
+    }
+    drop(opener);
+    let hex = db::get_nip55_user_pubkey()?.ok_or_else(|| crate::t::login_no_private_key().to_string())?;
+    let pk = PublicKey::parse(&hex).map_err(|e| e.to_string())?;
+    // A signer app removed since: the account still opens, and Settings offers the re-pair.
+    if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
+        vector_core::set_nip55_state(vector_core::Nip55State::Missing);
+    }
+    vector_core::set_signer_kind(SignerKind::Nip55);
+    if let Ok(Some(package)) = db::get_nip55_signer_package() {
+        crate::android::external_signer::set_signer_package(package);
+    }
+    state::set_my_public_key(pk);
+    finish_unlock().await
+}
+
+/// A bunker account whose signer was re-paired during unlock: the vault already holds its
+/// client key and the stored link is the new pairing.
+pub async fn resume_bunker_unlock() -> Result<String, String> {
+    // owned-key: the NIP-46 client keypair, which the login session owns for its life.
+    let keys = MY_SECRET_KEY.to_keys().ok_or("No client keypair loaded")?; // i18n-exempt: developer error
+    let remote = super::bunker::reconnect(&keys).await?;
+    drop(keys);
+    state::set_my_public_key(remote);
+    finish_unlock().await
+}
+
+async fn finish_unlock() -> Result<String, String> {
+    super::transport::wait_for_active_network().await;
+    install_client();
+
+    let npub = vector_core::my_public_key()
+        .ok_or("no identity")? // i18n-exempt: developer error
+        .to_bech32()
+        .map_err(|e| e.to_string())?;
+    insert_own_profile(&npub).await;
+    db::init_database(&npub)?;
+    db::set_current_account(npub.clone())?;
+    touch_last_active();
+    state::init_encryption_enabled();
+    if let Err(e) = db::at_rest::backfill_at_rest() {
+        vector_core::log_warn!("[Login] community at-rest backfill deferred: {e}");
+    }
+    vector_core::blossom_servers::refresh_cache();
+    Ok(npub)
+}
+
+/// Add the configured and discovery relays, then connect. False if already connected.
+pub async fn connect() -> bool {
+    let _one = OPENING.lock().await;
+    let Some(client) = state::nostr_client() else {
+        return false;
+    };
+    let one = db::current_session().scoped::<OneRelay, std::sync::atomic::AtomicBool>().swap(false, std::sync::atomic::Ordering::SeqCst);
+    if !one && !client.relays().await.is_empty() {
+        return false;
+    }
+    super::network::add_configured_relays(&client).await;
+    super::network::start_relay_monitor(&client);
+    db::spawn_bound(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        super::network::reconcile_dm_relay_list().await;
+    });
+    true
+}
+
+/// Make `npub` the account the next boot opens.
+pub fn set_active(npub: &str) -> Result<(), String> {
+    db::write_active_account_file(npub)
+}
+
+/// How many accounts this device may add up to: the soft cap of its highest tier.
+pub fn account_cap() -> usize {
+    [3, 6, 9, usize::MAX][vector_core::badges::max_account_tier().min(3) as usize]
+}
+
+static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Tear the live account down to a fresh boot: its client, database, keys and transfers.
+pub async fn reset() {
+    let _serial = RESET_LOCK.lock().await;
+    super::emit("unread_total", 0);
+    if let Some(npub) = vector_core::my_public_key().and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok()) {
+        super::notify::account_gone(&npub);
+    }
+    super::attachments::cancel_all();
+    super::messaging::cancel_all_uploads();
+    crate::miniapp::end_for_account_swap().await;
+    // A prompt parked on its answer wakes rather than unlocking an account no longer here.
+    #[cfg(target_os = "android")]
+    crate::android::biometric::on_session_reset();
+    vector_core::VectorCore.swap_session().await;
+    super::market::reset().await;
+    if let Some(bunker) = vector_core::drain_bunker_state() {
+        let _ = bunker.shutdown().await;
+    }
+    state::clear_pending_bunker_setup();
+    vector_core::transport::prelogin::cancel_start();
+    super::transport::stop_and_join_if_running().await;
+    super::transport::set_account_booted(false);
+    db::clear_current_account_in_memory();
+    abandon_pending();
+    state::set_encryption_enabled(false);
+    state::open_processing_gate();
+}
+
+/// Switch to another account on this device: the next boot opens it.
+pub async fn switch(npub: String) -> Result<(), String> {
+    super::security::refuse_if_migrating()?;
+    if !accounts().iter().any(|a| a.npub == npub) {
+        return Err(format!("Unknown account: {npub}")); // i18n-exempt: developer error
+    }
+    set_active(&npub)?;
+    reset().await;
+    Ok(())
+}
+
+/// Remove an account and everything it keeps on this device. True when it was the live one;
+/// the marker then points at the most recent account left, if any.
+pub async fn delete(npub: String) -> Result<bool, String> {
+    super::security::refuse_if_migrating()?;
+    if !accounts().iter().any(|a| a.npub == npub) {
+        return Err(format!("Unknown account: {npub}")); // i18n-exempt: developer error
+    }
+    super::notify::account_gone(&npub);
+    let was_active = db::get_current_account().is_ok_and(|a| a == npub);
+    if was_active {
+        let _ = db::clear_active_account_file();
+        reset().await;
+    } else if db::read_active_account_file()?.is_some_and(|m| m == npub) {
+        let _ = db::clear_active_account_file();
+    }
+    let dir = db::account_dir(&npub)?;
+    match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(crate::t::login_remove_failed(e.to_string()).to_string());
+        }
+        _ => {}
+    }
+    // Counted on disk, not validated: a locked database must not read as no account at all.
+    if db::list_account_npubs()
+        .map(|v| v.is_empty())
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_dir_all(db::get_download_dir());
+    }
+    if was_active {
+        for next in accounts() {
+            if set_active(&next.npub).is_ok() {
+                break;
+            }
+        }
+    }
+    Ok(was_active)
+}
+
+/// Add Profile's commit: the live account goes, and the new one starts on the welcome screen's
+/// network, not the previous account's. Resolves once that network can carry a sign-in.
+pub async fn enter_add_mode(kind: Option<String>, mut opts: Option<serde_json::Value>) -> Result<(), String> {
+    use vector_core::transport::{self, prefs, prelogin, Kind};
+    super::security::refuse_if_migrating()?;
+    let remembered = prelogin::marker().ok().flatten().map(|c| c.kind).unwrap_or(Kind::Clearnet);
+    let kind = kind.unwrap_or_else(|| remembered.as_str().into());
+    // Read while the current account is still live: its router's credentials carry over.
+    let choice = super::transport::add_account_choice(&kind, opts.as_ref());
+    if let Some(o) = opts.as_mut() {
+        prefs::scrub_json(o);
+    }
+    let choice = choice?;
+    let _ = db::clear_active_account_file();
+    reset().await;
+    if let Err(e) = super::transport::apply_prelogin(choice).await {
+        vector_core::log_warn!("[Transport] pre-login start for the new account failed: {e}");
+    }
+    let Some(k) = Kind::parse(&kind).filter(|k| *k != Kind::Clearnet) else { return Ok(()) };
+    // I2P connects after its start returns.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        let v = super::transport::transport_get_state();
+        if v.kind == k.as_str() && v.ready {
+            return Ok(());
+        }
+        if v.kind != k.as_str() || !matches!(v.phase, transport::status::Phase::Starting) || std::time::Instant::now() > deadline {
+            return Err(crate::t::login_net_not_yet(k.label()).to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}

@@ -18,24 +18,24 @@ if (!dir || !tag || !repo) {
 
 const ARCH = { x64: 'x86_64', amd64: 'x86_64', x86_64: 'x86_64', aarch64: 'aarch64', arm64: 'aarch64' };
 
-// Bundle name -> the updater targets it serves. `<os>-<arch>` alone is what older clients read.
+// Bundle name -> the updater targets it serves. `<os>-<arch>` alone is what older clients read;
+// `-gpui` is what the GPUI client's 0.5 test builds read, served the bundle of their kind.
 const RULES = [
-    [/^Vector_(aarch64|x64)\.app\.tar\.gz$/, (a) => [`darwin-${a}`, `darwin-${a}-app`]],
-    [/_(amd64|aarch64)\.AppImage$/, (a) => [`linux-${a}`, `linux-${a}-appimage`]],
+    [/^Vector_(aarch64|x64)\.app\.tar\.gz$/, (a) => [`darwin-${a}`, `darwin-${a}-app`, `darwin-${a}-gpui`]],
+    [/_(amd64|aarch64)\.AppImage$/, (a) => [`linux-${a}`, `linux-${a}-appimage`, `linux-${a}-gpui`]],
     [/_(amd64|arm64)\.deb$/, (a) => [`linux-${a}-deb`]],
     [/\.(x86_64|aarch64)\.rpm$/, (a) => [`linux-${a}-rpm`]],
     [/_(x64|arm64)_en-US\.msi$/, (a) => [`windows-${a}`, `windows-${a}-msi`]],
-    [/_(x64|arm64)-setup\.exe$/, (a) => [`windows-${a}-nsis`]],
+    [/_(x64|arm64)-setup\.exe$/, (a) => [`windows-${a}-nsis`, `windows-${a}-gpui`]],
 ];
 
 // Every desktop build the matrix ships: a release missing one must not go out quietly.
-const EXPECTED = [
-    'darwin-aarch64', 'darwin-aarch64-app', 'darwin-x86_64', 'darwin-x86_64-app',
-    'linux-aarch64', 'linux-aarch64-appimage', 'linux-aarch64-deb', 'linux-aarch64-rpm',
-    'linux-x86_64', 'linux-x86_64-appimage', 'linux-x86_64-deb', 'linux-x86_64-rpm',
-    'windows-aarch64', 'windows-aarch64-msi', 'windows-aarch64-nsis',
-    'windows-x86_64', 'windows-x86_64-msi', 'windows-x86_64-nsis',
-];
+const EXPECTED = ['darwin', 'linux', 'windows'].flatMap((os) =>
+    ['aarch64', 'x86_64'].flatMap((arch) => {
+        const kinds = { darwin: ['app'], linux: ['appimage', 'deb', 'rpm'], windows: ['msi', 'nsis'] }[os];
+        return [`${os}-${arch}`, `${os}-${arch}-gpui`, ...kinds.map((k) => `${os}-${arch}-${k}`)];
+    }),
+);
 
 const files = new Set(readdirSync(dir));
 const platforms = {};

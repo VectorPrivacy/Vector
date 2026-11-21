@@ -1,0 +1,16 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " a ",
+  "list_pair": " a ",
+  "dates": {
+    "months": ["ledna", "února", "března", "dubna", "května", "června", "července", "srpna", "září", "října", "listopadu", "prosince"],
+    "months_short": ["led", "úno", "bře", "dub", "kvě", "čvn", "čvc", "srp", "zář", "říj", "lis", "pro"],
+    "weekdays": ["neděle", "pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota"],
+    "weekdays_short": ["ne", "po", "út", "st", "čt", "pá", "so"],
+    "am_pm": ["dop.", "odp."],
+    "patterns": ["d. M. y", "dd. MM. y", "d. M. y", "d. MMMM y", "EEEE d. MMMM y", "d. M.", "E d. M.", "E d. M. y", "ccc"],
+    "times": ["h:mm a", "h:mm:ss a", "H:mm", "H:mm:ss"],
+    "date_time": "{0} {1}"
+  }
+}

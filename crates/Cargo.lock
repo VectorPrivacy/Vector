@@ -8212,6 +8212,7 @@ dependencies = [
  "js-sys",
  "libc",
  "libcrux-ml-kem",
+ "memchr",
  "ml-kem",
  "negentropy",
  "noq-proto",
