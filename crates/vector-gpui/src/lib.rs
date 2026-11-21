@@ -42,6 +42,7 @@ mod payaddr;
 mod reactpop;
 mod rekey;
 mod route;
+mod share;
 mod relayinfo;
 mod golinks;
 mod scrollbar;

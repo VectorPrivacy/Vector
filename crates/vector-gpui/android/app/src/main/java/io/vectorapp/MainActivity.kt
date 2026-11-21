@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -65,6 +66,9 @@ class MainActivity : ComponentActivity() {
         /** A message notification was tapped. */
         @JvmStatic
         external fun nativeOnNotificationTap(chatId: String)
+        /** Another app shared into Vector: the files' copies by path, and any text. */
+        @JvmStatic
+        external fun nativeOnShare(files: Array<String>, text: String)
     }
 
     /** The desktop client's glue (calls, permissions) holds this activity while it lives. */
@@ -123,8 +127,43 @@ class MainActivity : ComponentActivity() {
             nativeOnNotificationTap(chat)
             return
         }
+        if (shared(intent)) return
         intent.takeIf { it.action == Intent.ACTION_VIEW }?.dataString?.let(Bridge::nativeOpenUrl)
     }
+
+    /** The share sheet's files and text. Consumed, so a relaunch doesn't share them again. */
+    private fun shared(intent: Intent): Boolean {
+        val action = intent.action
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return false
+        val uris = streams(intent, action == Intent.ACTION_SEND_MULTIPLE)
+        val text = if (action == Intent.ACTION_SEND) intent.getStringExtra(Intent.EXTRA_TEXT) ?: "" else ""
+        intent.action = null
+        intent.removeExtra(Intent.EXTRA_STREAM)
+        intent.removeExtra(Intent.EXTRA_TEXT)
+        if (uris.isEmpty() && text.isEmpty()) return true
+        // Off the main thread: a shared video can take a while to copy.
+        val context = applicationContext
+        Thread {
+            val files = Picked.copy(context, uris)
+            nativeOnShare(files, text)
+        }.start()
+        return true
+    }
+
+    @Suppress("DEPRECATION")
+    private fun streams(intent: Intent, multiple: Boolean): List<Uri> =
+        if (multiple) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) ?: emptyList()
+            else
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
+        } else {
+            val one = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            else
+                intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            listOfNotNull(one)
+        }
 
     private fun configuration(config: Configuration) {
         val dark = config.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES

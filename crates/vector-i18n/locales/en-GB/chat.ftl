@@ -244,3 +244,5 @@ jump-new = { $count ->
    *[other] { $count } new messages
 }
 jump-new-many = 99+ new messages
+# A file or text shared from another app waits for the chat it goes to.
+share-choose-chat = Choose a chat to forward to

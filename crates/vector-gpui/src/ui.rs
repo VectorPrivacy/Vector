@@ -259,6 +259,8 @@ pub struct VectorApp {
     /// The chat the composer's text and reply belong to, which a close leaving no chat open
     /// keeps until another opens.
     draft_owner: Option<SharedString>,
+    /// Another app's share, for the next chat opened.
+    shared: Option<crate::share::Shared>,
     /// The draft has text: Send stands where the mic does.
     send_shown: bool,
     /// When typing last flipped the two: the swap runs from this clock, not element state.
@@ -1086,6 +1088,7 @@ impl VectorApp {
             root_focus: cx.focus_handle(),
             drafts: HashMap::new(),
             draft_owner: None,
+            shared: None,
             send_shown: false,
             send_flipped: None,
             jumped: None,
@@ -3225,6 +3228,7 @@ impl VectorApp {
             self.login_out = Some((view, std::time::Instant::now()));
         }
         self.intro = None;
+        self.share_arrived(cx);
         if let Some(v) = self.net_initial() {
             self.on_transport_view(v, cx);
         }
@@ -3687,6 +3691,7 @@ impl VectorApp {
                 self.show_toast(&t::call_no_video(), cx);
             }
             "audio_devices_changed" => self.reload_devices(cx),
+            "share_received" => self.share_arrived(cx),
             "call_route" => {
                 crate::pane::notify(&self.panes.chrome, cx);
                 crate::pane::notify(&self.panes.chat, cx);
@@ -4383,6 +4388,9 @@ impl VectorApp {
         self.close_popups(cx);
         self.pins_opened(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        if let Some(shared) = self.shared.take() {
+            self.attach_shared(shared, window, cx);
+        }
         if !self.live {
             return;
         }
@@ -15114,6 +15122,31 @@ impl VectorApp {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Another app shared into Vector: back to the chat list to pick where it goes.
+    fn share_arrived(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.screen, Screen::Main) || self.store.borrow().my_npub.is_empty() {
+            return;
+        }
+        let Some(shared) = crate::share::take() else { return };
+        self.shared = Some(shared);
+        self.stash_draft(cx);
+        self.go_home();
+        if self.live {
+            messaging::set_active_chat(None);
+        }
+        self.show_toast(&t::share_choose_chat(), cx);
+        cx.notify();
+    }
+
+    /// The first file to its preview, as Tauri does; text alone into the composer.
+    fn attach_shared(&mut self, shared: crate::share::Shared, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(file) = shared.files.into_iter().next() {
+            self.open_file_preview(file, window, cx);
+        } else if !shared.text.is_empty() {
+            self.input.update(cx, |input, cx| input.set_text(&shared.text, cx));
+        }
     }
 
     /// The chat list, with nothing over it.

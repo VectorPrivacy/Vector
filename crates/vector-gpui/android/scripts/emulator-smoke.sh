@@ -49,6 +49,13 @@ for shot in screen after-tap typed; do
   echo "SCREEN-END"
   echo "::endgroup::"
 done
+# Text shared in from another app reaches the running client without a crash.
+echo "::group::share sheet"
+adb shell am start -W -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "shared-text" -n "$app/io.vectorapp.MainActivity" || true
+sleep 3
+echo "pid after share: $(adb shell pidof "$app" || echo none)"
+adb logcat -d -b crash || true
+echo "::endgroup::"
 # A restart with the background on: the service comes up with no window and the process stays.
 echo "::group::service after a restart"
 adb shell am force-stop "$app"
