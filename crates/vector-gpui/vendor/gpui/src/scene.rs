@@ -57,6 +57,11 @@ pub struct Scene {
     pub(crate) zoom: Option<(Point<ScaledPixels>, f32)>,
 }
 
+fn overdraw_report() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VECTOR_OVERDRAW").is_some())
+}
+
 /// Sorts `items` by `key`, keeping insertion order among equal keys (a layer's primitives share
 /// one order and must draw as painted), through `keys` rather than a fresh merge buffer.
 fn sort_stable<T>(items: &mut [T], keys: &mut Vec<(u64, u32)>, key: impl Fn(&T) -> u64) {
@@ -202,13 +207,41 @@ impl Scene {
         });
         sort_stable(&mut self.surfaces, keys, |surface| order(surface.order));
         self.cull_covered();
+        if overdraw_report() {
+            self.report_overdraw();
+        }
+    }
+
+    /// `VECTOR_OVERDRAW=1`: each frame's blended area by kind, and its largest quads, to stderr.
+    fn report_overdraw(&self) {
+        let area = |b: &Bounds<ScaledPixels>| (b.size.width.0.max(0.) * b.size.height.0.max(0.)) as f64;
+        let quads: Vec<(f64, &Quad)> = self.quads.iter().map(|q| (area(&q.bounds.intersect(&q.content_mask.bounds)), q)).collect();
+        let shadows: f64 = self.shadows.iter().map(|s| area(&s.bounds.dilate(ScaledPixels(3.0 * s.blur_radius.0)).intersect(&s.content_mask.bounds))).sum();
+        let mono: f64 = self.monochrome_sprites.iter().map(|g| area(&g.bounds.intersect(&g.content_mask.bounds))).sum();
+        let poly: f64 = self.polychrome_sprites.iter().map(|g| area(&g.bounds.intersect(&g.content_mask.bounds))).sum();
+        let paths: f64 = self.paths.iter().map(|p| area(&p.clipped_bounds())).sum();
+        let total_q: f64 = quads.iter().map(|q| q.0).sum();
+        eprintln!(
+            "overdraw: quads {} {:.0}k px, shadows {:.0}k, glyphs {:.0}k, images {:.0}k, paths {:.0}k",
+            quads.len(), total_q / 1e3, shadows / 1e3, mono / 1e3, poly / 1e3, paths / 1e3
+        );
+        let mut big = quads;
+        big.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (a, q) in big.iter().take(12) {
+            let b = q.bounds.intersect(&q.content_mask.bounds);
+            eprintln!(
+                "  {:.0}k px order {} at {:.2},{:.2} {:.2}x{:.2} bg {:?} opaque {} r {:?} mr {:?} fade {:?}",
+                a / 1e3, q.order, b.origin.x.0, b.origin.y.0, b.size.width.0, b.size.height.0,
+                q.background, q.opaque_rect().is_some(), q.corner_radii, q.content_mask.corner_radii, q.content_mask.fade
+            );
+        }
     }
 
     /// Drops what a later opaque rectangle hides whole. Everything draws blended, so a tiled
     /// GPU can't discard hidden pixels itself, and each stacked full-window background costs a
     /// window of fill.
     fn cull_covered(&mut self) {
-        const MAX_COVERS: usize = 4;
+        const MAX_COVERS: usize = 6;
         let mut covers = smallvec::SmallVec::<[(DrawOrder, Bounds<ScaledPixels>); MAX_COVERS]>::new();
         for quad in &self.quads {
             let Some(rect) = quad.opaque_rect() else { continue };
@@ -724,16 +757,15 @@ pub struct Quad {
 }
 
 impl Quad {
-    /// The whole device pixels this quad paints fully opaque, if it is a solid, square-cornered
-    /// fill under a plain rectangular mask. A border blends over an opaque fill and stays opaque.
+    /// The whole device pixels this quad paints fully opaque, if it is an opaque fill under a plain
+    /// rectangular mask. A border blends over an opaque fill and stays opaque.
     fn opaque_rect(&self) -> Option<Bounds<ScaledPixels>> {
         let mask = &self.content_mask;
         let square = |c: &Corners<ScaledPixels>| {
             c.top_left.0 == 0.0 && c.top_right.0 == 0.0 && c.bottom_right.0 == 0.0 && c.bottom_left.0 == 0.0
         };
         let fade = &mask.fade;
-        if !self.background.as_solid().is_some_and(|c| c.a >= 1.0)
-            || !square(&self.corner_radii)
+        if !self.background.is_opaque()
             || !square(&mask.corner_radii)
             || fade.top_len.0 > 0.0
             || fade.bottom_len.0 > 0.0
@@ -742,8 +774,15 @@ impl Quad {
         {
             return None;
         }
+        // Rounded corners leave the full-width band between them opaque.
+        let r = &self.corner_radii;
+        let (top, bottom) = (r.top_left.0.max(r.top_right.0), r.bottom_left.0.max(r.bottom_right.0));
+        let band = Bounds {
+            origin: point(self.bounds.origin.x, ScaledPixels(self.bounds.origin.y.0 + top)),
+            size: size(self.bounds.size.width, ScaledPixels(self.bounds.size.height.0 - top - bottom)),
+        };
         // Edge pixels a fractional bound only partly covers are antialiased, so not opaque.
-        let clip = self.bounds.intersect(&mask.bounds);
+        let clip = band.intersect(&mask.bounds);
         let (x0, y0) = (clip.origin.x.0.ceil(), clip.origin.y.0.ceil());
         let (x1, y1) = ((clip.origin.x.0 + clip.size.width.0).floor(), (clip.origin.y.0 + clip.size.height.0).floor());
         (x1 > x0 && y1 > y0).then(|| Bounds {

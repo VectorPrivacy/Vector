@@ -945,6 +945,15 @@ impl Background {
         }
     }
 
+    /// Every pixel it paints fully covers what is under it.
+    pub(crate) fn is_opaque(&self) -> bool {
+        match self.tag {
+            BackgroundTag::Solid => self.solid.a >= 1.0,
+            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.a >= 1.0),
+            BackgroundTag::PatternSlash | BackgroundTag::Checkerboard => false,
+        }
+    }
+
     /// Returns whether the background color is transparent.
     pub fn is_transparent(&self) -> bool {
         match self.tag {

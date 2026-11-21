@@ -46,9 +46,9 @@ fn stacked_backgrounds_leave_only_the_top_one() {
 }
 
 #[test]
-fn see_through_rounded_or_faded_covers_hide_nothing() {
+fn see_through_or_faded_covers_hide_nothing() {
     let screen = rect(0., 0., 720., 1600.);
-    for top in [quad(screen, SEE_THROUGH, 0.), quad(screen, OPAQUE, 2.), {
+    for top in [quad(screen, SEE_THROUGH, 0.), {
         let mut q = quad(screen, OPAQUE, 0.);
         q.content_mask.fade.top_len = ScaledPixels(8.);
         q
@@ -175,4 +175,43 @@ fn a_centred_cover_leaves_a_frame() {
             rect(600., 100., 1200., 1000.),
         ]
     );
+}
+
+#[test]
+fn an_opaque_gradient_hides_what_is_under_it() {
+    let bar = rect(0., 1400., 720., 200.);
+    let gradient = |a: f32| {
+        let mut q = quad(bar, OPAQUE, 0.);
+        q.background = gpui::linear_gradient(
+            90.,
+            gpui::linear_color_stop(hsla(0.4, 0.9, 0.6, 1.), 0.),
+            gpui::linear_color_stop(hsla(0.4, 0.5, 0.4, a), 1.),
+        );
+        q
+    };
+    let scene = finished(|s| {
+        s.insert_primitive(quad(bar, OPAQUE, 0.));
+        s.insert_primitive(gradient(1.));
+    });
+    assert_eq!(scene.quads.len(), 1);
+    let scene = finished(|s| {
+        s.insert_primitive(quad(bar, OPAQUE, 0.));
+        s.insert_primitive(gradient(0.9));
+    });
+    assert_eq!(scene.quads.len(), 2);
+}
+
+#[test]
+fn a_rounded_cover_hides_only_under_the_band_between_its_corners() {
+    let rail = rect(0., 100., 136., 1200.);
+    let mut top = quad(rail, OPAQUE, 0.);
+    top.corner_radii.top_right = ScaledPixels(28.);
+    let scene = finished(|s| {
+        s.insert_primitive(quad(rect(0., 0., 720., 1600.), OPAQUE, 0.));
+        s.insert_primitive(top);
+    });
+    let bands: Vec<_> = scene.quads.iter().map(|q| q.bounds).collect();
+    // The backdrop keeps the strip right of the rail, above the band and below the rail.
+    assert!(bands.iter().all(|b| !(b.origin.x.0 < 136. && b.origin.y.0 >= 128. && b.origin.y.0 + b.size.height.0 <= 1300.) || *b == rail));
+    assert!(bands.contains(&rail));
 }
