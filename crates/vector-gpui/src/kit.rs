@@ -1356,7 +1356,8 @@ pub fn inert() -> gpui::Div {
 pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<AnyElement> {
     // `.popup-container`'s `transition: background-color 0.2s ease`.
     let (_, shown) = gone.track_for(open.then_some(&()), 0.2, bezier(0.25, 0.1, 0.25, 1.), window)?;
-    (shown < 1.).then(|| {
+    // The first closing frame is still at 1: drawn, or the dimming blinks off for a frame.
+    (!open).then(|| {
         gpui::deferred(div().absolute().inset_0().bg(ca(0, 0, 0, 0.85 * shown)).child(inert()))
             .with_priority(15)
             .into_any_element()
