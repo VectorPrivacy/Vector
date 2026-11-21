@@ -49,4 +49,22 @@ for shot in screen after-tap typed; do
   echo "SCREEN-END"
   echo "::endgroup::"
 done
+# A restart with the background on: the service comes up with no window and the process stays.
+echo "::group::service after a restart"
+adb shell am force-stop "$app"
+adb shell run-as "$app" sh -c "'mkdir -p shared_prefs && echo \"<map><boolean name=\\\"background_service_enabled\\\" value=\\\"true\\\" /></map>\" > shared_prefs/vector_prefs.xml'" || true
+adb logcat -c
+if adb root >/dev/null 2>&1; then
+  adb wait-for-device
+  adb shell am broadcast -a android.intent.action.BOOT_COMPLETED -p "$app" || true
+  sleep 15
+  echo "pid after boot: $(adb shell pidof "$app" || echo none)"
+  adb shell dumpsys activity services "$app" | grep -E "ServiceRecord|isForeground" || echo "no service"
+  adb logcat -d -b crash || true
+  adb logcat -d | grep -E "standby|UnsatisfiedLink|FATAL" || true
+  adb unroot >/dev/null 2>&1 || true
+else
+  echo "no root on this image: skipped"
+fi
+echo "::endgroup::"
 [ -n "$pid" ]

@@ -173,6 +173,29 @@ pub async fn open_headless() -> bool {
     true
 }
 
+/// The background service with no window: the account the app last used, signed in and
+/// listening when it opens without a PIN or a signer, as the window would. False otherwise.
+#[cfg(target_os = "android")]
+pub async fn standby() -> bool {
+    // A welcome-screen sign-in owns the transport and the vault.
+    if vector_core::transport::prelogin::armed().is_some() || !open_headless().await {
+        return false;
+    }
+    let plain = !state::is_encryption_enabled_fast()
+        && db::get_signer_type().unwrap_or_else(|_| "local".into()) == "local"
+        && db::get_pkey().ok().flatten().is_some_and(|k| k.starts_with("nsec1"));
+    if !plain {
+        return false;
+    }
+    if let Err(e) = unlock(None).await {
+        vector_core::log_warn!("[standby] sign-in failed: {e}");
+        return false;
+    }
+    connect().await;
+    super::sync::notifs();
+    true
+}
+
 /// Make `npub` the account in use and open its database; why not, kept for the user.
 fn opened(npub: &str, error: &mut Option<String>) -> bool {
     match db::set_current_account(npub.to_string()).and_then(|_| db::init_database(npub)) {
@@ -507,7 +530,11 @@ pub(super) async fn unlock_with_key(key: Zeroizing<[u8; 32]>) -> Result<String, 
     open_with(Opener::Key(key)).await
 }
 
+/// The window and the background service can both open the account at boot.
+static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn open_with(opener: Opener) -> Result<String, String> {
+    let _one = OPENING.lock().await;
     *FRESH_ACCOUNT_NPUB.lock().unwrap_or_else(|e| e.into_inner()) = None;
     state::init_encryption_enabled();
     if let Some(pk) = vector_core::my_public_key().filter(|_| state::nostr_client().is_some()) {
@@ -657,6 +684,7 @@ async fn finish_unlock() -> Result<String, String> {
 
 /// Add the configured and discovery relays, then connect. False if already connected.
 pub async fn connect() -> bool {
+    let _one = OPENING.lock().await;
     let Some(client) = state::nostr_client() else {
         return false;
     };

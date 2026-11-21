@@ -18,7 +18,8 @@ import androidx.core.graphics.drawable.IconCompat
 
 /**
  * Keeps the process, and so the client's relay connections, alive while the app is away, and
- * posts its message notifications. The Tauri client's channels and ids, so an update in place
+ * posts its message notifications. Started with no window (at boot, or restarted), it signs in
+ * an account that needs no PIN and listens for it. The Tauri client's channels and ids, so an update in place
  * keeps the user's channel settings.
  */
 class VectorNotificationService : Service() {
@@ -34,6 +35,13 @@ class VectorNotificationService : Service() {
         /** MessagingStyle shows only what each post replays, so each chat keeps its recent lines. */
         private data class ChatMessage(val senderName: String, val senderAvatarPath: String, val body: String, val timestamp: Long)
         private val chatMessageHistory = java.util.concurrent.ConcurrentHashMap<String, MutableList<ChatMessage>>()
+
+        init {
+            System.loadLibrary("vector_gpui")
+        }
+
+        @JvmStatic
+        private external fun nativeStandby(context: Context)
 
         /** Called from Rust on any thread, so it reaches everything through `context`. */
         @JvmStatic
@@ -218,10 +226,10 @@ class VectorNotificationService : Service() {
         createChannels(this)
     }
 
-    // Not sticky: restarted without the app, there would be no client behind the row.
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(SERVICE_NOTIFICATION_ID, buildServiceNotification())
-        return START_NOT_STICKY
+        nativeStandby(applicationContext)
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

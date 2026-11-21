@@ -36,6 +36,8 @@ pub mod biometric;
 pub mod nip55;
 pub mod selfsync;
 pub mod sound;
+#[cfg(target_os = "android")]
+mod standby;
 pub mod storage;
 pub mod transcribe;
 pub mod sync;

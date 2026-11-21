@@ -178,7 +178,14 @@ async fn merge_media_servers() {
 }
 
 /// Start the live DM subscription. Runs for the session's life.
+/// The session's live subscription is up.
+struct Listening;
+
+/// Once per session: a window logging in finds the background service's already listening.
 pub fn notifs() {
+    if db::current_session().scoped::<Listening, AtomicBool>().swap(true, Ordering::SeqCst) {
+        return;
+    }
     db::spawn_bound(async {
         if let Err(e) = VectorCore
             .listen_with(Arc::new(Handler), CatchUp::External)
@@ -186,6 +193,7 @@ pub fn notifs() {
         {
             vector_core::log_warn!("[GPUI] live subscription ended: {e}");
         }
+        db::current_session().scoped::<Listening, AtomicBool>().store(false, Ordering::SeqCst);
     });
 }
 
