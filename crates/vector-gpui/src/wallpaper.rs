@@ -251,7 +251,7 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     let Job { key, decoded } = job;
     let (w, h) = bake_size(&key);
     let file = key.stored.then(|| bake_file(&key)).flatten();
-    if let Some(img) = file.as_deref().and_then(|f| load_bake(f, w, h)) {
+    if let Some(img) = file.as_deref().and_then(|f| crate::bakes::load(f, (w, h))) {
         return (key, decoded, Some(Arc::new(RenderImage::new(vec![image::Frame::new(img)]))));
     }
     let src = match decoded {
@@ -266,18 +266,13 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     };
     let Some(src) = src else { return (key, None, None) };
     let f = bake_scale(key.blur);
-    let (sw, sh) = (src.width() as f32, src.height() as f32);
-    let scale = (w as f32 / sw).max(h as f32 / sh) * 1.02;
-    let (cw, ch) = ((w as f32 / scale).min(sw), (h as f32 / scale).min(sh));
-    let (cx, cy) = (((sw - cw) / 2.) as u32, ((sh - ch) / 2.) as u32);
-    let crop = image::imageops::crop_imm(&*src, cx, cy, cw.round() as u32, ch.round() as u32).to_image();
-    let mut out = gpui::resample(&crop, w, h, image::imageops::FilterType::Triangle);
+    let mut out = crate::bakes::cover(&src, (w, h), 1.02);
     if key.blur > 0 {
         out = image::imageops::fast_blur(&out, key.blur as f32 * f);
     }
     let out = crate::media::to_bgra(out);
     if let Some(f) = &file {
-        store_bake(f, &out, &source_tag(&key));
+        crate::bakes::store(f, &out, &source_tag(&key), SIZES_KEPT);
     }
     let image = Arc::new(RenderImage::new(vec![image::Frame::new(out)]));
     (key, Some(src), Some(image))
@@ -321,79 +316,26 @@ fn bakes_dir(path: &Path) -> Option<PathBuf> {
 
 /// What every bake of one picture, at one blur, starts its name with.
 fn source_tag(key: &Key) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in key.path.as_os_str().as_encoded_bytes() {
-        h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{h:016x}-{}-{}-", key.ts, key.blur)
+    format!("{:016x}-{}-{}-", crate::bakes::source_hash(&key.path), key.ts, key.blur)
 }
 
 fn bake_file(key: &Key) -> Option<PathBuf> {
-    let (w, h) = bake_size(key);
-    Some(bakes_dir(&key.path)?.join(format!("{}{w}x{h}.bgra", source_tag(key))))
-}
-
-/// A bake as written: its size, then its BGRA pixels.
-fn load_bake(file: &Path, w: u32, h: u32) -> Option<image::RgbaImage> {
-    let bytes = std::fs::read(file).ok()?;
-    let (head, px) = bytes.split_at_checked(8)?;
-    let size = (u32::from_le_bytes(head[..4].try_into().ok()?), u32::from_le_bytes(head[4..].try_into().ok()?));
-    if size != (w, h) || px.len() as u64 != u64::from(w) * u64::from(h) * 4 {
-        return None;
-    }
-    image::RgbaImage::from_raw(w, h, px.to_vec())
+    Some(crate::bakes::file(&bakes_dir(&key.path)?, &source_tag(key), bake_size(key)))
 }
 
 /// `key`'s saved bake at its size, else its newest at any size (the GPU stretches it until a
 /// bake for this size lands).
 fn saved_bake(key: &Key) -> Option<(Key, Arc<RenderImage>)> {
-    let picked = bake_file(key).filter(|f| key.size != (0, 0) && f.exists()).map(|f| (f, bake_size(key))).or_else(|| {
-        let tag = source_tag(key);
-        let dir = bakes_dir(&key.path)?;
-        std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().into_string().ok()?;
-                let (w, h) = name.strip_prefix(tag.as_str())?.strip_suffix(".bgra")?.split_once('x')?;
-                let at = e.metadata().and_then(|m| m.modified()).ok()?;
-                Some((at, e.path(), (w.parse().ok()?, h.parse().ok()?)))
-            })
-            .max_by_key(|(at, _, _)| *at)
-            .map(|(_, f, size)| (f, size))
-    })?;
+    let picked = bake_file(key)
+        .filter(|f| key.size != (0, 0) && f.exists())
+        .map(|f| (f, bake_size(key)))
+        .or_else(|| crate::bakes::newest(&bakes_dir(&key.path)?, &source_tag(key)))?;
     let (file, (w, h)) = picked;
-    let img = load_bake(&file, w, h)?;
+    let img = crate::bakes::load(&file, (w, h))?;
     let f = bake_scale(key.blur);
     let size = if (w, h) == bake_size(key) { key.size } else { ((w as f32 / f).round() as u32, (h as f32 / f).round() as u32) };
     let found = Key { size, ..key.clone() };
     Some((found, Arc::new(RenderImage::new(vec![image::Frame::new(img)]))))
-}
-
-/// Written whole or not at all, then the picture's other sizes past the newest few go.
-fn store_bake(file: &Path, img: &image::RgbaImage, tag: &str) {
-    let Some(dir) = file.parent() else { return };
-    let tmp = file.with_extension("tmp");
-    let mut bytes = Vec::with_capacity(8 + img.as_raw().len());
-    bytes.extend_from_slice(&img.width().to_le_bytes());
-    bytes.extend_from_slice(&img.height().to_le_bytes());
-    bytes.extend_from_slice(img.as_raw());
-    let written = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&tmp, &bytes)).and_then(|_| std::fs::rename(&tmp, file));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        vector_core::log_warn!("[Wallpaper] bake not kept: {e}");
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut sizes: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(tag)))
-        .map(|e| (e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), e.path()))
-        .collect();
-    sizes.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, old) in sizes.into_iter().skip(SIZES_KEPT) {
-        let _ = std::fs::remove_file(old);
-    }
 }
 
 /// The account's bake folder, where its chats' wallpapers live.
@@ -420,13 +362,7 @@ pub fn sweep(w: &mut Wallpaper, live: &[Key], home: Option<PathBuf>) -> impl FnO
     dirs.dedup();
     move || {
         for dir in dirs {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for e in entries.flatten() {
-                let stale = e.file_name().to_str().is_none_or(|n| !tags.iter().any(|t| n.starts_with(t.as_str())) || n.ends_with(".tmp"));
-                if stale {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
+            crate::bakes::sweep(&dir, &tags);
         }
     }
 }
@@ -685,6 +621,7 @@ mod tests {
 
     #[test]
     fn stored_bakes_load_back_and_go_with_their_wallpaper() {
+        crate::bakes::test_data_dir();
         let root = std::env::temp_dir().join(format!("vector-wallpaper-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -696,6 +633,8 @@ mod tests {
 
         let (_, decoded, first) = bake(Job { key: key(1, 6, (400, 300)), decoded: None });
         assert!(decoded.is_some() && bakes() == 1);
+        let kept = std::fs::read_dir(root.join(".bakes")).unwrap().next().unwrap().unwrap().path();
+        assert!(vector_core::vcache::is_sealed(&kept), "a bake is sealed like its wallpaper");
         let (_, decoded, again) = bake(Job { key: key(1, 6, (400, 300)), decoded: None });
         assert!(decoded.is_none(), "read back, not decoded");
         assert_eq!(first.unwrap().as_bytes(0), again.unwrap().as_bytes(0));
@@ -722,6 +661,7 @@ mod tests {
 
     #[test]
     fn a_saved_bake_shows_in_the_first_frame_even_before_layout() {
+        crate::bakes::test_data_dir();
         let root = std::env::temp_dir().join(format!("vector-wallpaper-first-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();

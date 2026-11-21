@@ -679,54 +679,42 @@ impl VectorApp {
         .detach();
     }
 
-    /// Each Community's banner decoded at the list's width, so its first open draws it.
+    /// Each Community's banner baked to disk at the list's width, so its first open reads it in
+    /// the first frame; bakes of banners no Community has any more go.
     pub(super) fn prefetch_banners(&mut self, cx: &mut Context<Self>) {
-        let fit = crate::pic::fit(if self.is_slim { 512. } else { super::list_w() });
-        let (wanted, gone) = {
+        let width = if self.is_slim { self.vw - 68. } else { super::list_w() };
+        let want = crate::banner::size(width);
+        let (dir, show, all) = {
             let mut store = self.store.borrow_mut();
-            let live: HashSet<std::path::PathBuf> = store
+            if store.banner_bakes.is_none() {
+                store.banner_bakes = crate::banner::dir(&store.my_npub);
+            }
+            let Some(dir) = store.banner_bakes.clone() else { return };
+            let all: Vec<_> = store.communities.iter().filter_map(|c| store.banner(&c.community_id)).collect();
+            let show: Vec<_> = store
                 .communities
                 .iter()
                 .filter(|c| !store.hidden_banners.contains(&c.community_id))
                 .filter_map(|c| store.banner(&c.community_id))
                 .collect();
-            let mut gone = Vec::new();
-            store.banner_pics.retain(|p, (_, image)| {
-                let keep = live.contains(p);
-                if !keep {
-                    gone.push(image.clone());
-                }
-                keep
-            });
-            let wanted: Vec<_> = live.into_iter().filter(|p| store.banner_pics.get(p).is_none_or(|(f, _)| *f < fit)).collect();
-            (wanted, gone)
+            (dir, show, all)
         };
-        for image in gone {
-            cx.drop_image(image, None);
-        }
-        if wanted.is_empty() {
+        if !self.live || width <= 0. {
             return;
         }
-        let decode = cx.background_executor().spawn(async move {
-            wanted
-                .into_iter()
-                .filter_map(|path| {
-                    let bytes = crate::pic::read(&path).ok()?;
-                    let ext = crate::backend::inline::sniff(&bytes).unwrap_or("png");
-                    let (image, ..) = crate::media::decode(&bytes, ext, (fit, fit))?;
-                    Some((path, (fit, std::sync::Arc::new(image))))
-                })
-                .collect::<Vec<_>>()
-        });
+        let baked = cx.background_executor().spawn(async move { crate::banner::bake_all(dir, show, all, want) });
         cx.spawn(async move |this, cx| {
-            let pics = decode.await;
+            if !baked.await {
+                return;
+            }
             this.update(cx, |app, cx| {
-                let mut store = app.store.borrow_mut();
-                for (path, pic) in pics {
-                    if let Some((_, old)) = store.banner_pics.insert(path, pic) {
-                        cx.drop_image(old, None);
-                    }
+                // One drawn without a bake reads again.
+                let store = app.store.borrow();
+                let mut slot = store.banner_shown.borrow_mut();
+                if slot.as_ref().is_some_and(|(_, image)| image.is_none()) {
+                    slot.take();
                 }
+                drop(slot);
                 drop(store);
                 app.notify_side(cx);
             })

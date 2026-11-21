@@ -524,8 +524,8 @@ pub fn sidebar(
                     let on = on.clone();
                     move |e, w, cx| on(Act::BannerMenu(e.position), w, cx)
                 })
-                .child(match store.banner_pics.get(&path).filter(|(fit, _)| *fit >= crate::pic::fit(width)) {
-                    Some((_, image)) => gpui::img(image.clone())
+                .child(match crate::banner::shown(store, &path, width) {
+                    Some(image) => gpui::img(image)
                         .w(px(width))
                         .h(px(width * 70. / 238.))
                         .object_fit(gpui::ObjectFit::Cover)

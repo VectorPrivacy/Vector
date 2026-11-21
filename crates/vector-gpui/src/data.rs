@@ -321,8 +321,12 @@ pub struct Store {
     pub nicknames: HashMap<String, HashMap<String, String>>,
     /// Each community's last roster read: members, admins, unlisted.
     pub rosters: HashMap<String, Roster>,
-    /// Community banners decoded ahead of their first sight, by file: the decode's fit and pixels.
-    pub banner_pics: HashMap<PathBuf, (u32, std::sync::Arc<gpui::RenderImage>)>,
+    /// Where this account's banner bakes live, once known.
+    pub banner_bakes: Option<PathBuf>,
+    /// The banner on screen, read from its bake (`None`: it has none yet).
+    pub banner_shown: std::cell::RefCell<Option<(PathBuf, Option<std::sync::Arc<gpui::RenderImage>>)>>,
+    /// Banners read and since replaced, for their GPU copies to go.
+    pub banner_retired: std::cell::RefCell<Vec<std::sync::Arc<gpui::RenderImage>>>,
     /// Each community's running Timeouts, npub → its span.
     pub timeouts: HashMap<String, HashMap<String, Timeout>>,
     /// Per channel, the authors seen there who can't send in it.
@@ -545,7 +549,9 @@ impl Store {
             pivx_price: None,
             nicknames: f.nicknames,
             rosters: HashMap::new(),
-            banner_pics: HashMap::new(),
+            banner_bakes: None,
+            banner_shown: Default::default(),
+            banner_retired: Default::default(),
             timeouts: f.timeouts,
             send_denied: f.send_denied,
             react_denied: f.react_denied,
@@ -626,7 +632,9 @@ impl Store {
             pivx_price: None,
             nicknames: HashMap::new(),
             rosters: HashMap::new(),
-            banner_pics: HashMap::new(),
+            banner_bakes: None,
+            banner_shown: Default::default(),
+            banner_retired: Default::default(),
             timeouts: HashMap::new(),
             send_denied: HashMap::new(),
             react_denied: HashMap::new(),

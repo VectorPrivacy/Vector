@@ -16394,6 +16394,19 @@ impl VectorApp {
         for image in gone {
             let _ = window.drop_image(image);
         }
+        {
+            let store = self.store.borrow();
+            let mut retired = std::mem::take(&mut *store.banner_retired.borrow_mut());
+            // A closed Community's banner goes too: the next open reads its bake again.
+            if self.community.is_none()
+                && let Some((_, Some(image))) = store.banner_shown.borrow_mut().take()
+            {
+                retired.push(image);
+            }
+            for image in retired {
+                let _ = window.drop_image(image);
+            }
+        }
         for old in frames {
             let _ = window.drop_image(old.clone());
             self.media.borrow_mut().videos.recycle(old);

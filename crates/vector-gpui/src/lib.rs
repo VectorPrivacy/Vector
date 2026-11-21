@@ -10,6 +10,8 @@ mod applog;
 mod assets;
 use vector_media::{audio_devices, calls, mic_access};
 mod attachments;
+mod bakes;
+mod banner;
 mod audio;
 mod audit;
 mod jxl;
