@@ -1956,19 +1956,35 @@ impl VectorApp {
             return;
         }
         let search = cx.new(|cx| {
-            TextInput::new(t::search(), cx).with_look(crate::composer::Look {
+            let mut i = TextInput::new(t::search(), cx).with_look(crate::composer::Look {
                 size: px(15.),
                 line_height: px(18.),
                 weight: FontWeight::NORMAL,
                 placeholder: white_a(0.5),
                 ..kit::field_look()
-            })
+            });
+            // Up and Down step through the results rather than move the caret.
+            i.set_nav(true);
+            i
         });
         cx.subscribe(&search, |app, _, _: &crate::composer::InputChanged, cx| {
             if let Some(sm) = app.start.as_mut() {
                 sm.selected = 0;
             }
             cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(&search, window, |app, _, nav: &crate::composer::Nav, window, cx| {
+            use crate::composer::Nav;
+            match nav {
+                Nav::Up => app.on_start(crate::startmenu::Act::Step(-1), window, cx),
+                Nav::Down => app.on_start(crate::startmenu::Act::Step(1), window, cx),
+                Nav::Pick => {
+                    let ix = app.start.as_ref().map(|s| s.selected).unwrap_or(0);
+                    app.on_start(crate::startmenu::Act::Pick(ix), window, cx);
+                }
+                Nav::Close => app.start_escape(window, cx),
+            }
         })
         .detach();
         cx.subscribe_in(&search, window, |app, _, _: &SendText, window, cx| {
