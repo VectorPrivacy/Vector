@@ -1184,6 +1184,48 @@ impl Settle {
         }
         self.fresh(key, true)
     }
+
+    /// `row` drawn again as if for the first time: what it holds now fills in place.
+    pub fn forget(&mut self, row: &str) {
+        self.0.remove(row);
+    }
+}
+
+thread_local! {
+    static ROLLS: std::cell::RefCell<std::collections::HashMap<SharedString, (usize, usize, std::time::Instant)>> = Default::default();
+}
+
+/// Rollers whose key starts with `prefix` show their next count without rolling to it.
+pub fn roll_forget(prefix: &str) {
+    ROLLS.with_borrow_mut(|all| all.retain(|k, _| !k.starts_with(prefix)));
+}
+
+/// `.reaction-count`'s roller: on a change the old number slides out (up on a rise, down on a
+/// fall) as the new one slides in from the other edge, inside a `line` px clip.
+pub fn roll(key: SharedString, n: usize, line: f32) -> AnyElement {
+    const SECS: f32 = 0.34;
+    let now = std::time::Instant::now();
+    let (from, to, at) = ROLLS.with_borrow_mut(|all| {
+        let e = all.entry(key).or_insert((n, n, now - std::time::Duration::from_secs(1)));
+        if e.1 != n {
+            *e = (e.1, n, now);
+        }
+        *e
+    });
+    let t = (now - at).as_secs_f32() / SECS;
+    if t >= 1. || from == to {
+        return div().child(crate::lang::num(n)).into_any_element();
+    }
+    let k = bezier(0.22, 1., 0.36, 1.)(t);
+    let dir = if to > from { 1. } else { -1. };
+    div()
+        .relative()
+        .overflow_hidden()
+        .h(px(line))
+        .child(div().relative().top(px(dir * (1. - k) * line)).opacity(k).child(crate::lang::num(to)))
+        .child(div().absolute().left_0().top(px(-dir * k * line)).opacity(1. - k).child(crate::lang::num(from)))
+        .child(gpui::canvas(|_, window, _| window.request_animation_frame(), |_, _, _, _| {}).absolute().size_0())
+        .into_any_element()
 }
 
 /// `reaction-pop-in`: a chip that arrived on a drawn message grows in from 0.6.

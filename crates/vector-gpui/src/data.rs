@@ -754,10 +754,16 @@ impl Store {
             .iter()
             .position(|m| m.id == old_id || m.id == msg.id)
         {
-            Some(i) => chat.messages[i] = msg,
-            None => {
+            // In place while its time holds; a send settles at its own time, which can pass
+            // messages that arrived while it was pending.
+            Some(i) if chat.messages[i].at == msg.at => chat.messages[i] = msg,
+            found => {
+                if let Some(i) = found {
+                    chat.messages.remove(i);
+                }
                 let at = chat.messages.partition_point(|m| m.at <= msg.at);
                 chat.messages.insert(at, msg);
+                self.resort();
             }
         }
     }
@@ -1656,6 +1662,22 @@ mod tests {
         assert_eq!(&text[found[0].0..found[0].1], format!("nostr:{npub}"));
         assert_eq!(found[1].2.as_deref(), Some(npub));
         assert_eq!(&text[found[1].0..found[1].1], nprofile);
+    }
+
+    #[test]
+    fn a_send_settling_later_moves_past_what_arrived_meanwhile() {
+        use vector_core::types::Message;
+        let mut store = Store::from_fixtures(std::path::Path::new(crate::FIXTURES)).unwrap();
+        let chat = store.chats[0].id.clone();
+        let top = store.chat(&chat).unwrap().messages.last().map_or(0, |m| m.at);
+        let msg = |id: &str, at: u64, mine: bool| Message { id: id.into(), at, mine, ..Default::default() };
+        store.chat_mut(&chat).unwrap().messages.push(msg("local-1", top + 10, true));
+        store.insert_message(&chat, msg("theirs", top + 20, false));
+        store.replace_message(&chat, "local-1", msg("sent", top + 30, true));
+        let ids: Vec<&str> = store.chat(&chat).unwrap().messages.iter().rev().take(2).map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["sent", "theirs"]);
+        store.replace_message(&chat, "sent", msg("sent", top + 30, true));
+        assert_eq!(store.chat(&chat).unwrap().messages.last().unwrap().id, "sent");
     }
 
     #[test]

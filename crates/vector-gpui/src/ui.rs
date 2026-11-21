@@ -4267,9 +4267,22 @@ impl VectorApp {
         if self.timeline.is_following_tail() {
             return;
         }
-        if let Some(ix) = old_keys.get(top.item_ix).and_then(|k| self.row_keys.iter().position(|x| x == k)) {
+        let find = |k: &u64| self.row_keys.iter().position(|x| x == k);
+        if let Some(ix) = old_keys.get(top.item_ix).and_then(find) {
             self.timeline.scroll_to(gpui::ListOffset { item_ix: ix, offset_in_item: top.offset_in_item });
+            return;
         }
+        // The top row itself changed (refolded, restyled): its nearest neighbour that survived
+        // holds the place, or the splice would leave the view at the top of the page.
+        let above = top.item_ix.checked_sub(1).and_then(|i| old_keys.get(i)).and_then(find);
+        let place = match above {
+            Some(ix) => gpui::ListOffset { item_ix: ix + 1, offset_in_item: top.offset_in_item },
+            None => {
+                let below = old_keys.iter().skip(top.item_ix + 1).take(64).find_map(find);
+                gpui::ListOffset { item_ix: below.unwrap_or(top.item_ix), offset_in_item: gpui::px(0.) }
+            }
+        };
+        self.timeline.scroll_to(place);
     }
 
     pub(super) fn open_viewer(&mut self, open: crate::viewer::Open, window: &mut Window, cx: &mut Context<Self>) {
@@ -4421,6 +4434,7 @@ impl VectorApp {
                     return;
                 };
                 views.reverse();
+                views.sort_by_key(|m| m.at);
                 if views.len() < 200 {
                     this.history_done.insert(id.to_string());
                 }
@@ -4434,6 +4448,13 @@ impl VectorApp {
                         .collect();
                     chat.messages = views;
                     chat.messages.extend(later);
+                    // The page's reactions were there all along: they settle, not arrive.
+                    let mut media = this.media.borrow_mut();
+                    for m in &chat.messages {
+                        media.settle.forget(&m.id);
+                    }
+                    drop(media);
+                    kit::roll_forget("rx:");
                 }
                 let count = this.rebuild_rows();
                 this.timeline = timeline_state(count, cx.entity().downgrade());
@@ -4549,25 +4570,13 @@ impl VectorApp {
 
     /// The open chat's rows re-laid with the row at the top staying put.
     fn relayout_keeping_top(&mut self) {
+        // Held by row key: the old rows' indices point into a message list that has since changed.
         let top = self.timeline.logical_scroll_top();
-        let store = self.store.borrow();
-        let chat = self.open.as_ref().and_then(|id| store.chat(id));
-        let held = chat.and_then(|c| {
-            self.rows.get(top.item_ix..)?.iter().find_map(|r| match r {
-                Row::Message { index, .. } => c.messages.get(*index).map(|m| m.id.clone()),
-                _ => None,
-            })
-        });
-        drop(store);
         let old = self.timeline.item_count();
+        let old_keys = std::mem::take(&mut self.row_keys);
         let new = self.rebuild_rows();
         self.timeline.splice(0..old, new);
-        if let Some(ix) = held.and_then(|id| self.row_of(&id)) {
-            self.timeline.scroll_to(gpui::ListOffset {
-                item_ix: ix,
-                offset_in_item: top.offset_in_item,
-            });
-        }
+        self.hold_top(top, &old_keys);
     }
 
     /// The timeline row of a message in the open chat.
@@ -16234,6 +16243,7 @@ impl VectorApp {
                 for (id, views) in read {
                     let Ok(mut views) = views else { continue };
                     views.reverse();
+                    views.sort_by_key(|m| m.at);
                     this.history_done.remove(&id);
                     if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
                         chat.messages = views;

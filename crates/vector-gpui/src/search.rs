@@ -699,6 +699,7 @@ fn drawn(source: vector_core::search::Source, terms: &[String], look: &Look, sto
         }
     });
     let revealed = std::collections::HashSet::new();
+    let here = store.community_of(chat).map(|c| c.community_id.clone());
     let blocks = crate::markdown::parse(
         text.trim(),
         &crate::markdown::Ctx {
@@ -710,7 +711,7 @@ fn drawn(source: vector_core::search::Source, terms: &[String], look: &Look, sto
             tags: &[],
             mask: Some(&|t: &str| store.stream_mask(t)),
             colors: &colors,
-            go: None,
+            go: Some(&|url: &str, look: &Look| crate::golinks::pill(store, url, here.as_deref(), look)),
         },
     );
     let mut atoms = Vec::new();
@@ -1316,7 +1317,8 @@ pub fn view(s: &Search, store: &Store, thumbs: &std::collections::HashMap<usize,
     let count = (!s.showing_suggestions() && s.corpus.is_some() && !s.found.hits.is_empty()).then(|| {
         let shown = s.found.hits.len();
         let label = if shown < s.found.total {
-            if s.oldest { t::search_results_capped_oldest(shown, s.found.total) } else { t::search_results_capped(shown, s.found.total) }
+            // Catalog arguments run alphabetically: count, then shown.
+            if s.oldest { t::search_results_capped_oldest(s.found.total, shown) } else { t::search_results_capped(s.found.total, shown) }
         } else {
             t::search_results(s.found.total)
         };

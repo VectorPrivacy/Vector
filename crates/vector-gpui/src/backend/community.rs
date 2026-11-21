@@ -1072,10 +1072,15 @@ pub async fn sync_report(community_id: String) -> (Result<Value, String>, Result
             Err(e) => return (Err(e.clone()), Err(e)),
         };
         let transport = vector_core::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-        tokio::join!(
+        let (control, mut epoch, probe) = tokio::join!(
             vector_core::community::v2::service::debug_control_report(&c),
             vector_core::community::v2::service::explain_epoch_state(&transport, &c),
-        )
+            vector_core::community::v2::service::probe_base_rekey_addresses(&transport, &c),
+        );
+        if let Ok(Value::Object(o)) = &mut epoch {
+            o.insert("addresses".into(), probe.unwrap_or_else(|e| serde_json::json!({ "error": e })));
+        }
+        (control, epoch)
     })
     .await
 }

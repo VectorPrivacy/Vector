@@ -16016,6 +16016,46 @@ enum Advance {
 }
 
 /// Fetch + parse every seal-verified 3303 chunk at a rekey plane address.
+/// Where a base rotation may have landed beside the address this client follows: the epoch
+/// after next at the held root, and the next epoch at each archived root. Read-only, paged off
+/// the relays, so a strand shows whether the rotation exists anywhere this member could read.
+pub async fn probe_base_rekey_addresses<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<serde_json::Value, String> {
+    let cid_hex = community.id().to_hex();
+    let next = Epoch(community.root_epoch.0.saturating_add(1));
+    let mut candidates = vec![
+        (format!("e{} @ held root e{}", next.0, community.root_epoch.0), base_rekey_group_key(&community.community_root, community.id(), next)),
+        (format!("e{} @ held root e{}", next.0 + 1, community.root_epoch.0), base_rekey_group_key(&community.community_root, community.id(), Epoch(next.0 + 1))),
+    ];
+    for (epoch, root) in crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap_or_default() {
+        if root != community.community_root {
+            candidates.push((format!("e{} @ archived root e{}", epoch.0 + 1, epoch.0), base_rekey_group_key(&root, community.id(), Epoch(epoch.0 + 1))));
+            candidates.push((format!("e{} @ archived root e{}", next.0, epoch.0), base_rekey_group_key(&root, community.id(), next)));
+        }
+    }
+    let mut out = Vec::with_capacity(candidates.len());
+    for (label, group) in candidates {
+        let entry = match plane_wraps_paged(transport, &community.relays, &group).await {
+            Ok(wraps) => {
+                let chunks: Vec<rekey::RekeyChunk> = wraps.iter().filter_map(|w| stream::open_wrap(w, &group).ok()).filter_map(|o| rekey::parse_rekey_chunk(&o).ok()).collect();
+                let rotations: Vec<serde_json::Value> = rekey::collect_rotations(&chunks)
+                    .iter()
+                    .map(|r| serde_json::json!({
+                        "rotator": r.rotator.to_hex(),
+                        "prev_epoch": r.prev_epoch.0,
+                        "new_epoch": r.new_epoch.0,
+                        "scope_is_root": r.scope.id32() == RekeyScope::Root.id32(),
+                        "complete": r.is_complete(),
+                    }))
+                    .collect();
+                serde_json::json!({ "address": label, "plane_pk": group.pk_hex(), "wraps": wraps.len(), "chunks": chunks.len(), "rotations": rotations })
+            }
+            Err(e) => serde_json::json!({ "address": label, "plane_pk": group.pk_hex(), "error": e }),
+        };
+        out.push(entry);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
 async fn fetch_rekey_chunks<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, group: &GroupKey) -> Result<Vec<rekey::RekeyChunk>, String> {
     // A rekey plane address is community_root-derived, so ANY member can seal junk 3303s
     // there: a flood, or a large community's own multi-chunk rotation, could bury the genuine

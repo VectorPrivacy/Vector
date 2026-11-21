@@ -22,6 +22,7 @@ mod commsettings;
 mod coretext;
 mod community;
 mod rail;
+mod thumbhash;
 mod voice;
 mod miniprofile;
 mod pings;

@@ -1846,7 +1846,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .line_height(px(12.))
                 .text_color(white_a(0.85))
                 .child(glyph)
-                .child(crate::lang::num(count));
+                .child(crate::kit::roll(SharedString::from(format!("{key}-n")), count, 12.));
         row = row.child(if entering {
             crate::kit::chip_pop(SharedString::from(format!("{key}-in")), chip).into_any_element()
         } else {

@@ -1057,6 +1057,8 @@ pub(crate) struct AnimatedSprite {
     pub(crate) data: Arc<RenderImage>,
     /// The frame shown and when it began, shared with the element's own state.
     pub(crate) clock: Rc<Cell<(usize, Option<Instant>)>>,
+    /// This copy's frame: copies of one picture share a clock, but each has its own tile.
+    pub(crate) shown: usize,
     pub(crate) tile: AtlasTile,
     pub(crate) at: Bounds<ScaledPixels>,
     pub(crate) visible: Bounds<Pixels>,
@@ -5650,6 +5652,7 @@ impl Window {
             self.next_frame.animated.push(AnimatedSprite {
                 data,
                 clock,
+                shown: frame_index,
                 tile,
                 at,
                 visible: bounds.intersect(&image_bounds),
@@ -5698,7 +5701,7 @@ impl Window {
             if count < 2 {
                 continue;
             }
-            let shown = r.clock.get().0.min(count - 1);
+            let shown = r.shown.min(count - 1);
             let (ix, due) = crate::elements::ticked_frame(&r.data, since, tick);
             if ix != shown {
                 let data = r.data.clone();
@@ -5706,6 +5709,7 @@ impl Window {
                     let sub = sub_tile(tile, r.visible, r.image);
                     swaps.push((r.tile, r.at, sub));
                     r.tile = sub;
+                    r.shown = ix;
                     changed = true;
                     if streams_frames(&data) && !self.anim_left.contains(&(data.id, shown)) {
                         self.anim_left.push((data.id, shown));
@@ -5759,7 +5763,7 @@ impl Window {
             .map(|s| (s.tile.texture_id, s.tile.tile_id.0))
             .collect();
         for (id, frame_index) in std::mem::take(&mut self.anim_left) {
-            if records.iter().any(|r| r.data.id == id && r.clock.get().0 == frame_index) {
+            if records.iter().any(|r| r.data.id == id && r.shown == frame_index) {
                 continue;
             }
             let key: AtlasKey = RenderImageParams { image_id: id, frame_index }.into();

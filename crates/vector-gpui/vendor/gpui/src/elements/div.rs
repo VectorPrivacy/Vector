@@ -3856,10 +3856,11 @@ impl Interactivity {
             _ => None,
         };
         match fades {
-            Some((g, h)) if (g > 0. && g < 1.) || (h > 0. && h < 1.) => {
+            // The frame a hover flips, its fade still stands at the old end: blended too.
+            Some((g, h)) if g != f32::from(u8::from(group_on)) || h != f32::from(u8::from(hover_on)) => {
                 window.request_animation_frame();
-                let row = |hover: bool| blend_style(&refine(&style, false, hover), &refine(&style, true, hover), g);
-                style = blend_style(&row(false), &row(true), h);
+                let row = |hover: bool| blend_style(&refine(&style, false, hover), &refine(&style, true, hover), g, group_on);
+                style = blend_style(&row(false), &row(true), h, hover_on);
             }
             _ => {
                 if group_on && let Some(g) = self.group_hover_style.as_ref() {
@@ -4109,15 +4110,20 @@ fn mix_opt(a: Option<crate::Hsla>, b: Option<crate::Hsla>, t: f32) -> Option<cra
 }
 
 /// `a` toward `b`: colours and opacity in between, the rest from whichever is nearer.
-fn blend_style(a: &Style, b: &Style, t: f32) -> Style {
+/// Colours and opacity blend by `t`; everything else (sizes, layout) is already where `on`
+/// points, as CSS switches what it doesn't transition. Following `t` there would flip a hover's
+/// layout back for the frames before the blend crosses half.
+fn blend_style(a: &Style, b: &Style, t: f32, on: bool) -> Style {
     use crate::Fill;
-    if t <= 0. {
-        return a.clone();
+    let mut out = if on { b.clone() } else { a.clone() };
+    if t <= 0. || t >= 1. {
+        let end = if t <= 0. { a } else { b };
+        out.background = end.background.clone();
+        out.border_color = end.border_color;
+        out.text.color = end.text.color;
+        out.opacity = end.opacity;
+        return out;
     }
-    if t >= 1. {
-        return b.clone();
-    }
-    let mut out = if t < 0.5 { a.clone() } else { b.clone() };
     let solid = |f: &Option<Fill>| f.as_ref().and_then(|f| f.color()?.as_solid());
     let (fa, fb) = (solid(&a.background), solid(&b.background));
     let gradient = |f: &Option<Fill>| f.is_some() && solid(f).is_none();

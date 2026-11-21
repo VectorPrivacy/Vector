@@ -211,6 +211,8 @@ nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v
 nostr-sdk = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
 nostr-database = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "vector-v0.45.6" }
 saturating-time = { path = "../vendor/saturating-time" }
+# cosmic-text 0.19.0, reading each face's weight axis once rather than per new font match.
+cosmic-text = { path = "vendor/cosmic-text" }
 # ndk 0.9.0 with the desktop client's switch that opens every AAudio stream as a phone call's.
 ndk = { path = "../vendor/ndk" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }

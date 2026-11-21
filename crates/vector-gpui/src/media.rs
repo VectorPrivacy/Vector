@@ -776,9 +776,10 @@ pub fn swap_red_blue(bytes: &mut [u8]) {
 /// A thumbhash's blur at the size it encodes (at most 32 px a side).
 pub fn decode_thumbhash(hash: &str) -> Option<RenderImage> {
     let bytes = fast_thumbhash::base91_decode(hash).ok()?;
-    let (w, h, rgba) = fast_thumbhash::thumb_hash_to_rgba(&bytes).ok()?;
-    let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
-    Some(RenderImage::new(vec![Frame::new(to_bgra(buf))]))
+    // 64 px: smooth under the GPU's stretch, where 32 px shows bilinear creases.
+    let (w, h, bgra) = crate::thumbhash::decode_bgra(&bytes, 64)?;
+    let buf = image::RgbaImage::from_raw(w as u32, h as u32, bgra)?;
+    Some(RenderImage::new(vec![Frame::new(buf)]))
 }
 
 /// An animation's frames (GIF, animated WebP or APNG, sniffed from the bytes, not the name),
