@@ -56,7 +56,9 @@ adb shell run-as "$app" sh -c "'mkdir -p shared_prefs && echo \"<map><boolean na
 adb logcat -c
 if adb root >/dev/null 2>&1; then
   adb wait-for-device
-  adb shell am broadcast -a android.intent.action.BOOT_COMPLETED -p "$app" || true
+  adb shell run-as "$app" cat shared_prefs/vector_prefs.xml || true
+  # 0x20 includes stopped packages: the force-stop leaves the app stopped, which a real boot does not.
+  adb shell am broadcast -f 0x20 -a android.intent.action.BOOT_COMPLETED -p "$app" || true
   sleep 15
   echo "pid after boot: $(adb shell pidof "$app" || echo none)"
   adb shell dumpsys activity services "$app" | grep -E "ServiceRecord|isForeground" || echo "no service"
