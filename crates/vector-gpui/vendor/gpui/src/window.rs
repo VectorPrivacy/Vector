@@ -5271,8 +5271,8 @@ impl Window {
 
         // Nothing to see still costs a blend per pixel: a hover fill eased to zero, say.
         let bw = &quad.border_widths;
-        let no_border = quad.border_color.a <= 0. || bw.top.0 <= 0. && bw.right.0 <= 0. && bw.bottom.0 <= 0. && bw.left.0 <= 0.;
-        if quad.background.is_transparent() && no_border {
+        let no_border = quad.border_color.a < 0.5 / 255. || bw.top.0 <= 0. && bw.right.0 <= 0. && bw.bottom.0 <= 0. && bw.left.0 <= 0.;
+        if quad.background.is_invisible() && no_border {
             return;
         }
 

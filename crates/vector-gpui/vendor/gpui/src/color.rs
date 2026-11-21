@@ -936,6 +936,15 @@ impl Background {
         background
     }
 
+    /// Nothing an 8-bit target would show: every alpha rounds to zero.
+    pub(crate) fn is_invisible(&self) -> bool {
+        const NIL: f32 = 0.5 / 255.;
+        match self.tag {
+            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.a < NIL),
+            _ => self.solid.a < NIL,
+        }
+    }
+
     /// Returns whether the background color is transparent.
     pub fn is_transparent(&self) -> bool {
         match self.tag {
