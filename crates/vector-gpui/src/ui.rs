@@ -386,6 +386,7 @@ pub struct VectorApp {
     scanner: Option<qrscan_ops::Scanner>,
     /// Scanner frames off screen, for the atlas to let go of.
     retired_frames: Vec<Arc<gpui::RenderImage>>,
+    draw_hooked: bool,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -1214,6 +1215,7 @@ impl VectorApp {
             menu_trail: Vec::new(),
             scanner: None,
             retired_frames: Vec::new(),
+            draw_hooked: false,
             start: None,
             menu: None,
             menu_keys: None,
@@ -6904,9 +6906,18 @@ fn safe_area<E: IntoElement>(el: E, _: &Window) -> E {
 }
 
 impl VectorApp {
-    fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        #[cfg(feature = "devctl")]
-        let _timed = crate::devctl::Timed::start();
+    /// Every frame's upkeep, run before the root draws whether it renders or reuses its last
+    /// drawing around the panes that changed.
+    fn each_draw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shell = |app: &Self| {
+            (
+                app.popout.item.is_some(),
+                app.popup.is_some(),
+                (app.shortcode.is_some(), app.mention.is_some(), app.time_pick.is_some(), app.time_chip.is_some()),
+                app.video_window_full,
+            )
+        };
+        let before = shell(self);
         let me = cx.entity().downgrade();
         cx.defer(move |cx| crate::relayinfo::pump(me, cx));
         self.sync_menu_keys(window, cx);
@@ -7055,12 +7066,6 @@ impl VectorApp {
         if self.mini_animating() || self.pivx_animating() || self.archive.animating() || self.nexus.as_ref().is_some_and(|n| n.animating()) {
             window.request_animation_frame();
         }
-        let popout = self.popout_view(window, cx);
-        let launch = self.launch_view(cx);
-        let pick = self.nexus_picker_view(cx);
-        let perm = self.perm_prompt_view(cx);
-        let publish = self.publish_view(window, cx);
-        let pivx = self.pivx_dialog_view(window, cx);
         match self.rec.due() {
             Some(crate::recorder::Due::Locked) => self.rec.locked(),
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
@@ -7111,6 +7116,39 @@ impl VectorApp {
         if window.focused(cx).is_none() {
             window.focus(&self.root_focus, cx);
         }
+        // The chrome pane stands for what the root draws itself.
+        if shell(self) != before || window.view_redraws(self.panes.chrome.entity_id()) {
+            window.rerender(cx.entity_id());
+        }
+    }
+
+    fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        #[cfg(feature = "devctl")]
+        let _timed = crate::devctl::Timed::start();
+        if !self.draw_hooked {
+            self.draw_hooked = true;
+            let me = cx.entity().downgrade();
+            window.on_each_draw(move |window, cx| {
+                me.update(cx, |app, cx| app.each_draw(window, cx)).ok();
+            });
+            // A reused root skips its own pump: eases built at layout still ask for frames.
+            window.after_each_prepaint(|window, _| {
+                if kit::easing() {
+                    window.request_animation_frame();
+                }
+            });
+            window.cache_root(true);
+            self.each_draw(window, cx);
+        }
+        let rail_mode = self.rail_mode(window);
+        let slim = self.is_slim;
+        let list_full = clamp_list_w(self.list_pref, self.vw, rail_mode.width());
+        let popout = self.popout_view(window, cx);
+        let launch = self.launch_view(cx);
+        let pick = self.nexus_picker_view(cx);
+        let perm = self.perm_prompt_view(cx);
+        let publish = self.publish_view(window, cx);
+        let pivx = self.pivx_dialog_view(window, cx);
         let root = div()
             .track_focus(&self.root_focus)
             .on_action(cx.listener(|_, _: &crate::composer::Tab, window, cx| keyboard_step(false, window, cx)))

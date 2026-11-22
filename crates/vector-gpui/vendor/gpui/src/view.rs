@@ -701,7 +701,7 @@ fn prepaint_view(
 
 /// The slots a view dirty only for views inside it draws afresh, reusing the rest: `None`
 /// when that cannot be done (a dirty view it holds is not one of them, the slots' paint
-/// ranges are unknown, or a reused piece holds deferred draws, whose contents it cannot see).
+/// ranges are unknown, or a reused deferred draw hangs off a node the reuse does not carry).
 fn punch_holes(
     state: &ViewElementState,
     entity_id: EntityId,
@@ -722,20 +722,23 @@ fn punch_holes(
     if holes.len() != inside.len() {
         return None;
     }
-    let mut cursor = old.start.deferred_index();
+    let mut cursor = old.start.clone();
+    let mut pieces = Vec::with_capacity(holes.len() + 1);
+    let mut deferred = Vec::with_capacity(holes.len() + 1);
     for &i in &holes {
         let slot = &state.slots[i];
         let at = slot.prepaint_range.start.moved(base, &old.start);
-        if at.deferred_index() != cursor {
-            return None;
-        }
-        cursor = slot.prepaint_range.end.moved(base, &old.start).deferred_index();
+        pieces.push(cursor.dispatch_index()..at.dispatch_index());
+        deferred.push(cursor.deferred_index()..at.deferred_index());
+        cursor = slot.prepaint_range.end.moved(base, &old.start);
         let ctx = window.peek_element_state::<ViewElementState, _>(&slot.global_id, |s| s.prepaint_ctx.is_some() && s.paint_ctx.is_some());
         if ctx != Some(true) {
             return None;
         }
     }
-    (old.end.deferred_index() == cursor).then_some(holes)
+    pieces.push(cursor.dispatch_index()..old.end.dispatch_index());
+    deferred.push(cursor.deferred_index()..old.end.deferred_index());
+    deferred.into_iter().all(|d| window.deferred_within(d, &pieces)).then_some(holes)
 }
 
 /// Reuses `state`'s last drawing around `holes`, drawing those slots afresh where they were.

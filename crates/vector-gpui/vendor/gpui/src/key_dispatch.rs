@@ -101,12 +101,28 @@ pub(crate) struct ReusedSubtree {
 pub(crate) struct OpenReuse {
     stack: Vec<DispatchNodeId>,
     contains_focus: bool,
+    /// Each piece reused so far: its first old node, how many, and where they now start.
+    pieces: Vec<(usize, usize, usize)>,
+}
+
+impl OpenReuse {
+    /// Where an old node reused in one of the pieces so far now sits.
+    pub(crate) fn map(&self, old: DispatchNodeId) -> Option<DispatchNodeId> {
+        self.pieces
+            .iter()
+            .find(|(from, len, _)| (*from..from + len).contains(&old.0))
+            .map(|(from, _, to)| DispatchNodeId(to + old.0 - from))
+    }
 }
 
 impl DispatchNodeId {
     /// This node's place in a copy of the tree that moved nodes from `from` on to `to`.
     pub(crate) fn moved(self, from: usize, to: usize) -> Self {
         DispatchNodeId(to + self.0 - from)
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.0
     }
 }
 
@@ -324,6 +340,7 @@ impl DispatchTree {
     /// [`Self::reuse_subtree`] in pieces around holes drawn afresh: the nodes still open stay
     /// on the stack between pieces, so what follows a hole rejoins its old parents.
     pub fn reuse_open(&mut self, old_range: Range<usize>, source: &mut Self, focus: Option<FocusId>, open: &mut OpenReuse) {
+        open.pieces.push((old_range.start, old_range.len(), self.nodes.len()));
         for (source_node_id, source_node) in source.nodes.iter_mut().enumerate().skip(old_range.start).take(old_range.len()) {
             while let Some(ancestor) = open.stack.last() {
                 if source_node.parent == Some(*ancestor) {

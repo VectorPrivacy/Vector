@@ -1443,6 +1443,11 @@ pub struct Window {
     /// The last frame's ranges of a cached view drawn alone inside its parent's reuse.
     pub(crate) punch_from: Option<Range<PrepaintStateIndex>>,
     pub(crate) punch_paint_from: Option<Range<PaintIndex>>,
+    /// Views that draw afresh this frame rather than reuse around the views inside them.
+    pub(crate) unpunched: FxHashSet<EntityId>,
+    each_draw: Option<Box<dyn FnMut(&mut Window, &mut App)>>,
+    each_prepaint: Option<Box<dyn FnMut(&mut Window, &mut App)>>,
+    cache_root: bool,
     /// When content last scrolled under a pointer that stayed put.
     scrolled_under_pointer: Option<Instant>,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
@@ -2599,6 +2604,10 @@ impl Window {
             view_paints: Vec::new(),
             punch_from: None,
             punch_paint_from: None,
+            unpunched: FxHashSet::default(),
+            each_draw: None,
+            each_prepaint: None,
+            cache_root: false,
             scrolled_under_pointer: None,
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
@@ -4161,6 +4170,7 @@ impl Window {
         self.hard_refresh = false;
         self.data_dirty.clear();
         self.notified.clear();
+        self.unpunched.clear();
         self.invalidator.set_phase(DrawPhase::None);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
@@ -4320,7 +4330,20 @@ impl Window {
         #[cfg(feature = "profiler")]
         let request_layout_start = Instant::now();
         let phase_at = Instant::now();
-        let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
+        let root = self.root.as_ref().unwrap().clone();
+        let root_id = root.entity_id();
+        if let Some(mut each) = self.each_draw.take() {
+            self.with_rendered_view(root_id, |window| each(window, cx));
+            self.each_draw.get_or_insert(each);
+        }
+        let mut root_element = if self.cache_root {
+            {
+                use crate::Styled as _;
+                root.cached(crate::StyleRefinement::default().size_full()).into_any_element()
+            }
+        } else {
+            root.into_any_element()
+        };
         let root_layout_id = root_element.request_layout(self, cx);
         let requested_at = Instant::now();
         #[cfg(feature = "profiler")]
@@ -4338,6 +4361,10 @@ impl Window {
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
 
         self.prepaint_deferred_draws(cx);
+        if let Some(mut each) = self.each_prepaint.take() {
+            self.with_rendered_view(root_id, |window| each(window, cx));
+            self.each_prepaint.get_or_insert(each);
+        }
 
         let mut prompt_element = None;
         let mut active_drag_element = None;
@@ -4718,6 +4745,7 @@ impl Window {
             && !self.a11y.is_active()
             && self.element_zoom.is_none()
             && !self.notified.contains(&view)
+            && !self.unpunched.contains(&view)
             && !self.is_inspector_picking(cx)
     }
 
@@ -4750,6 +4778,30 @@ impl Window {
         self.mark_view_dirty(view);
     }
 
+    /// Renders `view` again in the frame being drawn, rather than reuse its drawing around the
+    /// views inside it; those that did not change still reuse theirs. Call it before prepaint.
+    pub fn rerender(&mut self, view: EntityId) {
+        self.mark_view_dirty(view);
+        self.unpunched.insert(view);
+    }
+
+    /// Runs `f` as the root view at the start of every draw, whether the root renders or reuses
+    /// its drawing: the place for per-frame work a cached root would otherwise skip.
+    pub fn on_each_draw(&mut self, f: impl FnMut(&mut Window, &mut App) + 'static) {
+        self.each_draw = Some(Box::new(f));
+    }
+
+    /// Runs `f` as the root view once every draw's prepaint is done, deferred draws included.
+    pub fn after_each_prepaint(&mut self, f: impl FnMut(&mut Window, &mut App) + 'static) {
+        self.each_prepaint = Some(Box::new(f));
+    }
+
+    /// Draws the root as a cached view: a frame dirty only for cached views inside it reuses
+    /// the rest of its drawing. Its render then runs only when it is notified or refreshed.
+    pub fn cache_root(&mut self, on: bool) {
+        self.cache_root = on;
+    }
+
     /// Whether `view` draws afresh this frame.
     pub fn view_redraws(&self, view: EntityId) -> bool {
         self.dirty_views.contains(&view)
@@ -4757,7 +4809,6 @@ impl Window {
 
     /// One piece of a cached view's reuse around views drawn afresh inside it.
     pub(crate) fn reuse_prepaint_open(&mut self, range: Range<PrepaintStateIndex>, open: &mut crate::key_dispatch::OpenReuse) {
-        debug_assert_eq!(range.start.deferred_draws_index, range.end.deferred_draws_index);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -4782,6 +4833,32 @@ impl Window {
             self.focus,
             open,
         );
+        let deferred = &self.rendered_frame.deferred_draws[range.start.deferred_draws_index..range.end.deferred_draws_index];
+        self.next_frame.deferred_draws.extend(deferred.iter().map(|d| DeferredDraw {
+            current_view: d.current_view,
+            parent_node: open.map(d.parent_node).unwrap_or(d.parent_node),
+            element_id_stack: d.element_id_stack.clone(),
+            text_style_stack: d.text_style_stack.clone(),
+            content_mask: d.content_mask,
+            rem_size: d.rem_size,
+            opacity: d.opacity,
+            input_muted: d.input_muted,
+            zoom: d.zoom,
+            priority: d.priority,
+            element: None,
+            absolute_offset: d.absolute_offset,
+            prepaint_range: d.prepaint_range.clone(),
+            paint_range: d.paint_range.clone(),
+            accessed_entities: d.accessed_entities.clone(),
+        }));
+    }
+
+    /// Whether every deferred draw recorded in `deferred` (indices of the last frame) hangs
+    /// off a node in one of `pieces`, so a reuse in those pieces can carry it.
+    pub(crate) fn deferred_within(&self, deferred: Range<usize>, pieces: &[Range<usize>]) -> bool {
+        self.rendered_frame.deferred_draws[deferred]
+            .iter()
+            .all(|d| pieces.iter().any(|p| p.contains(&d.parent_node.index())))
     }
 
     pub(crate) fn reuse_prepaint_close(&mut self, open: &mut crate::key_dispatch::OpenReuse) {
