@@ -495,6 +495,43 @@ struct WrapScratch {
 struct LineLayoutCacheState {
     previous_frame: FrameCache,
     current_frame: FrameCache,
+    /// Lines a frame stopped drawing, so a view drawn again (a chat reopened, a tab switched back)
+    /// reuses its shaping instead of shaping all its text in one frame.
+    retained: Retained,
+}
+
+/// Recently dropped layouts, each stamped with the frame it was last drawn in.
+#[derive(Default)]
+struct Retained {
+    frame: u32,
+    lines: FxHashMap<Arc<CacheKey>, (Arc<LineLayout>, u32)>,
+    wrapped_lines: FxHashMap<Arc<CacheKey>, (Arc<WrappedLineLayout>, u32)>,
+}
+
+/// A few screens of text, bounded in memory.
+const RETAINED_LINES: usize = 3072;
+const RETAINED_WRAPPED_LINES: usize = 1536;
+
+/// Drops the oldest entries until `map` holds at most `cap`.
+fn trim_retained<V>(map: &mut FxHashMap<Arc<CacheKey>, (V, u32)>, cap: usize) {
+    if map.len() <= cap {
+        return;
+    }
+    // Down to three quarters, so the trim runs rarely rather than every frame at the cap.
+    let keep = cap * 3 / 4;
+    let mut stamps: Vec<u32> = map.values().map(|(_, s)| *s).collect();
+    let drop = stamps.len() - keep;
+    let (_, cutoff, _) = stamps.select_nth_unstable(drop - 1);
+    let cutoff = *cutoff;
+    let mut over = drop;
+    map.retain(|_, (_, s)| {
+        if *s < cutoff || (*s == cutoff && over > 0) {
+            over = over.saturating_sub(1);
+            false
+        } else {
+            true
+        }
+    });
 }
 
 #[derive(Default)]
@@ -549,6 +586,7 @@ impl LineLayoutCache {
         let LineLayoutCacheState {
             previous_frame,
             current_frame,
+            ..
         } = &mut *state;
 
         for key in &previous_frame.used_lines[range.start.lines_index..range.end.lines_index] {
@@ -586,10 +624,15 @@ impl LineLayoutCache {
         let LineLayoutCacheState {
             previous_frame,
             current_frame,
+            retained,
         } = &mut *self.state.borrow_mut();
         std::mem::swap(previous_frame, current_frame);
-        current_frame.lines.clear();
-        current_frame.wrapped_lines.clear();
+        retained.frame = retained.frame.wrapping_add(1);
+        let stamp = retained.frame;
+        retained.lines.extend(current_frame.lines.drain().map(|(k, v)| (k, (v, stamp))));
+        retained.wrapped_lines.extend(current_frame.wrapped_lines.drain().map(|(k, v)| (k, (v, stamp))));
+        trim_retained(&mut retained.lines, RETAINED_LINES);
+        trim_retained(&mut retained.wrapped_lines, RETAINED_WRAPPED_LINES);
         current_frame.used_lines.clear();
         current_frame.used_wrapped_lines.clear();
     }
@@ -622,7 +665,11 @@ impl LineLayoutCache {
         drop(state);
 
         let mut state = self.state.borrow_mut();
-        let previous_frame_entry = state.previous_frame.wrapped_lines.remove_entry(key);
+        let previous_frame_entry = state
+            .previous_frame
+            .wrapped_lines
+            .remove_entry(key)
+            .or_else(|| state.retained.wrapped_lines.remove_entry(key).map(|(k, (v, _))| (k, v)));
         if let Some((key, layout)) = previous_frame_entry {
             state
                 .current_frame
@@ -698,8 +745,13 @@ impl LineLayoutCache {
         let LineLayoutCacheState {
             previous_frame,
             current_frame,
+            retained,
         } = &mut *state;
-        if let Some((key, layout)) = previous_frame.lines.remove_entry(key) {
+        if let Some((key, layout)) = previous_frame
+            .lines
+            .remove_entry(key)
+            .or_else(|| retained.lines.remove_entry(key).map(|(k, (v, _))| (k, v)))
+        {
             current_frame.lines.insert(key.clone(), layout.clone());
             current_frame.used_lines.push(key);
             layout
