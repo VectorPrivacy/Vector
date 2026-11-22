@@ -238,6 +238,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             v["active"] = json!(window.is_window_active());
             let ph = gpui::draw_stats::phases_take();
             v["frames"]["request_layout_prepaint_paint_ms"] = json!(ph.map(|n| n as f64 / 1e6));
+            v["frames"]["list_build_layout_prepaint_ms"] = json!(gpui::draw_stats::list_take().map(|n| n as f64 / 1e6));
             let (built, replayed) = gpui::draw_stats::keyed_take();
             v["frames"]["keyed_built_replayed"] = json!([built, replayed]);
             let p = &app.panes;

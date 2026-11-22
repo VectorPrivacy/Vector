@@ -538,16 +538,17 @@ impl Element for Img {
                 Some(None) => true,
                 None => false,
             };
+            // A flip under the pointer: the subtree it is in draws afresh there anyway.
             if moving != hovered.get() {
                 hovered.set(moving);
-                cx.notify(view);
+                cx.notify_motion(view);
             }
             if let Some(Some(hitbox)) = host {
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != hovered.get()
                     {
                         hovered.set(!hovered.get());
-                        cx.notify(view);
+                        cx.notify_motion(view);
                     }
                 });
             }

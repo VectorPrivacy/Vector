@@ -172,15 +172,30 @@ fn codeblock_label(lang: &str) -> String {
 
 /// `truncateEmojiAware`: at most `max` graphemes, a `:shortcode:` priced as two.
 fn truncate(text: &str, max: usize) -> String {
+    // A cut keeps a `:shortcode:` whole or drops it, never leaves `:ca…` where a custom emoji draws.
+    let codes = crate::markdown::shortcodes(text);
+    let mut code = codes.iter().peekable();
     let mut used = 0;
     let mut out = String::new();
-    for g in text.graphemes(true) {
-        if used + 1 > max {
+    let mut skip_to = 0;
+    for (at, g) in text.grapheme_indices(true) {
+        if at < skip_to {
+            continue;
+        }
+        while code.next_if(|(_, end)| *end <= at).is_some() {}
+        let (unit, cost) = match code.peek() {
+            Some(&&(start, end)) if start == at => {
+                skip_to = end;
+                (&text[start..end], 2)
+            }
+            _ => (g, 1),
+        };
+        if used + cost > max {
             out.push('…');
             return out;
         }
-        out.push_str(g);
-        used += 1;
+        out.push_str(unit);
+        used += cost;
     }
     out
 }
@@ -356,4 +371,20 @@ pub fn with_customs(atoms: Vec<Atom>, custom: &dyn Fn(&str) -> Option<crate::med
         }
     }
     out
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate;
+
+    #[test]
+    fn a_shortcode_is_kept_whole_or_dropped() {
+        let line = "You are the only one I haven't unfriended yet. :cat_sleep:";
+        assert_eq!(truncate(line, 50), line);
+        assert_eq!(truncate(line, 48), "You are the only one I haven't unfriended yet. …");
+        assert_eq!(truncate(line, 49), line);
+        assert_eq!(truncate("ab :x: cd", 4), "ab …");
+        assert_eq!(truncate("ab :x: cd", 5), "ab :x:…");
+        assert_eq!(truncate("10:30:00 ok", 4), "10:3…");
+    }
 }

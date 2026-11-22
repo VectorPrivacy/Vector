@@ -1244,7 +1244,8 @@ impl Element for Inline {
             }
         }
         if let Some(key) = &self.select {
-            crate::select::place(key, &self.atoms, laid, bounds);
+            let (key, atoms, laid) = (key.clone(), self.atoms.clone(), laid.clone());
+            window.place(bounds, Rc::new(move |bounds| crate::select::place(&key, &atoms, &laid, bounds)));
         }
         if window.is_a11y_active() {
             window.report_a11y_text(&spoken(&self.atoms), bounds);

@@ -1094,6 +1094,8 @@ pub(crate) struct Frame {
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
     pub(crate) animated: Vec<AnimatedSprite>,
+    /// Where things told of their place were drawn, and what to tell them; see [`Window::place`].
+    pub(crate) places: Vec<(Bounds<Pixels>, Rc<dyn Fn(Bounds<Pixels>)>)>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1152,6 +1154,7 @@ impl Frame {
             tooltip_requests: Vec::new(),
             cursor_styles: Vec::new(),
             animated: Vec::new(),
+            places: Vec::new(),
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
@@ -1177,6 +1180,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.cursor_styles.clear();
         self.animated.clear();
+        self.places.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
@@ -4653,6 +4657,28 @@ impl Window {
     /// did, so what it hands the views inside is unchanged.
     pub(crate) fn refreshes_inside(&self, view: EntityId) -> bool {
         self.refreshing || no_replay() || self.notified.contains(&view)
+    }
+
+    /// Tells `told` where something is drawn, now and whenever a keyed subtree holding it is
+    /// replayed elsewhere, for what keeps its own record of where things are (text selection).
+    /// Call during prepaint.
+    pub fn place(&mut self, bounds: Bounds<Pixels>, told: Rc<dyn Fn(Bounds<Pixels>)>) {
+        told(bounds);
+        self.next_frame.places.push((bounds, told));
+    }
+
+    pub(crate) fn places_index(&self) -> usize {
+        self.next_frame.places.len()
+    }
+
+    /// Tells the places recorded in `range` of the last frame that they moved by `by`.
+    pub(crate) fn replay_places(&mut self, range: Range<usize>, by: Point<Pixels>) {
+        for i in range {
+            let Some((bounds, told)) = self.rendered_frame.places.get(i).cloned() else { break };
+            let bounds = Bounds { origin: bounds.origin + by, size: bounds.size };
+            told(bounds);
+            self.next_frame.places.push((bounds, told));
+        }
     }
 
     /// Runs `f` clipped by nothing, so what it draws carries its own masks alone.
@@ -8414,6 +8440,13 @@ impl Window {
     }
 
     #[inline(never)]
+    /// Reads an element's state without taking it, as its next prepaint will.
+    pub(crate) fn peek_element_state<S: 'static, R>(&self, global_id: &GlobalElementId, f: impl FnOnce(&S) -> R) -> Option<R> {
+        let key = (global_id.clone(), TypeId::of::<S>());
+        let any = self.next_frame.element_states.get(&key).or_else(|| self.rendered_frame.element_states.get(&key))?;
+        Some(f(any.inner.downcast_ref::<Option<S>>()?.as_ref()?))
+    }
+
     fn take_element_state(
         &mut self,
         global_id: &GlobalElementId,
@@ -11541,8 +11574,22 @@ fn sub_tile(tile: AtlasTile, visible_bounds: Bounds<Pixels>, image_bounds: Bound
 
 /// Whole-window draws, the time they took, and presents (a draw's or a re-shown scene's), for a
 /// dev build's own measurements.
+thread_local! {
+    static KEYED_VOLATILE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The keyed subtree being built shows something that changes without a notify (a picture
+/// still loading, a window onto a long block): it draws afresh next frame rather than replay.
+pub fn keyed_volatile() {
+    KEYED_VOLATILE.with(|v| v.set(v.get() + 1));
+}
+
+pub(crate) fn keyed_volatile_count() -> u64 {
+    KEYED_VOLATILE.with(Cell::get)
+}
+
 /// `GPUI_NO_REPLAY=1` draws every keyed subtree and cached view afresh, to compare against.
-pub(crate) fn no_replay() -> bool {
+pub fn no_replay() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("GPUI_NO_REPLAY").is_some())
 }
@@ -11611,6 +11658,17 @@ pub mod draw_stats {
     /// Each timed view's `(type, entity, [prepaint, paint] nanoseconds, prepaints)` since the last call.
     pub fn views_take() -> Vec<(&'static str, u64, [u64; 2], u32)> {
         std::mem::take(&mut *VIEWS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    static LIST: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+    pub(crate) fn list(phase: usize, took: std::time::Duration) {
+        LIST[phase].fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// Nanoseconds lists spent building, laying out and prepainting the items they draw.
+    pub fn list_take() -> [u64; 3] {
+        LIST.each_ref().map(|p| p.swap(0, Ordering::Relaxed))
     }
 
     static KEYED_BUILT: AtomicU64 = AtomicU64::new(0);

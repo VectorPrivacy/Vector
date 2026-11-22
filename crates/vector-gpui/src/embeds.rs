@@ -916,6 +916,8 @@ fn author(env: &Env, e: &Embed, key: &str, send: &Send) -> AnyElement {
                 ),
         )
         .when(at > 0, |d| {
+            // Its "2m"-style time ages with the clock, which notifies nothing.
+            gpui::keyed_volatile();
             d.child(
                 div()
                     .flex_shrink_0()

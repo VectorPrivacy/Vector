@@ -1528,6 +1528,8 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
     let built = if count < CODE_WINDOW_FROM {
         0..count
     } else {
+        // Which lines it builds follows the scroll, which a replay would not.
+        gpui::keyed_volatile();
         let (a, b) = scroll.window.get();
         a.min(count)..b.min(count).max(a.min(count))
     };

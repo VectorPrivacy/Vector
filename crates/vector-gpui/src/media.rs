@@ -314,8 +314,12 @@ impl Media {
         self.asked = Some(now);
         self.used.insert((1, key.to_string()), now);
         if let Some(s) = self.images.get(key) {
+            if matches!(s, Slot::Loading) {
+                gpui::keyed_volatile();
+            }
             return s.clone();
         }
+        gpui::keyed_volatile();
         self.images.insert(key.to_string(), Slot::Loading);
         let (hash, path) = match source {
             Source::Held(h) => (Some(h), None),
@@ -372,8 +376,12 @@ impl Media {
         self.asked = Some(now);
         self.used.insert((2, url.to_string()), now);
         if let Some(l) = self.linked.get(url) {
+            if matches!(l, Linked::Loading(_)) {
+                gpui::keyed_volatile();
+            }
             return l.clone();
         }
+        gpui::keyed_volatile();
         self.linked.insert(url.to_string(), Linked::Loading(None));
         self.linked_wants.push(url.to_string());
         Linked::Loading(None)
@@ -541,8 +549,12 @@ impl Media {
     pub fn custom(&mut self, url: &str, icon: bool) -> Custom {
         self.used.insert((3, url.to_string()), std::time::Instant::now());
         if let Some(c) = self.custom.get(url) {
+            if matches!(c, Custom::Pending) {
+                gpui::keyed_volatile();
+            }
             return c.clone();
         }
+        gpui::keyed_volatile();
         self.custom.insert(url.to_string(), Custom::Pending);
         self.custom_wants.push((url.to_string(), icon));
         Custom::Pending

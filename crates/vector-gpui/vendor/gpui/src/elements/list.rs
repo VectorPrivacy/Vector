@@ -1104,8 +1104,12 @@ impl StateInner {
             {
                 (size, self.is_item_ready(item_index, cx))
             } else {
+                let at = std::time::Instant::now();
                 let mut element = render_item(item_index, window, cx);
+                let built = at.elapsed();
                 let element_size = element.layout_as_root(available_item_space, window, cx);
+                crate::draw_stats::list(0, built);
+                crate::draw_stats::list(1, at.elapsed() - built);
                 let ready = self.is_item_ready(item_index, cx);
                 if ix == 0
                     && ready
@@ -1340,7 +1344,9 @@ impl StateInner {
                     };
                     window.with_content_mask(Some(ContentMask::new(bounds)), |window| {
                         window.scroll_parents.push(crate::window::ScrollParent::List);
+                        let timed = std::time::Instant::now();
                         item.element.prepaint_at(at, window, cx);
+                        crate::draw_stats::list(2, timed.elapsed());
                         window.scroll_parents.pop();
                     });
 

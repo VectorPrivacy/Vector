@@ -5110,8 +5110,8 @@ impl VectorApp {
                     self.want_delete_meta(&id, cx);
                     self.hovered = Some(id);
                     self.hover_in = 1;
-                    // Only the message list shows it.
-                    crate::pane::notify(&self.panes.timeline, cx);
+                    // Only the message list shows it, and only the rows keyed on it.
+                    crate::pane::notify_keyed(&self.panes.timeline, cx);
                 } else {
                     self.hover_in = self.hover_in.saturating_add(1);
                 }
@@ -5138,7 +5138,7 @@ impl VectorApp {
                                 && this.hover_in == 0
                             {
                                 this.hovered = None;
-                                crate::pane::notify(&this.panes.timeline, cx);
+                                crate::pane::notify_keyed(&this.panes.timeline, cx);
                             }
                         })
                         .ok();
@@ -10121,78 +10121,54 @@ impl VectorApp {
         let app = cx.entity().downgrade();
         let scroller = self.timeline.clone();
         let cursor = (self.timeline_ring && self.timeline_focus.is_focused(window)).then(|| self.cursor_message(store, &id)).flatten();
-        let list = list(self.timeline.clone(), move |i, window, cx| {
-            let rows_store = rows_store.borrow();
-            let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
-                return div().into_any_element();
-            };
-            let revealed = revealed.borrow();
-            let fail_reasons = fail_reasons.borrow();
-            let delete_meta = delete_meta.borrow();
-            let ctx = timeline::Ctx {
-                by_id: &msg_index,
-                anchors: &anchors,
-                rules: rules.as_deref(),
-                store: &rows_store,
-                chat,
-                revealed: &revealed,
-                clock,
-                on_act: on_act.clone(),
-                hovered: hovered.as_deref(),
-                hover_head,
-                replying: replying.as_deref(),
-                picker: picker.as_deref(),
-                fail_reasons: &fail_reasons,
-                delete_meta: &delete_meta,
-                media: &media,
-                scale: window.scale_factor(),
-                held: rows_store.is_request(chat),
-                invites: &invites,
-                jumped: jumped
-                    .as_ref()
-                    .map(|(id, _, shown)| (id.as_str(), shown.get().map_or(0., |t| t.elapsed().as_secs_f32()))),
-                commands: cmd_names.as_deref(),
-                content_w,
-                vw,
-                cursor: cursor.as_deref(),
-                swiped: swiped.as_ref().map(|(id, s)| (id.as_str(), *s)),
-            };
-            if ctx.jumped.is_some_and(|(id, _)| {
-                chat.messages
-                    .get(match row {
-                        Row::Message { index, .. } => *index,
-                        _ => usize::MAX,
-                    })
-                    .is_some_and(|m| m.id == id)
-            }) {
-                if let Some((_, _, shown)) = &jumped
-                    && shown.get().is_none()
-                {
-                    shown.set(Some(std::time::Instant::now()));
-                }
-                window.request_animation_frame();
-            }
-            // A divider's 10px margins stand in for the row's own above it.
-            let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
-            let el = timeline_row(&ctx, row, after_message);
-            // `SlideIn`: over 0.75 s from 100px left, growing from its bottom-left corner.
-            let el = match (&arrived, row) {
-                (Some((id, at)), Row::Message { index, .. }) if chat.messages.get(*index).is_some_and(|m| &m.id == id) => {
-                    window.request_animation_frame();
-                    let t = kit::bezier(0.46, 0.03, 0.52, 0.96)((at.elapsed().as_secs_f32() / 0.75).min(1.));
-                    let grown = gpui::zoom(el).origin(0., 1.).scale(t).opacity(t);
-                    div().w_full().relative().left(px(-100. * (1. - t))).child(grown).into_any_element()
-                }
-                _ => el,
-            };
-            // `.chat-rows > *:last-child`: clear of the typing strip.
-            let el = if i + 1 == rows.len() {
-                div().pb(px(33.)).child(el).into_any_element()
-            } else {
-                el
-            };
-            // The list's top padding scrolls with it, so rows pass under the header's fade.
-            let el = if i == 0 { div().pt(px(top_pad)).child(el).into_any_element() } else { el };
+        let row_rows = rows.clone();
+        let (rows_media, rows_jumped) = (media.clone(), jumped.clone());
+        // Builds row `i`'s context and hands it on; false when the row is gone.
+        let rows_view: Rc<dyn Fn(usize, f32, &mut dyn FnMut(&timeline::Ctx, &Row, bool)) -> bool> =
+            Rc::new(move |i, scale, f| {
+                let rows = &row_rows;
+                let rows_store = rows_store.borrow();
+                let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
+                    return false;
+                };
+                let revealed = revealed.borrow();
+                let fail_reasons = fail_reasons.borrow();
+                let delete_meta = delete_meta.borrow();
+                let ctx = timeline::Ctx {
+                    by_id: &msg_index,
+                    anchors: &anchors,
+                    rules: rules.as_deref(),
+                    store: &rows_store,
+                    chat,
+                    revealed: &revealed,
+                    clock,
+                    on_act: on_act.clone(),
+                    hovered: hovered.as_deref(),
+                    hover_head,
+                    replying: replying.as_deref(),
+                    picker: picker.as_deref(),
+                    fail_reasons: &fail_reasons,
+                    delete_meta: &delete_meta,
+                    media: &rows_media,
+                    scale,
+                    held: rows_store.is_request(chat),
+                    invites: &invites,
+                    jumped: rows_jumped
+                        .as_ref()
+                        .map(|(id, _, shown)| (id.as_str(), shown.get().map_or(0., |t| t.elapsed().as_secs_f32()))),
+                    commands: cmd_names.as_deref(),
+                    content_w,
+                    vw,
+                    cursor: cursor.as_deref(),
+                    swiped: swiped.as_ref().map(|(id, s)| (id.as_str(), *s)),
+                };
+                // A divider's 10px margins stand in for the row's own above it.
+                let after_message = i > 0 && matches!(rows[i - 1], Row::Message { .. });
+                f(&ctx, row, after_message);
+                true
+            });
+        // Starts what the rows just built asked for: decodes, fetches, probes.
+        let drain: Rc<dyn Fn(&mut gpui::App)> = Rc::new(move |cx| {
             crate::media::pump(&media, app_media.clone(), live, cx);
             let packs = std::mem::take(&mut media.borrow_mut().packs.queue);
             if !packs.is_empty() {
@@ -10281,6 +10257,101 @@ impl VectorApp {
                     .ok();
                 });
             }
+        });
+        // The width a row is measured at: the list's, once it has laid out.
+        let row_w = self.timeline.viewport_bounds().size.width;
+        let list = list(self.timeline.clone(), move |i, window, cx| {
+            let mut jumped_here = false;
+            let mut arrived_row = None;
+            let mut ident = None;
+            let found = rows_view(i, window.scale_factor(), &mut |ctx, row, after_message| {
+                let chat = ctx.chat;
+                if ctx.jumped.is_some_and(|(id, _)| {
+                    chat.messages
+                        .get(match row {
+                            Row::Message { index, .. } => *index,
+                            _ => usize::MAX,
+                        })
+                        .is_some_and(|m| m.id == id)
+                }) {
+                    if let Some((_, _, shown)) = &jumped
+                        && shown.get().is_none()
+                    {
+                        shown.set(Some(std::time::Instant::now()));
+                    }
+                    jumped_here = true;
+                }
+                arrived_row = match (&arrived, row) {
+                    (Some((id, _)), Row::Message { index, .. }) => Some(chat.messages.get(*index).is_some_and(|m| &m.id == id)),
+                    _ => Some(false),
+                };
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                let mut key = 0;
+                match row {
+                    Row::Message { index, first, run, shown } => {
+                        let id = chat.messages.get(*index).map(|m| m.id.as_str());
+                        id.hash(&mut h);
+                        (first, run, shown).hash(&mut h);
+                        // Hover redraws only the rows it shows on: the one under the pointer and its streak's head.
+                        key = (id.is_some() && ctx.hovered == id) as u64 | ((ctx.hover_head == Some(*index)) as u64) << 1;
+                    }
+                    Row::System { index, count } => (1u8, index, count).hash(&mut h),
+                    _ => (2u8, i).hash(&mut h),
+                }
+                after_message.hash(&mut h);
+                ident = Some((h.finish(), key));
+            });
+            if !found {
+                return div().into_any_element();
+            }
+            if jumped_here {
+                window.request_animation_frame();
+            }
+            let id = ident.map(|(ident, _)| gpui::ElementId::NamedInteger("tl-row".into(), ident));
+            // Under `GPUI_NO_REPLAY` rows draw as plain elements, so an A/B shows layout too.
+            let el = match ident.filter(|_| row_w > px(0.) && !gpui::no_replay()) {
+                // A row redraws when the timeline's data changes; a scroll only moves its last drawing.
+                Some((_, key)) => {
+                    let (view, drain) = (rows_view.clone(), drain.clone());
+                    gpui::keyed_measured(id.unwrap_or_else(|| "tl-row".into()), key, row_w, move |window, cx| {
+                        let mut el = None;
+                        view(i, window.scale_factor(), &mut |ctx, row, after_message| el = Some(timeline_row(ctx, row, after_message)));
+                        drain(cx);
+                        el.unwrap_or_else(|| div().into_any_element())
+                    })
+                    .into_any_element()
+                }
+                None => {
+                    let mut el = None;
+                    rows_view(i, window.scale_factor(), &mut |ctx, row, after_message| el = Some(timeline_row(ctx, row, after_message)));
+                    let el = el.unwrap_or_else(|| div().into_any_element());
+                    // Under the id a keyed row has, so its state (hover above all) carries across.
+                    match id {
+                        Some(id) => div().id(id).child(el).into_any_element(),
+                        None => el,
+                    }
+                }
+            };
+            // `SlideIn`: over 0.75 s from 100px left, growing from its bottom-left corner.
+            let el = match (&arrived, arrived_row) {
+                (Some((_, at)), Some(true)) => {
+                    window.request_animation_frame();
+                    let t = kit::bezier(0.46, 0.03, 0.52, 0.96)((at.elapsed().as_secs_f32() / 0.75).min(1.));
+                    let grown = gpui::zoom(el).origin(0., 1.).scale(t).opacity(t);
+                    div().w_full().relative().left(px(-100. * (1. - t))).child(grown).into_any_element()
+                }
+                _ => el,
+            };
+            // `.chat-rows > *:last-child`: clear of the typing strip.
+            let el = if i + 1 == rows.len() {
+                div().pb(px(33.)).child(el).into_any_element()
+            } else {
+                el
+            };
+            // The list's top padding scrolls with it, so rows pass under the header's fade.
+            let el = if i == 0 { div().pt(px(top_pad)).child(el).into_any_element() } else { el };
+            drain(cx);
             el
         })
         .size_full();
@@ -21475,6 +21546,7 @@ impl VectorApp {
             "timeline_items": self.timeline.item_count(),
             "scroll": [top.item_ix, f32::from(top.offset_in_item)],
             "following": self.timeline.is_following_tail(),
+            "hovered": self.hovered.is_some(),
             "read_anchor": format!("{:?}", self.read_anchor),
             "unread_jump": self.unread_jump.as_ref().map(|j| serde_json::json!({ "anchor": j.anchor, "count": j.count, "status": j.status, "paused": j.paused })),
             "history_done": self.open.as_ref().is_some_and(|o| self.history_done.contains(o.as_ref())),

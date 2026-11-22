@@ -79,3 +79,8 @@ pub fn cached(
 pub fn notify(pane: &Entity<Pane>, cx: &mut gpui::App) {
     pane.update(cx, |_, cx| cx.notify());
 }
+
+/// Redraw `pane` for a change its keyed rows carry in their keys: the rest replay.
+pub fn notify_keyed(pane: &Entity<Pane>, cx: &mut gpui::App) {
+    cx.notify_motion(pane.entity_id());
+}

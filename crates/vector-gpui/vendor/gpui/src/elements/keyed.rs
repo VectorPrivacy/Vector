@@ -24,7 +24,20 @@ pub fn keyed(
     style: StyleRefinement,
     build: impl FnOnce(&mut Window, &mut App) -> AnyElement + 'static,
 ) -> Keyed {
-    Keyed { id: id.into(), key, style, build: Some(Box::new(build)) }
+    Keyed { id: id.into(), key, style, build: Some(Box::new(build)), measure: None }
+}
+
+/// As [`keyed`], for a list item of any height at `width`: its height is measured when built
+/// and kept while it replays. Laid out only as a list lays its items out, during prepaint.
+pub fn keyed_measured(
+    id: impl Into<ElementId>,
+    key: u64,
+    width: Pixels,
+    build: impl FnOnce(&mut Window, &mut App) -> AnyElement + 'static,
+) -> Keyed {
+    let mut style = StyleRefinement::default();
+    style.size.width = Some(width.into());
+    Keyed { id: id.into(), key, style, build: Some(Box::new(build)), measure: Some(width) }
 }
 
 /// See [`keyed`].
@@ -33,6 +46,15 @@ pub struct Keyed {
     key: u64,
     style: StyleRefinement,
     build: Option<Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement>>,
+    /// Measured at this width, the height its build lays out to.
+    measure: Option<Pixels>,
+}
+
+/// A measured build, made while laying out: drawn this frame, not replayed.
+pub struct Prebuilt {
+    element: AnyElement,
+    accessed: FxHashSet<EntityId>,
+    moving: bool,
 }
 
 struct KeyedState {
@@ -52,13 +74,22 @@ struct KeyedState {
     pinned: bool,
     /// Asked for another frame while drawn: it is animating, so it draws afresh.
     moving: bool,
+    /// What it told of their place, in the frame it was drawn in.
+    places: Range<usize>,
 }
 
 /// `element` filling `size`, as it would in the slot it was laid out for: as a layout root of
 /// its own, a box with no width shrinks to its content.
-fn sized(element: AnyElement, size: Size<Pixels>) -> AnyElement {
+fn sized(element: AnyElement, size: Size<Option<Pixels>>) -> AnyElement {
     use crate::{IntoElement, ParentElement, Styled};
-    crate::div().w(size.width).h(size.height).flex().flex_col().child(element).into_any_element()
+    let mut boxed = crate::div().flex().flex_col();
+    if let Some(w) = size.width {
+        boxed = boxed.w(w);
+    }
+    if let Some(h) = size.height {
+        boxed = boxed.h(h);
+    }
+    boxed.child(element).into_any_element()
 }
 
 /// How this frame draws a keyed subtree.
@@ -72,7 +103,7 @@ pub enum KeyedDraw {
 }
 
 impl Element for Keyed {
-    type RequestLayoutState = ();
+    type RequestLayoutState = Option<Prebuilt>;
     type PrepaintState = Option<KeyedDraw>;
 
     fn id(&self) -> Option<ElementId> {
@@ -85,14 +116,48 @@ impl Element for Keyed {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, ()) {
+    ) -> (LayoutId, Option<Prebuilt>) {
         let mut style = Style::default();
         style.refine(&self.style);
-        (window.request_layout(style, None, cx), ())
+        let Some(width) = self.measure else {
+            return (window.request_layout(style, None, cx), None);
+        };
+        let (key, draw_count) = (self.key, window.draw_count);
+        let kept = window.keyed_may_replay()
+            && id
+                .and_then(|id| {
+                    window.peek_element_state::<KeyedState, _>(id, |s| {
+                        (s.key == key && s.drawn + 1 == draw_count && !s.moving && s.bounds.size.width == width)
+                            .then_some(s.bounds.size.height)
+                    })
+                })
+                .flatten()
+                .is_some_and(|height| {
+                    style.size.height = height.into();
+                    true
+                });
+        if kept {
+            return (window.request_layout(style, None, cx), None);
+        }
+        let Some(build) = self.build.take() else {
+            return (window.request_layout(style, None, cx), None);
+        };
+        let (asks, volatile) = (window.keyed_asks.get(), crate::keyed_volatile_count());
+        let ((element, size), accessed) = window.keyed_root(|window| {
+            cx.detect_accessed_entities(|cx| {
+                let mut element = sized(build(window, cx), Size { width: Some(width), height: None });
+                let space = Size { width: AvailableSpace::Definite(width), height: AvailableSpace::MinContent };
+                let size = element.layout_as_root(space, window, cx);
+                (element, size)
+            })
+        });
+        let moving = window.keyed_asks.get() != asks || crate::keyed_volatile_count() != volatile;
+        style.size.height = size.height.into();
+        (window.request_layout(style, None, cx), Some(Prebuilt { element, accessed, moving }))
     }
 
     fn prepaint(
@@ -100,14 +165,25 @@ impl Element for Keyed {
         id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
+        prebuilt: &mut Option<Prebuilt>,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<KeyedDraw> {
-        let build = self.build.take()?;
+        let prebuilt = prebuilt.take();
+        let build = self.build.take();
+        if prebuilt.is_none() && build.is_none() {
+            return None;
+        }
         if window.element_zoom.is_some() || window.is_inspector_picking(cx) {
-            let mut element = sized(build(window, cx), bounds.size);
-            element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+            let mut element = match (prebuilt, build) {
+                (Some(p), _) => p.element,
+                (None, Some(build)) => {
+                    let mut element = sized(build(window, cx), bounds.size.map(Some));
+                    element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                    element
+                }
+                (None, None) => return None,
+            };
             element.prepaint_at(bounds.origin, window, cx);
             return Some(KeyedDraw::Plain(element));
         }
@@ -119,7 +195,7 @@ impl Element for Keyed {
         let may_replay = window.keyed_may_replay();
         let scale = window.scale_factor();
         window.with_element_state::<KeyedState, _>(id.unwrap(), |state, window| {
-            if let Some(mut state) = state {
+            if let Some(mut state) = state.filter(|_| prebuilt.is_none()) {
                 let by = bounds.origin - state.bounds.origin;
                 // Text sits on whole device pixels; a part-pixel move would blur it.
                 let whole = |v: Pixels| ((v.0 * scale) - (v.0 * scale).round()).abs() < 1e-3;
@@ -137,9 +213,12 @@ impl Element for Keyed {
                     && (!moved || (!state.pinned && whole(by.x) && whole(by.y)))
                 {
                     let start = window.prepaint_index();
+                    let places = window.places_index();
                     window.keyed_outer.push(outer.clone());
                     window.reuse_prepaint_shifted(state.prepaint_range.clone(), by);
+                    window.replay_places(state.places.clone(), by);
                     window.keyed_outer.pop();
+                    state.places = places..window.places_index();
                     cx.entities.extend_accessed(state.accessed_entities.iter().copied());
                     state.prepaint_range = start..window.prepaint_index();
                     state.bounds = bounds;
@@ -150,17 +229,33 @@ impl Element for Keyed {
             }
             crate::draw_stats::keyed(false);
             let start = window.prepaint_index();
-            let asks = window.keyed_asks.get();
+            let places = window.places_index();
+            let (asks, volatile) = (window.keyed_asks.get(), crate::keyed_volatile_count());
+            let mut moving = prebuilt.as_ref().is_some_and(|p| p.moving);
+            let mut accessed_entities = FxHashSet::default();
+            let (prebuilt, build) = (prebuilt.map(|p| {
+                accessed_entities = p.accessed;
+                p.element
+            }), build);
             window.keyed_outer.push(outer.clone());
-            let (element, accessed_entities) = window.keyed_root(|window| {
+            let (element, accessed) = window.keyed_root(|window| {
                 cx.detect_accessed_entities(|cx| {
-                    let mut element = sized(build(window, cx), bounds.size);
-                    element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                    let mut element = match (prebuilt, build) {
+                        (Some(element), _) => element,
+                        (None, Some(build)) => {
+                            let mut element = sized(build(window, cx), bounds.size.map(Some));
+                            element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                            element
+                        }
+                        (None, None) => unreachable!("checked above"),
+                    };
                     element.prepaint_at(bounds.origin, window, cx);
                     element
                 })
             });
+            accessed_entities.extend(accessed);
             window.keyed_outer.pop();
+            moving |= window.keyed_asks.get() != asks || crate::keyed_volatile_count() != volatile;
             let end = window.prepaint_index();
             let pinned = window.prepaint_pins(&start, &end);
             let state = KeyedState {
@@ -175,7 +270,8 @@ impl Element for Keyed {
                 accessed_entities,
                 hovered: bounds.contains(&mouse),
                 pinned,
-                moving: window.keyed_asks.get() != asks,
+                moving,
+                places: places..window.places_index(),
             };
             (Some(KeyedDraw::Built(element)), state)
         })
@@ -186,7 +282,7 @@ impl Element for Keyed {
         id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
+        _request_layout: &mut Option<Prebuilt>,
         draw: &mut Option<KeyedDraw>,
         window: &mut Window,
         cx: &mut App,
@@ -203,12 +299,12 @@ impl Element for Keyed {
                 let start = window.paint_index();
                 match draw {
                     KeyedDraw::Built(element) => {
-                        let asks = window.keyed_asks.get();
+                        let (asks, volatile) = (window.keyed_asks.get(), crate::keyed_volatile_count());
                         let ((), accessed) = cx.detect_accessed_entities(|cx| element.paint(window, cx));
                         state.accessed_entities.extend(accessed);
                         let end = window.paint_index();
                         state.pinned |= window.paint_pins(&start, &end);
-                        state.moving |= window.keyed_asks.get() != asks;
+                        state.moving |= window.keyed_asks.get() != asks || crate::keyed_volatile_count() != volatile;
                     }
                     KeyedDraw::Replayed(by) => {
                         if *by == Point::default() {

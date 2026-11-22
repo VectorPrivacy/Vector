@@ -1307,12 +1307,9 @@ impl EmojiPicker {
                     .h(px(CELL_SIDE))
                     .rounded(px(8.))
                     .bg(white_a(0.03))
+                    // A border paints over children; the visible edge is a child so the × sits above it.
                     .border_1()
-                    .border_color(if hovered {
-                        white_a(0.18)
-                    } else {
-                        white_a(0.05)
-                    })
+                    .border_color(gpui::transparent_black())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1359,6 +1356,17 @@ impl EmojiPicker {
                             move |this, d: &DragCell, _, cx| this.creator_move(d.0, id, cx),
                         ))
                     })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(-1.))
+                            .left(px(-1.))
+                            .right(px(-1.))
+                            .bottom(px(-1.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(if hovered { white_a(0.18) } else { white_a(0.05) }),
+                    )
                     .child(face)
                     .when(hovered, |d| {
                         d.child(
