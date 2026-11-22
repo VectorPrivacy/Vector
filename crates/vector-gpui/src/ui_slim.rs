@@ -800,7 +800,8 @@ impl VectorApp {
                     let query = app.slim_query(cx);
                     let store = app.store.clone();
                     let store = store.borrow();
-                    app.slim_pane(&store, &query, window, cx)
+                    // The pane's root fills it, so the list grows into a flex row as it does in place.
+                    div().size_full().flex().child(app.slim_pane(&store, &query, window, cx)).into_any_element()
                 },
                 cx,
             ),
