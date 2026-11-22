@@ -1345,21 +1345,15 @@ impl<T> Linger<T> {
     }
 }
 
-/// A fading modal's view, dimmed and kept from clicks.
-pub fn faded(view: impl IntoElement, shown: f32, priority: usize) -> AnyElement {
+/// A fading modal's view, dimmed and passing every press to what lies beneath, as
+/// `pointer-events: none` does a closing modal's.
+pub fn faded(view: impl IntoElement, shown: f32, _priority: usize) -> AnyElement {
     div()
         .absolute()
         .inset_0()
         .opacity(shown)
-        .child(view)
-        .child(gpui::deferred(inert()).with_priority(priority + 1))
+        .child(gpui::pass_through(view, true))
         .into_any_element()
-}
-
-/// Over a fading modal: takes the clicks its buttons would, as `pointer-events: none` keeps them
-/// from a closing modal.
-pub fn inert() -> gpui::Div {
-    div().absolute().inset_0().occlude()
 }
 
 /// `.popup-container` once its popup is answered: the card goes at once, the dimming fades.
@@ -1368,7 +1362,7 @@ pub fn popup_gone(gone: &Linger<()>, open: bool, window: &mut Window) -> Option<
     let (_, shown) = gone.track_for(open.then_some(&()), 0.2, bezier(0.25, 0.1, 0.25, 1.), window)?;
     // Not `shown < 1.`: the first frame after the close is at 1, and skipping it flashes undimmed.
     (!open).then(|| {
-        gpui::deferred(div().absolute().inset_0().bg(ca(0, 0, 0, 0.85 * shown)).child(inert()))
+        gpui::deferred(div().absolute().inset_0().bg(ca(0, 0, 0, 0.85 * shown)))
             .with_priority(15)
             .into_any_element()
     })

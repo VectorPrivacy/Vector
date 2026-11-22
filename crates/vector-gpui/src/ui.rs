@@ -5391,7 +5391,7 @@ impl VectorApp {
             window.request_animation_frame();
         }
         let el = gpui::zoom(self.emoji_picker.clone()).shift_rel(0., 1. - slide).opacity(fade);
-        let el = if open { el.into_any_element() } else { div().relative().child(el).child(kit::inert()).into_any_element() };
+        let el = gpui::pass_through(el, !open).into_any_element();
         Some((el, open && self.picker.is_none(), f32::from(window.viewport_size().width) < 700.))
     }
 
@@ -7122,7 +7122,7 @@ impl VectorApp {
                         window.request_animation_frame();
                         let shown = 1. - kit::bezier(0.46, 0.03, 0.52, 0.96)(t);
                         return root
-                            .child(div().absolute().inset_0().opacity(shown).child(view.clone()).child(kit::inert()))
+                            .child(div().absolute().inset_0().opacity(shown).child(gpui::pass_through(view.clone(), true)))
                             .child(div().absolute().top_0().left_0().right_0().child(chrome(window, true, false)));
                     }
                     self.login_out = None;
@@ -20715,7 +20715,7 @@ impl VectorApp {
                         ),
                 );
         Some(
-            gpui::deferred(
+            gpui::deferred(gpui::pass_through(
                 div()
                     .id("status-dialog")
                     .absolute()
@@ -20747,7 +20747,6 @@ impl VectorApp {
                     )
                     .opacity(shown)
                     .child(kit::pop_or_out("status-dialog-pop", card, 160, shown))
-                    .when(shown < 1., |d| d.child(kit::inert()))
                     .when(panel, |d| {
                         d.child(
                             div()
@@ -20766,7 +20765,8 @@ impl VectorApp {
                                 ),
                         )
                     }),
-            )
+            shown < 1.,
+            ))
             .with_priority(10)
             .into_any_element(),
         )
@@ -20819,7 +20819,7 @@ impl VectorApp {
                     .child(t::dialog_close()),
             );
         Some(
-            gpui::deferred(
+            gpui::deferred(gpui::pass_through(
                 div()
                     .id("qr-overlay")
                     .track_focus(&focus)
@@ -20840,9 +20840,9 @@ impl VectorApp {
                         cx.listener(move |app, _, _, cx| close(app, cx)),
                     )
                     .opacity(shown)
-                    .child(kit::pop_or_out("qr-overlay-pop", card, 160, shown))
-                    .when(shown < 1., |d| d.child(kit::inert())),
-            )
+                    .child(kit::pop_or_out("qr-overlay-pop", card, 160, shown)),
+            shown < 1.,
+            ))
             .with_priority(10)
             .into_any_element(),
         )

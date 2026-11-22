@@ -1041,6 +1041,8 @@ pub(crate) struct DeferredDraw {
     rem_size: Pixels,
     /// The opacity around the deferral point, as CSS opacity reaches every descendant.
     opacity: f32,
+    /// Whether the deferral point was drawn without input.
+    input_muted: bool,
     zoom: Option<(Point<Pixels>, f32)>,
     element: Option<AnyElement>,
     absolute_offset: Point<Pixels>,
@@ -1283,6 +1285,7 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    pub(crate) input_muted: bool,
     /// A scaled subtree's map, `p -> a + p * k` in window points, composed with any outer one.
     pub(crate) element_zoom: Option<(Point<Pixels>, f32)>,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
@@ -2433,6 +2436,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            input_muted: false,
             element_zoom: None,
             requested_autoscroll: None,
             reveal_focus: None,
@@ -4333,7 +4337,7 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, opacity, zoom) = {
+                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, opacity, zoom, muted) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
                         .clone_from(&deferred_draw.element_id_stack);
@@ -4348,6 +4352,7 @@ impl Window {
                         deferred_draw.prepaint_range.clone(),
                         deferred_draw.opacity,
                         deferred_draw.zoom,
+                        deferred_draw.input_muted,
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
@@ -4360,7 +4365,9 @@ impl Window {
                                 window.with_absolute_element_offset(absolute_offset, |window| {
                                     let opacity = (opacity < 1.).then_some(opacity);
                                     window.with_zoom_state(zoom, |window| {
-                                        window.with_element_opacity(opacity, |window| element.prepaint(window, cx))
+                                        window.with_input_muted(muted, |window| {
+                                            window.with_element_opacity(opacity, |window| element.prepaint(window, cx))
+                                        })
                                     });
                                 });
                             });
@@ -4417,7 +4424,9 @@ impl Window {
                             window.with_rem_size(Some(deferred_draw.rem_size), |window| {
                                 let opacity = (deferred_draw.opacity < 1.).then_some(deferred_draw.opacity);
                                 window.with_zoom_state(deferred_draw.zoom, |window| {
-                                    window.with_element_opacity(opacity, |window| element.paint(window, cx))
+                                    window.with_input_muted(deferred_draw.input_muted, |window| {
+                                        window.with_element_opacity(opacity, |window| element.paint(window, cx))
+                                    })
                                 });
                             });
                         })
@@ -4495,6 +4504,7 @@ impl Window {
                     content_mask: deferred_draw.content_mask,
                     rem_size: deferred_draw.rem_size,
                     opacity: deferred_draw.opacity,
+                    input_muted: deferred_draw.input_muted,
                     zoom: deferred_draw.zoom,
                     priority: deferred_draw.priority,
                     element: None,
@@ -5057,6 +5067,7 @@ impl Window {
             content_mask,
             rem_size: self.rem_size(),
             opacity: self.element_opacity,
+            input_muted: self.input_muted,
             zoom: self.element_zoom,
             priority,
             element: Some(element),
@@ -6060,6 +6071,8 @@ impl Window {
         let content_mask = self.content_mask();
         let id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
+        // A muted subtree's hitboxes contain no point, so nothing in it is hovered or hit.
+        let bounds = if self.input_muted { Bounds::new(bounds.origin, Size::default()) } else { bounds };
         let hitbox = Hitbox {
             id,
             bounds,
@@ -6219,6 +6232,13 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
+        if self.input_muted {
+            // A listener that never runs keeps the indices cached paint ranges replay.
+            self.next_frame
+                .mouse_listeners
+                .push(Some(Box::new(|_: &dyn Any, _, _: &mut Window, _: &mut App| {})));
+            return;
+        }
         self.next_frame.mouse_listeners.push(Some(Box::new(
             move |event: &dyn Any, phase: DispatchPhase, window: &mut Window, cx: &mut App| {
                 if let Some(event) = event.downcast_ref() {
@@ -6226,6 +6246,18 @@ impl Window {
                 }
             },
         )));
+    }
+
+    /// Draws `f` without input when `muted`: what it lays out still shows, but takes no pointer
+    /// events, which pass to whatever lies beneath (CSS `pointer-events: none`).
+    pub fn with_input_muted<R>(&mut self, muted: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        if !muted || self.input_muted {
+            return f(self);
+        }
+        self.input_muted = true;
+        let result = f(self);
+        self.input_muted = false;
+        result
     }
 
     /// Register a key event listener on this node for the next frame. The type of event

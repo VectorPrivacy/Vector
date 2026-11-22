@@ -364,7 +364,7 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
     } else {
         pins.list.iter().map(|p| row(pins, p, store, revealed, clock, on)).collect()
     };
-    div()
+    let el = div()
         .absolute()
         .size_full()
         .top_0()
@@ -418,8 +418,8 @@ pub fn drawer(pins: &Pins, store: &Store, revealed: &HashMap<String, HashSet<u32
                     move |d, t| d.top(px(-1. - 10. * (1. - t * shown))).opacity(t),
                 ),
         )
-        .when(shown < 1., |d| d.child(crate::kit::inert()))
-        .into_any_element()
+        .into_any_element();
+    gpui::pass_through(el, shown < 1.).into_any_element()
 }
 
 /// `.pins-header-btn`: the 40px toggle left of the ⋯. The header's own colour rule outranks
