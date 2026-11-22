@@ -1134,41 +1134,52 @@ pub async fn fetch_channel_history_since_epoch<T: Transport + ?Sized>(
             let mut read_full = false;
             let lowest_since = if whole.is_empty() { read_since } else { read_since.min(whole_since) };
             let read_planes_here: &[(ReadPlane, Epoch)] = if read_on && !lowest_since.zip(read_until).is_some_and(|(s, u)| s > u) { &planes } else { &[] };
-            for (plane, _) in read_planes_here {
+            // Every address's page at once: each is its own read, and in series they were most
+            // of a channel's first paint.
+            let plane_reads = futures_util::future::join_all(read_planes_here.iter().map(|(plane, _)| {
                 let since = if whole.contains(&plane.address()) { whole_since } else { read_since };
                 let q = Query { since, evidence, ..plane_page(plane.address().to_hex(), page, read_until) };
-                // A read view holds no key to authenticate as the plane, so it asks plainly.
-                let fetched = match plane.group() {
-                    Some(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| {
-                        complete &= f.is_complete();
-                        f.events
-                    }),
-                    None => transport.fetch(&q, &community.relays).await,
+                async move {
+                    // A read view holds no key to authenticate as the plane, so it asks plainly.
+                    match plane.group() {
+                        Some(group) => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| (f.is_complete(), f.events)),
+                        None => transport.fetch(&q, &community.relays).await.map(|evs| (true, evs)),
+                    }
+                }
+            }));
+            let writer_reads = futures_util::future::join_all(writer_planes.iter().map(|(address, wepoch)| {
+                let q = Query { since, evidence, ..plane_page(address.to_hex(), page, until) };
+                let live_writer = &live_writer;
+                async move {
+                    // Only a writer can authenticate as the address.
+                    match live_writer {
+                        Some((e, _, group)) if e == wepoch => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| (f.is_complete(), f.events)),
+                        _ => transport.fetch(&q, &community.relays).await.map(|evs| (true, evs)),
+                    }
+                }
+            }));
+            let (plane_reads, writer_reads) = futures_util::future::join(plane_reads, writer_reads).await;
+            for fetched in plane_reads {
+                let Ok((whole_read, evs)) = fetched else {
+                    complete = false;
+                    continue;
                 };
-                complete &= fetched.is_ok();
-                if let Ok(evs) = fetched {
-                    answered = true;
-                    read_full |= evs.len() >= page;
-                    note_page(&evs);
-                    for e in evs {
-                        if wrap_ids.insert(e.id) {
-                            wraps.push(e);
-                        }
+                complete &= whole_read;
+                answered = true;
+                read_full |= evs.len() >= page;
+                note_page(&evs);
+                for e in evs {
+                    if wrap_ids.insert(e.id) {
+                        wraps.push(e);
                     }
                 }
             }
-            for (address, wepoch) in &writer_planes {
-                let q = Query { since, evidence, ..plane_page(address.to_hex(), page, until) };
-                // Only a writer can authenticate as the address.
-                let fetched = match &live_writer {
-                    Some((e, _, group)) if e == wepoch => transport.fetch_plane(group.keys(), &q, &community.relays).await.map(|f| {
-                        complete &= f.is_complete();
-                        f.events
-                    }),
-                    _ => transport.fetch(&q, &community.relays).await,
+            for fetched in writer_reads {
+                let Ok((whole_read, fetched)) = fetched else {
+                    complete = false;
+                    continue;
                 };
-                complete &= fetched.is_ok();
-                let Ok(fetched) = fetched else { continue };
+                complete &= whole_read;
                 answered = true;
                 note_page(&fetched);
                 for e in fetched {
