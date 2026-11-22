@@ -253,6 +253,11 @@ pub fn debug() -> serde_json::Value {
     })
 }
 
+/// Whether a selection spans any text: a press that dragged, not a click.
+pub fn picked() -> bool {
+    STATE.with(|s| ordered(&s.borrow()).is_some())
+}
+
 pub fn release() {
     STATE.with(|s| s.borrow_mut().dragging = false);
 }

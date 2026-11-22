@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, HighlightStyle, InteractiveElement, InteractiveText, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledText, Window, div,
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div,
     prelude::*, px, svg,
 };
 
@@ -234,6 +234,7 @@ pub fn view(
     pos: u64,
     playing: bool,
     accent: gpui::Hsla,
+    select: Option<crate::select::Key>,
     on_seek: Rc<dyn Fn(u64, &mut Window, &mut App)>,
 ) -> Option<AnyElement> {
     let reveal = t.reveal();
@@ -273,36 +274,38 @@ pub fn view(
             let text: AnyElement = if sections.is_empty() {
                 div().child(crate::t::transcript_none()).into_any_element()
             } else {
-                let mut joined = String::new();
-                let mut ranges = Vec::with_capacity(sections.len());
+                use crate::inline::{Atom, Kind, Look};
+                let lit = current(sections, pos, playing);
+                let base = Look::new(crate::theme::INTER, 15., 22.5, white_a(0.92));
+                let mut atoms = Vec::with_capacity(sections.len() * 2);
                 for (i, s) in sections.iter().enumerate() {
-                    let start = joined.len();
-                    joined.push_str(&s.text);
-                    ranges.push(start..joined.len());
+                    let mut look = base.clone();
+                    if lit == Some(i) {
+                        look.color = accent;
+                        look.bg = Some(accent.opacity(0.16));
+                    }
+                    atoms.push(Atom::Text { text: s.text.clone().into(), look, kind: Kind::Seek(i as u32) });
                     if i + 1 < sections.len() {
-                        // The sections' 1px side margins, as hair spaces.
-                        joined.push_str("\u{200A} \u{200A}");
+                        // The sections' 1px side margins; a copy keeps only the space between.
+                        atoms.extend([Atom::Gap(1.), Atom::Text { text: " ".into(), look: base.clone(), kind: Kind::Plain }, Atom::Gap(1.)]);
                     }
                 }
-                let lit = current(sections, pos, playing);
-                let highlights = lit
-                    .map(|i| {
-                        vec![(
-                            ranges[i].clone(),
-                            HighlightStyle {
-                                color: Some(accent),
-                                background_color: Some(accent.opacity(0.16)),
-                                ..Default::default()
-                            },
-                        )]
-                    })
-                    .unwrap_or_default();
                 let ats: Vec<u64> = sections.iter().map(|s| s.at).collect();
-                InteractiveText::new(
-                    SharedString::from(format!("transcript-{id}")),
-                    StyledText::new(joined).with_highlights(highlights),
-                )
-                .on_click(ranges, move |i, w, cx| on_seek(ats[i], w, cx))
+                let p = crate::inline::inline(atoms, base).id(SharedString::from(format!("transcript-{id}"))).on_click(Rc::new(
+                    move |target, w, cx| {
+                        // A drag that picked text is a selection, not a seek.
+                        if let crate::inline::Target::Seek(i) = target
+                            && !crate::select::picked()
+                            && let Some(&at) = ats.get(i as usize)
+                        {
+                            on_seek(at, w, cx);
+                        }
+                    },
+                ));
+                match select {
+                    Some(key) => p.selectable(key),
+                    None => p,
+                }
                 .into_any_element()
             };
             div()

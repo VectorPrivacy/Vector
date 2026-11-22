@@ -132,6 +132,8 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         media.audio.sheets.get(&att.id),
                         media.audio.all_tracks.contains(&att.id),
                         transcribable.then_some(&media.audio.transcripts),
+                        // After the body's paragraphs in a copy: no body path reaches this.
+                        Some(crate::select::Key { at: m.at, msg: crate::select::msg_hash(&m.id), path: [u16::MAX, 0, 0, 0] }),
                         &media.audio.narrow,
                         std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
                     ),

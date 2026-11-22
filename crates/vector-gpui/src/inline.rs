@@ -112,6 +112,8 @@ pub enum Kind {
     Time(SharedString),
     /// Quiet text that does something when clicked, brightening under the pointer.
     Action(SharedString),
+    /// A transcript's `.0`th section: selectable text whose click seeks its audio there.
+    Seek(u32),
 }
 
 /// What hovering an atom says.
@@ -161,6 +163,7 @@ impl Kind {
             Kind::Spoiler { .. } => None,
             Kind::Mention(npub) => Some(Target::Mention(npub.clone())),
             Kind::Action(a) => Some(Target::Action(a.clone())),
+            Kind::Seek(i) => Some(Target::Seek(*i)),
         }
     }
 }
@@ -274,6 +277,7 @@ pub enum Target {
     Spoiler(u32),
     Mention(SharedString),
     Action(SharedString),
+    Seek(u32),
 }
 
 pub type OnClick = Rc<dyn Fn(Target, &mut Window, &mut App)>;
@@ -1574,8 +1578,10 @@ impl Element for Inline {
         if pre.hits.is_empty() {
             return;
         }
-        for (hitbox, _) in &pre.hits {
-            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        for (hitbox, target) in &pre.hits {
+            // `.transcription-text`'s `cursor: text`: a section is read and selected as much as clicked.
+            let cursor = if matches!(target, Target::Seek(_)) { CursorStyle::IBeam } else { CursorStyle::PointingHand };
+            window.set_cursor_style(cursor, hitbox);
         }
         let Some(on_click) = self.on_click.clone() else {
             return;

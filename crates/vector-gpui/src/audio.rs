@@ -1574,6 +1574,7 @@ pub fn view(
     sheet: Option<&crate::lyrics::Sheet>,
     all_tracks: bool,
     transcripts: Option<&crate::transcript::Transcripts>,
+    select: Option<crate::select::Key>,
     narrow_set: &Rc<std::cell::RefCell<HashSet<String>>>,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
@@ -1722,6 +1723,7 @@ pub fn view(
             p.map_or(0, |p| p.position()),
             p.is_some_and(|p| p.playing),
             accent,
+            select.clone(),
             Rc::new(move |ms, w, cx| on(Act::SeekTo(ms), w, cx)),
         )
     });
