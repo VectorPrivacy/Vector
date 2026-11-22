@@ -792,7 +792,18 @@ impl VectorApp {
                     true,
                 ))
                 .into_any_element(),
-            None => self.slim_pane(store, &query, window, cx),
+            // A cached pane: scrolling the list redraws it alone.
+            None => crate::pane::cached(
+                &self.panes.side,
+                gpui::StyleRefinement::default().flex_1().min_w_0().h_full(),
+                |app, window, cx| {
+                    let query = app.slim_query(cx);
+                    let store = app.store.clone();
+                    let store = store.borrow();
+                    app.slim_pane(&store, &query, window, cx)
+                },
+                cx,
+            ),
         };
         div()
             .flex_1()

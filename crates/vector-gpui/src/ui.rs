@@ -229,6 +229,8 @@ pub struct VectorApp {
     /// The timeline's last laid-out width per layout (slim, the members panel): a chat's new
     /// list has no viewport on its first frame.
     timeline_w: RefCell<HashMap<(bool, Option<bool>), f32>>,
+    /// When a playing clip's next frame redraw is set for.
+    clip_wake_at: std::cell::Cell<Option<std::time::Instant>>,
     /// The window's width as of this frame, for helpers that don't take a `Window`.
     vw: f32,
     slim: slim_ops::Slim,
@@ -1093,6 +1095,7 @@ impl VectorApp {
             jump_miss: None,
             is_slim: false,
             timeline_w: RefCell::default(),
+            clip_wake_at: std::cell::Cell::default(),
             vw: 0.,
             slim: slim_ops::Slim::new(),
             send_btn: Rc::default(),
@@ -5778,14 +5781,59 @@ impl VectorApp {
         )
     }
 
+    /// Whether every clip that plays is drawn by the open chat's timeline: none fills the window
+    /// or floats, and nothing covers the chat.
+    fn clips_in_timeline(&self, media: &crate::media::Media) -> bool {
+        media.videos.full.is_none()
+            && self.open.is_some()
+            && self.settings.is_none()
+            && self.nexus.is_none()
+            && !self.popout.item.as_ref().is_some_and(|i| i.kind == crate::popout::Kind::Video)
+    }
+
+    /// A playing clip's next redraw: the next vsync when due within one, else a timer for its
+    /// next frame, so a 30 fps clip redraws 30 times a second whatever the display's rate.
+    fn clip_wake(&self, due: std::time::Duration, window: &mut Window, cx: &mut Context<Self>) {
+        if due <= std::time::Duration::from_millis(6) {
+            window.request_animation_frame();
+            return;
+        }
+        let at = std::time::Instant::now() + due;
+        if self.clip_wake_at.get().is_some_and(|t| t <= at + std::time::Duration::from_millis(1)) {
+            return;
+        }
+        self.clip_wake_at.set(Some(at));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(due).await;
+            this.update(cx, |app, cx| {
+                if app.clip_wake_at.get() == Some(at) {
+                    app.clip_wake_at.set(None);
+                }
+                if app.clips_in_timeline(&app.media.borrow()) {
+                    crate::pane::notify(&app.panes.timeline, cx);
+                } else {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn video_act(&mut self, msg: String, att: String, act: crate::video::Act, cx: &mut Context<Self>) {
         let embed = att.strip_prefix("embed:").map(|url| match self.media.borrow().embed_videos.get(url) {
             Some(crate::embeds::VideoState::Ready(spec)) => Some(spec.clone()),
             _ => None,
         });
         let input = embed.unwrap_or_else(|| self.audio_input(&msg, &att));
+        let to_full = matches!(act, crate::video::Act::Fullscreen);
         self.media.borrow_mut().videos.act(&att, input, act);
-        cx.notify();
+        // A clip in the chat redraws the timeline; one going to or from full screen, the app.
+        if to_full || !self.clips_in_timeline(&self.media.borrow()) {
+            cx.notify();
+        } else {
+            crate::pane::notify(&self.panes.timeline, cx);
+        }
     }
 
     fn video_work(&mut self, work: Vec<crate::video::Work>, cx: &mut Context<Self>) {
@@ -6929,12 +6977,15 @@ impl VectorApp {
                     crate::pane::notify(&self.panes.timeline, cx);
                 }
             }
-            if media.videos.tick() {
-                window.request_animation_frame();
-            }
-            for old in std::mem::take(&mut media.videos.retired) {
-                let _ = window.drop_image(old.clone());
-                media.videos.recycle(old);
+            // A clip in the chat ticks in the timeline pane, so its frames redraw it alone.
+            if !self.clips_in_timeline(&media) {
+                if let Some(due) = media.videos.tick() {
+                    self.clip_wake(due, window, cx);
+                }
+                for old in std::mem::take(&mut media.videos.retired) {
+                    let _ = window.drop_image(old.clone());
+                    media.videos.recycle(old);
+                }
             }
             // A clip filling the window takes the screen too, and gives it back as it found it.
             match (media.videos.full.is_some(), self.video_window_full) {
@@ -10300,6 +10351,15 @@ impl VectorApp {
                         && let Some(due) = media.models.tick()
                     {
                         crate::model3d::stage::ask(window, cx, due);
+                    }
+                    if app.clips_in_timeline(&media) {
+                        if let Some(due) = media.videos.tick() {
+                            app.clip_wake(due, window, cx);
+                        }
+                        for old in std::mem::take(&mut media.videos.retired) {
+                            let _ = window.drop_image(old.clone());
+                            media.videos.recycle(old);
+                        }
                     }
                 }
                 let store = app.store.clone();

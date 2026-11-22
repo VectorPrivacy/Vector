@@ -600,15 +600,17 @@ impl Videos {
         self.retired.extend(c.info.and_then(|i| i.poster));
     }
 
-    /// One frame: true while anything moves.
-    pub fn tick(&mut self) -> bool {
-        let mut moving = false;
+    /// Advances every clip; when the next redraw is wanted: at once (a scrub, a hover, a spinner,
+    /// a frame not decoded yet) or when the next decoded frame falls due. None when all are still.
+    pub fn tick(&mut self) -> Option<Duration> {
+        let mut next: Option<Duration> = None;
+        let mut want = |d: Duration| next = Some(next.map_or(d, |n: Duration| n.min(d)));
         for c in self.clips.values_mut() {
             if c.scrub.is_some() {
-                moving = true;
+                want(Duration::ZERO);
             }
             if c.hovered && c.playing && c.moved.is_some_and(|t| t.elapsed() < IDLE + Duration::from_millis(200)) {
-                moving = true;
+                want(Duration::ZERO);
             }
             c.waiting = if c.loading { c.waiting.or_else(|| Some(Instant::now())) } else { None };
             let gain = c.gain();
@@ -714,8 +716,17 @@ impl Videos {
                     let _ = e.pause(id);
                 }
             }
-            if c.playing || c.loading || p.fresh {
-                moving = true;
+            if c.loading || p.fresh {
+                want(Duration::ZERO);
+            } else if c.playing {
+                // A clip redraws at its own rate: when its next decoded frame falls due.
+                match &p.next {
+                    Some(Out::Frame { pts, epoch, .. }) if *epoch == p.epoch && p.started && !p.rebuffering => {
+                        let ms = pts.saturating_sub(now) as f32 / p.speed.max(0.01);
+                        want(Duration::from_secs_f32(ms / 1000.));
+                    }
+                    _ => want(Duration::from_millis(8)),
+                }
             }
         }
         if self.let_go() {
@@ -724,7 +735,7 @@ impl Videos {
         if self.active.as_ref().is_some_and(|a| self.clips.get(a).is_some_and(|c| !c.playing && !c.loading)) {
             self.active = None;
         }
-        moving
+        next
     }
 }
 
