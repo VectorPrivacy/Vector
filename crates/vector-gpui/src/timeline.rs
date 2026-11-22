@@ -1440,8 +1440,14 @@ impl CodeScroll {
 /// held; dragged, it scrolls in proportion, and a press on the track pages.
 fn code_scrollbar(scroll: CodeScroll) -> AnyElement {
     use gpui::{Bounds, DispatchPhase, HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+    let handle = scroll.handle.clone();
     gpui::canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::BlockMouse),
+        // A wheel over the bar still scrolls the timeline, as a page's does; with nothing to
+        // scroll sideways the strip is no bar at all.
+        move |bounds, window, _| {
+            let bar = handle.max_offset().x > px(0.5);
+            window.insert_hitbox(bounds, if bar { HitboxBehavior::BlockMouseExceptScroll } else { HitboxBehavior::Normal })
+        },
         move |bounds: Bounds<gpui::Pixels>, hitbox, window, _| {
             let h = &scroll.handle;
             let (view, max) = (h.bounds().size.width, h.max_offset().x);
