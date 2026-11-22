@@ -376,6 +376,13 @@ impl TextSystem {
         self.platform_text_system.prewarm_fonts(&font_ids);
     }
 
+    /// Shape `text` once and drop it, so the platform loads the fallback fonts its glyphs need
+    /// off the thread that draws. Expensive the first time; call it on a background executor.
+    pub fn prewarm_text(&self, text: &str, font: &Font, font_size: Pixels) {
+        let font_id = self.resolve_font(font);
+        let _ = self.platform_text_system.layout_line(text, font_size, &[FontRun { len: text.len(), font_id }]);
+    }
+
     /// Get the bounding box for the given font and font size.
     /// A font's bounding box is the smallest rectangle that could enclose all glyphs
     /// in the font. superimposed over one another.

@@ -722,6 +722,19 @@ mod secretguard_ops;
 
 impl VectorApp {
     fn base(store: Store, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // No bundled font draws the kaomoji (the picker's tab label among them); the system's
+        // first search for fonts that do cost ~20 ms inside the picker's first frame.
+        let (text, ex) = (cx.text_system().clone(), cx.background_executor().clone());
+        ex.clone()
+            .spawn(async move {
+                ex.timer(std::time::Duration::from_secs(2)).await;
+                let mut font = gpui::font(INTER);
+                font.fallbacks = crate::lang::fallbacks();
+                for run in std::iter::once("(◕‿◕)".to_string()).chain(crate::emoji::kaomoji_glyphs()) { // i18n-exempt: glyphs, never shown
+                    text.prewarm_text(&run, &font, px(12.));
+                }
+            })
+            .detach();
         let store: Shared = Rc::new(RefCell::new(store));
         let input = cx.new(|cx| {
             let mut t = TextInput::new(t::composer_placeholder(), cx)

@@ -23,6 +23,8 @@ use crate::theme::*;
 const COLS: usize = 6;
 const CELL: f32 = 42.;
 const GAP: f32 = 4.;
+/// Rows laid out past the grid's edge: each costs every cold open, and two cover a wheel step.
+const OVERDRAW: f32 = 2. * (CELL + GAP);
 const KAOMOJI_RECENTS: usize = 18;
 const GIF_PAGE: usize = 12;
 const GIF_GAP: f32 = 6.;
@@ -454,7 +456,7 @@ impl EmojiPicker {
             used: Rc::default(),
             items: Rc::default(),
             starts: Vec::new(),
-            list: ListState::new(0, ListAlignment::Top, px(400.)),
+            list: ListState::new(0, ListAlignment::Top, px(OVERDRAW)),
             collapsed: HashSet::new(),
             mode: Mode::Emoji,
             reaction: false,
@@ -1374,7 +1376,7 @@ impl EmojiPicker {
             );
         }
         self.starts = starts;
-        self.list = ListState::new(items.len(), ListAlignment::Top, px(400.));
+        self.list = ListState::new(items.len(), ListAlignment::Top, px(OVERDRAW));
         self.items = Rc::new(items);
     }
 

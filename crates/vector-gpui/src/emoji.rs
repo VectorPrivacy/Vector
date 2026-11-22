@@ -300,6 +300,19 @@ fn kaomoji_faces() -> impl Iterator<Item = (&'static Kaomoji, &'static str)> {
         .filter(move |(k, _)| seen.insert(k.face))
 }
 
+/// Every character the kaomoji draw beyond ASCII, each once, in runs short enough that shaping
+/// one never holds the text system for long.
+pub fn kaomoji_glyphs() -> Vec<String> {
+    let mut seen = HashSet::new();
+    let chars: Vec<char> = KAOMOJI
+        .iter()
+        .flat_map(|c| c.items.iter())
+        .flat_map(|k| k.face.chars())
+        .filter(|ch| !ch.is_ascii() && seen.insert(*ch))
+        .collect();
+    chars.chunks(24).map(|c| c.iter().collect()).collect()
+}
+
 /// A kaomoji by its face.
 pub fn kaomoji(face: &str) -> Option<&'static Kaomoji> {
     KAOMOJI
