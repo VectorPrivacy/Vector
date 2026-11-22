@@ -385,6 +385,8 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                // Not read back here: the element's own fill draws over a sharp backdrop.
+                PrimitiveBatch::Backdrops(_) => Ok(()),
             }
             .with_context(|| {
                 format!(

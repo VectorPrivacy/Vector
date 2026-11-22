@@ -325,6 +325,12 @@ pub struct Style {
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
 
+    /// Blur of what lies behind the element, as CSS `backdrop-filter: blur()`: a standard deviation.
+    pub backdrop_blur: Pixels,
+
+    /// Whether that blur is made once, when the element first shows, and kept while it stays put.
+    pub backdrop_held: bool,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -796,6 +802,10 @@ impl Style {
 
         window.paint_box_shadows(bounds, corner_radii, box_shadow);
 
+        if self.backdrop_blur > Pixels::ZERO {
+            window.paint_backdrop(bounds, corner_radii, self.backdrop_blur, self.backdrop_held);
+        }
+
         let mut background_color = self.background.as_ref().and_then(Fill::color);
         if rtl && let Some(bg) = background_color.as_mut().filter(|b| b.tag == BackgroundTag::LinearGradient) {
             bg.gradient_angle_or_pattern_height = (360. - bg.gradient_angle_or_pattern_height).rem_euclid(360.);
@@ -899,6 +909,8 @@ impl Default for Style {
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            backdrop_blur: Pixels::ZERO,
+            backdrop_held: false,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

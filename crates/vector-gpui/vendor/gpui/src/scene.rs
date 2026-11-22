@@ -50,6 +50,7 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    pub backdrops: Vec<Backdrop>,
     /// Sort keys with each primitive's index, kept between frames so sorting allocates nothing.
     sort_keys: Vec<(u64, u32)>,
     /// While a zoomed subtree paints: `p -> a + p * k` on every primitive's geometry, in device
@@ -107,6 +108,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.backdrops.clear();
         self.outer.clear();
     }
 
@@ -233,6 +235,10 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             }
+            Primitive::Backdrop(backdrop) => {
+                backdrop.order = order;
+                self.backdrops.push(backdrop.clone());
+            }
         }
         true
     }
@@ -266,6 +272,7 @@ impl Scene {
             order(sprite.order) | sprite.tile.texture_id.index as u64
         });
         sort_stable(&mut self.surfaces, keys, |surface| order(surface.order));
+        sort_stable(&mut self.backdrops, keys, |backdrop| order(backdrop.order));
         self.cull_covered();
         if overdraw_report() {
             self.report_overdraw();
@@ -364,6 +371,7 @@ impl Scene {
         });
         self.polychrome_sprites.retain(|i| !hidden(i.order, i.bounds.intersect(&i.content_mask.bounds)));
         self.surfaces.retain(|v| !hidden(v.order, v.bounds));
+        self.backdrops.retain(|b| !hidden(b.order, b.bounds.intersect(&b.content_mask.bounds)));
     }
 
     /// Whether no two path batches overlap, so a renderer can rasterize every path into one
@@ -410,6 +418,8 @@ impl Scene {
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            backdrops_start: 0,
+            backdrops_iter: self.backdrops.iter().peekable(),
         }
     }
 }
@@ -432,6 +442,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    Backdrop,
 }
 
 pub(crate) enum PaintOperation {
@@ -454,6 +465,7 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    Backdrop(Backdrop),
 }
 
 impl Primitive {
@@ -502,6 +514,11 @@ impl Primitive {
                 x.corner_radii = c(x.corner_radii);
             }
             Primitive::Surface(x) => x.bounds = b(x.bounds),
+            Primitive::Backdrop(x) => {
+                x.bounds = b(x.bounds);
+                x.corner_radii = c(x.corner_radii);
+                x.blur_radius = x.blur_radius * k;
+            }
         }
     }
 }
@@ -518,6 +535,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Backdrop(backdrop) => &backdrop.bounds,
         }
     }
 
@@ -531,6 +549,7 @@ impl Primitive {
             Primitive::SubpixelSprite(x) => &mut x.content_mask,
             Primitive::PolychromeSprite(x) => &mut x.content_mask,
             Primitive::Surface(x) => &mut x.content_mask,
+            Primitive::Backdrop(x) => &mut x.content_mask,
         }
     }
 
@@ -548,6 +567,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::Backdrop(backdrop) => &backdrop.content_mask,
         }
     }
 }
@@ -576,6 +596,8 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    backdrops_start: usize,
+    backdrops_iter: Peekable<slice::Iter<'a, Backdrop>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -608,6 +630,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
+            ),
+            (
+                self.backdrops_iter.peek().map(|b| b.order),
+                PrimitiveKind::Backdrop,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -754,6 +780,13 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             }
+            PrimitiveKind::Backdrop => {
+                // One at a time: each blurs what is drawn below it, which may hold the last.
+                let start = self.backdrops_start;
+                self.backdrops_iter.next();
+                self.backdrops_start = start + 1;
+                Some(PrimitiveBatch::Backdrops(start..start + 1))
+            }
         }
     }
 }
@@ -786,6 +819,8 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+    /// Blur what is drawn so far under each backdrop's shape, as CSS `backdrop-filter: blur()`.
+    Backdrops(Range<usize>),
 }
 
 impl PrimitiveBatch {
@@ -818,6 +853,7 @@ impl PrimitiveBatch {
                 )
             }
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
+            Self::Backdrops(range) => format!("backdrops ({})", range.len()),
         }
     }
 }
@@ -1175,6 +1211,43 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+}
+
+/// A blur of what lies below `bounds`, rounded at `corner_radii`: CSS `backdrop-filter: blur()`.
+/// `blur_radius` is the blur's standard deviation in device pixels. A renderer that can't read
+/// back what it drew skips it, leaving the element's own fill over a sharp backdrop.
+#[derive(Clone, Debug, Default)]
+#[allow(missing_docs)]
+pub struct Backdrop {
+    pub order: DrawOrder,
+    pub bounds: Bounds<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub blur_radius: ScaledPixels,
+    /// Blurred once when it first shows and kept while it stays in place, so later frames
+    /// draw no blur and keep their pass whole; what changes beneath it shows on its next showing.
+    pub held: bool,
+}
+
+impl Backdrop {
+    /// What a held blur is kept against: the same shape, clip and radius in consecutive frames.
+    pub fn key(&self) -> [u32; 13] {
+        let b = |v: ScaledPixels| v.0.to_bits();
+        let m = &self.content_mask.bounds;
+        let c = &self.corner_radii;
+        [
+            b(self.bounds.origin.x), b(self.bounds.origin.y), b(self.bounds.size.width), b(self.bounds.size.height),
+            b(m.origin.x), b(m.origin.y), b(m.size.width), b(m.size.height),
+            b(c.top_left), b(c.top_right), b(c.bottom_right), b(c.bottom_left),
+            b(self.blur_radius),
+        ]
+    }
+}
+
+impl From<Backdrop> for Primitive {
+    fn from(backdrop: Backdrop) -> Self {
+        Primitive::Backdrop(backdrop)
+    }
 }
 
 impl From<PaintSurface> for Primitive {

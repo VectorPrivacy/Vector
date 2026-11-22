@@ -236,6 +236,8 @@ struct WgpuRendererCore {
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
     pathless_frames: u32,
+    backdrops: Option<crate::backdrop::Backdrops>,
+    frame_size: (u32, u32),
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -475,8 +477,14 @@ impl WgpuRenderer {
             );
         }
 
+        // Copying out of the frame is how a backdrop blur reads what lies under it.
+        let copy_src = surface_caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: if copy_src {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: clamped_width.max(1),
@@ -1249,9 +1257,15 @@ impl WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        let readable = self
+            .surface_config
+            .usage
+            .contains(wgpu::TextureUsages::COPY_SRC)
+            .then_some(&frame.texture);
         if let Err(error) = core.render_frame(
             scene,
             &frame_view,
+            readable,
             size,
             premultiplied_alpha,
             wgpu::Color::TRANSPARENT,
@@ -1429,6 +1443,8 @@ impl WgpuRendererCore {
             target_format,
             max_texture_size,
             pathless_frames: 0,
+            backdrops: None,
+            frame_size: (0, 0),
         }
     }
 
@@ -1481,6 +1497,7 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         target_view: &wgpu::TextureView,
+        target_texture: Option<&wgpu::Texture>,
         size: Size<DevicePixels>,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
@@ -1538,7 +1555,8 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.frame_size = (size.width.0 as u32, size.height.0 as u32);
+        self.record_frame(scene, target_view, target_texture, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1549,6 +1567,7 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        frame_texture: Option<&wgpu::Texture>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut instance_offset = 0;
@@ -1574,6 +1593,49 @@ impl WgpuRendererCore {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("main_encoder"),
                 });
+
+        // A surface that can't be copied from (GL) draws a frame that must blur offscreen, then
+        // copies it over; with held blurs that is one frame per showing.
+        let mut offscreen = None;
+        if scene.backdrops.is_empty() {
+            if let Some(backdrops) = &mut self.backdrops {
+                backdrops.begin_frame(scene);
+            }
+        } else {
+            let device = &self.resources.device;
+            let format = frame_texture.map_or(self.target_format, |t| t.format());
+            let backdrops = match &mut self.backdrops {
+                Some(b) if b.format() == format => b,
+                slot => slot.insert(crate::backdrop::Backdrops::new(device, format)),
+            };
+            backdrops.reserve(device, scene.backdrops.len() + 1);
+            backdrops.begin_frame(scene);
+            if frame_texture.is_none() && backdrops.must_read(scene) {
+                let (width, height) = self.frame_size;
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("backdrop_frame"),
+                    size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                offscreen = Some((texture, view));
+            }
+        }
+        let surface_view = frame_view;
+        let frame_view = offscreen.as_ref().map_or(frame_view, |(_, view)| view);
+        let backdrop_frame = offscreen
+            .as_ref()
+            .map(|(texture, _)| texture)
+            .or(frame_texture)
+            .filter(|_| !scene.backdrops.is_empty());
+        let mut backdrops_drawn = 0;
 
         // Each break in the main pass makes a tiled GPU write the whole frame out and read it
         // back, so paths are rasterized up front whenever their batches can share the texture.
@@ -1696,8 +1758,47 @@ impl WgpuRendererCore {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::Backdrops(range) => {
+                        // A surface that can't be copied from leaves the backdrop sharp.
+                        let (Some(frame), Some(backdrops)) = (backdrop_frame, self.backdrops.as_mut()) else {
+                            continue;
+                        };
+                        for backdrop in &scene.backdrops[range] {
+                            // A held blur draws back with the pass whole; only a fresh one breaks it.
+                            if backdrops.held(backdrop) {
+                                backdrops.composite_latest(backdrop, &mut pass);
+                                continue;
+                            }
+                            drop(pass);
+                            let (device, queue) = (&self.resources.device, &self.resources.queue);
+                            let composite = backdrops.blur(device, queue, &mut encoder, frame, backdrop, backdrops_drawn);
+                            backdrops_drawn += 1;
+                            pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("main_pass_after_backdrop"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: frame_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                })],
+                                depth_stencil_attachment: None,
+                                ..Default::default()
+                            });
+                            if composite {
+                                backdrops.composite_latest(backdrop, &mut pass);
+                            }
+                        }
+                    }
                 }
             }
+        }
+
+        if let (Some((_, view)), Some(backdrops)) = (&offscreen, &self.backdrops) {
+            let (device, queue) = (&self.resources.device, &self.resources.queue);
+            backdrops.copy_over(device, queue, &mut encoder, view, surface_view, self.frame_size, scene.backdrops.len());
         }
 
         let submission = self
@@ -2515,7 +2616,7 @@ impl WgpuHeadlessRenderer {
             .view
             .clone();
         self.core
-            .render_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
+            .render_frame(scene, &view, None, size, false, wgpu::Color::BLACK)?;
         Ok(())
     }
 

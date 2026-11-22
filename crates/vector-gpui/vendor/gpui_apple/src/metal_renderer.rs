@@ -2,7 +2,7 @@ use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
+    AtlasTextureId, Backdrop, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -146,6 +146,13 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    backdrop_down_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    backdrop_blur_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    backdrop_composite_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Two quarter-size scratch textures a backdrop blurs between, kept while frames draw one.
+    backdrop_textures: Option<[Retained<ProtocolObject<dyn MTLTexture>>; 2]>,
+    /// Held backdrops' blurs, each with the pass that draws it back, kept while drawn each frame.
+    held_backdrops: Vec<HeldBackdrop>,
     unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
@@ -398,6 +405,19 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         )?;
 
+        let backdrop_down_pipeline_state =
+            build_opaque_pipeline_state(&device, &library, "backdrop_down", "backdrop_vertex", "backdrop_down_fragment")?;
+        let backdrop_blur_pipeline_state =
+            build_opaque_pipeline_state(&device, &library, "backdrop_blur", "backdrop_vertex", "backdrop_blur_fragment")?;
+        let backdrop_composite_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "backdrop_composite",
+            "backdrop_vertex",
+            "backdrop_composite_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        )?;
+
         let command_queue = device.newCommandQueue().context("creating command queue")?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
@@ -435,6 +455,11 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            backdrop_down_pipeline_state,
+            backdrop_blur_pipeline_state,
+            backdrop_composite_pipeline_state,
+            backdrop_textures: None,
+            held_backdrops: Vec::new(),
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -673,6 +698,11 @@ impl MetalRenderer {
         texture: &ProtocolObject<dyn MTLTexture>,
         viewport_size: Size<DevicePixels>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
+        if scene.backdrops.iter().all(|b| b.held) {
+            self.backdrop_textures = None;
+        }
+        // A held blur lasts while it is drawn frame after frame; gone a frame, it blurs afresh.
+        self.held_backdrops.retain_mut(|h| std::mem::replace(&mut h.drawn, false));
         if scene.paths.is_empty() {
             self.release_idle_path_textures();
         } else {
@@ -986,6 +1016,37 @@ impl MetalRenderer {
                         return Err(error);
                     }
                 }
+                PrimitiveBatch::Backdrops(range) => {
+                    for backdrop in &scene.backdrops[range] {
+                        let key = backdrop.held.then(|| backdrop.key());
+                        if let Some(i) = key.and_then(|k| self.held_backdrops.iter().position(|h| h.key == k)) {
+                            self.held_backdrops[i].drawn = true;
+                            let held = &self.held_backdrops[i];
+                            self.encode_backdrop(&self.backdrop_composite_pipeline_state, &held.texture, &held.pass, &command_encoder);
+                            continue;
+                        }
+                        // The blur reads what this pass drew, so the pass ends first and resumes after.
+                        command_encoder.endEncoding();
+                        let into = match key {
+                            Some(_) => self.held_backdrop_texture(backdrop, viewport_size).map(Some),
+                            None => Ok(None),
+                        };
+                        let composite = into.and_then(|into| {
+                            let pass = self.blur_backdrop(backdrop, texture, viewport_size, &command_buffer, into.as_deref())?;
+                            Ok(pass.map(|pass| (pass, into)))
+                        });
+                        command_encoder = new_command_encoder_for_texture(&command_buffer, texture, viewport_size, None)?;
+                        match composite {
+                            Ok(Some((pass, Some(held)))) => {
+                                self.encode_backdrop(&self.backdrop_composite_pipeline_state, &held, &pass, &command_encoder);
+                                self.held_backdrops.push(HeldBackdrop { key: key.unwrap_or_default(), texture: held, pass, drawn: true });
+                            }
+                            Ok(Some((pass, None))) => self.composite_backdrop(&pass, &command_encoder),
+                            Ok(None) => {}
+                            Err(error) => log::error!("backdrop blur: {error:#}"),
+                        }
+                    }
+                }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
@@ -993,6 +1054,192 @@ impl MetalRenderer {
         command_encoder.endEncoding();
 
         Ok(command_buffer)
+    }
+
+    /// Shrinks what `texture` holds around `backdrop` to a quarter and blurs it across and down
+    /// into the first scratch texture; answers the pass that draws it back, or nothing to draw.
+    fn blur_backdrop(
+        &mut self,
+        backdrop: &Backdrop,
+        texture: &ProtocolObject<dyn MTLTexture>,
+        viewport_size: Size<DevicePixels>,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        into: Option<&ProtocolObject<dyn MTLTexture>>,
+    ) -> Result<Option<BackdropPass>> {
+        const DOWN: f32 = 4.;
+        let (vw, vh) = (i32::from(viewport_size.width) as f32, i32::from(viewport_size.height) as f32);
+        let rect = |b: &Bounds<ScaledPixels>| [b.origin.x.0, b.origin.y.0, b.size.width.0, b.size.height.0];
+        let shape = backdrop.bounds.intersect(&backdrop.content_mask.bounds);
+        let (x0, y0) = (shape.origin.x.0.max(0.), shape.origin.y.0.max(0.));
+        let (x1, y1) = ((shape.origin.x.0 + shape.size.width.0).min(vw), (shape.origin.y.0 + shape.size.height.0).min(vh));
+        if x1 <= x0 || y1 <= y0 {
+            return Ok(None);
+        }
+        // Read past the shape by three deviations, so its edges blur in what lies beside them.
+        let reach = (backdrop.blur_radius.0 * 3.).ceil();
+        let (rx0, ry0) = ((x0 - reach).max(0.).floor(), (y0 - reach).max(0.).floor());
+        let (rx1, ry1) = ((x1 + reach).min(vw).ceil(), (y1 + reach).min(vh).ceil());
+        let (qw, qh) = (((rx1 - rx0) / DOWN).ceil().max(1.), ((ry1 - ry0) / DOWN).ceil().max(1.));
+        let [a, b] = self.backdrop_scratch(qw as usize, qh as usize)?;
+        let (aw, ah) = (a.width() as f32, a.height() as f32);
+
+        let sigma = (backdrop.blur_radius.0 / DOWN).max(0.5);
+        let spacing = sigma * 3. / 6.;
+        let gauss = |x: f32| (-(x * x) / (2. * sigma * sigma)).exp();
+        let mut weights = [0f32; 7];
+        for (i, w) in weights.iter_mut().enumerate() {
+            *w = gauss(i as f32 * spacing);
+        }
+        let total = weights[0] + 2. * weights[1..].iter().sum::<f32>();
+        weights.iter_mut().for_each(|w| *w /= total);
+        let o = |i: usize| i as f32 * spacing;
+
+        let scratch_clamp = [0.5 / aw, 0.5 / ah, (qw - 0.5) / aw, (qh - 0.5) / ah];
+        let mut pass = BackdropPass {
+            dst: [0., 0., qw, qh],
+            target: [aw, ah],
+            texel: [1. / vw, 1. / vh],
+            uv: [rx0 / vw, ry0 / vh, qw * DOWN / vw, qh * DOWN / vh],
+            uv_clamp: [(rx0 + 0.5) / vw, (ry0 + 0.5) / vh, (rx1 - 0.5) / vw, (ry1 - 0.5) / vh],
+            dir: [0., 0.],
+            pad: [0., 0.],
+            weights0: [weights[0], weights[1], weights[2], weights[3]],
+            weights1: [weights[4], weights[5], weights[6], 0.],
+            offsets0: [o(1), o(2), o(3), o(4)],
+            offsets1: [o(5), o(6), 0., 0.],
+            shape: rect(&backdrop.bounds),
+            radii: [
+                backdrop.corner_radii.top_left.0,
+                backdrop.corner_radii.top_right.0,
+                backdrop.corner_radii.bottom_right.0,
+                backdrop.corner_radii.bottom_left.0,
+            ],
+            clip: rect(&backdrop.content_mask.bounds),
+            clip_radii: [
+                backdrop.content_mask.corner_radii.top_left.0,
+                backdrop.content_mask.corner_radii.top_right.0,
+                backdrop.content_mask.corner_radii.bottom_right.0,
+                backdrop.content_mask.corner_radii.bottom_left.0,
+            ],
+        };
+        self.backdrop_pass(command_buffer, &self.backdrop_down_pipeline_state, texture, &a, &pass)?;
+        pass.texel = [1. / aw, 1. / ah];
+        pass.uv = [0., 0., qw / aw, qh / ah];
+        pass.uv_clamp = scratch_clamp;
+        pass.dir = [1., 0.];
+        self.backdrop_pass(command_buffer, &self.backdrop_blur_pipeline_state, &a, &b, &pass)?;
+        pass.dir = [0., 1.];
+        let out: &ProtocolObject<dyn MTLTexture> = into.unwrap_or(&a);
+        let (ow, oh) = (out.width() as f32, out.height() as f32);
+        pass.target = [ow, oh];
+        self.backdrop_pass(command_buffer, &self.backdrop_blur_pipeline_state, &b, out, &pass)?;
+
+        // Drawn back over the shape: each pixel reads the blur where it sits, a quarter as far.
+        pass.dst = [x0, y0, x1 - x0, y1 - y0];
+        pass.target = [vw, vh];
+        pass.uv = [(x0 - rx0) / DOWN / ow, (y0 - ry0) / DOWN / oh, (x1 - x0) / DOWN / ow, (y1 - y0) / DOWN / oh];
+        pass.uv_clamp = [0.5 / ow, 0.5 / oh, (qw - 0.5) / ow, (qh - 0.5) / oh];
+        Ok(Some(pass))
+    }
+
+    /// A texture of its own for a held backdrop's blur, the quarter of its reach on screen.
+    fn held_backdrop_texture(&self, backdrop: &Backdrop, viewport_size: Size<DevicePixels>) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
+        let (vw, vh) = (i32::from(viewport_size.width) as f32, i32::from(viewport_size.height) as f32);
+        let reach = (backdrop.blur_radius.0 * 3.).ceil();
+        let shape = backdrop.bounds.intersect(&backdrop.content_mask.bounds);
+        let w = (shape.size.width.0 + 2. * reach).min(vw).max(4.);
+        let h = (shape.size.height.0 + 2. * reach).min(vh).max(4.);
+        let descriptor = MTLTextureDescriptor::new();
+        // SAFETY: The dimensions are positive and this descriptor creates a 2D texture.
+        unsafe {
+            descriptor.setWidth((w / 4.).ceil() as usize + 2);
+            descriptor.setHeight((h / 4.).ceil() as usize + 2);
+        }
+        descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        descriptor.setStorageMode(MTLStorageMode::Private);
+        descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        self.device.newTextureWithDescriptor(&descriptor).context("allocating held backdrop texture")
+    }
+
+    /// The scratch textures, grown to hold `width` x `height`.
+    fn backdrop_scratch(&mut self, width: usize, height: usize) -> Result<[Retained<ProtocolObject<dyn MTLTexture>>; 2]> {
+        if let Some([a, b]) = &self.backdrop_textures
+            && a.width() >= width
+            && a.height() >= height
+        {
+            return Ok([a.clone(), b.clone()]);
+        }
+        let (width, height) = (width.next_multiple_of(64), height.next_multiple_of(64));
+        let make = || {
+            let descriptor = MTLTextureDescriptor::new();
+            // SAFETY: The dimensions are positive and this descriptor creates a 2D texture.
+            unsafe {
+                descriptor.setWidth(width);
+                descriptor.setHeight(height);
+            }
+            descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            descriptor.setStorageMode(MTLStorageMode::Private);
+            descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            self.device.newTextureWithDescriptor(&descriptor).context("allocating backdrop texture")
+        };
+        let textures = [make()?, make()?];
+        self.backdrop_textures = Some(textures.clone());
+        Ok(textures)
+    }
+
+    /// One full-screen-quad pass from `source` into `target`, which it overwrites.
+    fn backdrop_pass(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        source: &ProtocolObject<dyn MTLTexture>,
+        target: &ProtocolObject<dyn MTLTexture>,
+        pass: &BackdropPass,
+    ) -> Result<()> {
+        let descriptor = MTLRenderPassDescriptor::new();
+        // SAFETY: Index zero is within the render pass's color attachment array.
+        let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        color_attachment.setTexture(Some(target));
+        color_attachment.setLoadAction(MTLLoadAction::DontCare);
+        color_attachment.setStoreAction(MTLStoreAction::Store);
+        let encoder = command_buffer
+            .renderCommandEncoderWithDescriptor(&descriptor)
+            .context("creating backdrop render command encoder")?;
+        encoder.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: target.width() as f64,
+            height: target.height() as f64,
+            znear: 0.0,
+            zfar: 1.0,
+        });
+        self.encode_backdrop(pipeline, source, pass, &encoder);
+        encoder.endEncoding();
+        Ok(())
+    }
+
+    fn composite_backdrop(&self, pass: &BackdropPass, encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
+        let Some([blurred, _]) = &self.backdrop_textures else { return };
+        self.encode_backdrop(&self.backdrop_composite_pipeline_state, blurred, pass, encoder);
+    }
+
+    fn encode_backdrop(
+        &self,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        source: &ProtocolObject<dyn MTLTexture>,
+        pass: &BackdropPass,
+        encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    ) {
+        encoder.setRenderPipelineState(pipeline);
+        // SAFETY: Slot 0 holds the six retained unit vertices, slot 1 a copy of `pass`, whose
+        // layout matches `BackdropPass` in shaders.metal; the source texture is retained by Metal.
+        unsafe {
+            encoder.setVertexBuffer_offset_atIndex(Some(&self.unit_vertices), 0, 0);
+            encoder.setVertexBytes_length_atIndex(ptr::NonNull::from(pass).cast(), mem::size_of::<BackdropPass>(), 1);
+            encoder.setFragmentBytes_length_atIndex(ptr::NonNull::from(pass).cast(), mem::size_of::<BackdropPass>(), 1);
+            encoder.setFragmentTexture_atIndex(Some(source), 0);
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+        }
     }
 
     fn draw_paths_to_intermediate(
@@ -1633,6 +1880,61 @@ fn build_pipeline_state(
         .with_context(|| format!("creating {label} render pipeline"))
 }
 
+/// A pipeline that writes its output as is: the backdrop passes overwrite their scratch texture.
+fn build_opaque_pipeline_state(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
+    let vertex_fn = library
+        .newFunctionWithName(&NSString::from_str(vertex_fn_name))
+        .with_context(|| format!("locating vertex function {vertex_fn_name}"))?;
+    let fragment_fn = library
+        .newFunctionWithName(&NSString::from_str(fragment_fn_name))
+        .with_context(|| format!("locating fragment function {fragment_fn_name}"))?;
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str(label)));
+    descriptor.setVertexFunction(Some(vertex_fn.as_ref()));
+    descriptor.setFragmentFunction(Some(fragment_fn.as_ref()));
+    // SAFETY: Index zero is within the pipeline's color attachment array.
+    let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    color_attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    color_attachment.setBlendingEnabled(false);
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .with_context(|| format!("creating {label} render pipeline"))
+}
+
+struct HeldBackdrop {
+    key: [u32; 13],
+    texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    pass: BackdropPass,
+    drawn: bool,
+}
+
+/// `BackdropPass` in shaders.metal, row for row: every field fills a 16-byte row or half of one.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct BackdropPass {
+    dst: [f32; 4],
+    target: [f32; 2],
+    texel: [f32; 2],
+    uv: [f32; 4],
+    uv_clamp: [f32; 4],
+    dir: [f32; 2],
+    pad: [f32; 2],
+    weights0: [f32; 4],
+    weights1: [f32; 4],
+    offsets0: [f32; 4],
+    offsets1: [f32; 4],
+    shape: [f32; 4],
+    radii: [f32; 4],
+    clip: [f32; 4],
+    clip_radii: [f32; 4],
+}
+
 fn build_path_sprite_pipeline_state(
     device: &ProtocolObject<dyn MTLDevice>,
     library: &ProtocolObject<dyn MTLLibrary>,
@@ -2159,7 +2461,7 @@ mod tests {
             descriptor.setHeight(16);
         }
         descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-        descriptor.setUsage(MTLTextureUsage::RenderTarget);
+        descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
         let uses_shared_storage = cfg!(target_os = "ios") || renderer.is_apple_gpu;
         descriptor.setStorageMode(if uses_shared_storage {
             MTLStorageMode::Shared

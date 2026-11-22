@@ -46,7 +46,7 @@ impl WgpuRenderer {
             for (name, scene) in scenes {
                 let mut failed = None;
                 let times = time(|| {
-                    if let Err(error) = core.render_frame(scene, &view, size, false, wgpu::Color::BLACK) {
+                    if let Err(error) = core.render_frame(scene, &view, None, size, false, wgpu::Color::BLACK) {
                         failed = Some(format!("{error:#}"));
                     }
                     wait(&device);

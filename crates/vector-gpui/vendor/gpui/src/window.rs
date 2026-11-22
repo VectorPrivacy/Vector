@@ -5472,6 +5472,28 @@ impl Window {
         }
     }
 
+    /// Blurs what is already drawn under `bounds`, rounded at `corner_radii`, by a standard
+    /// deviation of `blur_radius`: CSS `backdrop-filter: blur()`. Paint it before the element's
+    /// own fill, which then tints the blur. Costs a few small passes on frames that draw one.
+    /// With `held`, the blur is made once when it first shows and kept while it stays in place.
+    pub fn paint_backdrop(&mut self, bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>, blur_radius: Pixels, held: bool) {
+        self.invalidator.debug_assert_paint();
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // `GPUI_NO_BACKDROP=1` leaves backdrops sharp, to compare against.
+        if blur_radius <= px(0.) || *OFF.get_or_init(|| std::env::var_os("GPUI_NO_BACKDROP").is_some()) {
+            return;
+        }
+        let scale = self.scale_factor();
+        self.next_frame.scene.insert_primitive(crate::Backdrop {
+            order: 0,
+            bounds: self.snap_bounds(bounds),
+            corner_radii: corner_radii.scale(scale),
+            content_mask: self.snapped_content_mask(),
+            blur_radius: ScaledPixels(blur_radius.0 * scale),
+            held,
+        });
+    }
+
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
     /// Quads are colored rectangular regions with an optional background, border, and corner radius.
     /// see [`fill`], [`outline`], and [`quad`] to construct this type.

@@ -1,3 +1,4 @@
+mod backdrop;
 mod cosmic_text_system;
 #[cfg(not(target_family = "wasm"))]
 mod gl_quads;

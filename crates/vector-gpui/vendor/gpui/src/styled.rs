@@ -749,6 +749,21 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Blurs what lies behind this element by a standard deviation of `radius`, as CSS
+    /// `backdrop-filter: blur()`: give it a translucent fill to tint the blur.
+    fn backdrop_blur(mut self, radius: Pixels) -> Self {
+        self.style().backdrop_blur = Some(radius);
+        self
+    }
+
+    /// [`Styled::backdrop_blur`] made once, when this element first shows, and kept while it
+    /// stays in place: for an overlay over still content, whose frames then draw no blur.
+    fn backdrop_blur_once(mut self, radius: Pixels) -> Self {
+        self.style().backdrop_blur = Some(radius);
+        self.style().backdrop_held = Some(true);
+        self
+    }
+
     /// Sets the opacity of this element and its children.
     fn opacity(mut self, opacity: f32) -> Self {
         self.style().opacity = Some(opacity);

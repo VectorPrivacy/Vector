@@ -1318,3 +1318,97 @@ float4 fill_color(Background background,
 
   return color;
 }
+
+// Backdrop blur (CSS `backdrop-filter: blur()`): what is drawn so far under a shape is shrunk
+// to a quarter, blurred across then down, and drawn back under the shape. All rects are
+// (x, y, width, height); `dst` in the target's pixels, `uv` in the source's 0..1.
+struct BackdropPass {
+  float4 dst;
+  float2 target;
+  float2 texel;
+  float4 uv;
+  float4 uv_clamp;
+  float2 dir;
+  float2 pad;
+  float4 weights0; // the centre tap, then taps 1..3 out each way
+  float4 weights1; // taps 4..6
+  float4 offsets0; // taps 1..4, in texels along `dir`
+  float4 offsets1; // taps 5..6
+  float4 shape;
+  float4 radii;    // top left, top right, bottom right, bottom left
+  float4 clip;
+  float4 clip_radii;
+};
+
+struct BackdropVertexOutput {
+  float4 position [[position]];
+  float2 uv;
+  float2 at;
+};
+
+vertex BackdropVertexOutput backdrop_vertex(
+  uint unit_vertex_id [[vertex_id]],
+  constant float2 *unit_vertices [[buffer(0)]],
+  constant BackdropPass *pass [[buffer(1)]]
+) {
+  float2 unit = unit_vertices[unit_vertex_id];
+  float2 at = pass->dst.xy + unit * pass->dst.zw;
+  float2 ndc = at / pass->target * float2(2., -2.) + float2(-1., 1.);
+  return BackdropVertexOutput{float4(ndc, 0., 1.), pass->uv.xy + unit * pass->uv.zw, at};
+}
+
+float2 backdrop_clamp(float2 uv, constant BackdropPass *pass) {
+  return clamp(uv, pass->uv_clamp.xy, pass->uv_clamp.zw);
+}
+
+// Each tap lands between four source pixels, so four of them average a 4x4 block.
+fragment float4 backdrop_down_fragment(
+  BackdropVertexOutput input [[stage_in]],
+  constant BackdropPass *pass [[buffer(1)]],
+  texture2d<float> source [[texture(0)]]
+) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+  float2 d = pass->texel;
+  float4 c = source.sample(s, backdrop_clamp(input.uv + float2(-d.x, -d.y), pass))
+           + source.sample(s, backdrop_clamp(input.uv + float2( d.x, -d.y), pass))
+           + source.sample(s, backdrop_clamp(input.uv + float2(-d.x,  d.y), pass))
+           + source.sample(s, backdrop_clamp(input.uv + float2( d.x,  d.y), pass));
+  return c * 0.25;
+}
+
+fragment float4 backdrop_blur_fragment(
+  BackdropVertexOutput input [[stage_in]],
+  constant BackdropPass *pass [[buffer(1)]],
+  texture2d<float> source [[texture(0)]]
+) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+  float2 step = pass->dir * pass->texel;
+  float4 c = source.sample(s, backdrop_clamp(input.uv, pass)) * pass->weights0.x;
+  float w[6] = {pass->weights0.y, pass->weights0.z, pass->weights0.w, pass->weights1.x, pass->weights1.y, pass->weights1.z};
+  float o[6] = {pass->offsets0.x, pass->offsets0.y, pass->offsets0.z, pass->offsets0.w, pass->offsets1.x, pass->offsets1.y};
+  for (int i = 0; i < 6; i++) {
+    float2 d = step * o[i];
+    c += (source.sample(s, backdrop_clamp(input.uv + d, pass)) + source.sample(s, backdrop_clamp(input.uv - d, pass))) * w[i];
+  }
+  return c;
+}
+
+float backdrop_rrect_sdf(float2 p, float4 b, float4 r) {
+  float2 half_size = b.zw * 0.5;
+  float2 to = p - (b.xy + half_size);
+  float radius = to.x < 0. ? (to.y < 0. ? r.x : r.w) : (to.y < 0. ? r.y : r.z);
+  float2 q = fabs(to) - half_size + radius;
+  return length(max(q, 0.)) + min(max(q.x, q.y), 0.) - radius;
+}
+
+fragment float4 backdrop_composite_fragment(
+  BackdropVertexOutput input [[stage_in]],
+  constant BackdropPass *pass [[buffer(1)]],
+  texture2d<float> source [[texture(0)]]
+) {
+  constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+  float4 c = source.sample(s, backdrop_clamp(input.uv, pass));
+  float a = saturate(0.5 - backdrop_rrect_sdf(input.at, pass->shape, pass->radii))
+          * saturate(0.5 - backdrop_rrect_sdf(input.at, pass->clip, pass->clip_radii));
+  return float4(c.rgb, a);
+}

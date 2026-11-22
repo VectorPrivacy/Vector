@@ -1550,6 +1550,8 @@ impl EmojiPicker {
                 .justify_center()
                 .p(px(24.))
                 .font_family(INTER)
+                // Tauri's blur(6px). Made once per showing: the editor beneath holds still.
+                .backdrop_blur_once(px(6.))
         };
         let glow = |color: gpui::Hsla| {
             div().absolute().inset_0().bg(linear_gradient(
