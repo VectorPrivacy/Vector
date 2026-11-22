@@ -226,6 +226,9 @@ pub struct VectorApp {
     jump_miss: Option<(String, SharedString)>,
     /// The window is narrower than widescreen: the slim layout.
     is_slim: bool,
+    /// The timeline's last laid-out width per layout (slim, the members panel): a chat's new
+    /// list has no viewport on its first frame.
+    timeline_w: RefCell<HashMap<(bool, Option<bool>), f32>>,
     /// The window's width as of this frame, for helpers that don't take a `Window`.
     vw: f32,
     slim: slim_ops::Slim,
@@ -1089,6 +1092,7 @@ impl VectorApp {
             answer_pending: None,
             jump_miss: None,
             is_slim: false,
+            timeline_w: RefCell::default(),
             vw: 0.,
             slim: slim_ops::Slim::new(),
             send_btn: Rc::default(),
@@ -1939,12 +1943,26 @@ impl VectorApp {
         app.screen = Screen::Booting(std::time::Instant::now());
         Self::start_sweeps(window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            while let Some(ev) = events.next().await {
+            let mut held = std::collections::VecDeque::new();
+            loop {
+                if held.is_empty() {
+                    match events.next().await {
+                        Some(ev) => held.push_back(ev),
+                        None => break,
+                    }
+                }
+                while let Ok(Some(ev)) = events.try_next() {
+                    held.push_back(ev);
+                }
                 if this
-                    .update_in(cx, |this, window, cx| this.on_event(ev, window, cx))
+                    .update_in(cx, |this, window, cx| this.on_events(&mut held, window, cx))
                     .is_err()
                 {
                     break;
+                }
+                // A sync's backlog is worked in slices, so frames and touches land between them.
+                if !held.is_empty() {
+                    cx.background_executor().timer(std::time::Duration::from_millis(1)).await;
                 }
             }
         })
@@ -3351,6 +3369,24 @@ impl VectorApp {
     }
 
     fn on_event(&mut self, ev: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_event(ev, window, cx);
+        self.sync_request_mutuals(cx);
+    }
+
+    /// Events in arrival order until the slice is spent; the rest wait for the next one.
+    fn on_events(&mut self, held: &mut std::collections::VecDeque<UiEvent>, window: &mut Window, cx: &mut Context<Self>) {
+        const SLICE: std::time::Duration = std::time::Duration::from_millis(4);
+        let began = std::time::Instant::now();
+        while let Some(ev) = held.pop_front() {
+            self.apply_event(ev, window, cx);
+            if began.elapsed() >= SLICE {
+                break;
+            }
+        }
+        self.sync_request_mutuals(cx);
+    }
+
+    fn apply_event(&mut self, ev: UiEvent, window: &mut Window, cx: &mut Context<Self>) {
         match ev {
             UiEvent::Booted(boot) => {
                 if let Some(state) = backend::calls::status() {
@@ -3377,7 +3413,6 @@ impl VectorApp {
             }
             UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
         }
-        self.sync_request_mutuals(cx);
         if !std::mem::take(&mut self.scoped) {
             cx.notify();
         }
@@ -9974,8 +10009,19 @@ impl VectorApp {
         // `.history-edge.alone`: a chat with nothing yet has its beginning mid-view.
         let anchors = self.anchors.clone();
         // 3px border, 12px padding and the 56px gutter on the left; 12px and the body's 12px on the right.
-        let content_w = (f32::from(self.timeline.viewport_bounds().size.width) - 95.).max(0.);
         let vw = f32::from(window.viewport_size().width);
+        // Width-sized media drawn at a stale width would jump a frame later; slim's timeline is the window's width.
+        let layout = (self.is_slim, self.community.as_ref().map(|v| v.panel));
+        let measured = f32::from(self.timeline.viewport_bounds().size.width);
+        let timeline_w = if self.is_slim {
+            vw
+        } else if measured > 0. {
+            self.timeline_w.borrow_mut().insert(layout, measured);
+            measured
+        } else {
+            self.timeline_w.borrow().get(&layout).copied().unwrap_or(measured)
+        };
+        let content_w = (timeline_w - 95.).max(0.);
         // Slim's header floats 60px over a list padded 75px; a voice stage takes that place in flow.
         let top_pad = {
             let top = if self.is_slim && !staged_voice { 15. } else { 12. };

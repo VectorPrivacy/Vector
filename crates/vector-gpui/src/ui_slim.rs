@@ -106,6 +106,8 @@ pub(super) struct Slim {
     tabs: Rc<RefCell<HashMap<Filter, Bounds<Pixels>>>>,
     /// Where the tab bar slides from: the tab last marked.
     bar_from: Option<(Filter, f32, f32)>,
+    /// When the bar began its slide; past it, the bar rests in its tab.
+    bar_at: Option<std::time::Instant>,
     new_btn: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
 
@@ -134,6 +136,7 @@ impl Slim {
             keys: RefCell::new(Vec::new()),
             tabs: Rc::default(),
             bar_from: None,
+            bar_at: None,
             new_btn: Rc::default(),
         }
     }
@@ -1548,6 +1551,13 @@ impl VectorApp {
         let filters = self.slim.filters();
         let many = filters.len() > 2;
         let probes = self.slim.tabs.clone();
+        // At rest the bar is the active tab's own, laid out with it wherever its row is drawn;
+        // only a slide between tabs places it from measured bounds.
+        let sliding = self.slim.bar_from.is_some_and(|(to, _, _)| to == active)
+            && self.slim.bar_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(260));
+        if sliding {
+            window.request_animation_frame();
+        }
         let tabs = filters.iter().map(|&f| {
             let on = f == active;
             let dot = dots.get(&f).copied().unwrap_or(false) && !on;
@@ -1570,6 +1580,7 @@ impl VectorApp {
                         let from = app.slim.active();
                         if let Some(b) = app.slim.tabs.borrow().get(&from) {
                             app.slim.bar_from = Some((f, f32::from(b.left()), f32::from(b.size.width)));
+                            app.slim.bar_at = Some(std::time::Instant::now());
                         }
                         app.slim.filter = f;
                     }
@@ -1581,7 +1592,8 @@ impl VectorApp {
                         d.child(div().absolute().top(px(-1.)).right(px(-9.)).size(px(8.)).rounded_full().bg(c(ACCENT)))
                     }),
                 )
-                .child(gpui::canvas(move |b, _, _| { probe.borrow_mut().insert(f, b); }, |_, _, _, _| {}).absolute().size_full());
+                .child(gpui::canvas(move |b, _, _| { probe.borrow_mut().insert(f, b); }, |_, _, _, _| {}).absolute().size_full())
+                .when(on && !sliding, |d| d.child(div().absolute().left_0().right_0().bottom(px(-1.)).h(px(2.)).bg(c(PRIMARY))));
             if many { tab.flex_grow(1.).px(px(6.)) } else { tab.flex_1() }
         });
         let row_probe = Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
@@ -1591,7 +1603,7 @@ impl VectorApp {
             row.map(|b| {
                 let (left, w) = (f32::from(b.left()), f32::from(b.size.width));
                 let bar = div().absolute().bottom(px(-1.)).h(px(2.)).bg(c(PRIMARY));
-                match self.slim.bar_from.filter(|(to, _, _)| *to == active) {
+                match self.slim.bar_from.filter(|(to, _, _)| *to == active && sliding) {
                     Some((_, l0, w0)) => bar
                         .with_animation(
                             SharedString::from(format!("cc-tab-bar-{}", active.id())),
@@ -1600,11 +1612,11 @@ impl VectorApp {
                             move |d, t| d.left(px(l0 + (left - l0) * t)).w(px(w0 + (w - w0) * t)),
                         )
                         .into_any_element(),
-                    None => bar.left(px(left)).w(px(w)).into_any_element(),
+                    None => div().into_any_element(),
                 }
             })
         };
-        if bar.is_none() {
+        if bar.is_none() && sliding {
             window.request_animation_frame();
         }
         // The bar is placed relative to the row; tabs are measured in window space.

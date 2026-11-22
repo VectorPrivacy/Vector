@@ -747,7 +747,7 @@ impl Store {
         }
         let at = chat.messages.partition_point(|m| m.at <= msg.at);
         chat.messages.insert(at, msg);
-        self.resort();
+        self.reposition(chat_id);
         true
     }
 
@@ -775,7 +775,7 @@ impl Store {
                 }
                 let at = chat.messages.partition_point(|m| m.at <= msg.at);
                 chat.messages.insert(at, msg);
-                self.resort();
+                self.reposition(chat_id);
             }
         }
     }
@@ -829,9 +829,29 @@ impl Store {
         self.chats.iter_mut().find(|c| c.id == id)
     }
 
+    /// Where `resort` would move this one chat, the rest already in order: a sync's burst of
+    /// messages walks a few chats each instead of every chat's every message.
+    fn reposition(&mut self, chat_id: &str) {
+        let Some(i) = self.chats.iter().position(|c| c.id == chat_id) else { return };
+        let chat = self.chats.remove(i);
+        let key = last_activity(&chat);
+        let (mut lo, mut hi) = (0, self.chats.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let k = last_activity(&self.chats[mid]);
+            if k > key || (k == key && mid < i) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        self.chats.insert(lo, chat);
+    }
+
     pub fn resort(&mut self) {
+        // One key per chat: each is a walk of its messages.
         self.chats
-            .sort_by_key(|c| std::cmp::Reverse(last_activity(c)));
+            .sort_by_cached_key(|c| std::cmp::Reverse(last_activity(c)));
     }
 
     pub fn me(&self) -> Option<&SlimProfile> {
@@ -1716,4 +1736,49 @@ pub enum PivxPhase {
     Claiming,
     Claimed,
     Failed,
+}
+
+#[cfg(test)]
+mod reposition_tests {
+    use super::*;
+
+    #[test]
+    fn a_moved_chat_lands_where_a_full_resort_puts_it() {
+        use vector_core::types::Message;
+        let mut store = Store::from_fixtures(std::path::Path::new(crate::FIXTURES)).unwrap();
+        let template = store.chats[0].clone();
+        store.chats.clear();
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut rand = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for c in 0..40u64 {
+            let mut chat = template.clone();
+            chat.id = format!("chat{c}");
+            chat.created_at = rand(5);
+            chat.messages = (0..rand(4)).map(|i| Message { id: format!("m{c}-{i}"), at: rand(8) * 1000, ..Default::default() }).collect();
+            chat.messages.sort_by_key(|m| m.at);
+            store.chats.push(chat);
+        }
+        store.resort();
+        for i in 0..2000u64 {
+            let chat = format!("chat{}", rand(40));
+            let before = store.chats.clone();
+            let at = rand(12) * 1000;
+            if rand(3) == 0 {
+                let old = store.chat(&chat).unwrap().messages.first().map(|m| m.id.clone()).unwrap_or_default();
+                store.replace_message(&chat, &old, Message { id: format!("r{i}"), at, ..Default::default() });
+            } else {
+                store.insert_message(&chat, Message { id: format!("n{i}"), at, ..Default::default() });
+            }
+            let changed = store.chat(&chat).unwrap().clone();
+            let mut expect: Vec<_> = before.into_iter().map(|c| if c.id == chat { changed.clone() } else { c }).collect();
+            expect.sort_by_cached_key(|c| std::cmp::Reverse(last_activity(c)));
+            let ids = |v: &[SerializableChat]| v.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            assert_eq!(ids(&store.chats), ids(&expect), "after op {i}");
+        }
+    }
 }

@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+/// The longest the main queue runs before the looper serves input and frames.
+const MAIN_SLICE: std::time::Duration = std::time::Duration::from_millis(4);
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Config {
     pub density: f32,
@@ -275,11 +278,17 @@ impl Platform for AndroidPlatform {
         let main_fd = unsafe { BorrowedFd::borrow_raw(self.0.main_wake.as_raw_fd()) };
         let registered = looper.add_fd_with_callback(main_fd, FdEvent::INPUT, move |fd, _| {
             bridge::clear_wake(fd.as_raw_fd());
+            let began = std::time::Instant::now();
             loop {
                 match receiver.try_pop() {
                     Ok(Some(runnable)) => dispatcher::run(runnable),
                     Ok(None) => return true,
                     Err(_) => return false,
+                }
+                // A long queue yields to the looper, so touches and vsync are served between slices.
+                if began.elapsed() >= MAIN_SLICE {
+                    bridge::signal(fd.as_raw_fd());
+                    return true;
                 }
             }
         });
