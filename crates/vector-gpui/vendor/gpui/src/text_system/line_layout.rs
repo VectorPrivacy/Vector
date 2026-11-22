@@ -549,6 +549,16 @@ pub(crate) struct LineLayoutIndex {
     wrapped_lines_index: usize,
 }
 
+impl LineLayoutIndex {
+    pub(crate) fn moved(&self, from: &Self, to: &Self) -> Self {
+        Self {
+            font_generation: to.font_generation,
+            lines_index: to.lines_index + self.lines_index - from.lines_index,
+            wrapped_lines_index: to.wrapped_lines_index + self.wrapped_lines_index - from.wrapped_lines_index,
+        }
+    }
+}
+
 impl LineLayoutCache {
     pub fn new(
         platform_text_system: Arc<dyn PlatformTextSystem>,

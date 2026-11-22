@@ -80,6 +80,10 @@ impl VectorApp {
 
     /// `updateChatScrollbar`: the view's place and size in the chat, measured off the last layout.
     pub(super) fn bar_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The overlay follows the timeline: whatever redraws it moves the bar.
+        if window.view_redraws(self.panes.timeline.entity_id()) {
+            window.redraw_now(self.panes.overlay.entity_id());
+        }
         let Some(chat_id) = self.open.clone() else { return };
         let list = self.timeline.clone();
         let view = list.viewport_bounds();
@@ -154,9 +158,8 @@ impl VectorApp {
             self.load_older(cx);
         }
         if fresh {
-            // Bounds lag the layout by a frame: measure again once it settles. The bar is the
-            // chat pane's, so only it redraws, and its rows replay.
-            let pane = self.panes.chat.clone();
+            // Bounds lag the layout by a frame: measure again once it settles.
+            let pane = self.panes.overlay.clone();
             window.on_next_frame(move |_, cx| crate::pane::notify_keyed(&pane, cx));
         }
         self.bar.sig = Some(sig.clone());

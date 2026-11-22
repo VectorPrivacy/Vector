@@ -9940,6 +9940,48 @@ impl VectorApp {
         )
     }
 
+    /// What floats over the timeline and moves with its scroll, as a pane of its own: a scroll
+    /// redraws it and the timeline, not the chat around them.
+    fn overlay_cached(&self, id: SharedString, listed: bool, bare: bool, cx: &mut Context<Self>) -> AnyElement {
+        crate::pane::cached(
+            &self.panes.overlay,
+            gpui::StyleRefinement::default().absolute().inset_0(),
+            move |app, window, cx| {
+                let store = app.store.clone();
+                let store = store.borrow();
+                let bar = (listed && bare).then(|| crate::scrollbar::render(&app.bar, window, app.bar_on(cx)));
+                let back = (app.return_shown && listed && bare).then(|| {
+                    let me = cx.entity().downgrade();
+                    crate::scrollbar::return_button(
+                        app.unread_below,
+                        Rc::new(move |_, cx| {
+                            me.update(cx, |app, cx| {
+                                app.unread_below = 0;
+                                app.to_tail();
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                    )
+                });
+                let pill = app
+                    .unread_jump
+                    .as_ref()
+                    .filter(|j| j.chat == id && listed && app.row_of(&j.anchor).is_none())
+                    .map(|j| unread_jump_pill(j, cx));
+                div()
+                    .size_full()
+                    .relative()
+                    .children(bar)
+                    .children(back)
+                    .children(pill)
+                    .children(typing_strip(&store, &id, app.typing_fade, window))
+                    .into_any_element()
+            },
+            cx,
+        )
+    }
+
     pub(super) fn chat_cached(&mut self, id: SharedString, cx: &mut Context<Self>) -> AnyElement {
         crate::pane::cached(
             &self.panes.chat,
@@ -10557,26 +10599,7 @@ impl VectorApp {
                 let max_h = ((pane_h + 32.) * 0.4).max(200.);
                 crate::pins::drawer(&self.pins, store, &self.revealed.borrow(), clock, max_h, shown, &self.pins_on(cx))
             });
-        let bar = (alone.is_none() && drawer.is_none()).then(|| crate::scrollbar::render(&self.bar, window, self.bar_on(cx)));
-        let back = (self.return_shown && alone.is_none() && drawer.is_none()).then(|| {
-            let app = cx.entity().downgrade();
-            crate::scrollbar::return_button(
-                self.unread_below,
-                Rc::new(move |_, cx| {
-                    app.update(cx, |app, cx| {
-                        app.unread_below = 0;
-                        app.to_tail();
-                        cx.notify();
-                    })
-                    .ok();
-                }),
-            )
-        });
-        let pill = self
-            .unread_jump
-            .as_ref()
-            .filter(|j| j.chat == id && alone.is_none() && self.row_of(&j.anchor).is_none())
-            .map(|j| unread_jump_pill(j, cx));
+        let overlay = self.overlay_cached(id.clone(), alone.is_none(), drawer.is_none(), cx);
         let request = store
             .chat(&id)
             .is_some_and(|chat| store.is_request(chat))
@@ -10649,12 +10672,9 @@ impl VectorApp {
                         )
                     })
                     // After the list: painted over its media and toolbars, and hit first.
-                    .children(bar)
-                    .children(back)
-                    .children(pill)
+                    .child(overlay)
                     .children(request)
-                    .children(drawer)
-                    .children(typing_strip(store, &id, self.typing_fade, window)),
+                    .children(drawer),
             )
             .children(preview_bar)
             .child(composer(

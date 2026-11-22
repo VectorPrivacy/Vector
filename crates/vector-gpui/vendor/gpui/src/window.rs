@@ -1131,6 +1131,72 @@ pub(crate) struct PaintIndex {
     animated_index: usize,
 }
 
+impl PrepaintStateIndex {
+    /// Where this index, recorded at or after `from`, lands in a copy that starts at `to`.
+    pub(crate) fn moved(&self, from: &Self, to: &Self) -> Self {
+        let m = |v: usize, f: usize, t: usize| t + v - f;
+        Self {
+            hitboxes_index: m(self.hitboxes_index, from.hitboxes_index, to.hitboxes_index),
+            tooltips_index: m(self.tooltips_index, from.tooltips_index, to.tooltips_index),
+            deferred_draws_index: m(self.deferred_draws_index, from.deferred_draws_index, to.deferred_draws_index),
+            dispatch_tree_index: m(self.dispatch_tree_index, from.dispatch_tree_index, to.dispatch_tree_index),
+            accessed_element_states_index: m(
+                self.accessed_element_states_index,
+                from.accessed_element_states_index,
+                to.accessed_element_states_index,
+            ),
+            line_layout_index: self.line_layout_index.moved(&from.line_layout_index, &to.line_layout_index),
+        }
+    }
+
+    pub(crate) fn dispatch_index(&self) -> usize {
+        self.dispatch_tree_index
+    }
+
+    pub(crate) fn deferred_index(&self) -> usize {
+        self.deferred_draws_index
+    }
+}
+
+impl PaintIndex {
+    /// Where this index, recorded at or after `from`, lands in a copy that starts at `to`.
+    pub(crate) fn moved(&self, from: &Self, to: &Self) -> Self {
+        let m = |v: usize, f: usize, t: usize| t + v - f;
+        Self {
+            scene_index: m(self.scene_index, from.scene_index, to.scene_index),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: m(self.debug_bounds_index, from.debug_bounds_index, to.debug_bounds_index),
+            mouse_listeners_index: m(self.mouse_listeners_index, from.mouse_listeners_index, to.mouse_listeners_index),
+            input_handlers_index: m(self.input_handlers_index, from.input_handlers_index, to.input_handlers_index),
+            cursor_styles_index: m(self.cursor_styles_index, from.cursor_styles_index, to.cursor_styles_index),
+            accessed_element_states_index: m(
+                self.accessed_element_states_index,
+                from.accessed_element_states_index,
+                to.accessed_element_states_index,
+            ),
+            tab_handle_index: m(self.tab_handle_index, from.tab_handle_index, to.tab_handle_index),
+            line_layout_index: self.line_layout_index.moved(&from.line_layout_index, &to.line_layout_index),
+            animated_index: m(self.animated_index, from.animated_index, to.animated_index),
+        }
+    }
+}
+
+/// The stacks an element draws within: enough to draw a cached view again on its own, where
+/// its parent's drawing is reused around it.
+pub(crate) struct DrawCtx {
+    element_id_stack: ElementIdStack,
+    text_style_stack: Vec<TextStyleRefinement>,
+    content_mask_stack: Vec<ContentMask<Pixels>>,
+    rendered_entity_stack: Vec<EntityId>,
+    element_offset_stack: Vec<Point<Pixels>>,
+    image_cache_stack: Vec<AnyImageCache>,
+    rem_size_override_stack: SmallVec<[Pixels; 8]>,
+    opacity: f32,
+    input_muted: bool,
+    zoom: Option<(Point<Pixels>, f32)>,
+    keep_ltr: bool,
+}
+
 impl Frame {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
@@ -1370,6 +1436,13 @@ pub struct Window {
     /// How deep in keyed subtrees' own drawing this is, and the frames they asked for.
     pub(crate) keyed_depth: usize,
     pub(crate) keyed_asks: Cell<u64>,
+    /// The cached views drawn inside the one being drawn afresh, gathered as they draw.
+    pub(crate) view_slots: Vec<Vec<crate::view::ViewSlot>>,
+    /// Where each cached view inside the one being painted afresh painted.
+    pub(crate) view_paints: Vec<Vec<(EntityId, Range<PaintIndex>)>>,
+    /// The last frame's ranges of a cached view drawn alone inside its parent's reuse.
+    pub(crate) punch_from: Option<Range<PrepaintStateIndex>>,
+    pub(crate) punch_paint_from: Option<Range<PaintIndex>>,
     /// When content last scrolled under a pointer that stayed put.
     scrolled_under_pointer: Option<Instant>,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
@@ -2522,6 +2595,10 @@ impl Window {
             draw_count: 0,
             keyed_depth: 0,
             keyed_asks: Cell::new(0),
+            view_slots: Vec::new(),
+            view_paints: Vec::new(),
+            punch_from: None,
+            punch_paint_from: None,
             scrolled_under_pointer: None,
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
@@ -4569,6 +4646,147 @@ impl Window {
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
+        }
+    }
+
+    pub(crate) fn draw_ctx(&self) -> DrawCtx {
+        DrawCtx {
+            element_id_stack: self.element_id_stack.clone(),
+            text_style_stack: self.text_style_stack.clone(),
+            content_mask_stack: self.content_mask_stack.clone(),
+            rendered_entity_stack: self.rendered_entity_stack.clone(),
+            element_offset_stack: self.element_offset_stack.clone(),
+            image_cache_stack: self.image_cache_stack.clone(),
+            rem_size_override_stack: self.rem_size_override_stack.clone(),
+            opacity: self.element_opacity,
+            input_muted: self.input_muted,
+            zoom: self.element_zoom,
+            keep_ltr: self.keep_ltr,
+        }
+    }
+
+    /// Runs `f` within the stacks `ctx` recorded, then puts the current ones back.
+    pub(crate) fn with_draw_ctx<R>(&mut self, ctx: &DrawCtx, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.draw_ctx();
+        self.element_id_stack.clone_from(&ctx.element_id_stack);
+        self.text_style_stack.clone_from(&ctx.text_style_stack);
+        self.content_mask_stack.clone_from(&ctx.content_mask_stack);
+        self.rendered_entity_stack.clone_from(&ctx.rendered_entity_stack);
+        self.element_offset_stack.clone_from(&ctx.element_offset_stack);
+        self.image_cache_stack.clone_from(&ctx.image_cache_stack);
+        self.rem_size_override_stack.clone_from(&ctx.rem_size_override_stack);
+        self.element_opacity = ctx.opacity;
+        self.input_muted = ctx.input_muted;
+        self.element_zoom = ctx.zoom;
+        self.keep_ltr = ctx.keep_ltr;
+        let result = f(self);
+        let DrawCtx {
+            element_id_stack,
+            text_style_stack,
+            content_mask_stack,
+            rendered_entity_stack,
+            element_offset_stack,
+            image_cache_stack,
+            rem_size_override_stack,
+            opacity,
+            input_muted,
+            zoom,
+            keep_ltr,
+        } = saved;
+        self.element_id_stack = element_id_stack;
+        self.text_style_stack = text_style_stack;
+        self.content_mask_stack = content_mask_stack;
+        self.rendered_entity_stack = rendered_entity_stack;
+        self.element_offset_stack = element_offset_stack;
+        self.image_cache_stack = image_cache_stack;
+        self.rem_size_override_stack = rem_size_override_stack;
+        self.element_opacity = opacity;
+        self.input_muted = input_muted;
+        self.element_zoom = zoom;
+        self.keep_ltr = keep_ltr;
+        result
+    }
+
+    /// Whether a cached view dirty only for a view inside it may reuse its drawing around that
+    /// view: not while everything redraws, nor where a reused drawing cannot be trusted.
+    pub(crate) fn may_punch(&self, view: EntityId, cx: &App) -> bool {
+        !no_replay()
+            && !no_punch()
+            && !self.refreshing
+            && self.keyed_depth == 0
+            && self.keyed_outer.is_empty()
+            && !self.a11y.is_active()
+            && self.element_zoom.is_none()
+            && !self.notified.contains(&view)
+            && !self.is_inspector_picking(cx)
+    }
+
+    /// The view just inside `view` on the way to each dirty view inside it: what must be drawn
+    /// afresh for `view` to reuse the rest. `None` when one lies in a dirty view that is not.
+    pub(crate) fn dirty_inside(&self, view: EntityId) -> Option<FxHashSet<EntityId>> {
+        let mut inside = FxHashSet::default();
+        for &dirty in &self.dirty_views {
+            if dirty == view {
+                continue;
+            }
+            let mut below = None;
+            for on_path in self.rendered_frame.dispatch_tree.view_path_reversed(dirty) {
+                if on_path == view {
+                    if let Some(below) = below {
+                        inside.insert(below);
+                    }
+                    break;
+                }
+                below = Some(on_path);
+            }
+        }
+        Some(inside)
+    }
+
+    /// Draws `view` afresh in the frame being drawn, along with the views holding it. Call it
+    /// before prepaint, from a render: a notify then reaches only the next frame.
+    pub fn redraw_now(&mut self, view: EntityId) {
+        self.notified.insert(view);
+        self.mark_view_dirty(view);
+    }
+
+    /// Whether `view` draws afresh this frame.
+    pub fn view_redraws(&self, view: EntityId) -> bool {
+        self.dirty_views.contains(&view)
+    }
+
+    /// One piece of a cached view's reuse around views drawn afresh inside it.
+    pub(crate) fn reuse_prepaint_open(&mut self, range: Range<PrepaintStateIndex>, open: &mut crate::key_dispatch::OpenReuse) {
+        debug_assert_eq!(range.start.deferred_draws_index, range.end.deferred_draws_index);
+        self.next_frame.hitboxes.extend(
+            self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
+                .iter()
+                .cloned(),
+        );
+        self.next_frame.tooltip_requests.extend(
+            self.rendered_frame.tooltip_requests[range.start.tooltips_index..range.end.tooltips_index]
+                .iter_mut()
+                .map(|request| request.take()),
+        );
+        self.next_frame.accessed_element_states.extend(
+            self.rendered_frame.accessed_element_states
+                [range.start.accessed_element_states_index..range.end.accessed_element_states_index]
+                .iter()
+                .map(|(id, type_id)| (id.clone(), *type_id)),
+        );
+        self.text_system
+            .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
+        self.next_frame.dispatch_tree.reuse_open(
+            range.start.dispatch_tree_index..range.end.dispatch_tree_index,
+            &mut self.rendered_frame.dispatch_tree,
+            self.focus,
+            open,
+        );
+    }
+
+    pub(crate) fn reuse_prepaint_close(&mut self, open: &mut crate::key_dispatch::OpenReuse) {
+        if self.next_frame.dispatch_tree.reuse_close(open) {
+            self.next_frame.focus = self.focus;
         }
     }
 
@@ -11631,6 +11849,12 @@ pub fn keyed_volatile() {
 
 pub(crate) fn keyed_volatile_count() -> u64 {
     KEYED_VOLATILE.with(Cell::get)
+}
+
+/// `GPUI_NO_PUNCH=1` redraws a cached view whole when a view inside it changes, to compare against.
+pub fn no_punch() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("GPUI_NO_PUNCH").is_some())
 }
 
 /// `GPUI_NO_REPLAY=1` draws every keyed subtree and cached view afresh, to compare against.

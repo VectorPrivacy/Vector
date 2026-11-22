@@ -5,6 +5,9 @@ use crate::{
     StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
+use crate::key_dispatch::{DispatchNodeId, OpenReuse};
+use crate::window::DrawCtx;
+use std::rc::Rc;
 use anyhow::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
@@ -44,7 +47,10 @@ impl AnyView {
     /// [Context::notify] was called on the backing entity since it was rendered
     /// (or [Window::refresh] is called, which ignores caching).
     pub fn cached(self, style: StyleRefinement) -> ViewElement<AnyView> {
-        self.into_element().cached(style)
+        let view = self.clone();
+        let mut element = self.into_element().cached(style);
+        element.respawn = Some(Rc::new(move |window: &mut Window, cx: &mut App| (view.render)(&view, window, cx)));
+        element
     }
 
     /// Convert this to a weak handle.
@@ -256,7 +262,10 @@ impl<T: Render> Entity<T> {
     /// uncached case.
     #[track_caller]
     pub fn cached(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
-        ViewElement::with_type_name(self, type_name::<T>()).cached(style)
+        let view = self.clone();
+        let mut element = ViewElement::with_type_name(self, type_name::<T>()).cached(style);
+        element.respawn = Some(Rc::new(move |window: &mut Window, cx: &mut App| render_view(view.clone(), window, cx)));
+        element
     }
 }
 
@@ -267,9 +276,26 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    /// Renders the view again on its own, for a cached view drawn alone in its parent's reuse.
+    respawn: Option<Respawn>,
     view_type_name: &'static str,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
+}
+
+pub(crate) type Respawn = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
+/// A cached view as drawn inside another: what it takes to draw it alone there again.
+/// Ranges are in the frame the holder's own ranges are from.
+#[derive(Clone)]
+pub(crate) struct ViewSlot {
+    entity_id: EntityId,
+    global_id: GlobalElementId,
+    respawn: Respawn,
+    prepaint_range: Range<PrepaintStateIndex>,
+    paint_range: Range<PaintIndex>,
+    /// The dispatch node it was drawn under.
+    parent_node: Option<DispatchNodeId>,
 }
 
 impl<V: View> ViewElement<V> {
@@ -287,6 +313,7 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            respawn: None,
             view_type_name,
             view: Some(view),
             #[cfg(debug_assertions)]
@@ -316,6 +343,30 @@ struct ViewElementState {
     /// The entities the view accessed while it was last drawn, in any phase,
     /// restored when its prepaint is reused so the window stays subscribed.
     accessed_entities: FxHashSet<EntityId>,
+    /// The draw these ranges are from: a parent reused whole leaves its views' ranges behind.
+    drawn: u64,
+    /// The cached views drawn inside it, in drawing order.
+    slots: Vec<ViewSlot>,
+    /// Whether every slot's paint range was found, so a paint can reuse around them.
+    slots_painted: bool,
+    /// This frame's views drawn afresh inside a reuse, with what prepaint made of each.
+    holes: Vec<(usize, Option<AnyElement>, Range<PaintIndex>)>,
+    punched: bool,
+    prepaint_ctx: Option<Rc<DrawCtx>>,
+    paint_ctx: Option<Rc<DrawCtx>>,
+}
+
+fn move_slots(slots: &mut [ViewSlot], from: &PrepaintStateIndex, to: &PrepaintStateIndex) {
+    for slot in slots {
+        slot.parent_node = slot.parent_node.map(|n| n.moved(from.dispatch_index(), to.dispatch_index()));
+        slot.prepaint_range = slot.prepaint_range.start.moved(from, to)..slot.prepaint_range.end.moved(from, to);
+    }
+}
+
+fn move_slot_paints(slots: &mut [ViewSlot], from: &PaintIndex, to: &PaintIndex) {
+    for slot in slots {
+        slot.paint_range = slot.paint_range.start.moved(from, to)..slot.paint_range.end.moved(from, to);
+    }
 }
 
 struct ViewElementCacheKey {
@@ -416,6 +467,7 @@ impl<V: View> Element for ViewElement<V> {
                 window,
                 cx,
                 &mut |window, cx| render_view(self.view.take().unwrap(), window, cx),
+                self.respawn.as_ref(),
             );
             if let Some(at) = timed {
                 crate::draw_stats::view(self.view_type_name, entity_id.as_u64(), 0, at.elapsed());
@@ -530,14 +582,21 @@ fn prepaint_view(
     window: &mut Window,
     cx: &mut App,
     render: &mut dyn FnMut(&mut Window, &mut App) -> AnyElement,
+    respawn: Option<&Respawn>,
 ) -> Option<AnyElement> {
+    // Ranges handed down by a parent drawing this view alone inside its own reuse.
+    let given = window.punch_from.take();
     window.set_view_id(entity_id);
-    window.with_rendered_view(entity_id, |window| {
-        if let Some(mut element) = element.take() {
+    if let Some(mut element) = element.take() {
+        return window.with_rendered_view(entity_id, |window| {
             element.prepaint(window, cx);
-            return Some(element);
-        }
-
+            Some(element)
+        });
+    }
+    let parent_node = window.next_frame.dispatch_tree.active_node_id();
+    let ctx = window.draw_ctx();
+    let start = window.prepaint_index();
+    let prepainted = window.with_rendered_view(entity_id, |window| {
         window.with_element_state::<ViewElementState, _>(
             global_id.unwrap(),
             |element_state, window| {
@@ -545,6 +604,9 @@ fn prepaint_view(
                 let text_style = window.text_style();
                 let opacity = window.element_opacity();
                 let zoom = window.element_zoom;
+                let draw_count = window.draw_count;
+                // The paint stacks hold until it paints, which a parent's reuse reads first.
+                let paint_ctx = element_state.as_ref().and_then(|s| s.paint_ctx.clone());
 
                 // Opacity is compared by bits so that a NaN opacity still matches itself
                 // and the view keeps using its cache.
@@ -554,28 +616,46 @@ fn prepaint_view(
                     && element_state.cache_key.text_style == text_style
                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
                     && element_state.cache_key.zoom == zoom
-                    && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
+                    && (given.is_some() || element_state.drawn + 1 == draw_count)
                 {
-                    let prepaint_start = window.prepaint_index();
-                    window.reuse_prepaint(element_state.prepaint_range.clone());
-                    cx.entities
-                        .extend_accessed(element_state.accessed_entities.iter().copied());
-                    let prepaint_end = window.prepaint_index();
-                    element_state.prepaint_range = prepaint_start..prepaint_end;
-
-                    return (None, element_state);
+                    let base = element_state.prepaint_range.start.clone();
+                    let old = given.clone().unwrap_or_else(|| element_state.prepaint_range.clone());
+                    if !window.dirty_views.contains(&entity_id) {
+                        let prepaint_start = window.prepaint_index();
+                        window.reuse_prepaint(old);
+                        cx.entities
+                            .extend_accessed(element_state.accessed_entities.iter().copied());
+                        let prepaint_end = window.prepaint_index();
+                        move_slots(&mut element_state.slots, &base, &prepaint_start);
+                        element_state.prepaint_range = prepaint_start..prepaint_end;
+                        element_state.drawn = draw_count;
+                        element_state.punched = false;
+                        element_state.holes.clear();
+                        element_state.prepaint_ctx = Some(Rc::new(ctx));
+                        return (None, element_state);
+                    }
+                    if window.may_punch(entity_id, cx)
+                        && let Some(holes) = punch_holes(&element_state, entity_id, &base, &old, window)
+                    {
+                        punch_prepaint(&mut element_state, holes, &base, old, window, cx);
+                        element_state.drawn = draw_count;
+                        element_state.prepaint_ctx = Some(Rc::new(ctx));
+                        return (None, element_state);
+                    }
                 }
 
                 let inside = window.refreshes_inside(entity_id);
                 let refreshing = mem::replace(&mut window.refreshing, inside);
                 let prepaint_start = window.prepaint_index();
+                window.view_slots.push(Vec::new());
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);
                     element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
                     element.prepaint_at(bounds.origin, window, cx);
                     element
                 });
+                let slots = window.view_slots.pop().unwrap_or_default();
 
                 let prepaint_end = window.prepaint_index();
                 window.refreshing = refreshing;
@@ -593,12 +673,131 @@ fn prepaint_view(
                             opacity,
                             zoom,
                         },
+                        drawn: draw_count,
+                        slots,
+                        slots_painted: false,
+                        holes: Vec::new(),
+                        punched: false,
+                        prepaint_ctx: Some(Rc::new(ctx)),
+                        paint_ctx,
                     },
                 )
             },
         )
-    })
+    });
+    let end = window.prepaint_index();
+    if let (Some(respawn), Some(global_id), Some(holder)) = (respawn, global_id, window.view_slots.last_mut()) {
+        holder.push(ViewSlot {
+            entity_id,
+            global_id: global_id.clone(),
+            respawn: respawn.clone(),
+            prepaint_range: start..end,
+            paint_range: PaintIndex::default()..PaintIndex::default(),
+            parent_node,
+        });
+    }
+    prepainted
 }
+
+/// The slots a view dirty only for views inside it draws afresh, reusing the rest: `None`
+/// when that cannot be done (a dirty view it holds is not one of them, the slots' paint
+/// ranges are unknown, or a reused piece holds deferred draws, whose contents it cannot see).
+fn punch_holes(
+    state: &ViewElementState,
+    entity_id: EntityId,
+    base: &PrepaintStateIndex,
+    old: &Range<PrepaintStateIndex>,
+    window: &Window,
+) -> Option<Vec<usize>> {
+    if !state.slots_painted || state.slots.is_empty() {
+        return None;
+    }
+    let inside = window.dirty_inside(entity_id)?;
+    if inside.is_empty() {
+        return None;
+    }
+    let holes: Vec<usize> = (0..state.slots.len())
+        .filter(|&i| inside.contains(&state.slots[i].entity_id))
+        .collect();
+    if holes.len() != inside.len() {
+        return None;
+    }
+    let mut cursor = old.start.deferred_index();
+    for &i in &holes {
+        let slot = &state.slots[i];
+        let at = slot.prepaint_range.start.moved(base, &old.start);
+        if at.deferred_index() != cursor {
+            return None;
+        }
+        cursor = slot.prepaint_range.end.moved(base, &old.start).deferred_index();
+        let ctx = window.peek_element_state::<ViewElementState, _>(&slot.global_id, |s| s.prepaint_ctx.is_some() && s.paint_ctx.is_some());
+        if ctx != Some(true) {
+            return None;
+        }
+    }
+    (old.end.deferred_index() == cursor).then_some(holes)
+}
+
+/// Reuses `state`'s last drawing around `holes`, drawing those slots afresh where they were.
+fn punch_prepaint(
+    state: &mut ViewElementState,
+    holes: Vec<usize>,
+    base: &PrepaintStateIndex,
+    old: Range<PrepaintStateIndex>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let new_start = window.prepaint_index();
+    let mut open = OpenReuse::default();
+    let mut cursor = old.start.clone();
+    let mut seg_new = new_start.clone();
+    let mut drawn = Vec::with_capacity(holes.len());
+    let mut next_hole = holes.iter().copied().peekable();
+    for i in 0..state.slots.len() {
+        let slot = &state.slots[i];
+        let from = slot.prepaint_range.start.moved(base, &old.start);
+        let to = slot.prepaint_range.end.moved(base, &old.start);
+        if next_hole.peek() != Some(&i) {
+            // Its own dispatch node opens just before it, in the same reused piece.
+            let slot = &mut state.slots[i];
+            slot.parent_node = slot.parent_node.map(|n| {
+                n.moved(base.dispatch_index(), old.start.dispatch_index())
+                    .moved(cursor.dispatch_index(), seg_new.dispatch_index())
+            });
+            slot.prepaint_range = from.moved(&cursor, &seg_new)..to.moved(&cursor, &seg_new);
+            continue;
+        }
+        next_hole.next();
+        window.reuse_prepaint_open(cursor.clone()..from.clone(), &mut open);
+        let parent = slot.parent_node.map(|n| n.moved(base.dispatch_index(), old.start.dispatch_index()));
+        window.next_frame.dispatch_tree.reuse_hole(parent, &mut open);
+        let (entity_id, global_id, respawn) = (slot.entity_id, slot.global_id.clone(), slot.respawn.clone());
+        let ctx = window
+            .peek_element_state::<ViewElementState, _>(&global_id, |s| (s.prepaint_ctx.clone(), s.cache_key.bounds))
+            .and_then(|(ctx, bounds)| Some((ctx?, bounds)));
+        let Some((ctx, bounds)) = ctx else { unreachable!("checked by punch_holes") };
+        window.punch_from = Some(from.clone()..to.clone());
+        window.view_slots.push(Vec::new());
+        let element = window.with_draw_ctx(&ctx, |window| {
+            prepaint_view(entity_id, Some(&global_id), bounds, &mut None, window, cx, &mut |w, cx| respawn(w, cx), Some(&respawn))
+        });
+        let fresh = window.view_slots.pop().and_then(|mut v| v.pop());
+        let painted = state.slots[i].paint_range.clone();
+        if let Some(fresh) = fresh {
+            state.slots[i] = fresh;
+        }
+        drawn.push((i, element, painted));
+        cursor = to;
+        seg_new = window.prepaint_index();
+    }
+    window.reuse_prepaint_open(cursor..old.end.clone(), &mut open);
+    window.reuse_prepaint_close(&mut open);
+    cx.entities.extend_accessed(state.accessed_entities.iter().copied());
+    state.prepaint_range = new_start..window.prepaint_index();
+    state.holes = drawn;
+    state.punched = true;
+}
+
 
 #[inline(never)]
 fn prepaint_component(
@@ -622,9 +821,12 @@ fn paint_view(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let given = window.punch_paint_from.take();
+    let caching = cached && !window.is_inspector_picking(cx);
+    let ctx = caching.then(|| window.draw_ctx());
+    let start = window.paint_index();
     window.with_rendered_view(entity_id, |window| {
-        let caching_disabled = window.is_inspector_picking(cx);
-        if cached && !caching_disabled {
+        if caching {
             window.with_element_state::<ViewElementState, _>(
                 global_id.unwrap(),
                 |element_state, window| {
@@ -640,13 +842,22 @@ fn paint_view(
                     // redrawn on the next frame.
                     if let Some(element) = element {
                         let refreshing = mem::replace(&mut window.refreshing, true);
+                        window.view_paints.push(Vec::new());
                         let ((), accessed_entities) =
                             cx.detect_accessed_entities(|cx| element.paint(window, cx));
+                        let painted = window.view_paints.pop().unwrap_or_default();
+                        element_state.slots_painted = place_paints(&mut element_state.slots, &painted);
                         element_state.accessed_entities.extend(accessed_entities);
                         window.refreshing = refreshing;
                         element_state.cache_key.opacity = opacity;
                     } else {
-                        window.reuse_paint(element_state.paint_range.clone());
+                        if element_state.punched {
+                            punch_paint(&mut element_state, given, window, cx);
+                        } else {
+                            let base = element_state.paint_range.start.clone();
+                            window.reuse_paint(given.unwrap_or_else(|| element_state.paint_range.clone()));
+                            move_slot_paints(&mut element_state.slots, &base, &paint_start);
+                        }
                         if element_state.cache_key.opacity.to_bits() != opacity.to_bits() {
                             window.request_animation_frame();
                         }
@@ -654,6 +865,7 @@ fn paint_view(
 
                     let paint_end = window.paint_index();
                     element_state.paint_range = paint_start..paint_end;
+                    element_state.paint_ctx = ctx.map(Rc::new);
 
                     ((), element_state)
                 },
@@ -662,6 +874,58 @@ fn paint_view(
             element.as_mut().unwrap().paint(window, cx);
         }
     });
+    let end = window.paint_index();
+    if caching && let Some(holder) = window.view_paints.last_mut() {
+        holder.push((entity_id, start..end));
+    }
+}
+
+/// Gives each slot the paint range it painted, in order; false if one went unpainted.
+fn place_paints(slots: &mut [ViewSlot], painted: &[(EntityId, Range<PaintIndex>)]) -> bool {
+    let mut from = 0;
+    for slot in slots {
+        let Some(at) = painted[from..].iter().position(|(id, _)| *id == slot.entity_id) else {
+            return false;
+        };
+        slot.paint_range = painted[from + at].1.clone();
+        from += at + 1;
+    }
+    true
+}
+
+/// Paints the reuse prepaint punched: the last paint around the slots drawn afresh.
+fn punch_paint(state: &mut ViewElementState, given: Option<Range<PaintIndex>>, window: &mut Window, cx: &mut App) {
+    let base = state.paint_range.start.clone();
+    let old = given.unwrap_or_else(|| state.paint_range.clone());
+    let mut cursor = old.start.clone();
+    let mut seg_new = window.paint_index();
+    let mut holes = mem::take(&mut state.holes).into_iter().peekable();
+    for i in 0..state.slots.len() {
+        let hole = holes.next_if(|(h, _, _)| *h == i);
+        let painted = match &hole {
+            Some((_, _, painted)) => painted.clone(),
+            None => state.slots[i].paint_range.clone(),
+        };
+        let from = painted.start.moved(&base, &old.start);
+        let to = painted.end.moved(&base, &old.start);
+        let Some((_, mut element, _)) = hole else {
+            state.slots[i].paint_range = from.moved(&cursor, &seg_new)..to.moved(&cursor, &seg_new);
+            continue;
+        };
+        window.reuse_paint(cursor.clone()..from.clone());
+        let (entity_id, global_id) = (state.slots[i].entity_id, state.slots[i].global_id.clone());
+        let ctx = window.peek_element_state::<ViewElementState, _>(&global_id, |s| s.paint_ctx.clone()).flatten();
+        let Some(ctx) = ctx else { unreachable!("checked by punch_holes") };
+        window.punch_paint_from = Some(from..to.clone());
+        let at = window.paint_index();
+        window.view_paints.push(Vec::new());
+        window.with_draw_ctx(&ctx, |window| paint_view(entity_id, true, Some(&global_id), &mut element, window, cx));
+        window.view_paints.pop();
+        state.slots[i].paint_range = at..window.paint_index();
+        cursor = to;
+        seg_new = window.paint_index();
+    }
+    window.reuse_paint(cursor..old.end);
 }
 
 #[inline(never)]

@@ -96,6 +96,20 @@ pub(crate) struct ReusedSubtree {
     contains_focus: bool,
 }
 
+/// A reuse in pieces: the old nodes still open, and whether the focused one was among them.
+#[derive(Default)]
+pub(crate) struct OpenReuse {
+    stack: Vec<DispatchNodeId>,
+    contains_focus: bool,
+}
+
+impl DispatchNodeId {
+    /// This node's place in a copy of the tree that moved nodes from `from` on to `to`.
+    pub(crate) fn moved(self, from: usize, to: usize) -> Self {
+        DispatchNodeId(to + self.0 - from)
+    }
+}
+
 impl ReusedSubtree {
     pub fn refresh_node_id(&self, node_id: DispatchNodeId) -> DispatchNodeId {
         debug_assert!(
@@ -305,6 +319,44 @@ impl DispatchTree {
             new_range,
             contains_focus,
         }
+    }
+
+    /// [`Self::reuse_subtree`] in pieces around holes drawn afresh: the nodes still open stay
+    /// on the stack between pieces, so what follows a hole rejoins its old parents.
+    pub fn reuse_open(&mut self, old_range: Range<usize>, source: &mut Self, focus: Option<FocusId>, open: &mut OpenReuse) {
+        for (source_node_id, source_node) in source.nodes.iter_mut().enumerate().skip(old_range.start).take(old_range.len()) {
+            while let Some(ancestor) = open.stack.last() {
+                if source_node.parent == Some(*ancestor) {
+                    break;
+                }
+                open.stack.pop();
+                self.pop_node();
+            }
+            open.stack.push(DispatchNodeId(source_node_id));
+            if source_node.focus_id.is_some() && source_node.focus_id == focus {
+                open.contains_focus = true;
+            }
+            self.move_node(source_node);
+        }
+    }
+
+    /// Closes reused nodes down to `parent`, the node a hole was drawn under (in the old tree).
+    pub fn reuse_hole(&mut self, parent: Option<DispatchNodeId>, open: &mut OpenReuse) {
+        while let Some(top) = open.stack.last() {
+            if Some(*top) == parent {
+                break;
+            }
+            open.stack.pop();
+            self.pop_node();
+        }
+    }
+
+    /// Ends an open reuse; whether it held the focused node.
+    pub fn reuse_close(&mut self, open: &mut OpenReuse) -> bool {
+        while open.stack.pop().is_some() {
+            self.pop_node();
+        }
+        open.contains_focus
     }
 
     pub fn truncate(&mut self, index: usize) {
