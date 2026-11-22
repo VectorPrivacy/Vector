@@ -160,7 +160,7 @@ pub async fn sync_focused(channel_id: String) -> Result<bool, String> {
     }
     {
         let _first = vector_core::community::cache::foreground();
-        let _ = db::scoped(VectorCore.sync_channel_events(&channel_id, 50, None, None)).await;
+        let _ = db::scoped(VectorCore.sync_community_channel_head(&channel_id, 50)).await;
     }
     sync_channel(channel_id, None).await
 }
