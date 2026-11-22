@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, HighlightStyle, InteractiveElement, InteractiveText, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledText, Window, div,
+    AnyElement, App, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::*, px, svg,
 };
 
@@ -227,13 +227,15 @@ pub fn download_view(d: &Download, on_cancel: Rc<dyn Fn(&mut Window, &mut App)>)
         .into_any_element()
 }
 
-/// `.transcription-result`: the language, then the sections; a click on one seeks there.
+/// `.transcription-result`: the language, then the sections; a click on one seeks there, and a
+/// drag selects them as message text when `select` places them in the timeline.
 pub fn view(
     id: &str,
     t: &Transcript,
     pos: u64,
     playing: bool,
     accent: gpui::Hsla,
+    select: Option<crate::select::Key>,
     on_seek: Rc<dyn Fn(u64, &mut Window, &mut App)>,
 ) -> Option<AnyElement> {
     let reveal = t.reveal();
@@ -273,37 +275,37 @@ pub fn view(
             let text: AnyElement = if sections.is_empty() {
                 div().child(crate::t::transcript_none()).into_any_element()
             } else {
-                let mut joined = String::new();
-                let mut ranges = Vec::with_capacity(sections.len());
-                for (i, s) in sections.iter().enumerate() {
-                    let start = joined.len();
-                    joined.push_str(&s.text);
-                    ranges.push(start..joined.len());
-                    if i + 1 < sections.len() {
-                        // The sections' 1px side margins, as hair spaces.
-                        joined.push_str("\u{200A} \u{200A}");
-                    }
-                }
+                use crate::inline::{Atom, Kind, Look, Target};
+                let base = Look::new(crate::theme::RUBIK, 15., 22.5, white_a(0.92));
                 let lit = current(sections, pos, playing);
-                let highlights = lit
-                    .map(|i| {
-                        vec![(
-                            ranges[i].clone(),
-                            HighlightStyle {
-                                color: Some(accent),
-                                background_color: Some(accent.opacity(0.16)),
-                                ..Default::default()
-                            },
-                        )]
-                    })
-                    .unwrap_or_default();
+                let mut atoms = Vec::with_capacity(sections.len() * 2);
+                for (i, s) in sections.iter().enumerate() {
+                    if i > 0 {
+                        // The sections' 1px side margins, as hair spaces.
+                        atoms.push(Atom::Text { text: "\u{200A} \u{200A}".into(), look: base.clone(), kind: Kind::Plain });
+                    }
+                    let mut look = base.clone();
+                    if lit == Some(i) {
+                        look.color = accent;
+                        look.bg = Some(accent.opacity(0.16));
+                    }
+                    atoms.push(Atom::Text { text: s.text.clone().into(), look, kind: Kind::Seek(i as u32) });
+                }
                 let ats: Vec<u64> = sections.iter().map(|s| s.at).collect();
-                InteractiveText::new(
-                    SharedString::from(format!("transcript-{id}")),
-                    StyledText::new(joined).with_highlights(highlights),
-                )
-                .on_click(ranges, move |i, w, cx| on_seek(ats[i], w, cx))
-                .into_any_element()
+                let el = crate::inline::inline(atoms, base)
+                    .dir_auto()
+                    .id(SharedString::from(format!("transcript-{id}")))
+                    .on_click(Rc::new(move |t, w, cx| {
+                        if let Target::Seek(i) = t
+                            && let Some(&at) = ats.get(i as usize)
+                        {
+                            on_seek(at, w, cx)
+                        }
+                    }));
+                match select {
+                    Some(k) => el.selectable(k).into_any_element(),
+                    None => el.into_any_element(),
+                }
             };
             div()
                 .children(lang_row)

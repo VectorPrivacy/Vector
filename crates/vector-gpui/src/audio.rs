@@ -1575,6 +1575,7 @@ pub fn view(
     all_tracks: bool,
     transcripts: Option<&crate::transcript::Transcripts>,
     narrow_set: &Rc<std::cell::RefCell<HashSet<String>>>,
+    select: Option<crate::select::Key>,
     on: Rc<dyn Fn(Act, &mut Window, &mut App)>,
 ) -> AnyElement {
     let narrow = narrow_set.borrow().contains(&att.id);
@@ -1722,6 +1723,7 @@ pub fn view(
             p.map_or(0, |p| p.position()),
             p.is_some_and(|p| p.playing),
             accent,
+            select,
             Rc::new(move |ms, w, cx| on(Act::SeekTo(ms), w, cx)),
         )
     });

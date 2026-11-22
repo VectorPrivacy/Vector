@@ -140,6 +140,10 @@ pub fn reset() {
     STATE.with(|s| *s.borrow_mut() = State::default());
 }
 
+pub fn selected() -> bool {
+    STATE.with(|s| ordered(&s.borrow()).is_some())
+}
+
 pub fn dragging() -> bool {
     STATE.with(|s| s.borrow().dragging)
 }
@@ -348,6 +352,15 @@ mod tests {
         let _s = Scope::enter(5, "m1");
         assert_eq!(key_for("m1-1-0"), Some(b0));
         assert_eq!(key_for("m2-1"), None);
+    }
+
+    #[test]
+    fn an_attachments_text_reads_after_its_messages_text() {
+        let body = Key::of_block(5, "m1", "m1-9-3").unwrap();
+        let transcript = Key { at: 5, msg: msg_hash("m1"), path: [u16::MAX, 1, 0, 0] };
+        let second = Key { at: 5, msg: msg_hash("m1"), path: [u16::MAX, 2, 0, 0] };
+        assert!(body < transcript && transcript < second);
+        assert!(second < Key::of_block(6, "m0", "m0-0").unwrap());
     }
 
     #[test]

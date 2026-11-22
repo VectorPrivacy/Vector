@@ -112,6 +112,8 @@ pub enum Kind {
     Time(SharedString),
     /// Quiet text that does something when clicked, brightening under the pointer.
     Action(SharedString),
+    /// A transcript's section: a click plays from its start.
+    Seek(u32),
 }
 
 /// What hovering an atom says.
@@ -161,6 +163,7 @@ impl Kind {
             Kind::Spoiler { .. } => None,
             Kind::Mention(npub) => Some(Target::Mention(npub.clone())),
             Kind::Action(a) => Some(Target::Action(a.clone())),
+            Kind::Seek(i) => Some(Target::Seek(*i)),
         }
     }
 }
@@ -274,6 +277,7 @@ pub enum Target {
     Spoiler(u32),
     Mention(SharedString),
     Action(SharedString),
+    Seek(u32),
 }
 
 pub type OnClick = Rc<dyn Fn(Target, &mut Window, &mut App)>;
@@ -1580,6 +1584,7 @@ impl Element for Inline {
         let Some(on_click) = self.on_click.clone() else {
             return;
         };
+        let selectable = self.select.is_some();
         let pressed: Rc<Cell<Option<usize>>> = match id {
             Some(id) => {
                 window.with_element_state(id, |state: Option<Rc<Cell<Option<usize>>>>, _| {
@@ -1604,7 +1609,8 @@ impl Element for Inline {
             }
             // The press may have landed in an earlier frame, whose hit areas this one need not have.
             let Some((hitbox, target)) = pressed.take().and_then(|i| hits.get(i)) else { return };
-            if hitbox.is_hovered(window) {
+            // A press that ends having selected text was a selection, not a click.
+            if hitbox.is_hovered(window) && !(selectable && crate::select::selected()) {
                 on_click(target.clone(), window, cx);
             }
         });

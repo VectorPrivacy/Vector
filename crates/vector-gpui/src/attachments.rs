@@ -133,6 +133,8 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                         media.audio.all_tracks.contains(&att.id),
                         transcribable.then_some(&media.audio.transcripts),
                         &media.audio.narrow,
+                        // After the message's text, in the order its attachments show.
+                        Some(crate::select::Key { at: m.at, msg: crate::select::msg_hash(&m.id), path: [u16::MAX, i as u16 + 1, 0, 0] }),
                         std::rc::Rc::new(move |a, w, cx| on_act(&msg, Act::Audio(aid.clone(), a), w, cx)),
                     ),
                     6.,

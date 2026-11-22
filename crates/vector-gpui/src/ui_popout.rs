@@ -468,6 +468,7 @@ impl VectorApp {
                 pos,
                 playing,
                 accent,
+                None,
                 Rc::new(move |ms, w, cx| on(Act::SeekTo(ms), w, cx)),
             ) {
                 panels.push(

@@ -4831,7 +4831,7 @@ impl VectorApp {
                 p.text = Some(text);
                 self.popup = Some((p, PopupAct::Notice));
             }
-            Target::Action(_) => {}
+            Target::Action(_) | Target::Seek(_) => {}
         }
     }
 
