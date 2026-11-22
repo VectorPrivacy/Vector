@@ -25,6 +25,17 @@ file-resume-done = { $progress } done
 file-unknown-size = Unknown Size
 # $reason is why, as the server or network gave it.
 file-failed-retry = Failed: { $reason } · Tap to Retry
+file-failed = Failed: { $reason }
+
+## Why a download failed, after "Failed:"
+
+# $code is the server's HTTP status, like 404.
+file-why-missing = Not on the server ({ $code })
+file-why-refused = The server refused it ({ $code })
+file-why-busy = The server is busy, try later
+file-why-down = The server is down ({ $code })
+file-why-timeout = The server took too long
+file-why-unreachable = Couldn't reach the server
 # $host is the website the Mini App comes from.
 file-tap-to-load = Tap to Load · { $host }
 file-unavailable-gone = Unavailable · Deleted, or lost by its server

@@ -577,7 +577,7 @@ fn download_box(
     };
     let sub = match failed {
         Some(_) if gone => t::file_gone().to_string(),
-        Some(e) if !e.is_empty() => e.chars().take(64).collect(),
+        Some(e) if !e.is_empty() => failure(e),
         Some(_) => t::file_tap_retry().to_string(),
         None if paused.is_some() => t::file_resume_done(paused.unwrap_or_default()).to_string(),
         None if att.size > 0 => media::format_bytes(att.size),
@@ -818,7 +818,7 @@ pub fn xdc_url_card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         }
         XdcUrl::Fetching => file_box_on(ctx, &media, m, &att, FileState::Downloading, None, None),
         XdcUrl::Failed(e) => {
-            let label = t::file_failed_retry(e.chars().take(48).collect::<String>()).to_string();
+            let label = t::file_failed_retry(failure(&e)).to_string();
             file_box_on(ctx, &media, m, &att, FileState::Failed, Some(&label), tap(Act::XdcUrl(url)))
         }
         XdcUrl::Probing | XdcUrl::Absent => {
@@ -938,15 +938,12 @@ fn file_box_on(
                 t::file_unavailable_gone().into()
             }
             (None, FileState::Failed) => {
-                let reason: String = media
-                    .failed
-                    .get(&att.id)
-                    .map(|r| r.chars().take(64).collect())
-                    .unwrap_or_default();
-                if reason.is_empty() {
-                    t::file_download_failed_retry().into()
-                } else {
-                    t::file_failed_retry(reason).into()
+                let reason = media.failed.get(&att.id).map(|r| failure(r)).unwrap_or_default();
+                match (reason.is_empty(), synthetic) {
+                    (true, _) => t::file_download_failed_retry().into(),
+                    // Its retry button says the rest.
+                    (false, true) => t::file_failed(reason).into(),
+                    (false, false) => t::file_failed_retry(reason).into(),
                 }
             }
             _ => match (media.resume_note(&att.id, att.size), &size) {
@@ -974,6 +971,8 @@ fn file_box_on(
                     .line_height(px(15.))
                     .text_color(white_a(0.55))
                     .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .child(sub),
             ),
         }
@@ -1170,4 +1169,52 @@ fn bar(pct: Option<f32>) -> impl IntoElement {
                 .rounded_full()
                 .bg(c(PRIMARY)),
         )
+}
+
+/// Why a download failed, in the card's few words: the server's answer by kind, else the
+/// error's first line without the "failed" its card already says.
+fn failure(raw: &str) -> String {
+    let mut text = raw.trim();
+    loop {
+        let lower = text.to_ascii_lowercase();
+        // i18n-exempt: prefixes of core's English errors
+        let Some(rest) = ["download failed:", "failed to download:", "failed:", "error:"]
+            .iter()
+            .find_map(|p| lower.starts_with(p).then(|| text[p.len()..].trim_start()))
+        else {
+            break;
+        };
+        text = rest;
+    }
+    let lower = text.to_ascii_lowercase();
+    let code = lower
+        .strip_prefix("http ")
+        .and_then(|r| r.get(..3))
+        .and_then(|c| c.parse::<u16>().ok());
+    match code {
+        Some(404 | 410) => return t::file_why_missing(code.unwrap_or_default()).into(),
+        Some(401 | 403) => return t::file_why_refused(code.unwrap_or_default()).into(),
+        Some(429) => return t::file_why_busy().into(),
+        Some(c @ 500..=599) => return t::file_why_down(c).into(),
+        _ => {}
+    }
+    if lower.contains("timed out") || lower.contains("timeout") { // i18n-exempt: core's English errors
+        return t::file_why_timeout().into();
+    }
+    if lower.contains("dns") || lower.contains("connect") {
+        return t::file_why_unreachable().into();
+    }
+    text.lines().next().unwrap_or_default().chars().take(80).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_failure_reads_as_its_kind_without_the_failed_its_card_says() {
+        // i18n-exempt: core's English errors and the shown English
+        assert_eq!(super::failure("download failed: HTTP 502 Bad Gateway"), "The server is down (502)");
+        assert_eq!(super::failure("Failed: download failed: HTTP 404 Not Found"), "Not on the server (404)");
+        assert_eq!(super::failure("operation timed out"), "The server took too long");
+        assert_eq!(super::failure("download failed: checksum mismatch\nmore"), "checksum mismatch");
+    }
 }
