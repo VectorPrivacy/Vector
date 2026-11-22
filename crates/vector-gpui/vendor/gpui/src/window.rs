@@ -128,6 +128,8 @@ struct WindowInvalidatorInner {
     pub dirty: bool,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
+    /// The dirty views told their data changed, not only that they moved.
+    pub data_views: FxHashSet<EntityId>,
     pub update_count: usize,
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
@@ -160,6 +162,7 @@ impl WindowInvalidator {
                 dirty: true,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
+                data_views: FxHashSet::default(),
                 update_count: 0,
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
@@ -172,6 +175,9 @@ impl WindowInvalidator {
         let mut inner = self.inner.borrow_mut();
         inner.update_count += 1;
         inner.dirty_views.insert(entity);
+        if !cx.motion_notify {
+            inner.data_views.insert(entity);
+        }
         if inner.draw_phase == DrawPhase::None {
             #[cfg(feature = "profiler")]
             let dirty_at = Self::record_frame_dirty(&mut inner);
@@ -263,6 +269,10 @@ impl WindowInvalidator {
 
     pub fn take_views(&self) -> FxHashSet<EntityId> {
         mem::take(&mut self.inner.borrow_mut().dirty_views)
+    }
+
+    pub fn take_data_views(&self) -> FxHashSet<EntityId> {
+        mem::take(&mut self.inner.borrow_mut().data_views)
     }
 
     pub fn replace_views(&self, views: FxHashSet<EntityId>) {
@@ -846,6 +856,8 @@ pub struct Hitbox {
     pub content_mask: ContentMask<Pixels>,
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
+    /// The clip of its own keyed subtree alone, which a shifted replay meets with the clips around it.
+    pub(crate) clip: Bounds<Pixels>,
 }
 
 impl Hitbox {
@@ -1341,6 +1353,17 @@ pub struct Window {
     /// A long press's start is offered to secondary-click listeners before anything else.
     long_press_menus: bool,
     pub(crate) refreshing: bool,
+    /// This frame redraws everything for a cause beyond a view's own notify.
+    pub(crate) hard_refresh: bool,
+    /// The views whose data changed for this frame; the rest of the dirty ones only moved.
+    pub(crate) data_dirty: FxHashSet<EntityId>,
+    /// The clips around the keyed subtrees being drawn, which draw clipped by their own masks.
+    pub(crate) keyed_outer: Vec<ContentMask<Pixels>>,
+    /// Counts draws, so a keyed record knows whether the last frame is the one it was made in.
+    pub(crate) draw_count: u64,
+    /// How deep in keyed subtrees' own drawing this is, and the frames they asked for.
+    pub(crate) keyed_depth: usize,
+    pub(crate) keyed_asks: Cell<u64>,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2484,6 +2507,12 @@ impl Window {
             long_press_capture: None,
             long_press_menus: false,
             refreshing: false,
+            hard_refresh: false,
+            data_dirty: FxHashSet::default(),
+            keyed_outer: Vec::new(),
+            draw_count: 0,
+            keyed_depth: 0,
+            keyed_asks: Cell::new(0),
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -2596,6 +2625,51 @@ impl<P: Clone + Copy + Debug + Default + PartialEq> ContentMask<P> {
             bounds,
             corner_radii: Corners::default(),
             fade: MaskFade::default(),
+        }
+    }
+}
+
+macro_rules! shift_mask {
+    ($p:ty) => {
+        impl MaskFade<$p> {
+            fn shift(&mut self, d: Point<$p>) {
+                self.top = self.top + d.y;
+                self.bottom = self.bottom + d.y;
+                self.left = self.left + d.x;
+                self.right = self.right + d.x;
+            }
+        }
+
+        impl ContentMask<$p> {
+            /// Move the mask, ramps and all, by `d`.
+            pub(crate) fn shift(&mut self, d: Point<$p>) {
+                self.bounds.origin = point(self.bounds.origin.x + d.x, self.bounds.origin.y + d.y);
+                self.fade.shift(d);
+            }
+        }
+    };
+}
+shift_mask!(Pixels);
+shift_mask!(ScaledPixels);
+
+impl ContentMask<ScaledPixels> {
+    pub(crate) fn unscale(&self, factor: f32) -> ContentMask<Pixels> {
+        let u = |v: ScaledPixels| px(v.0 / factor);
+        let b = self.bounds;
+        let (c, f) = (self.corner_radii, self.fade);
+        ContentMask {
+            bounds: Bounds { origin: point(u(b.origin.x), u(b.origin.y)), size: size(u(b.size.width), u(b.size.height)) },
+            corner_radii: Corners { top_left: u(c.top_left), top_right: u(c.top_right), bottom_right: u(c.bottom_right), bottom_left: u(c.bottom_left) },
+            fade: MaskFade {
+                top: u(f.top),
+                top_len: u(f.top_len),
+                bottom: u(f.bottom),
+                bottom_len: u(f.bottom_len),
+                left: u(f.left),
+                left_len: u(f.left_len),
+                right: u(f.right),
+                right_len: u(f.right_len),
+            },
         }
     }
 }
@@ -2758,6 +2832,7 @@ impl Window {
     pub fn refresh(&mut self) {
         if self.invalidator.not_drawing() {
             self.refreshing = true;
+            self.hard_refresh = true;
             self.invalidator.set_dirty(true);
         }
     }
@@ -3124,6 +3199,12 @@ impl Window {
     /// and skip the frame request when it is set.
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
+        // Asked from inside a keyed subtree, the subtree rebuilds next frame for itself.
+        if self.keyed_depth > 0 {
+            self.keyed_asks.set(self.keyed_asks.get() + 1);
+            self.on_next_frame(move |_, cx| cx.notify_motion(entity));
+            return;
+        }
         self.on_next_frame(move |_, cx| cx.notify(entity));
     }
 
@@ -3849,6 +3930,7 @@ impl Window {
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
         self.last_full_draw = Instant::now();
+        self.draw_count += 1;
         self.sweep_animation_tiles();
         let _timed = draw_stats::Timed::start();
         // Drain every draw in profiler builds so a previous frame's
@@ -3983,6 +4065,8 @@ impl Window {
         self.record_entities_accessed(cx);
         self.reset_cursor_style(cx);
         self.refreshing = false;
+        self.hard_refresh = false;
+        self.data_dirty.clear();
         self.invalidator.set_phase(DrawPhase::None);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
@@ -4022,6 +4106,7 @@ impl Window {
 
     fn invalidate_entities(&mut self) {
         let mut views = self.invalidator.take_views();
+        self.data_dirty.extend(self.invalidator.take_data_views());
         let root = self.root.as_ref().map(|r| r.entity_id());
         for entity in views.drain() {
             // Cached views learn of change only through their own notify, so a change to the
@@ -4031,6 +4116,7 @@ impl Window {
                     draw_stats::whole(Some(entity) == root);
                 }
                 self.refreshing = true;
+                self.hard_refresh = true;
             }
             self.mark_view_dirty(entity);
         }
@@ -4531,7 +4617,79 @@ impl Window {
         }
     }
 
+    /// The clip a keyed subtree drawn here sits in, whatever subtree encloses it.
+    pub(crate) fn keyed_clip(&self) -> ContentMask<Pixels> {
+        let mask = self.content_mask();
+        match self.keyed_outer.last() {
+            Some(outer) => mask.intersect(outer),
+            None => mask,
+        }
+    }
+
+    /// Whether this frame may replay keyed subtrees: nothing redraws everything, and no view
+    /// drawing this one was told its data changed.
+    pub(crate) fn keyed_may_replay(&self) -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // `GPUI_NO_REPLAY=1` draws every keyed subtree afresh, to compare against.
+        !*OFF.get_or_init(|| std::env::var_os("GPUI_NO_REPLAY").is_some())
+            && !self.hard_refresh
+            && self.captured_hitbox.is_none()
+            && !self.a11y.is_active()
+            && !self.rendered_entity_stack.iter().any(|view| self.data_dirty.contains(view))
+    }
+
+    /// Runs `f` clipped by nothing, so what it draws carries its own masks alone.
+    pub(crate) fn keyed_root<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let all = Bounds { origin: point(px(-1e7), px(-1e7)), size: size(px(2e7), px(2e7)) };
+        self.content_mask_stack.push(ContentMask::new(all));
+        self.keyed_depth += 1;
+        let result = f(self);
+        self.keyed_depth -= 1;
+        self.content_mask_stack.pop();
+        result
+    }
+
+    /// Paints a keyed subtree: its primitives keep their own masks and take `outer` on top.
+    pub(crate) fn keyed_paint(&mut self, outer: ContentMask<Pixels>, f: impl FnOnce(&mut Self)) {
+        let scale = self.scale_factor();
+        self.next_frame.scene.push_outer(outer, scale);
+        self.keyed_root(f);
+        self.next_frame.scene.pop_outer();
+    }
+
+    /// Whether a prepaint record holds what a moved replay cannot carry.
+    pub(crate) fn prepaint_pins(&self, start: &PrepaintStateIndex, end: &PrepaintStateIndex) -> bool {
+        end.tooltips_index > start.tooltips_index || end.deferred_draws_index > start.deferred_draws_index
+    }
+
+    /// Whether a paint record holds what a moved replay cannot carry.
+    pub(crate) fn paint_pins(&self, start: &PaintIndex, end: &PaintIndex) -> bool {
+        end.input_handlers_index > start.input_handlers_index
+    }
+
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        self.reuse_paint_by(range, None)
+    }
+
+    /// Replays a keyed subtree's last prepaint moved by `by`, its hit areas clipped by the
+    /// clip it now sits in.
+    pub(crate) fn reuse_prepaint_shifted(&mut self, range: Range<PrepaintStateIndex>, by: Point<Pixels>) {
+        let first = self.next_frame.hitboxes.len();
+        self.reuse_prepaint(range);
+        let outer = self.keyed_outer.last().map(|m| m.bounds);
+        for hitbox in &mut self.next_frame.hitboxes[first..] {
+            hitbox.bounds.origin = hitbox.bounds.origin + by;
+            hitbox.clip.origin = hitbox.clip.origin + by;
+            let clip = outer.map_or(hitbox.clip, |o| hitbox.clip.intersect(&o));
+            hitbox.content_mask = ContentMask::new(clip);
+        }
+    }
+
+    pub(crate) fn reuse_paint_shifted(&mut self, range: Range<PaintIndex>, by: Point<Pixels>) {
+        self.reuse_paint_by(range, Some(by))
+    }
+
+    fn reuse_paint_by(&mut self, range: Range<PaintIndex>, by: Option<Point<Pixels>>) {
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4571,15 +4729,28 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        self.next_frame.scene.replay(
-            range.start.scene_index..range.end.scene_index,
-            &self.rendered_frame.scene,
-        );
+        let scenes = range.start.scene_index..range.end.scene_index;
+        match by {
+            None => self.next_frame.scene.replay(scenes, &self.rendered_frame.scene),
+            Some(by) => {
+                let scale = self.scale_factor();
+                self.next_frame.scene.replay_shifted(scenes, &self.rendered_frame.scene, by, scale)
+            }
+        }
+        let first = self.next_frame.animated.len();
         self.next_frame.animated.extend(
             self.rendered_frame.animated[range.start.animated_index..range.end.animated_index]
                 .iter()
                 .cloned(),
         );
+        if let Some(by) = by {
+            let scaled = point(ScaledPixels(by.x.0 * self.scale_factor()), ScaledPixels(by.y.0 * self.scale_factor()));
+            for sprite in &mut self.next_frame.animated[first..] {
+                sprite.at.origin = point(sprite.at.origin.x + scaled.x, sprite.at.origin.y + scaled.y);
+                sprite.visible.origin = sprite.visible.origin + by;
+                sprite.image.origin = sprite.image.origin + by;
+            }
+        }
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
@@ -6068,7 +6239,11 @@ impl Window {
     pub fn insert_hitbox(&mut self, bounds: Bounds<Pixels>, behavior: HitboxBehavior) -> Hitbox {
         self.invalidator.debug_assert_prepaint();
 
-        let content_mask = self.content_mask();
+        let mut content_mask = self.content_mask();
+        let clip = content_mask.bounds;
+        if let Some(outer) = self.keyed_outer.last() {
+            content_mask = content_mask.intersect(outer);
+        }
         let id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
         // A muted subtree's hitboxes contain no point, so nothing in it is hovered or hit.
@@ -6078,6 +6253,7 @@ impl Window {
             bounds,
             content_mask,
             behavior,
+            clip,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
         hitbox
@@ -11367,6 +11543,18 @@ pub mod draw_stats {
     /// `(root, model)` whole-window draws since the last call.
     pub fn whole_take() -> (u64, u64) {
         (ROOT.swap(0, Ordering::Relaxed), MODEL.swap(0, Ordering::Relaxed))
+    }
+
+    static KEYED_BUILT: AtomicU64 = AtomicU64::new(0);
+    static KEYED_REPLAYED: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn keyed(replayed: bool) {
+        if replayed { &KEYED_REPLAYED } else { &KEYED_BUILT }.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(built, replayed)` keyed subtrees since the last call.
+    pub fn keyed_take() -> (u64, u64) {
+        (KEYED_BUILT.swap(0, Ordering::Relaxed), KEYED_REPLAYED.swap(0, Ordering::Relaxed))
     }
 
     pub(crate) fn presented(took: std::time::Duration) {

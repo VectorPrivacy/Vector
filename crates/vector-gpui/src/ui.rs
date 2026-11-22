@@ -8898,35 +8898,25 @@ fn chat_list(
                         let chatlist_ops::Row::Chat { idx, archived, last } = row else {
                             return archive_row.borrow_mut().take().unwrap_or_else(|| div().into_any_element());
                         };
-                        let store = store.borrow();
-                        let Some(chat) = store.chats.get(idx) else {
+                        let st = store.borrow();
+                        let Some(chat) = st.chats.get(idx) else {
                             return div().into_any_element();
                         };
-                        if !store.typers(&chat.id).is_empty() {
+                        if !st.typers(&chat.id).is_empty() {
                             gpui::wake_window_in(window, cx, BREATH);
                         }
-                        let active = open.as_ref().is_some_and(|o| *o == chat.id);
-                        let id: SharedString = chat.id.clone().into();
-                        let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), chat.id.clone());
-                        let pinned = store.pin_rank(&chat.id).is_some();
-                        let mut row = chat_row(&store, chat, active, pinned)
-                            .on_click(move |_, window, cx| {
-                                let id = id.clone();
-                                open_view
-                                    .update(cx, |app, cx| {
-                                        app.open_chat(id, window, cx);
-                                        cx.notify();
-                                    })
-                                    .ok();
-                            })
-                            .on_mouse_down(MouseButton::Right, move |e, _, cx| {
-                                let (id, at) = (menu_id.clone(), e.position);
-                                menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
-                            });
-                        if pinned && !archived {
-                            let name = store.name(&chat.id).into();
-                            row = chatlist_ops::pin_draggable(row, chat.id.clone(), name, pin_keys.clone(), view.clone());
-                        }
+                        let id = gpui::ElementId::NamedInteger("chat-row".into(), slim_ops::str_hash(&chat.id));
+                        let chat_id = chat.id.clone();
+                        drop(st);
+                        let (store, open, view, pin_keys) = (store.clone(), open.clone(), view.clone(), pin_keys.clone());
+                        // A row redraws when the list's data changes; a scroll only moves its last drawing.
+                        let row = gpui::keyed(id, 0, gpui::StyleRefinement::default().w(px(list_w() - 9.)).h(px(ROW_PITCH)), move |_, _| {
+                            let store = store.borrow();
+                            match store.chats.get(idx).filter(|c| c.id == chat_id) {
+                                Some(chat) => wide_chat_row(&store, chat, open.as_deref(), archived, &view, &pin_keys),
+                                None => div().into_any_element(),
+                            }
+                        });
                         if archived && last {
                             div()
                                 .pb(px(6.))
@@ -9168,6 +9158,33 @@ fn preview_line_at(store: &Store, chat: &SerializableChat, color: gpui::Hsla, si
         .single_line()
         .held()
         .into_any_element()
+}
+
+/// One row of the wide chat list, with its taps and, pinned, its drag.
+fn wide_chat_row(store: &Store, chat: &SerializableChat, open: Option<&str>, archived: bool, view: &gpui::WeakEntity<VectorApp>, pin_keys: &Rc<Vec<String>>) -> AnyElement {
+    let active = open == Some(chat.id.as_str());
+    let id: SharedString = chat.id.clone().into();
+    let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), chat.id.clone());
+    let pinned = store.pin_rank(&chat.id).is_some();
+    let mut row = chat_row(store, chat, active, pinned)
+        .on_click(move |_, window, cx| {
+            let id = id.clone();
+            open_view
+                .update(cx, |app, cx| {
+                    app.open_chat(id, window, cx);
+                    cx.notify();
+                })
+                .ok();
+        })
+        .on_mouse_down(MouseButton::Right, move |e, _, cx| {
+            let (id, at) = (menu_id.clone(), e.position);
+            menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
+        });
+    if pinned && !archived {
+        let name = store.name(&chat.id).into();
+        row = chatlist_ops::pin_draggable(row, chat.id.clone(), name, pin_keys.clone(), view.clone());
+    }
+    row.into_any_element()
 }
 
 fn chat_row(store: &Store, chat: &SerializableChat, active: bool, pinned: bool) -> gpui::Stateful<gpui::Div> {

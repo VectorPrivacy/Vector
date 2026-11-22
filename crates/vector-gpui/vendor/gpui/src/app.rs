@@ -955,6 +955,8 @@ pub struct App {
 
     // below is plain data, the drop order is insignificant here
     pub(crate) pending_notifications: FxHashSet<EntityId>,
+    /// Set while a notify only says the view's content moved, as a scroll does.
+    pub(crate) motion_notify: bool,
     pub(crate) pending_global_notifications: TypeIdHashSet,
     pub(crate) restart_path: Option<PathBuf>,
     pub(crate) restart_arguments: Vec<OsString>,
@@ -1055,6 +1057,7 @@ impl App {
                 global_action_listeners: Default::default(),
                 pending_effects: VecDeque::new(),
                 pending_notifications: FxHashSet::default(),
+                motion_notify: false,
                 pending_global_notifications: Default::default(),
                 observers: SubscriberSet::new(),
                 tracked_entities: FxHashMap::default(),
@@ -3164,6 +3167,14 @@ impl App {
     #[track_caller]
     pub fn focus_handle(&self) -> FocusHandle {
         FocusHandle::new(&self.focus_handles)
+    }
+
+    /// Notify a view that only its content's position changed (a scroll, a hover): keyed
+    /// subtrees in it may replay their last drawing where they now sit.
+    pub fn notify_motion(&mut self, entity_id: EntityId) {
+        let was = std::mem::replace(&mut self.motion_notify, true);
+        self.notify(entity_id);
+        self.motion_notify = was;
     }
 
     /// Tell GPUI that an entity has changed and observers of it should be notified.

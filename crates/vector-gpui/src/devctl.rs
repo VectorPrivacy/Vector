@@ -236,6 +236,8 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 "render_ms": render_ns as f64 / 1e6,
             });
             v["active"] = json!(window.is_window_active());
+            let (built, replayed) = gpui::draw_stats::keyed_take();
+            v["frames"]["keyed_built_replayed"] = json!([built, replayed]);
             let (root, model) = gpui::draw_stats::whole_take();
             v["frames"]["whole_root"] = json!(root);
             v["frames"]["whole_model"] = json!(model);

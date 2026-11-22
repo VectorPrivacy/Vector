@@ -55,6 +55,9 @@ pub struct Scene {
     /// While a zoomed subtree paints: `p -> a + p * k` on every primitive's geometry, in device
     /// pixels. Content masks are mapped where they are pushed, so outer clips stay put.
     pub(crate) zoom: Option<(Point<ScaledPixels>, f32)>,
+    /// Clips that hold over a keyed subtree, which records its primitives clipped by its own
+    /// masks alone, so it can be replayed elsewhere: (outer mask, scale factor).
+    outer: Vec<(ContentMask<Pixels>, f32)>,
 }
 
 fn overdraw_report() -> bool {
@@ -104,6 +107,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.outer.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -122,17 +126,72 @@ impl Scene {
         self.paint_operations.push(PaintOperation::EndLayer);
     }
 
+    pub(crate) fn push_outer(&mut self, mask: ContentMask<Pixels>, scale: f32) {
+        self.paint_operations.push(PaintOperation::PushOuter(mask.clone(), scale));
+        let mask = match self.outer.last() {
+            Some((o, _)) => mask.intersect(o),
+            None => mask,
+        };
+        self.outer.push((mask, scale));
+    }
+
+    pub(crate) fn pop_outer(&mut self) {
+        self.outer.pop();
+        self.paint_operations.push(PaintOperation::PopOuter);
+    }
+
+    /// Replays `range` of `prev` moved by `by` device pixels: geometry and the subtree's own
+    /// masks move, while the clips around it are this frame's.
+    pub(crate) fn replay_shifted(&mut self, range: Range<usize>, prev: &Scene, by: Point<Pixels>, scale: f32) {
+        let d = point(ScaledPixels(by.x.0 * scale), ScaledPixels(by.y.0 * scale));
+        let shift = |b: Bounds<ScaledPixels>| Bounds { origin: point(b.origin.x + d.x, b.origin.y + d.y), size: b.size };
+        for operation in &prev.paint_operations[range] {
+            match operation {
+                PaintOperation::Primitive(primitive) => {
+                    let mut primitive = primitive.clone();
+                    primitive.zoom(d, 1.);
+                    primitive.shift_mask(d);
+                    self.insert_primitive(primitive);
+                }
+                PaintOperation::StartLayer(bounds) => self.push_layer(shift(*bounds)),
+                PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::PushOuter(mask, scale) => {
+                    let mut mask = mask.clone();
+                    mask.shift(by);
+                    self.push_outer(mask, *scale)
+                }
+                PaintOperation::PopOuter => self.pop_outer(),
+            }
+        }
+    }
+
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
         if let Some((a, k)) = self.zoom {
             primitive.zoom(a, k);
         }
+        if let Some((outer, scale)) = self.outer.last() {
+            // Recorded clipped by its own masks only, so a shifted replay can clip it afresh.
+            let mut clipped = primitive.clone();
+            let mask = clipped.content_mask().unscale(*scale).intersect(outer).scale(*scale);
+            *clipped.content_mask_mut() = mask;
+            self.push_primitive(clipped);
+            self.paint_operations.push(PaintOperation::Primitive(primitive));
+            return;
+        }
+        if self.push_primitive(primitive.clone()) {
+            self.paint_operations.push(PaintOperation::Primitive(primitive));
+        }
+    }
+
+    /// Adds `primitive` to its kind's list; false when its mask hides all of it.
+    fn push_primitive(&mut self, mut primitive: Primitive) -> bool {
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);
 
         if clipped_bounds.is_empty() {
-            return;
+            return false;
         }
 
         let order = self
@@ -175,8 +234,7 @@ impl Scene {
                 self.surfaces.push(surface.clone());
             }
         }
-        self.paint_operations
-            .push(PaintOperation::Primitive(primitive));
+        true
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
@@ -185,6 +243,8 @@ impl Scene {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
+                PaintOperation::PushOuter(mask, scale) => self.push_outer(mask.clone(), *scale),
+                PaintOperation::PopOuter => self.pop_outer(),
             }
         }
     }
@@ -378,6 +438,9 @@ pub(crate) enum PaintOperation {
     Primitive(Primitive),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
+    /// The clip a keyed subtree's primitives take on top of their own masks.
+    PushOuter(ContentMask<Pixels>, f32),
+    PopOuter,
 }
 
 #[derive(Clone)]
@@ -456,6 +519,23 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
+    }
+
+    fn content_mask_mut(&mut self) -> &mut ContentMask<ScaledPixels> {
+        match self {
+            Primitive::Shadow(x) => &mut x.content_mask,
+            Primitive::Quad(x) => &mut x.content_mask,
+            Primitive::Path(x) => &mut x.content_mask,
+            Primitive::Underline(x) => &mut x.content_mask,
+            Primitive::MonochromeSprite(x) => &mut x.content_mask,
+            Primitive::SubpixelSprite(x) => &mut x.content_mask,
+            Primitive::PolychromeSprite(x) => &mut x.content_mask,
+            Primitive::Surface(x) => &mut x.content_mask,
+        }
+    }
+
+    fn shift_mask(&mut self, d: Point<ScaledPixels>) {
+        self.content_mask_mut().shift(d);
     }
 
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {

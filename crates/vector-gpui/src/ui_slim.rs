@@ -1097,47 +1097,23 @@ impl VectorApp {
                             return div().pt(px(8.)).child(row).into_any_element();
                         }
                         let store = shared.borrow();
-                        let (chat_id, rule) = match item {
-                            Item::Chat(id) => (Some(id), false),
-                            Item::Archived(id, last) => (Some(id), *last),
-                            _ => (None, false),
+                        let rule = matches!(item, Item::Archived(_, true));
+                        let (exists, hash) = match item {
+                            Item::Chat(id) | Item::Archived(id, _) => (store.chat(id).is_some(), id),
+                            Item::Community(id) => (store.community(id).is_some(), id),
+                            Item::Archive => (false, &String::new()),
                         };
-                        let row = match item {
-                            Item::Archive => None,
-                            Item::Chat(_) | Item::Archived(..) => chat_id.and_then(|id| store.chat(id)).map(|chat| {
-                                let id = &chat.id;
-                                let id: SharedString = id.clone().into();
-                                let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), id.to_string());
-                                slim_row(&store, chat)
-                                    .on_click(move |_, window, cx| {
-                                        let id = id.clone();
-                                        open_view
-                                            .update(cx, |app, cx| {
-                                                app.slim.drawer = false;
-                                                app.open_chat(id, window, cx);
-                                                cx.notify();
-                                            })
-                                            .ok();
-                                    })
-                                    .on_mouse_down(gpui::MouseButton::Right, move |e, _, cx| {
-                                        let (id, at) = (menu_id.clone(), e.position);
-                                        menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
-                                    })
-                                    .into_any_element()
-                            }),
-                            Item::Community(id) => store.community(id).map(|com| {
-                                let (v, key) = (view.clone(), id.clone());
-                                community_row(&store, com)
-                                    .on_click(move |_, window, cx| {
-                                        let key = key.clone();
-                                        v.update(cx, |app, cx| {
-                                            app.on_community(crate::community::Act::Open(key), window, cx)
-                                        })
-                                        .ok();
-                                    })
-                                    .into_any_element()
-                            }),
-                        };
+                        // A row redraws when the list's data changes; a scroll only moves its last drawing.
+                        let row = exists.then(|| {
+                            let (item, shared, view) = (item.clone(), shared.clone(), view.clone());
+                            let id = gpui::ElementId::NamedInteger("slim-row".into(), str_hash(hash));
+                            let style = gpui::StyleRefinement::default().w_full().h(px(70.));
+                            gpui::keyed(id, 0, style, move |_, _| {
+                                slim_list_row(&item, &shared.borrow(), &view).unwrap_or_else(|| div().into_any_element())
+                            })
+                            .into_any_element()
+                        });
+                        drop(store);
                         let top = if i == 0 { 8. } else { 0. };
                         div()
                             .pt(px(top))
@@ -1763,6 +1739,49 @@ fn slim_row(store: &Store, chat: &SerializableChat) -> gpui::Stateful<gpui::Div>
         preview_line_at(store, chat, if unread { c(0xb2b2b2) } else { c(0x737373) }, 14., 19.),
         data::time_ago(store.now_ms(), last),
     )
+}
+
+/// One chat or Community row of the phone-width list, with its taps.
+fn slim_list_row(item: &Item, store: &Store, view: &gpui::WeakEntity<VectorApp>) -> Option<AnyElement> {
+    match item {
+        Item::Archive => None,
+        Item::Chat(chat_id) | Item::Archived(chat_id, _) => store.chat(chat_id).map(|chat| {
+            let id: SharedString = chat.id.clone().into();
+            let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), id.to_string());
+            slim_row(store, chat)
+                .on_click(move |_, window, cx| {
+                    let id = id.clone();
+                    open_view
+                        .update(cx, |app, cx| {
+                            app.slim.drawer = false;
+                            app.open_chat(id, window, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                })
+                .on_mouse_down(gpui::MouseButton::Right, move |e, _, cx| {
+                    let (id, at) = (menu_id.clone(), e.position);
+                    menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
+                })
+                .into_any_element()
+        }),
+        Item::Community(id) => store.community(id).map(|com| {
+            let (v, key) = (view.clone(), id.clone());
+            community_row(store, com)
+                .on_click(move |_, window, cx| {
+                    let key = key.clone();
+                    v.update(cx, |app, cx| app.on_community(crate::community::Act::Open(key), window, cx)).ok();
+                })
+                .into_any_element()
+        }),
+    }
+}
+
+pub(super) fn str_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
 }
 
 /// A community as one row of the folded list: its newest channel's line.

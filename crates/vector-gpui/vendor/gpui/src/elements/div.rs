@@ -3173,7 +3173,7 @@ impl Interactivity {
                 if phase == DispatchPhase::Capture && hovered != was_hovered {
                     if let Some(hover_state) = &hover_state {
                         hover_state.borrow_mut().element = hovered;
-                        cx.notify(current_view);
+                        cx.notify_motion(current_view);
                     }
                 }
             });
@@ -3746,7 +3746,7 @@ impl Interactivity {
                     }
                     if *scroll_offset != old_scroll_offset {
                         window.report_scroll_moved(hitbox.bounds);
-                        cx.notify(current_view);
+                        cx.notify_motion(current_view);
                     }
                 }
             });

@@ -928,7 +928,7 @@ impl StateInner {
         }
 
         if moved {
-            cx.notify(current_view);
+            cx.notify_motion(current_view);
         }
     }
 
@@ -1327,6 +1327,10 @@ impl StateInner {
             if bounds.size.height > padding.top + padding.bottom {
                 let mut item_origin = bounds.origin + Point::new(padding.left, padding.top);
                 item_origin.y -= layout_response.scroll_top.offset_in_item + layout_response.lead;
+                // On whole device pixels, a scroll moves each row by whole pixels: crisp, and
+                // keyed rows replay rather than rebuild.
+                let scale = window.scale_factor();
+                item_origin.y = px((item_origin.y.0 * scale).round() / scale);
                 let mirrored = window.mirrored();
                 for item in &mut layout_response.item_layouts {
                     // Mirrored, each item sits as far from the right edge as it would from the left.
