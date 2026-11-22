@@ -19,6 +19,14 @@ transfer-title-send = Sign in on another device
 # On the device being signed in. Matches the option on the login screen.
 transfer-title-receive = Sign in with another device
 
+## Scanning the other device's code
+
+transfer-pick-lead = On your signed-in device, open Settings and choose Sign in on Another Device. Then scan the QR code it shows.
+transfer-scan = Scan QR Code
+transfer-text-instead = Use a Text Code Instead
+transfer-scan-other-instead = Scan the other device instead
+transfer-scan-instead = Scan instead
+
 ## Showing a code
 
 transfer-unnamed = Unnamed account

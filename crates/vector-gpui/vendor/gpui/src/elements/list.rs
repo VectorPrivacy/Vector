@@ -870,6 +870,7 @@ impl StateInner {
     fn scroll(
         &mut self,
         scroll_top: &ListOffset,
+        bounds: Bounds<Pixels>,
         height: Pixels,
         delta: Point<Pixels>,
         current_view: EntityId,
@@ -885,9 +886,12 @@ impl StateInner {
         let padding = self.last_padding.unwrap_or_default();
         let scroll_max =
             (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
-        let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
-            .max(px(0.))
-            .min(scroll_max);
+        let old_scroll_top = self.scroll_top(scroll_top);
+        let new_scroll_top = (old_scroll_top - delta.y).max(px(0.)).min(scroll_max);
+        let moved = new_scroll_top != old_scroll_top;
+        if moved {
+            window.report_scroll_moved(bounds);
+        }
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.set_scroll_anchor(None);
@@ -923,7 +927,9 @@ impl StateInner {
             );
         }
 
-        cx.notify(current_view);
+        if moved {
+            cx.notify(current_view);
+        }
     }
 
     fn logical_scroll_top(&self) -> ListOffset {
@@ -1661,6 +1667,7 @@ impl Element for List {
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
                 list_state.0.borrow_mut().scroll(
                     &scroll_top,
+                    bounds,
                     height,
                     pixel_delta,
                     current_view,

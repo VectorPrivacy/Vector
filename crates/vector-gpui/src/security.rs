@@ -32,6 +32,8 @@ pub enum Event {
     Toast(String),
     /// The account another device sent has arrived: sign in with it.
     Received,
+    /// The camera, for the other device's transfer code.
+    Scan,
 }
 
 #[derive(Clone, Copy, PartialEq)]

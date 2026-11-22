@@ -252,9 +252,7 @@ impl FilePreview {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let own = crate::picked::name(&path);
-        let edited = own.is_some();
-        let name = own.unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string());
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -376,7 +374,7 @@ impl FilePreview {
             receiver,
             reply,
             stem,
-            edited,
+            edited: false,
             ext,
             size,
             image: None,
@@ -977,13 +975,15 @@ impl Render for FilePreview {
         };
         let info = div()
             .flex_shrink_0()
+            .w_full()
+            .max_w(px(400.))
             .flex()
             .flex_col()
             .items_center()
             .child(
                 div()
                     .mb(px(8.))
-                    .max_w(px(400.))
+                    .max_w_full()
                     .flex()
                     .items_center()
                     .justify_center()

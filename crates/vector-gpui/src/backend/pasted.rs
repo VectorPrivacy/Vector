@@ -14,11 +14,25 @@ fn held() -> Arc<Held> {
 
 /// `bytes` held under a fresh `pasted_image.<ext>` path.
 pub fn hold(bytes: Vec<u8>, ext: &str) -> PathBuf {
+    hold_named(bytes, &format!("pasted_image.{ext}"))
+}
+
+/// `bytes` held under a fresh path ending in `name`.
+pub fn hold_named(bytes: Vec<u8>, name: &str) -> PathBuf {
+    let path = slot().join(name);
+    hold_at(path.clone(), bytes);
+    path
+}
+
+/// `bytes` held under `path`, which is never written.
+pub fn hold_at(path: PathBuf, bytes: Vec<u8>) {
+    held().lock().unwrap_or_else(|e| e.into_inner()).insert(path, Arc::new(bytes));
+}
+
+fn slot() -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = super::archive::work_dir().join(format!("pasted-{n}")).join(format!("pasted_image.{ext}"));
-    held().lock().unwrap_or_else(|e| e.into_inner()).insert(path.clone(), Arc::new(bytes));
-    path
+    super::archive::work_dir().join(format!("pasted-{n}"))
 }
 
 pub fn get(path: &Path) -> Option<Arc<Vec<u8>>> {

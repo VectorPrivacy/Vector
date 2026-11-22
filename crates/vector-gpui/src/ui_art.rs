@@ -130,6 +130,9 @@ impl VectorApp {
             let Some(path) = rx.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next()) else {
                 return gone(&this, cx, None);
             };
+            let Some(path) = cx.background_executor().spawn(async move { crate::picked::on_disk(vec![path]) }).await.pop() else {
+                return gone(&this, cx, None);
+            };
             let Some(ext) = backend::upload::picture_ext(&path) else {
                 return gone(&this, cx, Some(crate::t::community_art_unreadable()));
             };

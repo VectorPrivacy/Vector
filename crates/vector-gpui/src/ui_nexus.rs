@@ -396,19 +396,13 @@ impl VectorApp {
             }
             Act::Menu(id, at) => {
                 let key = format!("app/{id}");
-                let pinned = self.start_pinned(&key);
-                self.menu = Some((
-                    at,
-                    vec![
-                        crate::kit::MenuItem::new(t::store_copy_link(), "share"),
-                        if pinned {
-                            crate::kit::MenuItem::new(t::main_menu_unpin(), "pin").danger()
-                        } else {
-                            crate::kit::MenuItem::new(t::main_menu_pin(), "pin")
-                        },
-                    ],
-                    vec![super::MenuAct::NexusLink(id), super::MenuAct::StartTogglePin(key)],
-                ));
+                let mut items = vec![crate::kit::MenuItem::new(t::store_copy_link(), "share")];
+                let mut acts = vec![super::MenuAct::NexusLink(id)];
+                if let Some((item, act)) = self.start_pin_row(key) {
+                    items.push(item);
+                    acts.push(act);
+                }
+                self.menu = Some((at, items, acts));
             }
         }
         let _ = window;

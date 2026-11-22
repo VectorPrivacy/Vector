@@ -210,7 +210,11 @@ impl VectorApp {
             let _ = window.update(cx, |_, window, cx| {
                 app.update(cx, |app, cx| {
                     if transfer {
-                        app.security.update(cx, |f, cx| f.join_scanned(true, &text, cx));
+                        // The card open on a phone being set up scanned for its own sign-in.
+                        app.security.update(cx, |f, cx| {
+                            let send = !f.receiving();
+                            f.join_scanned(send, &text, cx)
+                        });
                     } else if let Some(a) = link {
                         app.open_deep_link(a, window, cx);
                     } else if let Some(key) = invite {
@@ -234,8 +238,7 @@ impl VectorApp {
         let side = (w * 0.7).min(280.);
         let (left, top) = ((w - side) / 2., (h - side) / 2. - 20.);
         let veil = gpui::black().opacity(0.55);
-        Some(
-            div()
+        let view = div()
                 .id("qr-scanner")
                 .occlude()
                 .absolute()
@@ -286,9 +289,9 @@ impl VectorApp {
                         .cursor_pointer()
                         .on_click(cx.listener(|app, _, _, cx| app.close_qr_scanner(cx)))
                         .child(t::dialog_cancel()),
-                )
-                .into_any_element(),
-        )
+                );
+        // Over the transfer card that can open it.
+        Some(gpui::deferred(view).with_priority(12).into_any_element())
     }
 }
 

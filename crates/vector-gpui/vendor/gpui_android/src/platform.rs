@@ -229,7 +229,24 @@ impl PlatformState {
     }
 }
 
+/// Android's own feel: `OverScroller`'s fling, `ViewConfiguration`'s timeouts.
+struct AndroidGestures;
+
+impl gpui::PlatformGestures for AndroidGestures {
+    fn tuning(&self) -> gpui::GestureTuning {
+        gpui::GestureTuning {
+            multi_tap_interval: std::time::Duration::from_millis(300),
+            scroll_physics: gpui::ScrollPhysics::android(),
+            ..Default::default()
+        }
+    }
+}
+
 impl Platform for AndroidPlatform {
+    fn gestures(&self) -> Option<Rc<dyn gpui::PlatformGestures>> {
+        Some(Rc::new(AndroidGestures))
+    }
+
     fn platform_info(&self) -> gpui::PlatformInfo {
         gpui::PlatformInfo {
             os: gpui::OperatingSystem::Android,

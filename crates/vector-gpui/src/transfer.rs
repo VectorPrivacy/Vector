@@ -19,12 +19,17 @@ use crate::security::{
 use crate::t;
 use crate::theme::*;
 
+/// A phone scans with its camera; elsewhere the other device's code is typed.
+const CAN_SCAN: bool = cfg!(target_os = "android");
+
 const CODE_LIFE: Duration = Duration::from_secs(5 * 60);
 // i18n-exempt: the QR's protocol prefix
 const CODE_LABEL: &str = "vector transfer code:";
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Stage {
+    /// A phone being set up starts on scanning: the device it moves from shows its code.
+    Pick,
     Show,
     Enter,
     Connecting,
@@ -164,7 +169,38 @@ impl SecurityFlow {
             floor: 0,
             focus: false,
         });
-        self.show_code(cx);
+        self.start_over(cx);
+    }
+
+    /// Where a card begins, and where Try Again returns: scanning on a phone being set up, else
+    /// this device's code.
+    fn start_over(&mut self, cx: &mut Context<Self>) {
+        if CAN_SCAN && self.receiving() {
+            self.abandon();
+            let Some(x) = self.xfer_mut() else { return };
+            x.stage = Stage::Pick;
+            x.error.clear();
+            x.busy = false;
+            cx.notify();
+        } else {
+            self.show_code(cx);
+        }
+    }
+
+    /// The card is open on the device being signed in.
+    pub fn receiving(&self) -> bool {
+        self.xfer.as_ref().is_some_and(|x| !x.sender)
+    }
+
+    /// The camera, for the other device's code. Cancelled, it leaves the card on scanning's
+    /// screen, or on typing the code.
+    fn scan(&mut self, cx: &mut Context<Self>) {
+        if self.xfer.as_ref().is_some_and(|x| x.stage == Stage::Pick) {
+            self.abandon();
+        } else {
+            self.enter_code(cx);
+        }
+        cx.emit(Event::Scan);
     }
 
     /// A code read off the camera: straight to connecting, as if typed.
@@ -379,7 +415,7 @@ impl SecurityFlow {
         if self.xfer.as_ref().is_some_and(|x| x.finish_failed) {
             self.finish_received(cx);
         } else {
-            self.show_code(cx);
+            self.start_over(cx);
         }
     }
 
@@ -625,6 +661,7 @@ impl SecurityFlow {
         }
         let x = self.xfer.as_ref()?;
         let me = cx.entity().downgrade();
+        let scanner = me.clone();
         let on = move |f: fn(&mut SecurityFlow, &mut Context<SecurityFlow>)| {
             let me = me.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
@@ -763,7 +800,42 @@ impl SecurityFlow {
                 .border_color(if focused { c(ACCENT) } else { c(0x2c2e2f) })
                 .bg(c(0x161718))
         };
+        let scan = |id: &'static str, text: SharedString, primary: bool, enabled: bool| {
+            let me = scanner.clone();
+            let click = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                me.update(cx, |s, cx| s.scan(cx)).ok();
+            };
+            if !primary {
+                return button(id, text, true, enabled, click).into_any_element();
+            }
+            div()
+                .id(id)
+                .w_full()
+                .h(px(44.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .rounded(px(12.))
+                .bg(c(ACCENT))
+                .text_color(c(0x000000))
+                .text_size(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .cursor_pointer()
+                .on_click(click)
+                .child(svg().path("icons/qr-scan.svg").size(px(20.)).text_color(c(0x000000)))
+                .child(text)
+                .into_any_element()
+        };
         match x.stage {
+            Stage::Pick => {
+                body = body.child(lead(t::transfer_pick_lead(), false)).child(
+                    actions()
+                        .child(scan("xfer-scan", t::transfer_scan(), true, true))
+                        .child(button("xfer-text", t::transfer_text_instead(), true, true, on(Self::enter_code)))
+                        .child(link("xfer-show", t::transfer_show_instead(), true, Self::show_code)),
+                );
+            }
             Stage::Show => {
                 let left = x
                     .expires
@@ -872,6 +944,9 @@ impl SecurityFlow {
                         on(Self::show_code),
                     ));
                 }
+                if CAN_SCAN {
+                    a = a.child(scan("xfer-scan", t::transfer_scan_other_instead(), false, true));
+                }
                 body = body.child(a.child(link(
                     "xfer-type",
                     t::transfer_type_instead(),
@@ -903,6 +978,7 @@ impl SecurityFlow {
                             !x.busy && typed,
                             on(Self::connect),
                         ))
+                        .when(CAN_SCAN, |d| d.child(scan("xfer-scan", t::transfer_scan_instead(), false, !x.busy)))
                         .child(link(
                             "xfer-show",
                             t::transfer_show_instead(),

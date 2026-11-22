@@ -61,6 +61,9 @@ pub fn forget(path: &Path) {
     }
 }
 
+trait WriteSeek: std::io::Write + std::io::Seek {}
+impl<T: std::io::Write + std::io::Seek> WriteSeek for T {}
+
 fn walk(
     current: &Path,
     prefix: &str,
@@ -155,11 +158,15 @@ fn collect(paths: &[PathBuf]) -> Result<(String, Vec<Item>, u64), String> {
         let Some(file_name) = picked.file_name() else {
             continue;
         };
+        if let Some(bytes) = super::pasted::get(picked) {
+            let name = unique_root_name(&file_name.to_string_lossy(), false, &mut taken);
+            total += bytes.len() as u64;
+            items.push(Item { source: picked.clone(), name, is_dir: false, size: bytes.len() as u64 });
+            continue;
+        }
         // The user chose these roots, so an alias is followed; the walk still skips symlinks inside.
-        let source = match std::fs::canonicalize(picked) {
-            Ok(source) => source,
-            Err(_) if crate::picked::is_held(picked) => picked.clone(),
-            Err(_) => continue,
+        let Ok(source) = std::fs::canonicalize(picked) else {
+            continue;
         };
         let Ok(meta) = std::fs::metadata(&source) else {
             continue;
@@ -203,17 +210,23 @@ pub fn zip_paths(
 
     let (name, items, total) = collect(paths)?;
     // Zipped from picks held in memory, the zip is held there too.
-    let memory = items.iter().any(|i| crate::picked::is_held(&i.source));
+    let memory = items.iter().any(|i| super::pasted::get(&i.source).is_some());
     let file_name = format!("{name}.zip");
     let path = work_slot()
         .map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?
         .join(&file_name);
     let cancelled = || cancel.load(Ordering::Relaxed);
 
-    let run = || -> Result<(u32, u32, Vec<Entry>), String> {
-        let file =
-            crate::picked::create(&path, memory).map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?;
-        let mut zw = zip::ZipWriter::new(BufWriter::new(file));
+    let mut kept = Vec::new();
+    let mut run = || -> Result<(u32, u32, Vec<Entry>), String> {
+        let out: Box<dyn WriteSeek + '_> = if memory {
+            Box::new(std::io::Cursor::new(&mut kept))
+        } else {
+            let file = std::fs::File::create(&path)
+                .map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?;
+            Box::new(BufWriter::new(file))
+        };
+        let mut zw = zip::ZipWriter::new(out);
         // Level 2: zlib-rs's level 1 is deflate_quick (up to ~20% larger); 2 still beats C zlib's 1.
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
@@ -240,17 +253,24 @@ pub fn zip_paths(
                 return Err("Cancelled".into()); // i18n-exempt: never shown, the preview drops a cancelled zip
             }
             // Re-checked at zip time: a file swapped for a link since the walk is skipped.
-            match std::fs::symlink_metadata(&item.source) {
-                Ok(m) if m.file_type().is_symlink() && !crate::picked::is_held(&item.source) => continue,
-                Err(_) => continue,
-                _ => {}
+            let held = super::pasted::get(&item.source);
+            if held.is_none() {
+                match std::fs::symlink_metadata(&item.source) {
+                    Ok(m) if m.file_type().is_symlink() => continue,
+                    Err(_) => continue,
+                    _ => {}
+                }
             }
             files += 1;
             zw.start_file(&rel, options.large_file(item.size >= u32::MAX as u64))
                 .map_err(|e| crate::t::preview_zip_start_file_failed(e.to_string()).to_string())?;
             if item.size > 0 {
-                let data = std::fs::read(&item.source)
-                    .map_err(|e| crate::t::preview_zip_read_file_failed(e.to_string(), item.source.display().to_string()).to_string())?;
+                let data = match held {
+                    Some(bytes) => bytes,
+                    None => std::sync::Arc::new(std::fs::read(&item.source).map_err(|e| {
+                        crate::t::preview_zip_read_file_failed(e.to_string(), item.source.display().to_string()).to_string()
+                    })?),
+                };
                 for chunk in data.chunks(CHUNK) {
                     if cancelled() {
                         return Err("Cancelled".into()); // i18n-exempt: never shown, the preview drops a cancelled zip
@@ -277,11 +297,18 @@ pub fn zip_paths(
     };
     let done = run();
     for p in paths {
+        super::pasted::forget(p);
         crate::picked::release(p);
     }
     match done {
         Ok((file_count, dir_count, entries)) => {
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let size = if memory {
+                let size = kept.len() as u64;
+                super::pasted::hold_at(path.clone(), kept);
+                size
+            } else {
+                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            };
             Ok(Zipped {
                 path,
                 name: file_name,

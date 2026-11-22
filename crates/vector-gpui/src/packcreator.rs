@@ -498,6 +498,7 @@ impl EmojiPicker {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
+            let paths = cx.background_executor().spawn(async move { crate::picked::on_disk(paths) }).await;
             window
                 .update(cx, |_, window, cx| {
                     this.update(cx, |this, cx| this.add_paths(paths, window, cx))
@@ -668,6 +669,7 @@ impl EmojiPicker {
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
+            let paths = cx.background_executor().spawn(async move { crate::picked::on_disk(paths) }).await;
             let Some(path) = paths.into_iter().next() else { return };
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
             let error = |this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp, pre: &str, detail: &str| {

@@ -367,8 +367,9 @@ impl VectorApp {
     }
 
     /// `startPinItems`: the Main Menu toggle for a pinnable place, while the Main Menu is in use.
+    /// Slim has no Main Menu.
     pub(super) fn start_pin_row(&self, key: String) -> Option<(kit::MenuItem, MenuAct)> {
-        self.start_menu_on().then(|| {
+        (!self.is_slim && self.start_menu_on()).then(|| {
             let item = if self.start_pinned(&key) {
                 kit::MenuItem::new(crate::t::main_menu_unpin(), "pin").danger()
             } else {

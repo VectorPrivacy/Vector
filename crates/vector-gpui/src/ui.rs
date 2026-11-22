@@ -7106,6 +7106,7 @@ impl VectorApp {
                             .child(chrome(window, true, false)),
                     )
                     .child(self.security.clone())
+                    .children(self.qr_scanner_view(window, cx))
                     .children(self.popup.as_ref().map(|(p, _)| {
                         let app = cx.entity().downgrade();
                         gpui::deferred(kit::popup(p, move |yes, window, cx| {
@@ -9510,6 +9511,7 @@ impl VectorApp {
         let live = self.live;
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
+            let paths = cx.background_executor().spawn(async move { crate::picked::on_disk(paths) }).await;
             let Some(path) = paths.into_iter().next() else { return };
             let picked = path.to_string_lossy().to_string();
             if live {
@@ -11469,6 +11471,7 @@ impl VectorApp {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
+            let paths = cx.background_executor().spawn(async move { crate::picked::adopt(paths) }).await;
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
@@ -11514,6 +11517,7 @@ impl VectorApp {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
+            let paths = cx.background_executor().spawn(async move { crate::picked::adopt(paths) }).await;
             window
                 .update(cx, |_, window, cx| {
                     this.update(cx, |this, cx| this.open_paths_preview(paths, window, cx))
@@ -11532,7 +11536,7 @@ impl VectorApp {
     ) {
         match paths.len() {
             0 => {}
-            1 if paths[0].is_file() => self.open_file_preview(paths.remove(0), window, cx),
+            1 if paths[0].is_file() || backend::pasted::get(&paths[0]).is_some() => self.open_file_preview(paths.remove(0), window, cx),
             _ => self.open_preview(window, cx, move |chat, reply, window, cx| {
                 crate::filepreview::FilePreview::zipped(paths, chat, reply, window, cx)
             }),
@@ -15237,15 +15241,23 @@ impl VectorApp {
         if !matches!(self.screen, Screen::Main) || self.store.borrow().my_npub.is_empty() {
             return;
         }
-        let Some(shared) = crate::share::take() else { return };
-        self.shared = Some(shared);
-        self.stash_draft(cx);
-        self.go_home();
-        if self.live {
-            messaging::set_active_chat(None);
-        }
-        self.show_toast(&t::share_choose_chat(), cx);
-        cx.notify();
+        let Some(mut shared) = crate::share::take() else { return };
+        cx.spawn(async move |this, cx| {
+            let files = std::mem::take(&mut shared.files);
+            shared.files = cx.background_executor().spawn(async move { crate::picked::adopt(files) }).await;
+            this.update(cx, |this, cx| {
+                this.shared = Some(shared);
+                this.stash_draft(cx);
+                this.go_home();
+                if this.live {
+                    messaging::set_active_chat(None);
+                }
+                this.show_toast(&t::share_choose_chat(), cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The first file to its preview, as Tauri does; text alone into the composer.
@@ -18414,6 +18426,7 @@ impl VectorApp {
         let dir = backend::default_data_dir().join("cache").join("sounds");
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = rx.await else { return };
+            let paths = cx.background_executor().spawn(async move { crate::picked::on_disk(paths) }).await;
             let Some(path) = paths.into_iter().next() else { return };
             let imported = cx.background_executor().spawn(async move { backend::sound::import(&path, &dir) }).await;
             this.update(cx, |this, cx| {
@@ -19977,6 +19990,7 @@ impl VectorApp {
             let Ok(Ok(Some(paths))) = rx.await else {
                 return;
             };
+            let paths = cx.background_executor().spawn(async move { crate::picked::on_disk(paths) }).await;
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
@@ -20306,6 +20320,7 @@ impl VectorApp {
             }
             crate::security::Event::Toast(text) => self.show_toast(text, cx),
             crate::security::Event::Received => self.finish_transfer(window, cx),
+            crate::security::Event::Scan => self.open_qr_scanner(window, cx),
         }
     }
 

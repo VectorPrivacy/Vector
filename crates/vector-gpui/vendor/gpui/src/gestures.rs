@@ -14,7 +14,7 @@ use scheduler::Instant;
 use smallvec::SmallVec;
 
 use crate::{
-    Axis, GestureEvent, InputEvent, IsZero, Modifiers, MouseButton, MouseDownEvent, MouseEvent,
+    Axis, Bounds, GestureEvent, InputEvent, IsZero, Modifiers, MouseButton, MouseDownEvent, MouseEvent,
     MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollEvent, ScrollSource, TouchEvent,
     TouchId, TouchPhase, point, px, seal::Sealed,
 };
@@ -514,6 +514,21 @@ const VELOCITY_ASSUME_STOPPED_GAP: Duration = Duration::from_millis(40);
 
 const VELOCITY_MAX_SAMPLES: usize = 20;
 
+/// Below this speed, in pixels per second, a fling reads as stopped: a touch landing on it
+/// taps instead of catching it.
+const CATCH_MIN_SPEED: f32 = 150.;
+
+/// What the latest scroll step moved, as the window reports it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FlingTarget {
+    /// Nothing reported: a touch may catch the fling anywhere.
+    Unreported,
+    /// The scroller with these bounds moved.
+    Moving(Bounds<Pixels>),
+    /// The step moved nothing, as a scroller already at its end.
+    Stalled,
+}
+
 /// The portable recognizer behind raw touch input: it watches the
 /// [`TouchEvent`] stream for one touch at a time and resolves it into either
 /// a tap or a pan, following the competition model described in the module
@@ -530,6 +545,7 @@ pub(crate) struct TouchGestureRecognizer {
     tuning: GestureTuning,
     state: TouchGestureState,
     momentum: Option<Momentum>,
+    fling_target: FlingTarget,
     last_tap: Option<CompletedTap>,
 }
 
@@ -619,8 +635,41 @@ impl TouchGestureRecognizer {
             tuning,
             state: TouchGestureState::Idle,
             momentum: None,
+            fling_target: FlingTarget::Unreported,
             last_tap: None,
         }
+    }
+
+    /// What the scroll step just dispatched moved: the bounds of the scroller it moved, or
+    /// None when it moved nothing.
+    pub(crate) fn scrolled(&mut self, moved: Option<Bounds<Pixels>>) {
+        self.fling_target = match moved {
+            Some(bounds) => FlingTarget::Moving(bounds),
+            None => FlingTarget::Stalled,
+        };
+    }
+
+    /// Ends a fling whose last step moved nothing, returning the scroll that closes it.
+    pub(crate) fn end_stalled_momentum(&mut self) -> Option<RecognizedTouchGesture> {
+        if self.fling_target != FlingTarget::Stalled {
+            return None;
+        }
+        let momentum = self.momentum.take()?;
+        Some(RecognizedTouchGesture::Scroll(scroll_event(
+            momentum.position,
+            Point::default(),
+            TouchPhase::Ended,
+        )))
+    }
+
+    /// Whether a touch at `position` lands on a fling still visibly moving what it scrolls.
+    fn catches(&self, momentum: &Momentum, position: Point<Pixels>, now: Instant) -> bool {
+        let over = match self.fling_target {
+            FlingTarget::Unreported => true,
+            FlingTarget::Moving(bounds) => bounds.contains(&position),
+            FlingTarget::Stalled => false,
+        };
+        over && momentum.speed_at(self.tuning.scroll_physics, now) >= CATCH_MIN_SPEED
     }
 
     pub(crate) fn handle_event(
@@ -644,10 +693,13 @@ impl TouchGestureRecognizer {
                         Point::default(),
                         TouchPhase::Ended,
                     )));
-                    true
+                    self.catches(&momentum, event.position, now)
                 } else {
                     false
                 };
+                if matches!(self.state, TouchGestureState::Idle) {
+                    self.fling_target = FlingTarget::Unreported;
+                }
                 if matches!(self.state, TouchGestureState::Idle) {
                     let mut velocity_tracker = VelocityTracker::default();
                     velocity_tracker.push(now, event.position);
@@ -1064,6 +1116,21 @@ impl TouchGestureRecognizer {
                 TouchPhase::Moved,
             )))
         }
+    }
+}
+
+impl Momentum {
+    /// The fling's speed `now`, in pixels per second.
+    fn speed_at(&self, physics: ScrollPhysics, now: Instant) -> f32 {
+        const SPAN: Duration = Duration::from_millis(5);
+        let elapsed = now.duration_since(self.started_at);
+        if elapsed >= self.duration {
+            return 0.;
+        }
+        let before = elapsed.saturating_sub(SPAN);
+        let after = elapsed + SPAN;
+        let travelled = physics.fling_distance(self.speed, after) - physics.fling_distance(self.speed, before);
+        travelled / (after - before).as_secs_f32()
     }
 }
 

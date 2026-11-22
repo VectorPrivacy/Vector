@@ -1331,6 +1331,7 @@ pub struct Window {
     pub(crate) window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
+    touch_scroll_moved: Option<Bounds<Pixels>>,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
@@ -2473,6 +2474,7 @@ impl Window {
                     .gestures()
                     .map_or_else(GestureTuning::default, |gestures| gestures.tuning()),
             ),
+            touch_scroll_moved: None,
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
@@ -6599,6 +6601,12 @@ impl Window {
         }
     }
 
+    /// A scroll listener moved its content: the scroller's `bounds`. A touch catches a fling
+    /// only over what it still moves, and a fling that moves nothing ends.
+    pub fn report_scroll_moved(&mut self, bounds: Bounds<Pixels>) {
+        self.touch_scroll_moved = Some(bounds);
+    }
+
     /// Whether recognized touch pans may use the platform's predicted touch
     /// positions ([`TouchEvent::predicted_position`]) to compensate for input
     /// latency. Defaults to true.
@@ -6660,7 +6668,12 @@ impl Window {
             RecognizedTouchGesture::Scroll(scroll_wheel) => {
                 self.mouse_position = scroll_wheel.position;
                 cx.propagate_event = true;
+                let moves = !scroll_wheel.delta.pixel_delta(px(1.)).is_zero();
+                self.touch_scroll_moved = None;
                 self.dispatch_mouse_event(&scroll_wheel, cx);
+                if moves {
+                    self.touch_gestures.scrolled(self.touch_scroll_moved.take());
+                }
             }
             RecognizedTouchGesture::Tap { down, up } => {
                 self.mouse_position = up.position;
@@ -6743,6 +6756,9 @@ impl Window {
         self.on_next_frame(|window, cx| {
             if let Some(gesture) = window.touch_gestures.tick_momentum() {
                 window.dispatch_recognized_touch_gesture(gesture, cx);
+            }
+            if let Some(end) = window.touch_gestures.end_stalled_momentum() {
+                window.dispatch_recognized_touch_gesture(end, cx);
             }
             if window.touch_gestures.has_momentum() {
                 window.schedule_touch_momentum_tick();

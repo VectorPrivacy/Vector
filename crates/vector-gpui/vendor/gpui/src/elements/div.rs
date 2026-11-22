@@ -2337,6 +2337,8 @@ pub struct Interactivity {
     pub hovered: Option<bool>,
     pub(crate) tooltip_id: Option<TooltipId>,
     pub(crate) content_size: Size<Pixels>,
+    /// How far this frame's layout lets the content scroll, once it is laid out.
+    pub(crate) scroll_max: Cell<Option<Point<Pixels>>>,
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
@@ -2743,6 +2745,7 @@ impl Interactivity {
                 scroll_offset.y = scroll_offset.y.clamp(-scroll_max.y, px(0.));
             }
 
+            self.scroll_max.set(Some(scroll_max));
             if let Some(mut scroll_handle_state) = tracked_scroll_handle {
                 scroll_handle_state.max_offset = scroll_max;
                 scroll_handle_state.bounds = bounds;
@@ -3689,6 +3692,7 @@ impl Interactivity {
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             let mirrored = window.mirrored();
+            let scroll_max = self.scroll_max.get();
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
@@ -3730,7 +3734,18 @@ impl Interactivity {
                     }
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
+                    // Held at the edges here, not only at the next layout, so a push past the
+                    // end moves nothing and says so.
+                    if let Some(max) = scroll_max {
+                        scroll_offset.y = scroll_offset.y.clamp(-max.y, px(0.));
+                        scroll_offset.x = if mirrored {
+                            scroll_offset.x.clamp(px(0.), max.x)
+                        } else {
+                            scroll_offset.x.clamp(-max.x, px(0.))
+                        };
+                    }
                     if *scroll_offset != old_scroll_offset {
+                        window.report_scroll_moved(hitbox.bounds);
                         cx.notify(current_view);
                     }
                 }
