@@ -1377,7 +1377,15 @@ impl VectorApp {
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while rx.next().await.is_some() {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                // A model's new frame redraws only the timeline it plays in; full screen, the app.
+                let woke = this.update(cx, |app, cx| {
+                    if app.media.borrow().models.front {
+                        cx.notify();
+                    } else {
+                        crate::pane::notify(&app.panes.timeline, cx);
+                    }
+                });
+                if woke.is_err() {
                     break;
                 }
             }
@@ -6948,7 +6956,10 @@ impl VectorApp {
             media.models.scale = window.scale_factor();
             media.models.active = window.is_window_active() && !gpui::animations_asleep();
             media.models.front = self.model_viewer.is_some();
-            if let Some(due) = media.models.tick() {
+            // In a chat the timeline pane asks for its models' frames, so they redraw it alone.
+            if let Some(due) = media.models.tick()
+                && media.models.front
+            {
                 crate::model3d::stage::ask(window, cx, due);
             }
             for old in media.models.retired.drain(..) {
@@ -10283,6 +10294,14 @@ impl VectorApp {
             move |app, window, cx| {
                 // A scroll back to the newest redraws this pane alone.
                 app.catch_up_read(window, cx);
+                {
+                    let mut media = app.media.borrow_mut();
+                    if !media.models.front
+                        && let Some(due) = media.models.tick()
+                    {
+                        crate::model3d::stage::ask(window, cx, due);
+                    }
+                }
                 let store = app.store.clone();
                 let store = store.borrow();
                 app.timeline_list(&store, id.clone(), staged_voice, window, cx)
