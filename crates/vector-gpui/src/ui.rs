@@ -728,11 +728,18 @@ impl VectorApp {
         ex.clone()
             .spawn(async move {
                 ex.timer(std::time::Duration::from_secs(2)).await;
+                // Each font (weight included) searches for itself: warm the ones the picker uses.
                 let mut font = gpui::font(INTER);
                 font.fallbacks = crate::lang::fallbacks();
-                for run in std::iter::once("(◕‿◕)".to_string()).chain(crate::emoji::kaomoji_glyphs()) { // i18n-exempt: glyphs, never shown
-                    text.prewarm_text(&run, &font, px(12.));
+                let mut tab = font.clone();
+                tab.weight = gpui::FontWeight::SEMIBOLD;
+                let at = std::time::Instant::now();
+                text.prewarm_text("(◕‿◕)", &tab, px(12.)); // i18n-exempt: glyphs, never shown
+                let label = at.elapsed();
+                for run in crate::emoji::kaomoji_glyphs() {
+                    text.prewarm_text(&run, &font, px(16.));
                 }
+                log::debug!("kaomoji fonts warmed: label {label:?}, all {:?}", at.elapsed());
             })
             .detach();
         let store: Shared = Rc::new(RefCell::new(store));
