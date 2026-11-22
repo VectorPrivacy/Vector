@@ -70,6 +70,8 @@ struct KeyedState {
     accessed_entities: FxHashSet<EntityId>,
     /// Drawn with the pointer over it, so its hover styles may be stale anywhere else.
     hovered: bool,
+    /// `bounds` and every hit area drawn in it, where the pointer can hover it.
+    extent: Bounds<Pixels>,
     /// Holds what cannot move: tooltips, deferred draws, text input.
     pinned: bool,
     /// Asked for another frame while drawn: it is animating, so it draws afresh.
@@ -209,7 +211,7 @@ impl Element for Keyed {
                     && state.opacity.to_bits() == opacity.to_bits()
                     && !state.hovered
                     && !state.moving
-                    && !bounds.contains(&mouse)
+                    && !state.extent.contains(&(mouse - by))
                     && (!moved || (!state.pinned && whole(by.x) && whole(by.y)))
                 {
                     let start = window.prepaint_index();
@@ -222,6 +224,7 @@ impl Element for Keyed {
                     cx.entities.extend_accessed(state.accessed_entities.iter().copied());
                     state.prepaint_range = start..window.prepaint_index();
                     state.bounds = bounds;
+                    state.extent.origin = state.extent.origin + by;
                     state.drawn = window.draw_count;
                     crate::draw_stats::keyed(true);
                     return (Some(KeyedDraw::Replayed(by)), state);
@@ -258,6 +261,7 @@ impl Element for Keyed {
             moving |= window.keyed_asks.get() != asks || crate::keyed_volatile_count() != volatile;
             let end = window.prepaint_index();
             let pinned = window.prepaint_pins(&start, &end);
+            let extent = window.prepaint_extent(bounds, &start, &end);
             let state = KeyedState {
                 key,
                 drawn: window.draw_count,
@@ -268,7 +272,8 @@ impl Element for Keyed {
                 prepaint_range: start..end,
                 paint_range: PaintIndex::default()..PaintIndex::default(),
                 accessed_entities,
-                hovered: bounds.contains(&mouse),
+                hovered: extent.contains(&mouse),
+                extent,
                 pinned,
                 moving,
                 places: places..window.places_index(),

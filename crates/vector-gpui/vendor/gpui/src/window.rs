@@ -1370,6 +1370,8 @@ pub struct Window {
     /// How deep in keyed subtrees' own drawing this is, and the frames they asked for.
     pub(crate) keyed_depth: usize,
     pub(crate) keyed_asks: Cell<u64>,
+    /// When content last scrolled under a pointer that stayed put.
+    scrolled_under_pointer: Option<Instant>,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2520,6 +2522,7 @@ impl Window {
             draw_count: 0,
             keyed_depth: 0,
             keyed_asks: Cell::new(0),
+            scrolled_under_pointer: None,
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -3922,6 +3925,12 @@ impl Window {
         self.last_input_modality == InputModality::Keyboard
     }
 
+    /// Whether content is scrolling under a pointer that has not moved: hover then flips
+    /// without a fade, so a row the content carries away is not left animating.
+    pub fn scrolling_under_pointer(&self) -> bool {
+        self.scrolled_under_pointer.is_some_and(|t| t.elapsed() < Duration::from_millis(200))
+    }
+
     /// Returns whether the last input event came from a touch screen.
     pub fn last_input_was_touch(&self) -> bool {
         self.last_input_modality == InputModality::Touch
@@ -4703,6 +4712,14 @@ impl Window {
     /// Whether a prepaint record holds what a moved replay cannot carry.
     pub(crate) fn prepaint_pins(&self, start: &PrepaintStateIndex, end: &PrepaintStateIndex) -> bool {
         end.tooltips_index > start.tooltips_index || end.deferred_draws_index > start.deferred_draws_index
+    }
+
+    /// Everything a prepaint record can be hovered over: its hit areas reach past its bounds
+    /// where something hangs outside them.
+    pub(crate) fn prepaint_extent(&self, bounds: Bounds<Pixels>, start: &PrepaintStateIndex, end: &PrepaintStateIndex) -> Bounds<Pixels> {
+        self.next_frame.hitboxes[start.hitboxes_index..end.hitboxes_index]
+            .iter()
+            .fold(bounds, |extent, hitbox| extent.union(&hitbox.bounds.intersect(&hitbox.clip)))
     }
 
     /// Whether a paint record holds what a moved replay cannot carry.
@@ -6697,6 +6714,9 @@ impl Window {
             // Track the mouse position with our own state, since accessing the platform
             // API for the mouse position can only occur on the main thread.
             PlatformInput::MouseMove(mouse_move) => {
+                if mouse_move.position != self.mouse_position {
+                    self.scrolled_under_pointer = None;
+                }
                 self.mouse_position = mouse_move.position;
                 self.modifiers = mouse_move.modifiers;
                 PlatformInput::MouseMove(mouse_move)
@@ -6724,6 +6744,9 @@ impl Window {
                 PlatformInput::ModifiersChanged(modifiers_changed)
             }
             PlatformInput::Scroll(scroll_wheel) => {
+                if scroll_wheel.position == self.mouse_position {
+                    self.scrolled_under_pointer = Some(Instant::now());
+                }
                 self.mouse_position = scroll_wheel.position;
                 self.modifiers = scroll_wheel.modifiers;
                 PlatformInput::Scroll(scroll_wheel)

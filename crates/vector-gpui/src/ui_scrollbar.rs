@@ -155,9 +155,9 @@ impl VectorApp {
         }
         if fresh {
             // Bounds lag the layout by a frame: measure again once it settles. The bar is the
-            // chat pane's, so only it redraws.
+            // chat pane's, so only it redraws, and its rows replay.
             let pane = self.panes.chat.clone();
-            window.on_next_frame(move |_, cx| crate::pane::notify(&pane, cx));
+            window.on_next_frame(move |_, cx| crate::pane::notify_keyed(&pane, cx));
         }
         self.bar.sig = Some(sig.clone());
         let Some((newer_j, total)) = rank else { return };

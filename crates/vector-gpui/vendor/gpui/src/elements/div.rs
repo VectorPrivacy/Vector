@@ -3862,7 +3862,14 @@ impl Interactivity {
             }
             s
         };
-        let ease = self.hover_ease.unwrap_or_else(|| HOVER_EASE.with(|e| e.get()));
+        let mut ease = self.hover_ease.unwrap_or_else(|| HOVER_EASE.with(|e| e.get()));
+        if window.scrolling_under_pointer() {
+            if let Some(state) = element_state.as_deref_mut() {
+                state.group_fade.snap(group_on);
+                state.hover_fade.snap(hover_on);
+            }
+            ease = Duration::ZERO;
+        }
         let fades = match (!ease.is_zero(), element_state.as_deref_mut()) {
             (true, Some(state)) => {
                 let (g, h) = (state.group_fade.step(group_on, ease), state.hover_fade.step(hover_on, ease));
@@ -4071,6 +4078,10 @@ impl Fade {
             }
             None => to,
         }
+    }
+
+    fn snap(&mut self, on: bool) {
+        *self = Fade { seen: true, on, since: None, from: on as u8 as f32 };
     }
 
     /// How far toward hovered it stands; the first frame an element is seen it takes its state as is.
