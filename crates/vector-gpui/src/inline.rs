@@ -1578,8 +1578,9 @@ impl Element for Inline {
         if pre.hits.is_empty() {
             return;
         }
-        for (hitbox, _) in &pre.hits {
-            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        for (hitbox, target) in &pre.hits {
+            let cursor = if matches!(target, Target::Seek(_)) { CursorStyle::IBeam } else { CursorStyle::PointingHand };
+            window.set_cursor_style(cursor, hitbox);
         }
         let Some(on_click) = self.on_click.clone() else {
             return;

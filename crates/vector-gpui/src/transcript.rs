@@ -281,8 +281,8 @@ pub fn view(
                 let mut atoms = Vec::with_capacity(sections.len() * 2);
                 for (i, s) in sections.iter().enumerate() {
                     if i > 0 {
-                        // The sections' 1px side margins, as hair spaces.
-                        atoms.push(Atom::Text { text: "\u{200A} \u{200A}".into(), look: base.clone(), kind: Kind::Plain });
+                        // The sections' 1px side margins, as gaps a copy leaves out.
+                        atoms.extend([Atom::Gap(1.), Atom::Text { text: " ".into(), look: base.clone(), kind: Kind::Plain }, Atom::Gap(1.)]);
                     }
                     let mut look = base.clone();
                     if lit == Some(i) {
