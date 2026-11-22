@@ -236,6 +236,8 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 "render_ms": render_ns as f64 / 1e6,
             });
             v["active"] = json!(window.is_window_active());
+            let ph = gpui::draw_stats::phases_take();
+            v["frames"]["request_layout_prepaint_paint_ms"] = json!(ph.map(|n| n as f64 / 1e6));
             let (built, replayed) = gpui::draw_stats::keyed_take();
             v["frames"]["keyed_built_replayed"] = json!([built, replayed]);
             let (root, model) = gpui::draw_stats::whole_take();
@@ -367,6 +369,18 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 }
             });
         }
+        // `pan:x,y,dy,n`: n pixel scrolls of dy at x,y, one a frame, as a finger pans.
+        "pan" => {
+            let n: Vec<f32> = rest.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let [x, y, dy, count] = n[..] else {
+                return answer(json!({ "error": "expected x,y,dy,n" }));
+            };
+            let at = point(px(x), px(y));
+            later(window, cx, move |window, cx| {
+                window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: at, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                pan(window, cx, at, dy, count as u32);
+            });
+        }
         "file" => app.dev_open_file(rest.into(), window, cx),
         "drop" => {
             let p: Vec<&str> = rest.split(':').collect();
@@ -420,6 +434,14 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
 }
 
 /// Input dispatched once the app's own update has ended, as the platform's would be.
+fn pan(window: &mut Window, cx: &mut gpui::App, at: gpui::Point<gpui::Pixels>, dy: f32, left: u32) {
+    let step = ScrollEvent { position: at, delta: ScrollDelta::Pixels(point(px(0.), px(dy))), ..Default::default() };
+    window.dispatch_event(PlatformInput::Scroll(step), cx);
+    if left > 1 {
+        window.on_next_frame(move |window, cx| pan(window, cx, at, dy, left - 1));
+    }
+}
+
 fn later(window: &mut Window, cx: &mut Context<VectorApp>, f: impl FnOnce(&mut Window, &mut gpui::App) + 'static) {
     cx.spawn_in(window, async move |_, cx| {
         cx.update(|window, cx| f(window, cx)).ok();

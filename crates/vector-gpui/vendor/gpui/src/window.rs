@@ -4224,15 +4224,20 @@ impl Window {
         let scale_factor = self.scale_factor();
         #[cfg(feature = "profiler")]
         let request_layout_start = Instant::now();
+        let phase_at = Instant::now();
         let mut root_element = self.root.as_ref().unwrap().clone().into_any_element();
         let root_layout_id = root_element.request_layout(self, cx);
+        let requested_at = Instant::now();
         #[cfg(feature = "profiler")]
         let prepaint_start = Instant::now();
         self.layout_engine
             .as_mut()
             .unwrap()
             .stretch_auto_size_to_fill(root_layout_id, root_size, scale_factor);
-        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+        root_element.layout_as_root(root_size.into(), self, cx);
+        let laid_out_at = Instant::now();
+        self.with_absolute_element_offset(Point::default(), |window| root_element.prepaint(window, cx));
+        let prepainted_at = Instant::now();
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
@@ -4268,7 +4273,9 @@ impl Window {
         #[cfg(feature = "profiler")]
         let paint_start = Instant::now();
         self.invalidator.set_phase(DrawPhase::Paint);
+        let paint_at = Instant::now();
         root_element.paint(self, cx);
+        draw_stats::phases([requested_at - phase_at, laid_out_at - requested_at, prepainted_at - laid_out_at, paint_at.elapsed()]);
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector(inspector_element, cx);
@@ -11543,6 +11550,20 @@ pub mod draw_stats {
     /// `(root, model)` whole-window draws since the last call.
     pub fn whole_take() -> (u64, u64) {
         (ROOT.swap(0, Ordering::Relaxed), MODEL.swap(0, Ordering::Relaxed))
+    }
+
+    static PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+    /// Time in the root's request layout (renders included), layout, prepaint, and paint.
+    pub(crate) fn phases(took: [std::time::Duration; 4]) {
+        for (sum, t) in PHASES.iter().zip(took) {
+            sum.fetch_add(t.as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Nanoseconds in each of [`phases`] since the last call.
+    pub fn phases_take() -> [u64; 4] {
+        PHASES.each_ref().map(|p| p.swap(0, Ordering::Relaxed))
     }
 
     static KEYED_BUILT: AtomicU64 = AtomicU64::new(0);
