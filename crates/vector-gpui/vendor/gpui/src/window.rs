@@ -4832,11 +4832,10 @@ impl Window {
         self.dirty_views.contains(&view)
     }
 
-    /// Redraws every view in the frame being drawn, as [`Self::refresh`] does for the next one.
-    /// Call it before layout.
-    pub fn refresh_now(&mut self) {
+    /// Renders every view again in the frame being drawn. Keyed subtrees whose keys hold still
+    /// replay: nothing they read changed, only what draws them. Call it before layout.
+    pub fn rerender_all(&mut self) {
         self.refreshing = true;
-        self.hard_refresh = true;
     }
 
     /// Whether any view was told its data changed this frame, not only that it moved.

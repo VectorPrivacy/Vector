@@ -7124,7 +7124,7 @@ impl VectorApp {
         // the root again. Only motion (scroll, hover) and animation frames reuse it.
         if self.shape() != self.drawn_shape {
             // Another screen: every pane draws through new closures.
-            window.refresh_now();
+            window.rerender_all();
         } else if shell(self) != before || window.data_changed() || window.view_redraws(self.panes.chrome.entity_id()) {
             window.rerender(cx.entity_id());
         }
