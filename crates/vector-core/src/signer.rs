@@ -665,9 +665,8 @@ pub fn build_nostrconnect_session(
     // (which doesn't read perms locally), while the signer app on the other
     // side parses the appended query param to render its pairing screen.
     //
-    // The NIP-46 `secret` IS emitted now (0.45 requires it, and its response
-    // parser accepts both a spec-compliant secret echo and Amber's bare `"ack"`),
-    // so spoof detection costs nothing in interop.
+    // The NIP-46 `secret` is always emitted: nostr-connect accepts only its echo
+    // here (a bare `"ack"` would let any relay participant pair as the signer).
     let mut uri_string = uri.to_string();
     let perms = VECTOR_NIP46_PERMS.join(",");
     if !perms.is_empty() {

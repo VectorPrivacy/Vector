@@ -4126,9 +4126,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-connect"
-version = "0.45.2"
+version = "0.45.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dcb124b932705c146e3e7e61d1b4d2c63720434422ed191a550228d04149555"
+checksum = "99a90f462a73bcb95134a2f3a731c4a9c5ee5d3156bc4f4663bc114ee533bb98"
 dependencies = [
  "async-utility",
  "futures-core",
@@ -8179,7 +8179,7 @@ dependencies = [
 
 [[package]]
 name = "vector-core"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm 0.11.1",
