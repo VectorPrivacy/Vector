@@ -387,6 +387,8 @@ pub struct VectorApp {
     /// Scanner frames off screen, for the atlas to let go of.
     retired_frames: Vec<Arc<gpui::RenderImage>>,
     draw_hooked: bool,
+    /// `shape()` when the root last rendered.
+    drawn_shape: u64,
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -1216,6 +1218,7 @@ impl VectorApp {
             scanner: None,
             retired_frames: Vec::new(),
             draw_hooked: false,
+            drawn_shape: 0,
             start: None,
             menu: None,
             menu_keys: None,
@@ -6876,7 +6879,7 @@ impl Render for VectorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Child views (the login screen's) render after this one returns: an ease they start
         // still needs a next frame, which only a display link would otherwise bring.
-        let el = div().size_full().child(self.render_root(window, cx)).child(kit::pump());
+        let el = div().size_full().child(self.render_root(window, cx)).child(kit::pump_all());
         if kit::easing() {
             window.request_animation_frame();
         }
@@ -7117,9 +7120,29 @@ impl VectorApp {
             window.focus(&self.root_focus, cx);
         }
         // The chrome pane stands for what the root draws itself.
-        if shell(self) != before || window.view_redraws(self.panes.chrome.entity_id()) {
+        // Panes draw through closures the root's last render made: a data change anywhere, or a
+        // different screen, renders the root again. Only motion (scroll, hover) reuses it.
+        if shell(self) != before
+            || self.shape() != self.drawn_shape
+            || window.data_changed()
+            || window.view_redraws(self.panes.chrome.entity_id())
+        {
             window.rerender(cx.entity_id());
         }
+    }
+
+    /// What decides which panes the root draws and what their closures hold.
+    fn shape(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.open.as_deref(),
+            self.community.as_ref().map(|v| v.id.as_str()),
+            (self.settings.is_some(), self.nexus.is_some(), self.profile.is_some(), self.new_chat.is_some()),
+            (self.create_community.is_some(), self.start.is_some(), self.is_slim),
+        )
+            .hash(&mut h);
+        h.finish()
     }
 
     fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -7134,12 +7157,13 @@ impl VectorApp {
             // A reused root skips its own pump: eases built at layout still ask for frames.
             window.after_each_prepaint(|window, _| {
                 if kit::easing() {
-                    window.request_animation_frame();
+                    window.request_refresh_frame();
                 }
             });
             window.cache_root(true);
             self.each_draw(window, cx);
         }
+        self.drawn_shape = self.shape();
         let rail_mode = self.rail_mode(window);
         let slim = self.is_slim;
         let list_full = clamp_list_w(self.list_pref, self.vw, rail_mode.width());
@@ -7496,7 +7520,9 @@ impl VectorApp {
                                 div().flex_1().min_w_0().h_full().flex().relative().child(el).children(kit::veil(fade)).into_any_element()
                             }
                             (None, Some(id)) => {
-                                let t = self.chat_in.shown(0.25, window);
+                                if self.chat_in.enter() {
+                                    window.redraw_now(self.panes.veil.entity_id());
+                                }
                                 let el = match self
                                 .community
                                 .as_ref()
@@ -7518,8 +7544,19 @@ impl VectorApp {
                                     .into_any_element(),
                                 None => self.chat_cached(id, cx),
                             };
-                                let fade = kit::bezier(0.46, 0.03, 0.52, 0.96)(t);
-                                div().flex_1().min_w_0().h_full().flex().relative().child(el).children(kit::veil(fade)).into_any_element()
+                                let veil = crate::pane::cached(
+                                    &self.panes.veil,
+                                    gpui::StyleRefinement::default().absolute().inset_0(),
+                                    |app, window, _| {
+                                        let t = app.chat_in.at(0.25);
+                                        if t < 1. {
+                                            window.request_animation_frame();
+                                        }
+                                        kit::veil(kit::bezier(0.46, 0.03, 0.52, 0.96)(t)).map_or_else(|| div().into_any_element(), |v| v.into_any_element())
+                                    },
+                                    cx,
+                                );
+                                div().flex_1().min_w_0().h_full().flex().relative().child(el).child(veil).into_any_element()
                             }
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })
@@ -10219,6 +10256,9 @@ impl VectorApp {
                 let (Some(chat), Some(row)) = (rows_store.chat(&rows_id), rows.get(i)) else {
                     return false;
                 };
+                if matches!(row, Row::Message { index, .. } if *index >= chat.messages.len()) {
+                    return false;
+                }
                 let revealed = revealed.borrow();
                 let fail_reasons = fail_reasons.borrow();
                 let delete_meta = delete_meta.borrow();

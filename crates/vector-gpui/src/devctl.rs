@@ -57,6 +57,9 @@ impl Drop for Timed {
     fn drop(&mut self) {
         RENDERS.fetch_add(1, Ordering::Relaxed);
         RENDER_NANOS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if gpui::draw_stats::frame_log() {
+            eprintln!("[root render] {:.3} ms", self.0.elapsed().as_secs_f64() * 1e3);
+        }
     }
 }
 

@@ -130,6 +130,8 @@ struct WindowInvalidatorInner {
     pub dirty_views: FxHashSet<EntityId>,
     /// The dirty views told their data changed, not only that they moved.
     pub data_views: FxHashSet<EntityId>,
+    /// The data views told so by something other than their own animation frame.
+    pub changed_views: FxHashSet<EntityId>,
     pub update_count: usize,
     #[cfg(feature = "profiler")]
     pub frame_dirty: FrameDirtyAccumulator,
@@ -163,6 +165,7 @@ impl WindowInvalidator {
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
                 data_views: FxHashSet::default(),
+                changed_views: FxHashSet::default(),
                 update_count: 0,
                 #[cfg(feature = "profiler")]
                 frame_dirty: FrameDirtyAccumulator::default(),
@@ -177,6 +180,9 @@ impl WindowInvalidator {
         inner.dirty_views.insert(entity);
         if !cx.motion_notify {
             inner.data_views.insert(entity);
+            if !cx.frame_notify {
+                inner.changed_views.insert(entity);
+            }
         }
         if inner.draw_phase == DrawPhase::None {
             #[cfg(feature = "profiler")]
@@ -273,6 +279,10 @@ impl WindowInvalidator {
 
     pub fn take_data_views(&self) -> FxHashSet<EntityId> {
         mem::take(&mut self.inner.borrow_mut().data_views)
+    }
+
+    pub fn take_changed_views(&self) -> FxHashSet<EntityId> {
+        mem::take(&mut self.inner.borrow_mut().changed_views)
     }
 
     pub fn replace_views(&self, views: FxHashSet<EntityId>) {
@@ -1427,6 +1437,8 @@ pub struct Window {
     pub(crate) hard_refresh: bool,
     /// The views whose data changed for this frame; the rest of the dirty ones only moved.
     pub(crate) data_dirty: FxHashSet<EntityId>,
+    /// `data_dirty` less the views that only asked for an animation frame.
+    pub(crate) changed: FxHashSet<EntityId>,
     /// The views notified for this frame, as opposed to dirty only for holding one that was.
     pub(crate) notified: FxHashSet<EntityId>,
     /// The clips around the keyed subtrees being drawn, which draw clipped by their own masks.
@@ -2595,6 +2607,7 @@ impl Window {
             refreshing: false,
             hard_refresh: false,
             data_dirty: FxHashSet::default(),
+            changed: FxHashSet::default(),
             notified: FxHashSet::default(),
             keyed_outer: Vec::new(),
             draw_count: 0,
@@ -3301,7 +3314,13 @@ impl Window {
             self.on_next_frame(move |_, cx| cx.notify_motion(entity));
             return;
         }
-        self.on_next_frame(move |_, cx| cx.notify(entity));
+        self.on_next_frame(move |_, cx| cx.notify_frame(entity));
+    }
+
+    /// [`Self::request_animation_frame`] that redraws every view next frame: for motion somewhere
+    /// below that only the drawing, not a view, knows about.
+    pub fn request_refresh_frame(&self) {
+        self.on_next_frame(|window, _| window.refresh());
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
@@ -4169,6 +4188,7 @@ impl Window {
         self.refreshing = false;
         self.hard_refresh = false;
         self.data_dirty.clear();
+        self.changed.clear();
         self.notified.clear();
         self.unpunched.clear();
         self.invalidator.set_phase(DrawPhase::None);
@@ -4211,11 +4231,16 @@ impl Window {
     fn invalidate_entities(&mut self) {
         let mut views = self.invalidator.take_views();
         self.data_dirty.extend(self.invalidator.take_data_views());
+        self.changed.extend(self.invalidator.take_changed_views());
         let root = self.root.as_ref().map(|r| r.entity_id());
         for entity in views.drain() {
-            // Cached views learn of change only through their own notify, so a change to the
-            // root or to a model they may read redraws them all, as an uncached tree would.
-            if Some(entity) == root || !self.rendered_frame.dispatch_tree.has_view(entity) {
+            // A cached root that only moved or asked for a frame renders again around the
+            // views inside it, which nothing told of a change.
+            if self.cache_root && Some(entity) == root && !self.changed.contains(&entity) {
+                self.unpunched.insert(entity);
+            } else if Some(entity) == root || !self.rendered_frame.dispatch_tree.has_view(entity) {
+                // Cached views learn of change only through their own notify, so a change to the
+                // root or to a model they may read redraws them all, as an uncached tree would.
                 if !self.refreshing {
                     draw_stats::whole(Some(entity) == root);
                 }
@@ -4805,6 +4830,11 @@ impl Window {
     /// Whether `view` draws afresh this frame.
     pub fn view_redraws(&self, view: EntityId) -> bool {
         self.dirty_views.contains(&view)
+    }
+
+    /// Whether any view was told its data changed this frame, not only that it moved.
+    pub fn data_changed(&self) -> bool {
+        !self.changed.is_empty() || !self.invalidator.inner.borrow().changed_views.is_empty()
     }
 
     /// One piece of a cached view's reuse around views drawn afresh inside it.
@@ -11963,10 +11993,19 @@ pub mod draw_stats {
 
     static PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
+    /// `GPUI_FRAME_LOG`: each draw's time and phases on stderr.
+    pub fn frame_log() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("GPUI_FRAME_LOG").is_some())
+    }
+
     /// Time in the root's request layout (renders included), layout, prepaint, and paint.
     pub(crate) fn phases(took: [std::time::Duration; 4]) {
         for (sum, t) in PHASES.iter().zip(took) {
             sum.fetch_add(t.as_nanos() as u64, Ordering::Relaxed);
+        }
+        if frame_log() {
+            eprintln!("[phases] {:?}", took.map(|t| (t.as_secs_f64() * 1e5).round() / 1e2));
         }
     }
 
@@ -12072,6 +12111,9 @@ pub mod draw_stats {
         fn drop(&mut self) {
             DRAWS.fetch_add(1, Ordering::Relaxed);
             NANOS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            if frame_log() {
+                eprintln!("[frame] {:.3} ms", self.0.elapsed().as_secs_f64() * 1e3);
+            }
             keep(&DRAW_MICROS, self.0.elapsed());
         }
     }

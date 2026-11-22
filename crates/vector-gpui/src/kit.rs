@@ -1122,6 +1122,21 @@ pub fn pump() -> impl IntoElement {
     .size_0()
 }
 
+/// [`pump`] for the root: an ease drawn anywhere below it redraws every view next frame, as the
+/// view that drew it is not known here.
+pub fn pump_all() -> impl IntoElement {
+    gpui::canvas(
+        |_, window, _| {
+            if easing() {
+                window.request_refresh_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_0()
+}
+
 /// Something built now is still moving: the view drawing it asks for another frame.
 pub fn keep_moving() {
     EASING.set(true);
@@ -1401,6 +1416,23 @@ impl Reveal {
             window.request_animation_frame();
         }
         t
+    }
+
+    /// [`Self::shown`] for a surface whose entrance another view draws: that view reads [`Self::at`].
+    /// True when the entrance starts now.
+    pub fn enter(&mut self) -> bool {
+        self.seen = true;
+        if self.was {
+            return false;
+        }
+        self.was = true;
+        self.at = Some(std::time::Instant::now());
+        true
+    }
+
+    /// How far the entrance has come, 0 to 1.
+    pub fn at(&self, secs: f32) -> f32 {
+        self.at.map_or(1., |at| (at.elapsed().as_secs_f32() / secs).min(1.))
     }
 }
 

@@ -41,6 +41,8 @@ pub struct Panes {
     pub timeline: Entity<Pane>,
     /// What floats over the timeline and follows its scroll: the scrollbar, the way back, typing.
     pub overlay: Entity<Pane>,
+    /// The open chat's entrance veil: its frames redraw it alone.
+    pub veil: Entity<Pane>,
     /// Empty: notifying it redraws only what the root draws itself (the call panel, the rail).
     pub chrome: Entity<Pane>,
     /// Settings, wide or slim: its entrances and hovers redraw it alone.
@@ -60,6 +62,7 @@ impl Panes {
             members: pane(),
             timeline: pane(),
             overlay: pane(),
+            veil: pane(),
             chrome: pane(),
             settings: pane(),
             start: pane(),

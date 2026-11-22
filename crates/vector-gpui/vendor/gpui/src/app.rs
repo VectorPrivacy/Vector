@@ -957,6 +957,8 @@ pub struct App {
     pub(crate) pending_notifications: FxHashSet<EntityId>,
     /// Set while a notify only says the view's content moved, as a scroll does.
     pub(crate) motion_notify: bool,
+    /// The notify in flight asks for an animation frame: its view redraws, nothing it shows changed.
+    pub(crate) frame_notify: bool,
     pub(crate) pending_global_notifications: TypeIdHashSet,
     pub(crate) restart_path: Option<PathBuf>,
     pub(crate) restart_arguments: Vec<OsString>,
@@ -1058,6 +1060,7 @@ impl App {
                 pending_effects: VecDeque::new(),
                 pending_notifications: FxHashSet::default(),
                 motion_notify: false,
+                frame_notify: false,
                 pending_global_notifications: Default::default(),
                 observers: SubscriberSet::new(),
                 tracked_entities: FxHashMap::default(),
@@ -3176,6 +3179,13 @@ impl App {
         let was = std::mem::replace(&mut self.motion_notify, true);
         self.notify(entity_id);
         self.motion_notify = was;
+    }
+
+    /// [`Self::notify`] for an animation frame a view asked for.
+    pub(crate) fn notify_frame(&mut self, entity_id: EntityId) {
+        let was = std::mem::replace(&mut self.frame_notify, true);
+        self.notify(entity_id);
+        self.frame_notify = was;
     }
 
     /// Tell GPUI that an entity has changed and observers of it should be notified.
