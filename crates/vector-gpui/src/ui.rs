@@ -3988,15 +3988,15 @@ impl VectorApp {
             }
             "miniapp_realtime_status" => {
                 let topic = payload.get("topic").and_then(Value::as_str).unwrap_or_default();
-                let peers: Vec<String> = payload
-                    .get("peers")
-                    .and_then(|p| serde_json::from_value(p.clone()).ok())
-                    .unwrap_or_default();
-                let active = payload.get("is_active").and_then(Value::as_bool).unwrap_or(false);
-                self.media
-                    .borrow_mut()
-                    .xdc_live
-                    .insert(topic.to_string(), crate::media::XdcLive { active, peers });
+                let mut media = self.media.borrow_mut();
+                let live = media.xdc_live.entry(topic.to_string()).or_default();
+                live.active = payload.get("is_active").and_then(Value::as_bool).unwrap_or(false);
+                live.count = payload.get("peer_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+                // The mesh's neighbour updates carry a count only: who is playing stays the lobby's word.
+                if let Some(p) = payload.get("peers") {
+                    live.peers = serde_json::from_value(p.clone()).unwrap_or_default();
+                }
+                drop(media);
                 self.refresh_rows(false);
                 cx.notify();
             }

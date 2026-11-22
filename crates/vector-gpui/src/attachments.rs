@@ -1087,7 +1087,7 @@ fn file_box_on(
 
 /// `.file-box-session`: what the Mini App is doing, and who else is in it.
 fn session_line(ctx: &Ctx, live: &crate::media::XdcLive) -> AnyElement {
-    let players = live.peers.len();
+    let players = if live.peers.is_empty() { live.count } else { live.peers.len() };
     let label = if live.active {
         t::file_app_playing()
     } else if players > 0 {
@@ -1132,7 +1132,12 @@ fn session_line(ctx: &Ctx, live: &crate::media::XdcLive) -> AnyElement {
                             .items_center()
                             .mr(px(4.))
                             .children(peers.iter().enumerate().map(|(i, npub)| {
+                                let named = ctx.store.profiles.get(*npub).is_some_and(|p| {
+                                    !(p.nickname.is_empty() && p.name.is_empty() && p.display_name.is_empty())
+                                });
                                 div()
+                                    .id(SharedString::from(format!("xdc-peer-{npub}"))) // i18n-exempt: element id
+                                    .when(named, |d| d.tip(ctx.store.name(npub)))
                                     .when(i > 0, |d| d.ml(px(-5.)))
                                     .size(px(14.))
                                     .rounded_full()

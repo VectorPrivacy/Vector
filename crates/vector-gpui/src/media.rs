@@ -234,6 +234,8 @@ pub struct Media {
 pub struct XdcLive {
     pub active: bool,
     pub peers: Vec<String>,
+    /// The latest count reported, which a neighbour update sends without names.
+    pub count: usize,
 }
 
 /// A custom emoji as a message draws it.
