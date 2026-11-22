@@ -25,14 +25,17 @@ file-resume-done = { $progress } done
 file-unknown-size = Unknown Size
 # $reason is why, as the server or network gave it.
 file-failed-retry = Failed: { $reason } · Tap to Retry
+# $reason is why, as the server or network gave it.
 file-failed = Failed: { $reason }
 
 ## Why a download failed, after "Failed:"
 
 # $code is the server's HTTP status, like 404.
 file-why-missing = Not on the server ({ $code })
+# $code is the server's HTTP status, like 403.
 file-why-refused = The server refused it ({ $code })
 file-why-busy = The server is busy, try later
+# $code is the server's HTTP status, like 503.
 file-why-down = The server is down ({ $code })
 file-why-timeout = The server took too long
 file-why-unreachable = Couldn't reach the server
