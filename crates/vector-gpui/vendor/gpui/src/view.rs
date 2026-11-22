@@ -567,7 +567,8 @@ fn prepaint_view(
                     return (None, element_state);
                 }
 
-                let refreshing = mem::replace(&mut window.refreshing, true);
+                let inside = window.refreshes_inside(entity_id);
+                let refreshing = mem::replace(&mut window.refreshing, inside);
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);

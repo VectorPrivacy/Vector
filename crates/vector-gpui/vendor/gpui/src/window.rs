@@ -1357,6 +1357,8 @@ pub struct Window {
     pub(crate) hard_refresh: bool,
     /// The views whose data changed for this frame; the rest of the dirty ones only moved.
     pub(crate) data_dirty: FxHashSet<EntityId>,
+    /// The views notified for this frame, as opposed to dirty only for holding one that was.
+    pub(crate) notified: FxHashSet<EntityId>,
     /// The clips around the keyed subtrees being drawn, which draw clipped by their own masks.
     pub(crate) keyed_outer: Vec<ContentMask<Pixels>>,
     /// Counts draws, so a keyed record knows whether the last frame is the one it was made in.
@@ -2509,6 +2511,7 @@ impl Window {
             refreshing: false,
             hard_refresh: false,
             data_dirty: FxHashSet::default(),
+            notified: FxHashSet::default(),
             keyed_outer: Vec::new(),
             draw_count: 0,
             keyed_depth: 0,
@@ -4067,6 +4070,7 @@ impl Window {
         self.refreshing = false;
         self.hard_refresh = false;
         self.data_dirty.clear();
+        self.notified.clear();
         self.invalidator.set_phase(DrawPhase::None);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
@@ -4118,6 +4122,7 @@ impl Window {
                 self.refreshing = true;
                 self.hard_refresh = true;
             }
+            self.notified.insert(entity);
             self.mark_view_dirty(entity);
         }
         self.invalidator.replace_views(views);
@@ -4636,13 +4641,18 @@ impl Window {
     /// Whether this frame may replay keyed subtrees: nothing redraws everything, and no view
     /// drawing this one was told its data changed.
     pub(crate) fn keyed_may_replay(&self) -> bool {
-        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        // `GPUI_NO_REPLAY=1` draws every keyed subtree afresh, to compare against.
-        !*OFF.get_or_init(|| std::env::var_os("GPUI_NO_REPLAY").is_some())
+        !no_replay()
             && !self.hard_refresh
             && self.captured_hitbox.is_none()
             && !self.a11y.is_active()
             && !self.rendered_entity_stack.iter().any(|view| self.data_dirty.contains(view))
+    }
+
+    /// Whether a cached view redrawn for this frame redraws the cached views inside it too:
+    /// only when it was notified itself. One redrawn for holding a notified view renders as it
+    /// did, so what it hands the views inside is unchanged.
+    pub(crate) fn refreshes_inside(&self, view: EntityId) -> bool {
+        self.refreshing || no_replay() || self.notified.contains(&view)
     }
 
     /// Runs `f` clipped by nothing, so what it draws carries its own masks alone.
@@ -11531,6 +11541,12 @@ fn sub_tile(tile: AtlasTile, visible_bounds: Bounds<Pixels>, image_bounds: Bound
 
 /// Whole-window draws, the time they took, and presents (a draw's or a re-shown scene's), for a
 /// dev build's own measurements.
+/// `GPUI_NO_REPLAY=1` draws every keyed subtree and cached view afresh, to compare against.
+pub(crate) fn no_replay() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("GPUI_NO_REPLAY").is_some())
+}
+
 pub mod draw_stats {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
