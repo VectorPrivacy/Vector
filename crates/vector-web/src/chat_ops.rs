@@ -379,11 +379,13 @@ async fn get_messages_around_id(chat_id: &str, target: &str, context_before: usi
 
 const INVITE_PREFIXES: [&str; 2] = ["https://vectorapp.io/invite", "https://www.vectorapp.io/invite"];
 
-fn extract_https_urls(text: &str) -> Vec<String> {
+/// The first `max`: a run of bare `https://` names one link per byte, each running to the end.
+fn extract_https_urls(text: &str, max: usize) -> Vec<String> {
     const DELIMITERS: &[u8] = b" \t\n\r\"<>)]}|";
     let mut urls = Vec::new();
     let mut from = 0;
-    while let Some(i) = text[from..].find("https://") {
+    while urls.len() < max {
+        let Some(i) = text[from..].find("https://") else { break };
         let start = from + i;
         let rest = text[start..].as_bytes();
         let mut end = rest.iter().position(|b| DELIMITERS.contains(b)).unwrap_or(rest.len());
@@ -451,8 +453,8 @@ async fn site_metadata(url: &str) -> Result<SiteMetadata, String> {
 
 async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
     let Some((_, message)) = VectorCore.get_message(&msg_id).await else { return false };
-    let urls = extract_https_urls(&vector_core::net::strip_md_link_claims(&message.content));
-    for url in urls.into_iter().take(3) {
+    let urls = extract_https_urls(&vector_core::net::strip_md_link_claims(&message.content), 3);
+    for url in urls {
         if INVITE_PREFIXES.iter().any(|p| url.starts_with(p)) || vector_core::golink::is_go_url(&url) {
             continue;
         }
