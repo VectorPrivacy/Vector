@@ -388,7 +388,7 @@ pub struct VectorApp {
     retired_frames: Vec<Arc<gpui::RenderImage>>,
     draw_hooked: bool,
     /// `shape()` when the root last rendered.
-    drawn_shape: u64,
+    drawn_shape: (u64, u64),
     start: Option<crate::startmenu::StartMenu>,
     /// The context menu open: where, its rows, and what each does.
     menu: Option<(gpui::Point<gpui::Pixels>, Vec<kit::MenuItem>, Vec<MenuAct>)>,
@@ -1218,7 +1218,7 @@ impl VectorApp {
             scanner: None,
             retired_frames: Vec::new(),
             draw_hooked: false,
-            drawn_shape: 0,
+            drawn_shape: (0, 0),
             start: None,
             menu: None,
             menu_keys: None,
@@ -7122,26 +7122,41 @@ impl VectorApp {
         // The chrome pane stands for what the root draws itself.
         // Panes draw through closures the root's last render made: a data change anywhere renders
         // the root again. Only motion (scroll, hover) and animation frames reuse it.
-        if self.shape() != self.drawn_shape {
+        let shape = self.shape();
+        if shape.0 != self.drawn_shape.0 {
             // Another screen: every pane draws through new closures.
             window.rerender_all();
+        } else if shape.1 != self.drawn_shape.1 {
+            // Another chat: the panes whose closures hold it, and the list that marks it.
+            let p = &self.panes;
+            for pane in [&p.chat, &p.timeline, &p.members, &p.overlay, &p.veil, &p.side] {
+                window.rerender(pane.entity_id());
+            }
+            window.rerender(cx.entity_id());
         } else if shell(self) != before || window.data_changed() || window.view_redraws(self.panes.chrome.entity_id()) {
             window.rerender(cx.entity_id());
         }
     }
 
-    /// What decides which panes the root draws and what their closures hold.
-    fn shape(&self) -> u64 {
+    /// What decides which panes the root draws, then which chat their closures hold.
+    fn shape(&self) -> (u64, u64) {
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let hash = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v(&mut h);
+            h.finish()
+        };
         (
-            self.open.as_deref(),
-            self.community.as_ref().map(|v| v.id.as_str()),
-            (self.settings.is_some(), self.nexus.is_some(), self.profile.is_some(), self.new_chat.is_some()),
-            (self.create_community.is_some(), self.start.is_some(), self.is_slim),
+            hash(&|h| {
+                (
+                    self.community.as_ref().map(|v| v.id.as_str()),
+                    (self.settings.is_some(), self.nexus.is_some(), self.profile.is_some(), self.new_chat.is_some()),
+                    (self.create_community.is_some(), self.start.is_some(), self.is_slim, self.open.is_some()),
+                )
+                    .hash(h)
+            }),
+            hash(&|h| self.open.as_deref().hash(h)),
         )
-            .hash(&mut h);
-        h.finish()
     }
 
     fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
