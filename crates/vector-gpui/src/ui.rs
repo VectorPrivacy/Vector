@@ -4300,13 +4300,16 @@ impl VectorApp {
         if !self.live || self.history_net.contains_key(id.as_ref()) || !self.history_net_busy.insert(id.to_string()) {
             return;
         }
-        let before = self.store.borrow().chat(&id).and_then(|c| c.messages.first()).map(|m| m.at);
+        // Nothing held yet: the open's own fetch brings the newest page, and older pages follow it.
+        let Some(before) = self.store.borrow().chat(&id).and_then(|c| c.messages.first()).map(|m| m.at) else {
+            self.history_net_busy.remove(id.as_ref());
+            return;
+        };
         let channel = id.to_string();
         let rx = backend::run(async move {
-            let start = backend::community::sync_channel(channel.clone(), before).await;
+            let start = backend::community::sync_channel(channel.clone(), Some(before)).await;
             // `history_limited`: the start reached going back is only this account's start.
-            let limited = before.is_some()
-                && matches!(start, Ok(true))
+            let limited = matches!(start, Ok(true))
                 && !vector_core::community::holds_history_from_start(&channel);
             start.map(|s| (s, limited))
         });
@@ -6963,14 +6966,19 @@ impl VectorApp {
         {
             let mut media = self.media.borrow_mut();
             media.videos.scale = window.scale_factor();
-            // `profilewatch.js`: who was drawn goes to the profile queue every 1.5 s.
+            // `profilewatch.js`: who was drawn goes to the profile queue in batches, top first.
             if self.live && !self.profile_flush && crate::profilewatch::has_pending() {
                 self.profile_flush = true;
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
-                    let npubs = crate::profilewatch::take();
-                    if !npubs.is_empty() {
-                        let _ = backend::run(vector_core::profile::sync::queue_visible_profiles(npubs));
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                        let npubs = crate::profilewatch::take();
+                        if !npubs.is_empty() {
+                            let _ = backend::run(vector_core::profile::sync::queue_visible_profiles(npubs));
+                        }
+                        if !crate::profilewatch::has_pending() {
+                            break;
+                        }
                     }
                     this.update(cx, |this, _| this.profile_flush = false).ok();
                 })
@@ -12125,7 +12133,7 @@ impl VectorApp {
             self.refresh_timeouts(&community, cx);
         }
         if self.live {
-            let _ = backend::run(backend::community::sync_channel(id, None));
+            let _ = backend::run(backend::community::sync_focused(id));
         }
         cx.notify();
     }

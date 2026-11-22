@@ -209,8 +209,9 @@ async fn presence(
     let nameless = STATE.lock().await.get_profile(npub).is_none_or(|p| {
         p.nickname().is_empty() && p.display_name().is_empty() && p.name().is_empty()
     });
+    // Behind whoever is on screen, which the drawn rows queue first.
     if nameless {
-        vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::High, false);
+        vector_core::profile::sync::queue_profile_sync(npub.to_string(), vector_core::profile::sync::SyncPriority::Medium, false);
     }
     if !shown {
         return;

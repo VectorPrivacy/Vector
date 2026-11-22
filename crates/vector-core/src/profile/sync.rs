@@ -126,13 +126,19 @@ impl ProfileSyncQueue {
 
     /// Add a profile to the sync queue.
     pub fn add(&mut self, npub: impl AsRef<str> + Into<String>, priority: SyncPriority, force_refresh: bool) {
+        self.add_at(npub, priority, force_refresh, false)
+    }
+
+    /// [`Self::add`], at the front of its lane when `front`: what is on screen goes before
+    /// what was queued for being somewhere else.
+    fn add_at(&mut self, npub: impl AsRef<str> + Into<String>, priority: SyncPriority, force_refresh: bool, front: bool) {
         let key = npub.as_ref();
         if self.processing.contains(key) {
             return;
         }
         // An entry already waiting at this priority or higher keeps its place and age: a
         // periodic re-add would otherwise restart the delay and never let a Low entry ripen.
-        if self.queued.get(key).is_some_and(|&(_, waiting)| waiting <= priority) {
+        if self.queued.get(key).is_some_and(|&(_, waiting)| waiting < priority || (waiting == priority && !front)) {
             return;
         }
 
@@ -159,11 +165,16 @@ impl ProfileSyncQueue {
                 lane.retain(|e| Self::is_live(&self.queued, e));
             }
         }
-        match priority {
-            SyncPriority::Critical => self.critical_queue.push_back(entry),
-            SyncPriority::High => self.high_queue.push_back(entry),
-            SyncPriority::Medium => self.medium_queue.push_back(entry),
-            SyncPriority::Low => self.low_queue.push_back(entry),
+        let lane = match priority {
+            SyncPriority::Critical => &mut self.critical_queue,
+            SyncPriority::High => &mut self.high_queue,
+            SyncPriority::Medium => &mut self.medium_queue,
+            SyncPriority::Low => &mut self.low_queue,
+        };
+        if front {
+            lane.push_front(entry);
+        } else {
+            lane.push_back(entry);
         }
         PROCESSOR_WAKE.notify_one();
     }
@@ -345,22 +356,6 @@ impl ProfileSyncHandler for NoOpProfileSyncHandler {}
 // load_profile — core relay fetch + STATE update
 // ============================================================================
 
-/// The newest kind-0 the relays hold for `pubkey`, or `None` when they hold none.
-async fn fetch_newest_metadata(client: &Client, pubkey: PublicKey) -> Result<Option<Metadata>, String> {
-    // `Client::fetch_metadata` is gone: fetch the newest kind-0 and parse it.
-    client
-        .fetch_events(Filter::new().author(pubkey).kind(Kind::Metadata).limit(1))
-        .timeout(crate::relay_request_timeout(Duration::from_secs(15)))
-        .await
-        .map(|events| {
-            events
-                .into_iter()
-                .max_by_key(|e| e.created_at)
-                .and_then(|e| Metadata::from_json(&e.content).ok())
-        })
-        .map_err(|e| e.to_string())
-}
-
 /// Our kind-0 as it stands on the relays, whole: its content's JSON object with every key it
 /// holds, whatever Vector makes of them, and every tag. Profiles carry what other clients
 /// invented (emoji in names, profile fields, identity proofs); a save edits, never rebuilds.
@@ -493,21 +488,51 @@ fn metadata_view(content: &serde_json::Map<String, serde_json::Value>) -> Metada
 ///
 /// Returns `true` if the fetch succeeded (even if nothing changed).
 pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> bool {
-    let client = match nostr_client() {
-        Some(c) => c,
-        None => return false,
+    load_profiles(vec![npub], handler).await.first().copied().unwrap_or(false)
+}
+
+/// [`load_profile`] for many at once: one REQ for every profile's metadata and status, so a
+/// screen of people costs a round trip, not one each. Whether each loaded, in the order given.
+pub async fn load_profiles(npubs: Vec<String>, handler: &dyn ProfileSyncHandler) -> Vec<bool> {
+    let Some(client) = nostr_client() else { return vec![false; npubs.len()] };
+    let keys: Vec<Option<PublicKey>> = npubs.iter().map(|n| PublicKey::from_bech32(n.as_str()).ok()).collect();
+    let authors: Vec<PublicKey> = keys.iter().flatten().copied().collect();
+    if authors.is_empty() {
+        return vec![false; npubs.len()];
+    }
+    let filter = Filter::new().authors(authors).kinds([Kind::Metadata, Kind::from_u16(30315)]);
+    let fetched = client
+        .fetch_events(filter)
+        .timeout(crate::relay_request_timeout(Duration::from_secs(15)))
+        .await
+        .map_err(|e| e.to_string());
+    let newest = |pk: &PublicKey, kind: Kind| -> Option<Event> {
+        fetched.as_ref().ok()?.iter().filter(|e| e.pubkey == *pk && e.kind == kind).max_by_key(|e| e.created_at).cloned()
     };
+    let mut loaded = Vec::with_capacity(npubs.len());
+    for (npub, pk) in npubs.into_iter().zip(keys) {
+        let Some(pk) = pk else {
+            loaded.push(false);
+            continue;
+        };
+        let status = newest(&pk, Kind::from_u16(30315));
+        let meta = match &fetched {
+            Ok(_) => Ok(newest(&pk, Kind::Metadata).and_then(|e| Metadata::from_json(&e.content).ok())),
+            Err(e) => Err(e.clone()),
+        };
+        loaded.push(apply_fetched(npub, pk, status, meta, handler).await);
+    }
+    loaded
+}
 
-    // Session captured for the whole load_profile lifecycle. Relay
-    // fetches can sleep multi-second; we re-check before writing back
-    // to STATE / DB so a mid-fetch swap doesn't land account A's
-    // profile in account B's storage.
-
-    let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
-        Ok(pk) => pk,
-        Err(_) => return false,
-    };
-
+/// Folds one profile's fetched status and metadata into STATE, the DB and the UI.
+async fn apply_fetched(
+    npub: String,
+    profile_pubkey: PublicKey,
+    status: Option<Event>,
+    fetch_result: Result<Option<Metadata>, String>,
+    handler: &dyn ProfileSyncHandler,
+) -> bool {
     let my_public_key = match my_public_key() {
         Some(pk) => pk,
         None => return false,
@@ -535,36 +560,16 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         }
     }
 
-    // Fetch status (kind 30315) from relays
-    let status_filter = Filter::new()
-        .author(profile_pubkey)
-        .kind(Kind::from_u16(30315))
-        .limit(1);
-
-    let (status_title, status_purpose, status_url, status_emoji_tags) = match client
-        .fetch_events(status_filter).timeout(crate::relay_request_timeout(Duration::from_secs(15)))
-        .await
-    {
-        Ok(res) => {
-            if !res.is_empty() {
-                let status_event = res.first().unwrap();
-                (
-                    clamp_status(status_event.content.clone()),
-                    status_event.tags.first()
-                        .and_then(|t| t.content())
-                        .unwrap_or_default()
-                        .to_string(),
-                    String::new(),
-                    crate::types::EmojiTag::extract_from_tags(status_event.tags.iter()),
-                )
-            } else {
-                (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags)
-            }
-        }
-        Err(_) => (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags),
+    let (status_title, status_purpose, status_url, status_emoji_tags) = match status {
+        Some(status_event) => (
+            clamp_status(status_event.content.clone()),
+            status_event.tags.first().and_then(|t| t.content()).unwrap_or_default().to_string(),
+            String::new(),
+            crate::types::EmojiTag::extract_from_tags(status_event.tags.iter()),
+        ),
+        None => (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags),
     };
 
-    let fetch_result = fetch_newest_metadata(&client, profile_pubkey).await;
     if fetch_result.is_ok() {
         let _ = crate::db::profiles::mark_profile_checked(&npub, now_secs());
     }
@@ -1162,16 +1167,13 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
         // account A's queue work lands in account B's DB. The next
         // outer-loop iteration picks up the new session's queue cleanly.
 
-        for entry in &batch {
-            load_profile(entry.npub.clone(), handler.as_ref()).await;
-
-            {
-                let owner = profile_sync_queue();
-                let mut queue = owner.lock().unwrap();
+        load_profiles(batch.iter().map(|e| e.npub.clone()).collect(), handler.as_ref()).await;
+        {
+            let owner = profile_sync_queue();
+            let mut queue = owner.lock().unwrap();
+            for entry in &batch {
                 queue.mark_done(&entry.npub);
             }
-
-            crate::rt::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Release processing lock
@@ -1181,7 +1183,7 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
             queue.is_processing = false;
         }
 
-        crate::rt::time::sleep(Duration::from_millis(500)).await;
+        crate::rt::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1218,8 +1220,9 @@ fn on_screen_need(profile: Option<&Profile>, now: u64) -> Option<SyncPriority> {
     (now.saturating_sub(checked) >= ON_SCREEN_FRESH.as_secs()).then_some(SyncPriority::Medium)
 }
 
-/// Queue the profiles the UI has on screen (or nearly) whose last check has gone stale. Called
-/// on every view, so it costs a lookup per npub and a fetch only for those that need one.
+/// Queue the profiles the UI has on screen (or nearly) whose last check has gone stale, ahead of
+/// what waits in their lane, the first given fetched first. Called on every view, so it costs a
+/// lookup per npub and a fetch only for those that need one.
 pub async fn queue_visible_profiles(npubs: Vec<String>) {
     const MAX_PER_CALL: usize = 200;
     let now = now_secs();
@@ -1237,8 +1240,9 @@ pub async fn queue_visible_profiles(npubs: Vec<String>) {
     }
     let owner = profile_sync_queue();
     let mut queue = owner.lock().unwrap();
-    for (npub, priority) in picks {
-        queue.add(npub, priority, false);
+    // Reversed onto the fronts, so the first drawn is the first fetched.
+    for (npub, priority) in picks.into_iter().rev() {
+        queue.add_at(npub, priority, false, true);
     }
 }
 
@@ -1275,8 +1279,9 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
             })
             .unwrap_or(false);
 
+        // A Community's members come on screen a few at a time: those drawn go first.
         let priority = if !has_metadata {
-            SyncPriority::Critical
+            if is_community { SyncPriority::High } else { SyncPriority::Critical }
         } else if is_community {
             continue;
         } else {
@@ -1415,6 +1420,22 @@ mod tests {
         assert!(queue.get_next_batch().is_empty());
         queue.add("npub1high", SyncPriority::Critical, true);
         assert_eq!(queue.next_ready_in(), Some(Duration::ZERO), "the superseded high entry no longer counts");
+    }
+
+    #[test]
+    fn people_on_screen_go_first_in_the_order_drawn() {
+        let mut queue = ProfileSyncQueue::new();
+        for i in 0..30 {
+            queue.add(format!("npub1joined{i}"), SyncPriority::Critical, false);
+        }
+        queue.add("npub1joined20", SyncPriority::Critical, false);
+        assert_eq!(queue.live(&queue.critical_queue)[20], "npub1joined20", "a plain re-add keeps its place");
+        for npub in ["npub1team", "npub1joined20", "npub1member"].into_iter().rev() {
+            queue.add_at(npub, SyncPriority::Critical, false, true);
+        }
+        let batch: Vec<String> = queue.get_next_batch().into_iter().map(|e| e.npub).collect();
+        assert_eq!(&batch[..4], ["npub1team", "npub1joined20", "npub1member", "npub1joined0"]);
+        assert_eq!(batch.iter().filter(|n| *n == "npub1joined20").count(), 1, "moved, not doubled");
     }
 
     #[test]

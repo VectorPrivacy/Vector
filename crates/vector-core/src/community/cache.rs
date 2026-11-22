@@ -1,5 +1,6 @@
-//! Per-account RAM state for Community sync: the in-flight page claims. Keyed by this
-//! account's channel ids, so it lives on the account's session and goes when that does.
+//! Per-account RAM state for Community sync: the in-flight page claims and the foreground gate.
+//! Keyed by this account's channel ids, so it lives on the account's session and goes when that
+//! does.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -41,9 +42,80 @@ pub fn claim_page_fetch(channel_id: &str, older: bool) -> Option<PageFetchClaim>
     Some(PageFetchClaim { set, key: Some(key) })
 }
 
+struct ForegroundKey;
+
+#[derive(Default)]
+struct ForegroundGate {
+    running: std::sync::atomic::AtomicUsize,
+    done: tokio::sync::Notify,
+}
+
+fn foreground_gate() -> Arc<ForegroundGate> {
+    crate::db::current_session().scoped::<ForegroundKey, ForegroundGate>()
+}
+
+/// A fetch the reader is waiting on (the newest page of the channel on screen): background
+/// channel walks hold off until it ends. Released when dropped.
+pub struct Foreground(Arc<ForegroundGate>);
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            self.0.done.notify_waiters();
+        }
+    }
+}
+
+/// Marks a foreground fetch running until the guard drops.
+pub fn foreground() -> Foreground {
+    let gate = foreground_gate();
+    gate.running.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    Foreground(gate)
+}
+
+/// The longest a background walk waits on foreground fetches: one that hangs can't stall the rest.
+const FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Waits, before a background channel walk, until no foreground fetch is running.
+pub async fn after_foreground() {
+    let gate = foreground_gate();
+    let _ = crate::rt::time::timeout(FOREGROUND_WAIT, async {
+        loop {
+            let done = gate.done.notified();
+            if gate.running.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                return;
+            }
+            done.await;
+        }
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_background_walk_waits_out_the_foreground_fetch() {
+        crate::db::with_session(crate::db::Session::empty(), async {
+            after_foreground().await;
+            let fg = foreground();
+            let second = foreground();
+            let waiting = crate::db::spawn_bound(async {
+                let at = std::time::Instant::now();
+                after_foreground().await;
+                at.elapsed()
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(fg);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(!waiting.is_finished(), "one foreground fetch still runs");
+            drop(second);
+            let waited = waiting.await.unwrap();
+            assert!(waited >= std::time::Duration::from_millis(100) && waited < FOREGROUND_WAIT);
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn a_page_is_claimed_once_until_released() {

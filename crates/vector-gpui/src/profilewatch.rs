@@ -3,7 +3,7 @@
 //! so scrolling back and forth doesn't re-ask; the backend dedupes too.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const RESEND: Duration = Duration::from_secs(10 * 60);
@@ -11,8 +11,12 @@ const RESEND: Duration = Duration::from_secs(10 * 60);
 #[derive(Default)]
 struct Watch {
     sent: HashMap<String, Instant>,
-    pending: HashSet<String>,
+    /// In the order drawn: top of the screen first.
+    pending: Vec<String>,
 }
+
+/// The most one batch reports; the rest wait for the next.
+const BATCH: usize = 200;
 
 thread_local! {
     static WATCH: RefCell<Watch> = RefCell::default();
@@ -29,7 +33,7 @@ pub fn seen(npub: &str) {
             return;
         }
         w.sent.insert(npub.to_string(), Instant::now());
-        w.pending.insert(npub.to_string());
+        w.pending.push(npub.to_string());
     });
 }
 
@@ -37,7 +41,11 @@ pub fn has_pending() -> bool {
     WATCH.with(|w| !w.borrow().pending.is_empty())
 }
 
-/// The people seen since the last batch.
+/// The people seen since the last batch, first drawn first.
 pub fn take() -> Vec<String> {
-    WATCH.with(|w| w.borrow_mut().pending.drain().collect())
+    WATCH.with(|w| {
+        let mut w = w.borrow_mut();
+        let n = w.pending.len().min(BATCH);
+        w.pending.drain(..n).collect()
+    })
 }

@@ -126,6 +126,8 @@ pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<
     use vector_core::community::cache;
     let is_older = before_ms.is_some();
     let Some(_claim) = cache::claim_page_fetch(&channel_id, is_older) else {
+        // Not "more remains" at once: a caller paging on would spin while the holder runs.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         return Ok(false);
     };
     let community_id =
@@ -145,6 +147,53 @@ pub async fn sync_channel(channel_id: String, before_ms: Option<u64>) -> Result<
     } else {
         count.new_messages < LIMIT
     })
+}
+
+/// The channel just opened: its newest page alone first, ahead of every background walk, so the
+/// reader sees the latest messages before the deeper catch-up behind it; then that catch-up.
+pub async fn sync_focused(channel_id: String) -> Result<bool, String> {
+    set_focus(&channel_id);
+    let community_id =
+        db::community::community_id_for_channel(&channel_id)?.ok_or_else(|| crate::t::community_unknown_channel().to_string())?;
+    if !is_held(&community_id) {
+        return Ok(true);
+    }
+    {
+        let _first = vector_core::community::cache::foreground();
+        let _ = db::scoped(VectorCore.sync_channel_events(&channel_id, 50, None, None)).await;
+    }
+    sync_channel(channel_id, None).await
+}
+
+struct Focus;
+
+fn focus() -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+    db::current_session().scoped::<Focus, std::sync::Mutex<Option<String>>>()
+}
+
+/// The channel on screen, which a sweep reads before the rest.
+fn set_focus(channel_id: &str) {
+    *focus().lock().unwrap_or_else(|e| e.into_inner()) = Some(channel_id.to_string());
+}
+
+/// Background walks of `channels`, a few at a time, each after any foreground fetch and the
+/// channel on screen first.
+async fn walk_channels(mut channels: Vec<String>) {
+    let on_screen = focus().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(at) = on_screen.and_then(|f| channels.iter().position(|c| *c == f)) {
+        let ch = channels.remove(at);
+        channels.insert(0, ch);
+    }
+    stream::iter(channels)
+        .map(|cid| async move {
+            vector_core::community::cache::after_foreground().await;
+            if !db::session_stopped() {
+                let _ = sync_channel(cid, None).await;
+            }
+        })
+        .buffer_unordered(WINDOW)
+        .collect::<Vec<()>>()
+        .await;
 }
 
 /// `fill_community_gap`: the hole a scroll up from `before_ms` is about to cross, filled from the
@@ -436,15 +485,7 @@ async fn resync(relays: Vec<String>, ours: bool) {
     if ours {
         db::spawn_bound(ingest_list());
     }
-    stream::iter(channels)
-        .map(|cid| async move {
-            if !db::session_stopped() {
-                let _ = sync_channel(cid, None).await;
-            }
-        })
-        .buffer_unordered(WINDOW)
-        .collect::<Vec<()>>()
-        .await;
+    walk_channels(channels).await;
 }
 
 async fn run() {
@@ -503,21 +544,15 @@ async fn sweep() {
         }
     }
     super::emit("communities_changed", ());
-    targets.sort_by_key(|t| std::cmp::Reverse(t.1));
+    let on_screen = focus().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    targets.sort_by_key(|t| (on_screen.as_deref() != Some(t.0.channel_hex.as_str()), std::cmp::Reverse(t.1)));
     let channels: Vec<String> = targets.iter().map(|(t, _)| t.channel_hex.clone()).collect();
+    vector_core::community::cache::after_foreground().await;
     volley::paint_all(targets.into_iter().map(|(t, _)| t).collect()).await;
     for id in &held {
         realtime::enqueue_follow(id);
     }
-    stream::iter(channels)
-        .map(|cid| async move {
-            if !db::session_stopped() {
-                let _ = sync_channel(cid, None).await;
-            }
-        })
-        .buffer_unordered(WINDOW)
-        .collect::<Vec<()>>()
-        .await;
+    walk_channels(channels).await;
     if let Some(client) = vector_core::state::nostr_client() {
         realtime::force_refresh_subscription(&client).await;
     }
