@@ -4183,7 +4183,8 @@ impl VectorApp {
     /// measured heights, so a busy channel lays out only what changed.
     fn refresh_rows_at(&mut self, changed: &str, follow: bool) {
         let top = self.timeline.logical_scroll_top();
-        let at_end = top.item_ix + 12 >= self.timeline.item_count();
+        // Only a view already pinned to the tail follows: a reader a line up stays put.
+        let at_end = self.timeline.is_following_tail();
         let old = self.timeline.item_count();
         let old_keys = std::mem::take(&mut self.row_keys);
         if old_keys.len() != old {
@@ -4287,7 +4288,7 @@ impl VectorApp {
     /// The open chat's rows changed: re-laid, following the end when `follow`.
     fn refresh_rows(&mut self, follow: bool) {
         let top = self.timeline.logical_scroll_top();
-        let at_end = top.item_ix + 12 >= self.timeline.item_count();
+        let at_end = self.timeline.is_following_tail();
         let old = self.timeline.item_count();
         let old_keys = std::mem::take(&mut self.row_keys);
         let new = self.rebuild_rows();
