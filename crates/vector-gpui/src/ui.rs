@@ -7120,13 +7120,12 @@ impl VectorApp {
             window.focus(&self.root_focus, cx);
         }
         // The chrome pane stands for what the root draws itself.
-        // Panes draw through closures the root's last render made: a data change anywhere, or a
-        // different screen, renders the root again. Only motion (scroll, hover) reuses it.
-        if shell(self) != before
-            || self.shape() != self.drawn_shape
-            || window.data_changed()
-            || window.view_redraws(self.panes.chrome.entity_id())
-        {
+        // Panes draw through closures the root's last render made: a data change anywhere renders
+        // the root again. Only motion (scroll, hover) and animation frames reuse it.
+        if self.shape() != self.drawn_shape {
+            // Another screen: every pane draws through new closures.
+            window.refresh_now();
+        } else if shell(self) != before || window.data_changed() || window.view_redraws(self.panes.chrome.entity_id()) {
             window.rerender(cx.entity_id());
         }
     }

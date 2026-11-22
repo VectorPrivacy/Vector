@@ -4832,6 +4832,13 @@ impl Window {
         self.dirty_views.contains(&view)
     }
 
+    /// Redraws every view in the frame being drawn, as [`Self::refresh`] does for the next one.
+    /// Call it before layout.
+    pub fn refresh_now(&mut self) {
+        self.refreshing = true;
+        self.hard_refresh = true;
+    }
+
     /// Whether any view was told its data changed this frame, not only that it moved.
     pub fn data_changed(&self) -> bool {
         !self.changed.is_empty() || !self.invalidator.inner.borrow().changed_views.is_empty()
