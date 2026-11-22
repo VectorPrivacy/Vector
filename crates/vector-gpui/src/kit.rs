@@ -1122,6 +1122,11 @@ pub fn pump() -> impl IntoElement {
     .size_0()
 }
 
+/// Something built now is still moving: the view drawing it asks for another frame.
+pub fn keep_moving() {
+    EASING.set(true);
+}
+
 /// Whether an [`ease`] built since the last call is still moving: its view wants another frame.
 pub fn easing() -> bool {
     EASING.replace(false)

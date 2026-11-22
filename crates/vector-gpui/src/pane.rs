@@ -41,13 +41,26 @@ pub struct Panes {
     pub timeline: Entity<Pane>,
     /// Empty: notifying it redraws only what the root draws itself (the call panel, the rail).
     pub chrome: Entity<Pane>,
+    /// Settings, wide or slim: its entrances and hovers redraw it alone.
+    pub settings: Entity<Pane>,
+    /// The start menu over everything.
+    pub start: Entity<Pane>,
 }
 
 impl Panes {
     pub fn new(cx: &mut Context<VectorApp>) -> Self {
         let app = cx.entity().downgrade();
         let mut pane = || cx.new(|_| Pane { app: app.clone(), build: None });
-        Self { side: pane(), rail: pane(), chat: pane(), members: pane(), timeline: pane(), chrome: pane() }
+        Self {
+            side: pane(),
+            rail: pane(),
+            chat: pane(),
+            members: pane(),
+            timeline: pane(),
+            chrome: pane(),
+            settings: pane(),
+            start: pane(),
+        }
     }
 }
 

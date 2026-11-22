@@ -3679,7 +3679,7 @@ impl VectorApp {
                     .filter(|a| a.testing)
                 {
                     a.level = payload.get("mic").and_then(Value::as_f64).unwrap_or(0.) as f32;
-                    crate::pane::notify(&self.panes.chrome, cx);
+                    crate::pane::notify(&self.panes.settings, cx);
                 }
                 self.scoped = true;
             }
@@ -7235,20 +7235,9 @@ impl VectorApp {
                             cx,
                         )),
                     )
-                    .when_some(self.settings.as_ref(), |row, settings| {
-                        let app = cx.entity().downgrade();
-                        let on: crate::settings::OnAct = Rc::new(move |act, window, cx| {
-                            app.update(cx, |app, cx| app.on_settings(act, window, cx))
-                                .ok();
-                        });
+                    .when(self.settings.is_some(), |row| {
                         let width = f32::from(window.viewport_size().width) - rail_mode.width();
-                        row.child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .child(crate::settings::view(settings, width, &on, cx)),
-                        )
+                        row.child(div().flex_1().min_w_0().h_full().child(self.settings_cached(Some(width), cx)))
                     })
                     .when(self.settings.is_none() && self.nexus.is_some(), |row| {
                         let width = f32::from(window.viewport_size().width) - rail_mode.width();
@@ -7684,19 +7673,21 @@ impl VectorApp {
                     kit::faded(crate::createchannel::view(m, &on, window, cx), shown, 13)
                 })
             }))
-            .children(self.start.as_ref().map(|sm| {
+            .children(self.start.is_some().then(|| {
                 let app = cx.entity().downgrade();
                 let on: crate::startmenu::OnAct = Rc::new(move |act, window, cx| {
                     app.update(cx, |app, cx| app.on_start(act, window, cx)).ok();
                 });
-                gpui::deferred(div().absolute().inset_0().child(crate::startmenu::render(
-                    sm,
-                    &self.store.borrow(),
-                    window,
-                    &on,
+                let menu = crate::pane::cached(
+                    &self.panes.start,
+                    gpui::StyleRefinement::default().size_full(),
+                    move |app, window, cx| match app.start.as_ref() {
+                        Some(sm) => crate::startmenu::render(sm, &app.store.borrow(), window, &on, cx),
+                        None => div().into_any_element(),
+                    },
                     cx,
-                )))
-                .with_priority(8)
+                );
+                gpui::deferred(div().absolute().inset_0().child(menu)).with_priority(8)
             }))
             .children(self.video_full_overlay(window, cx))
             .children(self.menu.as_ref().map(|(at, items, _)| {
@@ -9793,6 +9784,26 @@ impl VectorApp {
         }
     }
 
+    /// Settings as a pane of its own; `width` for the wide layout, None for slim.
+    pub(super) fn settings_cached(&mut self, width: Option<f32>, cx: &mut Context<Self>) -> AnyElement {
+        crate::pane::cached(
+            &self.panes.settings,
+            gpui::StyleRefinement::default().size_full(),
+            move |app, _, cx| {
+                let Some(settings) = app.settings.as_ref() else { return div().into_any_element() };
+                let me = cx.entity().downgrade();
+                let on: crate::settings::OnAct = Rc::new(move |act, window, cx| {
+                    me.update(cx, |app, cx| app.on_settings(act, window, cx)).ok();
+                });
+                match width {
+                    Some(width) => crate::settings::view(settings, width, &on, cx).into_any_element(),
+                    None => crate::settings::slim_view(settings, &on, cx).into_any_element(),
+                }
+            },
+            cx,
+        )
+    }
+
     pub(super) fn chat_cached(&mut self, id: SharedString, cx: &mut Context<Self>) -> AnyElement {
         crate::pane::cached(
             &self.panes.chat,
@@ -11358,10 +11369,7 @@ fn attachment_panel(
             )
     };
     if t < 1. || opened.elapsed().as_secs_f32() < 0.6 {
-        let me = cx.entity().downgrade();
-        cx.defer(move |cx| {
-            me.update(cx, |_, cx| cx.notify()).ok();
-        });
+        kit::keep_moving();
     }
     div()
         .absolute()

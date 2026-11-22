@@ -363,12 +363,8 @@ impl VectorApp {
         let from_list = std::mem::take(&mut self.slim.on_list);
         let width = f32::from(window.viewport_size().width);
         let screen = |body: AnyElement| div().flex_1().min_h_0().w_full().flex().flex_col().child(body);
-        if let Some(settings) = self.settings.as_ref() {
-            let app = cx.entity().downgrade();
-            let on: crate::settings::OnAct = Rc::new(move |act, window, cx| {
-                app.update(cx, |app, cx| app.on_settings(act, window, cx)).ok();
-            });
-            let view = div().flex_1().min_h_0().child(crate::settings::slim_view(settings, &on, cx));
+        if self.settings.is_some() {
+            let view = div().flex_1().min_h_0().child(self.settings_cached(None, cx));
             return screen(view.into_any_element()).child(self.slim_navbar(store, cx)).into_any_element();
         }
         if self.nexus.is_some() {
