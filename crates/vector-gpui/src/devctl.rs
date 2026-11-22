@@ -240,6 +240,25 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
             v["frames"]["request_layout_prepaint_paint_ms"] = json!(ph.map(|n| n as f64 / 1e6));
             let (built, replayed) = gpui::draw_stats::keyed_take();
             v["frames"]["keyed_built_replayed"] = json!([built, replayed]);
+            let p = &app.panes;
+            let panes = [
+                (&p.side, "side"), (&p.rail, "rail"), (&p.chat, "chat"), (&p.members, "members"),
+                (&p.timeline, "timeline"), (&p.chrome, "chrome"), (&p.settings, "settings"), (&p.start, "start"),
+            ]
+            .map(|(e, n)| (e.entity_id().as_u64(), n));
+            let views: serde_json::Map<_, _> = gpui::draw_stats::views_take()
+                .into_iter()
+                .map(|(name, entity, [pre, paint], n)| {
+                    let name = match panes.iter().find(|(e, _)| *e == entity) {
+                        Some((_, pane)) => format!("pane:{pane}"),
+                        None => format!("{}#{entity}", name.rsplit("::").next().unwrap_or(name)),
+                    };
+                    (name, json!([n, pre as f64 / 1e6, paint as f64 / 1e6]))
+                })
+                .collect();
+            if !views.is_empty() {
+                v["frames"]["views_n_prepaint_paint_ms"] = json!(views);
+            }
             let (root, model) = gpui::draw_stats::whole_take();
             v["frames"]["whole_root"] = json!(root);
             v["frames"]["whole_model"] = json!(model);
@@ -276,6 +295,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         }
         "lang" => crate::lang::set(rest, cx),
         "pivx" => app.dev_pivx(rest, cx),
+        "views" => gpui::draw_stats::views_time(rest != "0"),
         "idle" => gpui::set_animation_idle(std::time::Duration::from_secs(rest.parse().unwrap_or(300))),
         "dump" => answer(app.dev_dump(rest)),
         "caches" => answer(app.dev_caches()),

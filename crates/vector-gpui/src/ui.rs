@@ -87,7 +87,7 @@ struct UnreadJump {
 pub struct VectorApp {
     unread_jump: Option<UnreadJump>,
     screen: Screen,
-    panes: crate::pane::Panes,
+    pub(crate) panes: crate::pane::Panes,
     /// This build is older than the account's database: (this build, the one it needs).
     downgrade: Option<(String, String)>,
     /// Re-pairing the remote signer from Settings: the signer form over everything.
@@ -1993,6 +1993,16 @@ impl VectorApp {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(4 * 60 * 60))
                     .await;
+            }
+        })
+        .detach();
+        // The chat list's "2m"-style times, as Tauri's 30 s list clock.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                if this.update(cx, |this, cx| this.notify_side(cx)).is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -8907,10 +8917,12 @@ fn chat_list(
                         }
                         let id = gpui::ElementId::NamedInteger("chat-row".into(), slim_ops::str_hash(&chat.id));
                         let chat_id = chat.id.clone();
+                        // Its "2m"-style time ages with the clock, which notifies nothing.
+                        let minute = data::ago_key(st.now_ms(), chat.messages.last().map_or(0, |m| m.at));
                         drop(st);
                         let (store, open, view, pin_keys) = (store.clone(), open.clone(), view.clone(), pin_keys.clone());
                         // A row redraws when the list's data changes; a scroll only moves its last drawing.
-                        let row = gpui::keyed(id, 0, gpui::StyleRefinement::default().w(px(list_w() - 9.)).h(px(ROW_PITCH)), move |_, _| {
+                        let row = gpui::keyed(id, minute, gpui::StyleRefinement::default().w(px(list_w() - 9.)).h(px(ROW_PITCH)), move |_, _| {
                             let store = store.borrow();
                             match store.chats.get(idx).filter(|c| c.id == chat_id) {
                                 Some(chat) => wide_chat_row(&store, chat, open.as_deref(), archived, &view, &pin_keys),

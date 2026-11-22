@@ -1170,6 +1170,11 @@ pub fn preview_text(chat: &SerializableChat) -> String {
 }
 
 /// `timeAgo` (misc.js).
+/// What [`time_ago`]'s label depends on: whole minutes elapsed.
+pub fn ago_key(now_ms: u64, at_ms: u64) -> u64 {
+    now_ms.saturating_sub(at_ms) / 60_000
+}
+
 pub fn time_ago(now_ms: u64, at_ms: u64) -> String {
     let s = now_ms.saturating_sub(at_ms) / 1000;
     match s {

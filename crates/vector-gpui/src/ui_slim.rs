@@ -1108,7 +1108,14 @@ impl VectorApp {
                             let (item, shared, view) = (item.clone(), shared.clone(), view.clone());
                             let id = gpui::ElementId::NamedInteger("slim-row".into(), str_hash(hash));
                             let style = gpui::StyleRefinement::default().w_full().h(px(70.));
-                            gpui::keyed(id, 0, style, move |_, _| {
+                            // Its "2m"-style time ages with the clock, which notifies nothing.
+                            let ago = match &item {
+                                Item::Chat(id) | Item::Archived(id, _) => store
+                                    .chat(id)
+                                    .map_or(0, |c| data::ago_key(store.now_ms(), c.messages.last().map_or(0, |m| m.at))),
+                                _ => store.now_ms() / 60_000,
+                            };
+                            gpui::keyed(id, ago, style, move |_, _| {
                                 slim_list_row(&item, &shared.borrow(), &view).unwrap_or_else(|| div().into_any_element())
                             })
                             .into_any_element()

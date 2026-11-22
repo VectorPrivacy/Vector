@@ -267,7 +267,6 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
-    #[cfg(feature = "profiler")]
     view_type_name: &'static str,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
@@ -283,13 +282,11 @@ impl<V: View> ViewElement<V> {
     /// Wraps a view whose draw time profiling attributes to `view_type_name`,
     /// such as an entity's type rather than [`Entity`]'s.
     #[track_caller]
-    #[cfg_attr(not(feature = "profiler"), expect(unused_variables))]
     pub(crate) fn with_type_name(view: V, view_type_name: &'static str) -> Self {
         let entity_id = view.entity_id();
         ViewElement {
             entity_id,
             cached_style: None,
-            #[cfg(feature = "profiler")]
             view_type_name,
             view: Some(view),
             #[cfg(debug_assertions)]
@@ -410,6 +407,7 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             #[cfg(feature = "profiler")]
             let start = window.window_profiler.begin_view();
+            let timed = crate::draw_stats::views_on().then(std::time::Instant::now);
             let prepainted = prepaint_view(
                 entity_id,
                 global_id,
@@ -419,6 +417,9 @@ impl<V: View> Element for ViewElement<V> {
                 cx,
                 &mut |window, cx| render_view(self.view.take().unwrap(), window, cx),
             );
+            if let Some(at) = timed {
+                crate::draw_stats::view(self.view_type_name, entity_id.as_u64(), 0, at.elapsed());
+            }
             #[cfg(feature = "profiler")]
             window.window_profiler.end_view(
                 start,
@@ -446,6 +447,7 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             #[cfg(feature = "profiler")]
             let start = window.window_profiler.begin_view();
+            let timed = crate::draw_stats::views_on().then(std::time::Instant::now);
             paint_view(
                 entity_id,
                 self.cached_style.is_some(),
@@ -454,6 +456,9 @@ impl<V: View> Element for ViewElement<V> {
                 window,
                 cx,
             );
+            if let Some(at) = timed {
+                crate::draw_stats::view(self.view_type_name, entity_id.as_u64(), 1, at.elapsed());
+            }
             #[cfg(feature = "profiler")]
             window.window_profiler.end_view(
                 start,

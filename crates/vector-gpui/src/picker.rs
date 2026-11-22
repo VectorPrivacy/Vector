@@ -2202,6 +2202,27 @@ impl Render for EmojiPicker {
                     .update(cx, |this, cx| this.header(s, cx))
                     .unwrap_or_else(|_| div().into_any_element())
             }
+            Item::Row { cells, last } if cells.iter().all(|c| matches!(c, Cell::Stock(_))) => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (cols, *last).hash(&mut h);
+                for cell in cells.iter() {
+                    if let Cell::Stock(e) = cell {
+                        e.emoji.hash(&mut h);
+                    }
+                }
+                let (last, items, media, me) = (*last, items.clone(), media.clone(), me.clone());
+                gpui::keyed(
+                    gpui::ElementId::NamedInteger("pick-row".into(), i as u64),
+                    h.finish(),
+                    gpui::StyleRefinement::default().w_full().h(px(CELL + if last { 3. } else { GAP })),
+                    move |_, _| match &items[i] {
+                        Item::Row { cells, .. } => Self::row(cells, cols, last, &media, me),
+                        _ => div().into_any_element(),
+                    },
+                )
+                .into_any_element()
+            }
             Item::Row { cells, last } => Self::row(cells, cols, *last, &media, me.clone()),
             Item::PackRow { cells, last } => {
                 let row = Self::pack_row(cells, cols, *last, &media, me.clone());

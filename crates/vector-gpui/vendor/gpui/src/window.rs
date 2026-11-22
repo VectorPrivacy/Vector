@@ -11566,6 +11566,37 @@ pub mod draw_stats {
         PHASES.each_ref().map(|p| p.swap(0, Ordering::Relaxed))
     }
 
+    static VIEWS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static VIEWS: Mutex<Vec<(&'static str, u64, [u64; 2], u32)>> = Mutex::new(Vec::new());
+
+    /// Whether views time their prepaint and paint, for [`views_take`].
+    pub fn views_on() -> bool {
+        VIEWS_ON.load(Ordering::Relaxed)
+    }
+
+    /// Starts or stops timing each view's prepaint and paint, children included.
+    pub fn views_time(on: bool) {
+        VIEWS_ON.store(on, Ordering::Relaxed);
+    }
+
+    pub(crate) fn view(name: &'static str, entity: u64, phase: usize, took: std::time::Duration) {
+        let mut v = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+        let at = match v.iter().position(|(n, e, ..)| *n == name && *e == entity) {
+            Some(at) => at,
+            None => {
+                v.push((name, entity, [0; 2], 0));
+                v.len() - 1
+            }
+        };
+        v[at].2[phase] += took.as_nanos() as u64;
+        v[at].3 += (phase == 0) as u32;
+    }
+
+    /// Each timed view's `(type, entity, [prepaint, paint] nanoseconds, prepaints)` since the last call.
+    pub fn views_take() -> Vec<(&'static str, u64, [u64; 2], u32)> {
+        std::mem::take(&mut *VIEWS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     static KEYED_BUILT: AtomicU64 = AtomicU64::new(0);
     static KEYED_REPLAYED: AtomicU64 = AtomicU64::new(0);
 

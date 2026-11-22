@@ -54,6 +54,13 @@ struct KeyedState {
     moving: bool,
 }
 
+/// `element` filling `size`, as it would in the slot it was laid out for: as a layout root of
+/// its own, a box with no width shrinks to its content.
+fn sized(element: AnyElement, size: Size<Pixels>) -> AnyElement {
+    use crate::{IntoElement, ParentElement, Styled};
+    crate::div().w(size.width).h(size.height).flex().flex_col().child(element).into_any_element()
+}
+
 /// How this frame draws a keyed subtree.
 pub enum KeyedDraw {
     /// Built afresh.
@@ -99,7 +106,7 @@ impl Element for Keyed {
     ) -> Option<KeyedDraw> {
         let build = self.build.take()?;
         if window.element_zoom.is_some() || window.is_inspector_picking(cx) {
-            let mut element = build(window, cx);
+            let mut element = sized(build(window, cx), bounds.size);
             element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
             element.prepaint_at(bounds.origin, window, cx);
             return Some(KeyedDraw::Plain(element));
@@ -147,7 +154,7 @@ impl Element for Keyed {
             window.keyed_outer.push(outer.clone());
             let (element, accessed_entities) = window.keyed_root(|window| {
                 cx.detect_accessed_entities(|cx| {
-                    let mut element = build(window, cx);
+                    let mut element = sized(build(window, cx), bounds.size);
                     element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
                     element.prepaint_at(bounds.origin, window, cx);
                     element
