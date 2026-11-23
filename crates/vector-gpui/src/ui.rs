@@ -4409,6 +4409,9 @@ impl VectorApp {
 
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         if self.open.as_ref() != Some(&id) {
+            // Measured in the last chat's layout (a Community's pane is narrower): a wallpaper
+            // keyed to it would show cropped until the real size rebakes it.
+            self.chat_box.set(None);
             self.store.borrow_mut().unveiled.clear();
             self.revealed.borrow_mut().clear();
             let mut media = self.media.borrow_mut();
@@ -10639,6 +10642,7 @@ impl VectorApp {
         });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let look = self.wallpaper_look();
+        let keyed = look.is_some();
         let paper = self.wallpaper.image(look.as_ref().map(|(k, _)| k));
         let shade = look.map_or(0., |(_, dim)| 1. - f32::from(dim) / 100.);
         let slim_com = channel.and_then(|_| store.community_of(&id)).filter(|_| self.is_slim);
@@ -10667,6 +10671,7 @@ impl VectorApp {
         });
         let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
         let chat_box = self.chat_box.clone();
+        let app_box = cx.entity().downgrade();
         let clock = self.started.elapsed().as_secs_f32();
         let app = cx.entity().downgrade();
         let on_act: timeline::OnAct = Rc::new(move |msg_id, act, window, cx| {
@@ -10714,7 +10719,19 @@ impl VectorApp {
             .flex_col()
             .bg(c(CHAT_BG))
             .child(
-                gpui::canvas(move |b, _, _| chat_box.set(Some(b)), |_, _, _, _| {})
+                gpui::canvas(
+                    move |b, window, _| {
+                        // The wallpaper was keyed to the size before this layout: key it again now.
+                        if keyed && chat_box.get().map(|o| o.size) != Some(b.size) {
+                            let app = app_box.clone();
+                            window.on_next_frame(move |_, cx| {
+                                app.update(cx, |_, cx| cx.notify()).ok();
+                            });
+                        }
+                        chat_box.set(Some(b));
+                    },
+                    |_, _, _, _| {},
+                )
                     .absolute()
                     .size_full(),
             )

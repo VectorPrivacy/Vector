@@ -130,8 +130,19 @@ impl Wallpaper {
         if want.size == (0, 0) {
             return None;
         }
-        let resized = self.shown.as_ref().is_some_and(|(k, _)| same(k));
         let now = Instant::now();
+        let dragging = self.sized.is_some_and(|(size, at)| size != want.size && now - at < SETTLE);
+        // A size the layout lands on (not one a drag passes through): its saved bake, if kept, shows now.
+        if want.stored && !dragging && self.looked.as_ref() != Some(&want) {
+            self.looked = Some(want.clone());
+            if let Some(found) = saved_exact(&want) {
+                self.keep_shown();
+                self.shown = Some(found);
+                self.queued = None;
+                return None;
+            }
+        }
+        let resized = self.shown.as_ref().is_some_and(|(k, _)| same(k));
         let since = match self.sized {
             Some((size, at)) if size == want.size => at,
             _ => {
@@ -321,6 +332,13 @@ fn source_tag(key: &Key) -> String {
 
 fn bake_file(key: &Key) -> Option<PathBuf> {
     Some(crate::bakes::file(&bakes_dir(&key.path)?, &source_tag(key), bake_size(key)))
+}
+
+/// `key`'s saved bake at exactly its size.
+fn saved_exact(key: &Key) -> Option<(Key, Arc<RenderImage>)> {
+    let file = bake_file(key)?;
+    let img = crate::bakes::load(&file, bake_size(key))?;
+    Some((key.clone(), Arc::new(RenderImage::new(vec![image::Frame::new(img)]))))
 }
 
 /// `key`'s saved bake at its size, else its newest at any size (the GPU stretches it until a
@@ -680,6 +698,12 @@ mod tests {
         let mut w = Wallpaper::default();
         assert!(w.want(Some(key((480, 360)))).is_none(), "another size shows stretched while it settles");
         assert!(w.image(Some(&key((480, 360)))).is_some());
+
+        bake(Job { key: key((480, 360)), decoded: None });
+        let mut w = Wallpaper::default();
+        assert!(w.want(Some(key((480, 360)))).is_none());
+        assert!(w.want(Some(key((400, 300)))).is_none(), "a size the layout lands on takes its saved bake, no settle");
+        assert_eq!(w.shown.as_ref().map(|(k, _)| k.size), Some((400, 300)));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(src);
     }
