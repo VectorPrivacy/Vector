@@ -711,6 +711,8 @@ enum Jumbo {
     Stock(SharedString),
     /// A tagged `:shortcode:`, drawn once it has loaded.
     Custom(Option<std::sync::Arc<gpui::RenderImage>>),
+    /// A line break the sender typed.
+    Break,
 }
 
 /// `.dmsg-emoji-only`: one to six emoji, stock or the message's own `:shortcode:`s, and nothing else.
@@ -740,6 +742,8 @@ fn jumbo(ctx: &Ctx, m: &Message, text: &str) -> Option<Vec<Jumbo>> {
         for g in unicode_segmentation::UnicodeSegmentation::graphemes(stock, true) {
             if let Some(src) = emoji::twemoji(g) {
                 out.push(Jumbo::Stock(src));
+            } else if g == "\n" || g == "\r\n" {
+                out.push(Jumbo::Break);
             }
         }
         if let Some(code) = code {
@@ -749,12 +753,12 @@ fn jumbo(ctx: &Ctx, m: &Message, text: &str) -> Option<Vec<Jumbo>> {
                 crate::media::Custom::Missing(_) => return None,
             }
         }
-        if out.len() > 6 {
+        if out.iter().filter(|j| !matches!(j, Jumbo::Break)).count() > 6 {
             return None;
         }
         rest = after;
     }
-    (!out.is_empty()).then_some(out)
+    out.iter().any(|j| !matches!(j, Jumbo::Break)).then_some(out)
 }
 
 /// A message's text with its colour spans marked for `markdown::parse` and its times as codes,
@@ -927,9 +931,14 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
         text.as_ref().into()
     };
     if !headed && let Some(glyphs) = jumbo(ctx, m, &bare) {
-        let mut row = div().flex().items_center().py(px(4.));
+        let mut lines = div().flex().flex_col().py(px(4.));
+        let mut row = div().flex().items_center().min_h(px(50.));
         for glyph in glyphs {
-            row = row.child(match glyph {
+            let el = match glyph {
+                Jumbo::Break => {
+                    lines = lines.child(std::mem::replace(&mut row, div().flex().items_center().min_h(px(50.))));
+                    continue;
+                }
                 Jumbo::Stock(src) => img(src).size(px(50.)).flex_shrink_0().into_any_element(),
                 Jumbo::Custom(Some(image)) => img(gpui::ImageSource::Render(image))
                     .size(px(50.))
@@ -937,12 +946,13 @@ fn content(ctx: &Ctx, m: &Message) -> AnyElement {
                     .flex_shrink_0()
                     .into_any_element(),
                 Jumbo::Custom(None) => crate::kit::emoji_loading(50.).into_any_element(),
-            });
+            };
+            row = row.child(el);
         }
         return div()
             .flex()
             .items_end()
-            .child(row)
+            .child(lines.child(row))
             .children(marks(m))
             .into_any_element();
     }
