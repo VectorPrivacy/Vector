@@ -3299,6 +3299,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
                     gpui::linear_color_stop(c(crate::theme::PROGRESS_FROM), 0.),
                     gpui::linear_color_stop(c(crate::theme::PROGRESS_TO), 1.),
                 ))
+                .when_some(crate::kit::many_stops(crate::theme::Grad::Progress), |d, layer| d.relative().overflow_hidden().child(layer))
                 .text_size(px(16.))
                 .font_weight(FontWeight::BOLD)
                 .text_color(c(0x000000))

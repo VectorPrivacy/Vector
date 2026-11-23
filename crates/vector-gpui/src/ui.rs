@@ -11311,6 +11311,7 @@ fn composer(
     let blur_out = cfg!(target_os = "android") && picker.is_none() && attach.is_none() && popup.is_none();
     let typing = input.clone();
     let mut boxed = div()
+        .children(crate::kit::many_stops(crate::theme::Grad::Input))
         .child(
             gpui::canvas(move |b, _, _| measure.set(Some(b)), |_, _, _, _| {})
                 .absolute()

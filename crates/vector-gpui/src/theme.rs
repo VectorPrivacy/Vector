@@ -82,6 +82,20 @@ static PALETTE: [std::sync::atomic::AtomicU32; TOKENS] = {
     p
 };
 static CHOSEN: std::sync::Mutex<&'static str> = std::sync::Mutex::new("vector");
+/// The chosen theme's `.input-box` and `.progress-bar-fill` gradients, every stop.
+static STOPS: std::sync::Mutex<[Vec<(u32, f32)>; 2]> = std::sync::Mutex::new([Vec::new(), Vec::new()]);
+
+/// A gradient a theme may give more than two stops.
+#[derive(Clone, Copy)]
+pub enum Grad {
+    Input,
+    Progress,
+}
+
+/// The chosen theme's stops for `g`, positions 0..1; empty for a plain two-stop one.
+pub fn stops(g: Grad) -> Vec<(u32, f32)> {
+    STOPS.lock().unwrap_or_else(|e| e.into_inner())[g as usize].clone()
+}
 
 /// A colour's value now: a theme token's under the chosen theme, any other as it is.
 pub fn hex(v: u32) -> u32 {
@@ -113,7 +127,51 @@ pub fn set_theme(name: &str) -> bool {
     for (slot, v) in PALETTE.iter().zip(palette(css)) {
         slot.store(v, std::sync::atomic::Ordering::Relaxed);
     }
+    let vars = vars(css);
+    let many = |selector: &str| {
+        let s = block(css, selector)
+            .and_then(|b| b.split(';').find_map(|d| d.trim().strip_prefix("background:")))
+            .map(|v| positioned(v, &vars))
+            .unwrap_or_default();
+        if s.len() > 2 { s } else { Vec::new() }
+    };
+    *STOPS.lock().unwrap_or_else(|e| e.into_inner()) = [many(".input-box"), many(".progress-bar-fill")];
     true
+}
+
+/// A gradient's stops with their places, unplaced ones spread evenly as CSS does.
+fn positioned(value: &str, vars: &[(&str, &str)]) -> Vec<(u32, f32)> {
+    let mut out: Vec<(u32, Option<f32>)> = Vec::new();
+    for part in value.split(',') {
+        let Some(&colour) = colours(part, vars).first() else { continue };
+        let at = part.split_whitespace().last().and_then(|w| w.strip_suffix('%')).and_then(|p| p.parse::<f32>().ok()).map(|p| p / 100.);
+        out.push((colour, at));
+    }
+    let n = out.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if out[0].1.is_none() {
+        out[0].1 = Some(0.);
+    }
+    if out[n - 1].1.is_none() {
+        out[n - 1].1 = Some(1.);
+    }
+    let mut i = 0;
+    while i < n {
+        if out[i].1.is_some() {
+            i += 1;
+            continue;
+        }
+        let from = i - 1;
+        let to = (i..n).find(|&j| out[j].1.is_some()).unwrap_or(n - 1);
+        let (a, b) = (out[from].1.unwrap_or(0.), out[to].1.unwrap_or(1.));
+        for (k, stop) in out.iter_mut().enumerate().take(to).skip(i) {
+            stop.1 = Some(a + (b - a) * (k - from) as f32 / (to - from) as f32);
+        }
+        i = to;
+    }
+    out.into_iter().map(|(c, at)| (c, at.unwrap_or(0.))).collect()
 }
 
 pub fn theme() -> &'static str {
@@ -310,6 +368,16 @@ mod tests {
             let p = palette(css);
             assert!(p.iter().all(|v| *v <= 0xff_ffff), "{id}");
         }
+    }
+
+    #[test]
+    fn stops_spread_and_keep_their_places() {
+        let v = positioned("linear-gradient(90deg, #F7FFAE, #AEFFDF, #B6AEFF, #FFAECE)", &[]);
+        assert_eq!(v.iter().map(|s| s.1).collect::<Vec<_>>(), [0., 1. / 3., 2. / 3., 1.]);
+        let v = positioned("linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%)", &[]);
+        assert_eq!((v[0], v[3]), ((0xf7ffae, 0.4), (0xffaece, 1.)));
+        let v = positioned("linear-gradient(90deg, #CD3DD3, #b188e2, #5749E4)", &[]);
+        assert_eq!(v, [(0xcd3dd3, 0.), (0xb188e2, 0.5), (0x5749e4, 1.)]);
     }
 
     #[test]

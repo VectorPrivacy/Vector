@@ -2356,3 +2356,29 @@ mod tests {
         assert!(!settle.part(seen, "a"));
     }
 }
+
+/// A theme gradient of more than two stops, run left to right under its box as two-stop pieces
+/// (GPUI's gradients take two); `None` when the theme's is plain.
+pub fn many_stops(g: crate::theme::Grad) -> Option<gpui::Div> {
+    use gpui::{ParentElement, Styled};
+    let stops = crate::theme::stops(g);
+    let (first, last) = (*stops.first()?, *stops.last()?);
+    let mut row = gpui::div().absolute().inset_0().flex().flex_row();
+    if first.1 > 0. {
+        row = row.child(gpui::div().h_full().w(gpui::relative(first.1)).bg(crate::theme::c(first.0)));
+    }
+    for w in stops.windows(2) {
+        let ((a, at), (b, bt)) = (w[0], w[1]);
+        if bt > at {
+            row = row.child(gpui::div().h_full().w(gpui::relative(bt - at)).bg(gpui::linear_gradient(
+                90.,
+                gpui::linear_color_stop(crate::theme::c(a), 0.),
+                gpui::linear_color_stop(crate::theme::c(b), 1.),
+            )));
+        }
+    }
+    if last.1 < 1. {
+        row = row.child(gpui::div().h_full().flex_1().bg(crate::theme::c(last.0)));
+    }
+    Some(row)
+}
