@@ -12114,9 +12114,25 @@ impl VectorApp {
             thumb: None,
             blur: None,
             video: false,
+            icon: None,
             added: std::time::Instant::now(),
             leaving: None,
         });
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xdc")) {
+            let file = path.to_string_lossy().into_owned();
+            let rx = backend::run(async move { crate::miniapp::info(file).await });
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(info)) = rx.await else { return };
+                this.update(cx, |this, cx| {
+                    if let Some(s) = this.staged.iter_mut().chain(this.drafts.values_mut().flat_map(|d| d.staged.iter_mut())).find(|s| s.id == id) {
+                        s.icon = info.icon;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.attach = None;
         window.focus(&self.input.focus_handle(cx), cx);
         self.staged_changed(cx);

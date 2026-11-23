@@ -30,6 +30,8 @@ pub struct Staged {
     /// Its blur, drawn while it is a spoiler.
     pub blur: Option<Arc<RenderImage>>,
     pub video: bool,
+    /// A Mini App's own icon, read from its package as the chat reads it.
+    pub icon: Option<std::path::PathBuf>,
     pub added: Instant,
     pub leaving: Option<Instant>,
 }
@@ -100,20 +102,25 @@ pub fn tray<V: 'static>(staged: &[Staged], on: On, cx: &mut Context<V>) -> AnyEl
         let (name, ext, spoiler) = (p.shown_name(), p.ext().to_string(), p.spoiler());
         let id = s.id;
         let picture = if spoiler { s.blur.clone().or_else(|| s.thumb.clone()) } else { s.thumb.clone() };
-        let face = match picture {
-            Some(image) => crate::pic::img(ImageSource::Render(image))
+        let face = match (picture, s.icon.clone()) {
+            (Some(image), _) => crate::pic::img(ImageSource::Render(image))
                 .size(px(TILE))
                 .rounded(px(8.))
                 .object_fit(if spoiler { ObjectFit::Fill } else { ObjectFit::Cover })
                 .into_any_element(),
-            None => div()
+            (None, Some(icon)) => crate::pic::img(icon)
+                .size(px(TILE))
+                .rounded(px(8.))
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            (None, None) => div()
                 .size_full()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
                 .gap(px(4.))
-                .child(svg().path(crate::filepreview::file_icon(&ext)).size(px(22.)).text_color(white_a(0.7)))
+                .child(svg().path(if ext == "xdc" { "icons/gamepad.svg" } else { crate::filepreview::file_icon(&ext) }).size(px(22.)).text_color(white_a(0.7)))
                 .child(
                     div()
                         .max_w(px(TILE - 8.))
