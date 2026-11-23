@@ -1009,6 +1009,12 @@ impl Videos {
     }
 }
 
+/// A video file's first frame, `scale` of its shown size; None without FFmpeg.
+pub fn poster(path: &std::path::Path, scale: f32) -> Option<Arc<RenderImage>> {
+    let input = crate::audio::AudioInputSpec::File(path.to_path_buf()).open().ok()?;
+    ff::probe(input, scale)?.poster
+}
+
 #[cfg(feature = "video")]
 #[path = "video_ffmpeg.rs"]
 mod ff;

@@ -6,6 +6,10 @@ composer-replying-to = Replying to <b>{ $name }</b>
 composer-emoji = Emoji
 composer-send = Send
 composer-attach = Attach
+# An attachment waiting in the composer: opens it to rename or mark as a spoiler.
+composer-staged-edit = Edit { $name }
+# Takes an attachment out of the message being written.
+composer-staged-remove = Remove { $name }
 
 ## The attach menu
 

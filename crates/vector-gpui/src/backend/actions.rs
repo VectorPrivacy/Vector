@@ -156,13 +156,20 @@ pub async fn retry(receiver: String, message_id: String) -> Result<bool, String>
     let failed = VectorCore
         .get_message(&message_id)
         .await
-        .is_some_and(|(_, m)| m.failed);
-    if !failed {
+        .map(|(_, m)| m)
+        .filter(|m| m.failed);
+    let Some(msg) = failed else {
         return Err("Message is not failed or does not exist".into()); // i18n-exempt: developer error
-    }
+    };
     let callback: Arc<dyn SendCallback> = Arc::new(Callback);
-    vector_core::sending::resend_failed_dm(&receiver, &message_id, &SendConfig::gui(), callback)
-        .await
+    if vector_core::sending::resend_failed_dm(&receiver, &message_id, &SendConfig::gui(), callback).await? {
+        return Ok(true);
+    }
+    // No wrap ever left: files go up again from what this device holds.
+    if msg.attachments.is_empty() {
+        return Ok(false);
+    }
+    super::outbox::retry_dm(receiver, msg).await.map(|_| true)
 }
 
 /// Takes back one of our reactions.

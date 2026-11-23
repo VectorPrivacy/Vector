@@ -70,6 +70,7 @@ mod embeds;
 mod emoji;
 mod fileclip;
 mod filepreview;
+mod staged;
 mod highlight;
 #[cfg(test)]
 mod i18n_audit;

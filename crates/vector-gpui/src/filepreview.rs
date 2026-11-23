@@ -49,6 +49,10 @@ pub enum Event {
     Close(PathBuf),
     /// The Mini App goes to the App Store instead.
     Publish(PathBuf),
+    /// A staged file's edits are kept; it waits in the composer.
+    Done,
+    /// A staged file taken out of the composer.
+    Remove,
 }
 
 impl EventEmitter<Event> for FilePreview {}
@@ -86,6 +90,8 @@ pub struct FilePreview {
     pub check_servers: bool,
     /// No enabled server would take the zip: it can't be sent.
     too_large: bool,
+    /// Waits in the composer with others: this edits it, and the composer sends them all.
+    staged: bool,
 }
 
 /// A folder or a selection being zipped, then what the archive holds.
@@ -243,15 +249,13 @@ impl FilePreview {
         ))
     }
 
-    pub fn new(
-        path: PathBuf,
-        receiver: String,
-        reply: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    /// A file staged in the composer: compressing starts now, its picture loads when shown.
+    pub fn staged(path: PathBuf, receiver: String, cx: &mut Context<Self>) -> Self {
+        Self::build(path, receiver, String::new(), true, cx)
+    }
+
+    fn build(path: PathBuf, receiver: String, reply: String, staged: bool, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
         let ext = path
             .extension()
@@ -327,29 +331,9 @@ impl FilePreview {
         });
 
         if is_image || SHOWN_ONLY.contains(&ext.as_str()) {
-            let file = path.clone();
-            let e = ext.clone();
-            cx.spawn(async move |this, cx| {
-                let decoded = cx
-                    .background_executor()
-                    .spawn(async move {
-                        crate::backend::pasted::read(&file)
-                            .ok()
-                            .and_then(|b| crate::media::decode(&b, &e, (1600, 1600)))
-                    })
-                    .await;
-                this.update(cx, |p, cx| {
-                    if let Some((image, w, h)) = decoded {
-                        p.image = Some((Arc::new(image), w, h));
-                        if p.spoiler {
-                            p.make_blur(cx);
-                        }
-                        cx.notify();
-                    }
-                })
-                .ok();
-            })
-            .detach();
+            if !staged {
+                Self::load_image(path.clone(), ext.clone(), cx);
+            }
             if ext != "gif" {
                 let file = path.clone();
                 cx.spawn(async move |this, cx| {
@@ -394,7 +378,121 @@ impl FilePreview {
             publish: false,
             check_servers: false,
             too_large: false,
+            staged,
         }
+    }
+
+    fn load_image(file: PathBuf, e: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::backend::pasted::read(&file)
+                        .ok()
+                        .and_then(|b| crate::media::decode(&b, &e, (1600, 1600)))
+                })
+                .await;
+            this.update(cx, |p, cx| {
+                if let Some((image, w, h)) = decoded {
+                    p.image = Some((Arc::new(image), w, h));
+                    if p.spoiler {
+                        p.make_blur(cx);
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A staged file opened for editing: its picture loads, and keys come here.
+    pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.image.is_none() && (IMAGE_EXTS.contains(&self.ext.as_str()) || SHOWN_ONLY.contains(&self.ext.as_str())) {
+            Self::load_image(self.path.clone(), self.ext.clone(), cx);
+        }
+        window.focus(&self.focus, cx);
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn ext(&self) -> &str {
+        &self.ext
+    }
+
+    pub fn spoiler(&self) -> bool {
+        self.spoiler
+    }
+
+    /// The name it shows under: the edited stem and its extension.
+    pub fn shown_name(&self) -> String {
+        if self.ext.is_empty() { self.stem.clone() } else { format!("{}.{}", self.stem, self.ext) }
+    }
+
+    /// The name it travels under; empty keeps the file's own.
+    fn travel_name(&self) -> String {
+        let ext = if self.ext.is_empty() {
+            String::new()
+        } else {
+            format!(".{}", self.ext)
+        };
+        if self.spoiler {
+            let stem = if self.stem.is_empty() {
+                "image"
+            } else {
+                &self.stem
+            };
+            let stem = if stem.to_uppercase().starts_with("SPOILER_") {
+                stem.to_string()
+            } else {
+                format!("SPOILER_{stem}") // i18n-exempt: filename convention
+            };
+            format!("{stem}{ext}")
+        } else if self.edited {
+            format!("{}{ext}", self.stem)
+        } else {
+            String::new()
+        }
+    }
+
+    /// The staged file as it sends.
+    pub fn outgoing(&self) -> crate::backend::outbox::Outgoing {
+        let compress = self.compress_offered && self.compress;
+        let keep_metadata = self.metadata_offered && self.keep_metadata;
+        crate::backend::outbox::Outgoing {
+            path: self.path.clone(),
+            name: self.travel_name(),
+            compress,
+            keep_metadata,
+            precompressed: None,
+        }
+    }
+
+    /// The background compression a send waits on, when the choices still use it.
+    pub fn compressed_for_send(&self) -> Option<Compressed> {
+        let o = self.outgoing();
+        self.compressed.clone().filter(|_| o.compress && !o.keep_metadata)
+    }
+
+    /// Taken out of the composer, or sent: its encode stops and its clip goes.
+    pub fn discard(&mut self) {
+        if !self.outgoing().compress {
+            self.stop_compressing();
+        }
+        self.forget_clip();
+    }
+
+    /// Edits kept; what only the open preview needed goes.
+    fn done(&mut self, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            self.rename = None;
+        }
+        self.forget_clip();
+        self.image = None;
+        self.blur = None;
+        cx.emit(Event::Done);
     }
 
     /// A folder, or several items, zipped into one archive that sends under its name.
@@ -433,6 +531,7 @@ impl FilePreview {
         })
         .detach();
         Self {
+            staged: false,
             focus,
             path: PathBuf::new(),
             receiver,
@@ -531,7 +630,10 @@ impl FilePreview {
                 .spawn(async move {
                     let size = image.size(0);
                     let (w, h) = (size.width.0 as u32, size.height.0 as u32);
-                    let rgba = image::RgbaImage::from_raw(w, h, image.as_bytes(0)?.to_vec())?;
+                    // Decoded frames are BGRA, as the GPU takes them.
+                    let mut bytes = image.as_bytes(0)?.to_vec();
+                    crate::media::swap_red_blue(&mut bytes);
+                    let rgba = image::RgbaImage::from_raw(w, h, bytes)?;
                     let hash = crate::util::generate_thumbhash_from_image(
                         &image::DynamicImage::ImageRgba8(rgba),
                     )?;
@@ -602,6 +704,9 @@ impl FilePreview {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
+        if self.staged {
+            return self.done(cx);
+        }
         self.stop_compressing();
         self.forget_clip();
         cx.emit(Event::Close(self.path.clone()));
@@ -627,28 +732,10 @@ impl FilePreview {
         if self.rename.is_some() {
             self.end_rename(true, window, cx);
         }
-        let ext = if self.ext.is_empty() {
-            String::new()
-        } else {
-            format!(".{}", self.ext)
-        };
-        let name = if self.spoiler {
-            let stem = if self.stem.is_empty() {
-                "image"
-            } else {
-                &self.stem
-            };
-            let stem = if stem.to_uppercase().starts_with("SPOILER_") {
-                stem.to_string()
-            } else {
-                format!("SPOILER_{stem}") // i18n-exempt: filename convention
-            };
-            format!("{stem}{ext}")
-        } else if self.edited {
-            format!("{}{ext}", self.stem)
-        } else {
-            String::new()
-        };
+        if self.staged {
+            return self.done(cx);
+        }
+        let name = self.travel_name();
         let compress = self.compress_offered && self.compress;
         if !compress {
             self.stop_compressing();
@@ -1097,14 +1184,33 @@ impl Render for FilePreview {
                         })),
                 )
             })
-            .child(
+            .when(self.staged, |d| {
+                d.child(
+                    button("fp-remove", t::preview_remove())
+                        .bg(white_a(0.1))
+                        .hover(|s| s.bg(white_a(0.15)))
+                        .text_color(c(crate::timeline::DANGER))
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            p.forget_clip();
+                            cx.emit(Event::Remove)
+                        })),
+                )
+                .child(
+                    button("fp-done", t::preview_done())
+                        .bg(white_a(0.9))
+                        .hover(|s| s.bg(white_a(1.)))
+                        .text_color(c(0x000000))
+                        .on_click(cx.listener(|p, _, _, cx| p.done(cx))),
+                )
+            })
+            .when(!self.staged, |d| d.child(
                 button("fp-cancel", t::dialog_cancel())
                     .bg(white_a(0.1))
                     .hover(|s| s.bg(white_a(0.15)))
                     .text_color(white_a(0.9))
                     .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
-            )
-            .child(
+            ))
+            .when(!self.staged, |d| d.child(
                 button("fp-send", if zipping { t::preview_compressing() } else if self.too_large { t::preview_too_large() } else if self.held.is_some() { t::preview_sending_when_ready() } else { t::preview_send() })
                     .when(zipping || self.too_large || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
                     .bg(linear_gradient(
@@ -1115,7 +1221,7 @@ impl Render for FilePreview {
                     .hover(|s| s.opacity(0.9))
                     .text_color(c(0x000000))
                     .on_click(cx.listener(|p, _, window, cx| p.send(window, cx))),
-            );
+            ));
 
         let vh = f32::from(window.viewport_size().height);
         let vw = f32::from(window.viewport_size().width);

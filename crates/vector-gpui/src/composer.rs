@@ -2668,6 +2668,11 @@ impl TextInput {
         self
     }
 
+    /// Enter sends with no text: something else (staged files) is the message.
+    pub fn set_submit_empty(&mut self, on: bool) {
+        self.submit_empty = on;
+    }
+
     pub fn keep_on_submit(mut self) -> Self {
         self.clear_on_submit = false;
         self.submit_empty = true;

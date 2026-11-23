@@ -252,7 +252,7 @@ pub async fn chat_snapshot(chat_id: String) -> Option<vector_core::SerializableC
 
 /// A file DM's settings: the chat's self-destruct lifespan rides along and is stamped once
 /// the upload is done, so the clock starts at publish.
-fn file_send_config(receiver: &str) -> SendConfig {
+pub(super) fn file_send_config(receiver: &str) -> SendConfig {
     SendConfig {
         self_destruct_secs: vector_core::self_destruct::chat_duration_secs(receiver),
         ..SendConfig::gui()

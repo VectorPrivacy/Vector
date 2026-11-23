@@ -44,6 +44,10 @@ preview-spoiler-mark = Mark as spoiler
 # Publishes a Mini App to the App Store.
 preview-publish = Publish
 preview-send = Send
+# Keeps a staged attachment's edits and goes back to the composer.
+preview-done = Done
+# Takes a staged attachment out of the message.
+preview-remove = Remove
 preview-too-large = Too Large
 # The file is still being prepared; it sends once it's ready.
 preview-sending-when-ready = Sending when ready

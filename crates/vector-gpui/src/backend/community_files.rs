@@ -16,9 +16,9 @@ use crate::message::types::CachedCompressedImage;
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
 
-struct Prepared {
-    attachment: vector_core::types::Attachment,
-    plain: FileSource,
+pub(super) struct Prepared {
+    pub(super) attachment: vector_core::types::Attachment,
+    pub(super) plain: FileSource,
     mime: String,
 }
 
@@ -57,7 +57,7 @@ pub async fn send_voice(channel: String, wav: Vec<u8>, replied_to: String) -> Re
     dispatch(channel, String::new(), replied_to, vec![prepared]).await.map(|_| ())
 }
 
-async fn prepare(
+pub(super) async fn prepare(
     path: &Path,
     name_override: &str,
     compress: bool,
@@ -175,7 +175,7 @@ async fn prepare_bytes(
 }
 
 /// The optimistic attachment; nothing is sealed or uploaded until the bubble is up.
-fn stage(
+pub(super) fn stage(
     plain: FileSource,
     plain_len: u64,
     hash_hex: String,
@@ -233,7 +233,7 @@ fn stage(
     Prepared { attachment, plain, mime }
 }
 
-async fn mark_failed(channel: &str, pending_id: &str) {
+pub(super) async fn mark_failed(channel: &str, pending_id: &str) {
     let failed = {
         let mut state = vector_core::state::STATE.lock().await;
         state.update_message(pending_id, |m| {
@@ -248,7 +248,7 @@ async fn mark_failed(channel: &str, pending_id: &str) {
 
 /// The bubble first, then each upload with progress and cancel, then one sealed message;
 /// the echo replaces the bubble. Returns a sent Mini App's realtime topic.
-async fn dispatch(
+pub(super) async fn dispatch(
     channel: String,
     content: String,
     replied_to: String,
@@ -297,138 +297,7 @@ async fn dispatch(
         Callback.on_pending(&channel, &pending);
         let cancel = Callback.cancel_token(&pending_id);
 
-        let signer = vector_core::signer::active_signer().map_err(|e| crate::t::community_signer_unavailable(e.to_string()).to_string())?;
-        let servers = vector_core::state::get_blossom_servers();
-        if servers.is_empty() {
-            mark_failed(&channel, &pending_id).await;
-            return Err(crate::t::community_no_media_servers().to_string());
-        }
-
-        let mut uploaded = Vec::with_capacity(prepared.len());
-        for Prepared { mut attachment, plain, mime } in prepared {
-            let sealed = match vector_core::sending::seal_or_reuse(
-                plain,
-                &attachment.id,
-                &attachment.key,
-                &attachment.nonce,
-                &pending_id,
-                Arc::new(Callback),
-                cancel.clone(),
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    mark_failed(&channel, &pending_id).await;
-                    return Err(e);
-                }
-            };
-            let (encrypted, sealed_file) = match sealed {
-                // A live blob already holds it: no upload, only a background mirror if it's someone else's.
-                Sealed::Reused(r) => {
-                    let foreign = !r.mine;
-                    (attachment.key, attachment.nonce, attachment.url, attachment.size) =
-                        (r.key, r.nonce, r.url, r.size);
-                    {
-                        let adopted = vector_core::compact::CompactAttachment::from_attachment(&attachment);
-                        let mut state = vector_core::state::STATE.lock().await;
-                        state.update_attachment(&channel, &pending_id, &attachment.id, |a| *a = adopted.clone());
-                    }
-                    Callback.on_upload_complete(&channel, &pending_id, &attachment.id, &attachment.url);
-                    if foreign {
-                        let (signer, url) = (signer.clone(), attachment.url.clone());
-                        vector_core::db::spawn_bound(async move {
-                            let _ = vector_core::blossom::mirror_blob_to_servers(
-                                signer,
-                                &url,
-                                vector_core::state::get_blossom_servers(),
-                                1,
-                                Duration::from_secs(8),
-                                &[],
-                            )
-                            .await;
-                        });
-                    }
-                    uploaded.push(attachment);
-                    continue;
-                }
-                Sealed::Body(body, guard) => (body, guard),
-            };
-            let pid = pending_id.clone();
-            let progress: vector_core::blossom::ProgressCallback = Arc::new(move |pct, bytes| {
-                Callback.on_upload_progress(&pid, pct.unwrap_or(0), bytes.unwrap_or(0))
-            });
-            let body = encrypted.clone();
-            let accepted = match vector_core::blossom::upload_body_with_progress_and_failover(
-                signer.clone(),
-                servers.clone(),
-                encrypted,
-                Some(mime.as_str()),
-                true,
-                progress,
-                Some(3),
-                Some(Duration::from_secs(2)),
-                cancel.clone(),
-            )
-            .await
-            {
-                Ok(a) => a,
-                Err(e) => {
-                    if !cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
-                        vector_core::sending::keep_for_retry(
-                            &body,
-                            sealed_file,
-                            &attachment.id,
-                            &attachment.key,
-                            &attachment.nonce,
-                            &pending_id,
-                            &mime,
-                        );
-                    }
-                    mark_failed(&channel, &pending_id).await;
-                    return Err(crate::t::community_upload_failed(e.to_string()).to_string());
-                }
-            };
-            if vector_core::media::keep_media()
-                && vector_core::sending::keep_sent(
-                    &body,
-                    &attachment.id,
-                    &attachment.key,
-                    &attachment.nonce,
-                    attachment.size.saturating_sub(16),
-                    &mime,
-                )
-            {
-                attachment.downloaded = true;
-            }
-            attachment.url = accepted.url.clone();
-            {
-                let mut state = vector_core::state::STATE.lock().await;
-                let url = accepted.url.clone();
-                state.update_attachment(&channel, &pending_id, &attachment.id, |a| {
-                    a.url = url.clone().into_boxed_str();
-                });
-            }
-            Callback.on_upload_complete(&channel, &pending_id, &attachment.id, &accepted.url);
-            // BUD-04 mirrors ride the imeta as fallbacks; none never fails the send.
-            let mirrors = vector_core::blossom::mirror_blob_to_servers(
-                signer.clone(),
-                &accepted.url,
-                servers.clone(),
-                2,
-                Duration::from_secs(5),
-                std::slice::from_ref(&accepted.server),
-            )
-            .await;
-            if !mirrors.is_empty() {
-                attachment.fallback_urls = mirrors.clone();
-                let mut state = vector_core::state::STATE.lock().await;
-                state.update_attachment(&channel, &pending_id, &attachment.id, |a| {
-                    a.set_fallback_urls(mirrors.iter().map(|s| s.as_str().into()));
-                });
-            }
-            uploaded.push(attachment);
-        }
+        let uploaded = upload_all(&channel, &pending_id, prepared, cancel).await?;
 
         let mut tags: Vec<_> = uploaded
             .iter()
@@ -493,6 +362,163 @@ async fn dispatch(
         }
     })
     .await
+}
+
+/// Each file sealed and uploaded in turn under the bubble `pending_id`, which goes red on a
+/// failure. A blob already live is referenced rather than sent again.
+pub(super) async fn upload_all(
+    chat: &str,
+    pending_id: &str,
+    prepared: Vec<Prepared>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Vec<vector_core::types::Attachment>, String> {
+    let signer = match vector_core::signer::active_signer() {
+        Ok(s) => s,
+        Err(e) => {
+            mark_failed(chat, pending_id).await;
+            return Err(crate::t::community_signer_unavailable(e.to_string()).to_string());
+        }
+    };
+    let servers = vector_core::state::get_blossom_servers();
+    if servers.is_empty() {
+        mark_failed(chat, pending_id).await;
+        return Err(crate::t::community_no_media_servers().to_string());
+    }
+    let total = prepared.iter().map(|p| p.attachment.size).sum::<u64>().max(1);
+    let mut done = 0u64;
+    let mut uploaded = Vec::with_capacity(prepared.len());
+    for Prepared { mut attachment, plain, mime } in prepared {
+        let size = attachment.size;
+        let sealed = match vector_core::sending::seal_or_reuse(
+            plain,
+            &attachment.id,
+            &attachment.key,
+            &attachment.nonce,
+            pending_id,
+            Arc::new(Callback),
+            cancel.clone(),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                mark_failed(chat, pending_id).await;
+                return Err(e);
+            }
+        };
+        let (encrypted, sealed_file) = match sealed {
+            // A live blob already holds it: no upload, only a background mirror if it's someone else's.
+            Sealed::Reused(r) => {
+                let foreign = !r.mine;
+                (attachment.key, attachment.nonce, attachment.url, attachment.size) =
+                    (r.key, r.nonce, r.url, r.size);
+                {
+                    let adopted = vector_core::compact::CompactAttachment::from_attachment(&attachment);
+                    let mut state = vector_core::state::STATE.lock().await;
+                    state.update_attachment(chat, pending_id, &attachment.id, |a| *a = adopted.clone());
+                }
+                Callback.on_upload_complete(chat, pending_id, &attachment.id, &attachment.url);
+                if foreign {
+                    let (signer, url) = (signer.clone(), attachment.url.clone());
+                    vector_core::db::spawn_bound(async move {
+                        let _ = vector_core::blossom::mirror_blob_to_servers(
+                            signer,
+                            &url,
+                            vector_core::state::get_blossom_servers(),
+                            1,
+                            Duration::from_secs(8),
+                            &[],
+                        )
+                        .await;
+                    });
+                }
+                done += size;
+                uploaded.push(attachment);
+                continue;
+            }
+            Sealed::Body(body, guard) => (body, guard),
+        };
+        let pid = pending_id.to_string();
+        // One bar for the whole message: this file's share on top of those already up.
+        let (before, share) = (done, size.max(1));
+        let progress: vector_core::blossom::ProgressCallback = Arc::new(move |pct, bytes| {
+            let pct = pct.unwrap_or(0) as u64;
+            let overall = ((before + share * pct / 100) * 100 / total).min(100) as u8;
+            Callback.on_upload_progress(&pid, overall, before + bytes.unwrap_or(0))
+        });
+        let body = encrypted.clone();
+        let accepted = match vector_core::blossom::upload_body_with_progress_and_failover(
+            signer.clone(),
+            servers.clone(),
+            encrypted,
+            Some(mime.as_str()),
+            true,
+            progress,
+            Some(3),
+            Some(Duration::from_secs(2)),
+            cancel.clone(),
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                if !cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+                    vector_core::sending::keep_for_retry(
+                        &body,
+                        sealed_file,
+                        &attachment.id,
+                        &attachment.key,
+                        &attachment.nonce,
+                        pending_id,
+                        &mime,
+                    );
+                }
+                mark_failed(chat, pending_id).await;
+                return Err(crate::t::community_upload_failed(e.to_string()).to_string());
+            }
+        };
+        if vector_core::media::keep_media()
+            && vector_core::sending::keep_sent(
+                &body,
+                &attachment.id,
+                &attachment.key,
+                &attachment.nonce,
+                attachment.size.saturating_sub(16),
+                &mime,
+            )
+        {
+            attachment.downloaded = true;
+        }
+        attachment.url = accepted.url.clone();
+        {
+            let mut state = vector_core::state::STATE.lock().await;
+            let url = accepted.url.clone();
+            state.update_attachment(chat, pending_id, &attachment.id, |a| {
+                a.url = url.clone().into_boxed_str();
+            });
+        }
+        Callback.on_upload_complete(chat, pending_id, &attachment.id, &accepted.url);
+        // BUD-04 mirrors ride the imeta as fallbacks; none never fails the send.
+        let mirrors = vector_core::blossom::mirror_blob_to_servers(
+            signer.clone(),
+            &accepted.url,
+            servers.clone(),
+            2,
+            Duration::from_secs(5),
+            std::slice::from_ref(&accepted.server),
+        )
+        .await;
+        if !mirrors.is_empty() {
+            attachment.fallback_urls = mirrors.clone();
+            let mut state = vector_core::state::STATE.lock().await;
+            state.update_attachment(chat, pending_id, &attachment.id, |a| {
+                a.set_fallback_urls(mirrors.iter().map(|s| s.as_str().into()));
+            });
+        }
+        done += size;
+        uploaded.push(attachment);
+    }
+    Ok(uploaded)
 }
 
 // i18n-exempt: sentinel, matched and shown translated

@@ -261,6 +261,9 @@ pub struct VectorApp {
     last_dm: Option<String>,
     /// Each chat's composer as it was left, until it is opened again. Runtime only.
     drafts: HashMap<String, Draft>,
+    /// Files waiting in the composer for the next message, and the next tile's id.
+    staged: Vec<crate::staged::Staged>,
+    staged_seq: u64,
     /// The chat the composer's text and reply belong to, which a close leaving no chat open
     /// keeps until another opens.
     draft_owner: Option<SharedString>,
@@ -431,6 +434,7 @@ struct Draft {
     mode: Mode,
     held: Option<(String, Mode)>,
     tracked: Vec<(String, String)>,
+    staged: Vec<crate::staged::Staged>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1117,6 +1121,8 @@ impl VectorApp {
             last_dm: None,
             root_focus: cx.focus_handle(),
             drafts: HashMap::new(),
+            staged: Vec::new(),
+            staged_seq: 0,
             draft_owner: None,
             shared: None,
             send_shown: false,
@@ -6621,12 +6627,17 @@ impl VectorApp {
         let text = self.input.read(cx).text().to_string();
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         let held = self.edit_held.take();
-        if text.is_empty() && mode == Mode::Normal {
+        let mut staged = std::mem::take(&mut self.staged);
+        staged.retain(|s| s.live());
+        if text.is_empty() && mode == Mode::Normal && staged.is_empty() {
             self.drafts.remove(open.as_ref());
         } else {
-            self.drafts.insert(open.to_string(), Draft { text, mode, held, tracked: std::mem::take(&mut self.tracked) });
+            self.drafts.insert(open.to_string(), Draft { text, mode, held, tracked: std::mem::take(&mut self.tracked), staged });
         }
-        self.input.update(cx, |input, cx| input.set_text("", cx));
+        self.input.update(cx, |input, cx| {
+            input.set_text("", cx);
+            input.set_submit_empty(false);
+        });
     }
 
     /// `id`'s draft back in the composer; a drafted reply only while its target exists.
@@ -6635,7 +6646,11 @@ impl VectorApp {
             return;
         }
         let Some(d) = self.drafts.remove(id) else { return };
-        self.input.update(cx, |input, cx| input.set_text(&d.text, cx));
+        self.input.update(cx, |input, cx| {
+            input.set_text(&d.text, cx);
+            input.set_submit_empty(!d.staged.is_empty());
+        });
+        self.staged = d.staged;
         self.tracked = d.tracked;
         self.edit_held = d.held;
         let target = match &d.mode {
@@ -6686,6 +6701,12 @@ impl VectorApp {
             Mode::Reply { id, .. } => id.clone(),
             _ => String::new(),
         };
+        if self.has_staged() && bot.is_none() {
+            return self.send_staged(id.to_string(), text, reply, cx);
+        }
+        if text.trim().is_empty() {
+            return;
+        }
         if self.live {
             let receiver = id.to_string();
             let used = crate::emoji::in_text(&text);
@@ -7082,7 +7103,9 @@ impl VectorApp {
             Some(crate::recorder::Due::Idle) => self.rec.idle(),
             None => {}
         }
-        self.send_shown = !self.input.read(cx).text().trim().is_empty();
+        let now = std::time::Instant::now();
+        self.staged.retain(|s| !s.spent(now));
+        self.send_shown = !self.input.read(cx).text().trim().is_empty() || self.has_staged();
         self.sync_wallpaper(cx);
         if self.wallpaper.moving() {
             window.request_animation_frame();
@@ -10719,6 +10742,7 @@ impl VectorApp {
         let edit_bar = self.wallpaper.edit_alpha().filter(|_| staged.is_some() || self.wallpaper.preview.is_none()).map(|a| {
             crate::wallpaper::edit_bar(&self.wallpaper.label, self.wallpaper.busy, a, &on_wp)
         });
+        let staged_tray = self.staged_tray(cx);
         let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
         let chat_box = self.chat_box.clone();
         let app_box = cx.entity().downgrade();
@@ -10847,6 +10871,7 @@ impl VectorApp {
             .child(composer(
                 self.input.clone(),
                 &self.mode,
+                staged_tray,
                 self.composer_picker(window),
                 self.attach.map(|o| (o, self.pivx_wallet_view(cx).or_else(|| self.miniapps_view(cx)))),
                 {
@@ -11266,6 +11291,7 @@ fn divider(label: impl IntoElement, line: gpui::Hsla, opacity: f32) -> AnyElemen
 fn composer(
     input: Entity<TextInput>,
     mode: &Mode,
+    tray: Option<(AnyElement, bool)>,
     picker: Option<(AnyElement, bool, bool)>,
     attach: Option<(std::time::Instant, Option<AnyElement>)>,
     attach_turned: Option<std::time::Instant>,
@@ -11318,6 +11344,8 @@ fn composer(
     let replying = matches!(mode, Mode::Reply { .. });
     let editing = matches!(mode, Mode::Edit { .. });
     let opened = crate::kit::ease("reply-bar".into(), if replying { 1. } else { 0. }, 0.22, crate::kit::bezier(0.33, 1., 0.68, 1.));
+    let trayed = crate::kit::ease("staged-tray".into(), if tray.as_ref().is_some_and(|t| t.1) && !editing { 1. } else { 0. }, 0.22, crate::kit::bezier(0.33, 1., 0.68, 1.));
+    let tray_h = crate::staged::TRAY * trayed;
     let shown = crate::kit::ease("reply-bar-fade".into(), if replying { 1. } else { 0. }, 0.18, crate::kit::css_ease());
     thread_local! {
         // The bar keeps its last reply while it folds away.
@@ -11355,7 +11383,7 @@ fn composer(
         })
         .flex_shrink_0()
         .px(px(8.))
-        .pt(px(5. + 34. * opened + if commanding { 34. } else { 0. }))
+        .pt(px(5. + 34. * opened + tray_h + if commanding { 34. } else { 0. }))
         .pb(px(5.))
         .bg(linear_gradient(
             90.,
@@ -11439,11 +11467,28 @@ fn composer(
                 ),
         );
     }
-    if let Some(strip) = strip {
+    if let Some((tray, _)) = tray.filter(|_| trayed > 0.) {
+        // Under a reply bar it continues the bar; alone it is the tab.
+        let corner = 10. * (1. - opened);
         boxed = boxed.child(
             div()
                 .absolute()
                 .top(px(5. + 34. * opened))
+                .left(px(8.))
+                .right(px(8.))
+                .h(px(12. + tray_h))
+                .overflow_hidden()
+                .rounded_tl(px(corner))
+                .rounded_tr(px(corner))
+                .bg(c(0x0b1510))
+                .child(div().h(px(crate::staged::TRAY)).child(tray)),
+        );
+    }
+    if let Some(strip) = strip {
+        boxed = boxed.child(
+            div()
+                .absolute()
+                .top(px(5. + 34. * opened + tray_h))
                 .left(px(8.))
                 .right(px(8.))
                 .h(px(46.))
@@ -11875,7 +11920,7 @@ impl VectorApp {
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             filters: None,
             prompt: None,
         });
@@ -11885,12 +11930,9 @@ impl VectorApp {
                 return;
             };
             let paths = cx.background_executor().spawn(async move { crate::picked::adopt(paths) }).await;
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
             window
                 .update(cx, |_, window, cx| {
-                    this.update(cx, |this, cx| this.open_file_preview(path, window, cx))
+                    this.update(cx, |this, cx| this.open_paths_preview(paths, window, cx))
                         .ok();
                 })
                 .ok();
@@ -11943,13 +11985,18 @@ impl VectorApp {
 
     fn open_paths_preview(
         &mut self,
-        mut paths: Vec<std::path::PathBuf>,
+        paths: Vec<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let files = |p: &std::path::PathBuf| p.is_file() || backend::pasted::get(p).is_some();
         match paths.len() {
             0 => {}
-            1 if paths[0].is_file() || backend::pasted::get(&paths[0]).is_some() => self.open_file_preview(paths.remove(0), window, cx),
+            _ if paths.iter().all(files) => {
+                for path in paths {
+                    self.open_file_preview(path, window, cx);
+                }
+            }
             _ => self.open_preview(window, cx, move |chat, reply, window, cx| {
                 crate::filepreview::FilePreview::zipped(paths, chat, reply, window, cx)
             }),
@@ -11989,21 +12036,170 @@ impl VectorApp {
                             cx,
                         );
                     }
-                    _ => this.preview_file(path, window, cx),
+                    _ => this.stage_file(path, window, cx),
                 })
                 .ok();
             })
             .detach();
             return;
         }
-        self.preview_file(path, window, cx);
+        self.stage_file(path, window, cx);
     }
 
-    fn preview_file(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let media = self.media.clone();
-        self.open_preview(window, cx, move |chat, reply, window, cx| {
-            crate::filepreview::FilePreview::new(path, chat, reply, window, cx).with_media(media)
+    fn has_staged(&self) -> bool {
+        self.staged.iter().any(|s| s.live())
+    }
+
+    /// The composer's Send and Enter follow whether there's anything to send.
+    fn staged_changed(&mut self, cx: &mut Context<Self>) {
+        let any = self.has_staged();
+        self.input.update(cx, |i, _| i.set_submit_empty(any));
+        let send = any || !self.input.read(cx).text().trim().is_empty();
+        if send != self.send_shown {
+            self.send_shown = send;
+            self.send_flipped = Some(std::time::Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// A file joins the message being written, as a tile in the composer.
+    fn stage_file(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.clone() else {
+            return;
+        };
+        let (publish, live, media) = (self.can_publish(), self.live, self.media.clone());
+        let preview = cx.new(|cx| {
+            let mut p = crate::filepreview::FilePreview::staged(path.clone(), chat.to_string(), cx).with_media(media);
+            p.publish = publish;
+            p.check_servers = live;
+            p
         });
+        self.staged_seq += 1;
+        let id = self.staged_seq;
+        cx.subscribe_in(&preview, window, move |this, _, e: &crate::filepreview::Event, window, cx| {
+            this.file_preview = None;
+            window.focus(&this.input.focus_handle(cx), cx);
+            match e {
+                crate::filepreview::Event::Remove => this.unstage(id, cx),
+                crate::filepreview::Event::Publish(path) => {
+                    let path = path.clone();
+                    this.unstage(id, cx);
+                    this.open_publish(path, window, cx);
+                }
+                _ => cx.notify(),
+            }
+        })
+        .detach();
+        let ext = preview.read(cx).ext().to_string();
+        let file = path.clone();
+        cx.spawn(async move |this, cx| {
+            let (thumb, blur, video) = cx
+                .background_executor()
+                .spawn(async move { crate::staged::thumb(&file, &ext) })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.staged.iter_mut().chain(this.drafts.values_mut().flat_map(|d| d.staged.iter_mut())).find(|s| s.id == id) {
+                    s.thumb = thumb.map(Arc::new);
+                    s.blur = blur.map(Arc::new);
+                    s.video = video;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        self.staged.push(crate::staged::Staged {
+            id,
+            preview,
+            thumb: None,
+            blur: None,
+            video: false,
+            added: std::time::Instant::now(),
+            leaving: None,
+        });
+        self.attach = None;
+        window.focus(&self.input.focus_handle(cx), cx);
+        self.staged_changed(cx);
+    }
+
+    /// A tile leaves the composer; its slot folds away.
+    fn unstage(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(s) = self.staged.iter_mut().find(|s| s.id == id && s.live()) else { return };
+        s.leaving = Some(std::time::Instant::now());
+        let path = s.preview.update(cx, |p, _| {
+            p.discard();
+            p.path().to_path_buf()
+        });
+        backend::archive::forget(&path);
+        self.staged_changed(cx);
+    }
+
+    fn open_staged(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.staged.iter().find(|s| s.id == id && s.live()) else { return };
+        let preview = s.preview.clone();
+        preview.update(cx, |p, cx| p.open(window, cx));
+        self.file_preview = Some(preview);
+        cx.notify();
+    }
+
+    /// The composer's tray, while it holds or is folding away tiles.
+    fn staged_tray(&self, cx: &mut Context<Self>) -> Option<(AnyElement, bool)> {
+        if self.staged.is_empty() || matches!(self.mode, Mode::Edit { .. }) {
+            return None;
+        }
+        let app = cx.entity().downgrade();
+        let on: crate::staged::On = Rc::new(move |act, window, cx| {
+            app.update(cx, |app, cx| match act {
+                crate::staged::Act::Open(id) => app.open_staged(id, window, cx),
+                crate::staged::Act::Remove(id) => app.unstage(id, cx),
+            })
+            .ok();
+        });
+        Some((crate::staged::tray(&self.staged, on, cx), self.has_staged()))
+    }
+
+    /// Words and every staged file as one message. A video still encoding is waited for,
+    /// as the single-file preview does.
+    fn send_staged(&mut self, receiver: String, text: String, reply: String, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let mut files = Vec::new();
+        for s in self.staged.iter_mut().filter(|s| s.live()) {
+            s.leaving = Some(now);
+            let p = s.preview.read(cx);
+            files.push((p.outgoing(), p.compressed_for_send()));
+        }
+        self.staged_changed(cx);
+        if !self.live {
+            for (o, _) in &files {
+                backend::archive::forget(&o.path);
+            }
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let mut out = Vec::with_capacity(files.len());
+            for (mut o, wait) in files {
+                if let Some(w) = wait {
+                    o.precompressed = w.await;
+                }
+                out.push(o);
+            }
+            let paths: Vec<_> = out.iter().map(|o| o.path.clone()).collect();
+            let done = backend::run(backend::outbox::send(receiver, text, reply, out)).await;
+            for p in &paths {
+                backend::archive::forget(p);
+            }
+            let err = match done {
+                Ok(Ok(())) => return,
+                Ok(Err(e)) => e,
+                Err(e) => e.to_string(),
+            };
+            // i18n-exempt: core's English
+            if err.contains("Upload cancelled") {
+                return;
+            }
+            this.update(cx, |this, cx| this.upload_failed(&err, cx)).ok();
+        })
+        .detach();
     }
 
     fn open_preview(
@@ -12046,6 +12242,7 @@ impl VectorApp {
                     crate::filepreview::Event::Failed(err) => {
                         this.notice(&t::upload_compression_failed(), err.clone(), cx)
                     }
+                    crate::filepreview::Event::Done | crate::filepreview::Event::Remove => {}
                 }
             },
         )
@@ -15130,7 +15327,7 @@ impl VectorApp {
         let (text, caret) = (input.text().to_string(), input.caret());
         let shown = |app: &Self| (app.shortcode.is_some(), app.mention.is_some(), app.time_pick.is_some(), app.time_chip.as_ref().map(|c| c.key()));
         let (before, send_before) = (shown(self), self.send_shown);
-        let send = !text.trim().is_empty();
+        let send = !text.trim().is_empty() || self.has_staged();
         if send != self.send_shown {
             self.send_shown = send;
             self.send_flipped = Some(std::time::Instant::now());

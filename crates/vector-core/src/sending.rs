@@ -706,7 +706,7 @@ async fn finalize_gift_wrap_sent(
 /// gift-wrap with retry → finalize → callback.on_sent → optional self-send.
 /// Our pending message into its chat. A send answers a DM request, so the pictures and
 /// wallpaper held while it waited come down now.
-async fn add_pending(receiver_npub: &str, msg: &Message) {
+pub async fn add_pending(receiver_npub: &str, msg: &Message) {
     let answered = {
         let mut state = STATE.lock().await;
         let unanswered = crate::requests::shielded() && state.dm_unanswered(receiver_npub);
