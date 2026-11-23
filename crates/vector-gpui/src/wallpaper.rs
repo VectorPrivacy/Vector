@@ -255,14 +255,16 @@ fn bake_size(key: &Key) -> (u32, u32) {
     (((key.size.0.max(1) as f32 * f).round() as u32).max(1), ((key.size.1.max(1) as f32 * f).round() as u32).max(1))
 }
 
-/// Decode, cover the pane (scaled 2% so the blurred edge falls outside) and blur. Dim is a
-/// shade drawn over it, so it never rebakes.
+/// Decode, scale to cover the pane at the picture's own shape (cut 1% a side so the blurred
+/// edge falls outside) and blur. The paint covers the pane from it, so a bake made for any size
+/// frames the picture the same: a new size only sharpens it. Dim is a shade drawn over it, so
+/// it never rebakes.
 pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderImage>>) {
     let _trim = crate::trim::OnDrop;
     let Job { key, decoded } = job;
     let (w, h) = bake_size(&key);
     let file = key.stored.then(|| bake_file(&key)).flatten();
-    if let Some(img) = file.as_deref().and_then(|f| crate::bakes::load(f, (w, h))) {
+    if let Some(img) = file.as_deref().and_then(|f| crate::bakes::load(f, None)) {
         return (key, decoded, Some(Arc::new(RenderImage::new(vec![image::Frame::new(img)]))));
     }
     let src = match decoded {
@@ -277,7 +279,9 @@ pub fn bake(job: Job) -> (Key, Option<Arc<image::RgbaImage>>, Option<Arc<RenderI
     };
     let Some(src) = src else { return (key, None, None) };
     let f = bake_scale(key.blur);
-    let mut out = crate::bakes::cover(&src, (w, h), 1.02);
+    let s = (w as f32 / src.width() as f32).max(h as f32 / src.height() as f32);
+    let shape = (((src.width() as f32 * s).round() as u32).max(1), ((src.height() as f32 * s).round() as u32).max(1));
+    let mut out = crate::bakes::cover(&src, shape, 1.02);
     if key.blur > 0 {
         out = image::imageops::fast_blur(&out, key.blur as f32 * f);
     }
@@ -327,7 +331,8 @@ fn bakes_dir(path: &Path) -> Option<PathBuf> {
 
 /// What every bake of one picture, at one blur, starts its name with.
 fn source_tag(key: &Key) -> String {
-    format!("{:016x}-{}-{}-", crate::bakes::source_hash(&key.path), key.ts, key.blur)
+    // `s`: bakes at the picture's shape; those cut to a pane's shape frame differently.
+    format!("{:016x}-{}-{}-s-", crate::bakes::source_hash(&key.path), key.ts, key.blur)
 }
 
 fn bake_file(key: &Key) -> Option<PathBuf> {
@@ -337,7 +342,7 @@ fn bake_file(key: &Key) -> Option<PathBuf> {
 /// `key`'s saved bake at exactly its size.
 fn saved_exact(key: &Key) -> Option<(Key, Arc<RenderImage>)> {
     let file = bake_file(key)?;
-    let img = crate::bakes::load(&file, bake_size(key))?;
+    let img = crate::bakes::load(&file, None)?;
     Some((key.clone(), Arc::new(RenderImage::new(vec![image::Frame::new(img)]))))
 }
 
@@ -349,7 +354,7 @@ fn saved_bake(key: &Key) -> Option<(Key, Arc<RenderImage>)> {
         .map(|f| (f, bake_size(key)))
         .or_else(|| crate::bakes::newest(&bakes_dir(&key.path)?, &source_tag(key)))?;
     let (file, (w, h)) = picked;
-    let img = crate::bakes::load(&file, (w, h))?;
+    let img = crate::bakes::load(&file, None)?;
     let f = bake_scale(key.blur);
     let size = if (w, h) == bake_size(key) { key.size } else { ((w as f32 / f).round() as u32, (h as f32 / f).round() as u32) };
     let found = Key { size, ..key.clone() };
@@ -607,9 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn a_blurred_bake_sits_below_the_pane_and_covers_it() {
+    fn a_blurred_bake_sits_below_the_pane_and_covers_it_at_the_pictures_shape() {
         let path = photo("cover", 1600, 1200);
-        for (blur, side) in [(0u8, (700u32, 450u32)), (2, (350, 225)), (5, (175, 113))] {
+        for (blur, side) in [(0u8, (700u32, 525u32)), (2, (350, 263)), (5, (175, 131))] {
             let key = Key { path: path.clone(), ts: 1, blur, size: (700, 450), stored: false };
             let (_, decoded, image) = bake(Job { key, decoded: None });
             let image = image.expect("baked");
@@ -705,6 +710,21 @@ mod tests {
         assert!(w.want(Some(key((400, 300)))).is_none(), "a size the layout lands on takes its saved bake, no settle");
         assert_eq!(w.shown.as_ref().map(|(k, _)| k.size), Some((400, 300)));
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(src);
+    }
+
+    #[test]
+    fn every_bake_keeps_the_pictures_shape() {
+        crate::bakes::test_data_dir();
+        let src = photo("shape", 900, 600);
+        for size in [(400, 300), (200, 600), (1200, 300)] {
+            let key = Key { path: src.clone(), ts: 1, blur: 0, size, stored: false };
+            let (_, _, image) = bake(Job { key, decoded: None });
+            let s = image.unwrap().size(0);
+            let ratio = s.width.0 as f32 / s.height.0 as f32;
+            assert!((ratio - 1.5).abs() < 0.01, "{size:?} baked {s:?}");
+            assert!(s.width.0 >= size.0 as i32 && s.height.0 >= size.1 as i32, "{size:?} covered by {s:?}");
+        }
         let _ = std::fs::remove_file(src);
     }
 
