@@ -10,7 +10,7 @@ use gpui::{AnyElement, Context, Entity, ImageSource, ObjectFit, RenderImage, Sha
 use crate::filepreview::FilePreview;
 use crate::kit::Tipped as _;
 use crate::t;
-use crate::theme::white_a;
+use crate::theme::{c, white_a};
 
 /// A tile's side, and the tray's height around a row of them.
 pub const TILE: f32 = 64.;
@@ -159,7 +159,7 @@ pub fn tray<V: 'static>(staged: &[Staged], on: On, cx: &mut Context<V>) -> AnyEl
                             div()
                                 .size(px(24.))
                                 .rounded_full()
-                                .bg(gpui::black().opacity(0.55))
+                                .bg(c(0x141414))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -188,18 +188,20 @@ pub fn tray<V: 'static>(staged: &[Staged], on: On, cx: &mut Context<V>) -> AnyEl
                     .right(px(4.))
                     .size(px(18.))
                     .rounded_full()
-                    .bg(gpui::black().opacity(0.6))
+                    .bg(c(0x141414))
+                    .border_1()
+                    .border_color(c(0x2e2e2e))
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .hover(|d| d.bg(gpui::black().opacity(0.85)))
+                    .hover(|d| d.bg(c(0x262626)))
                     .aria_label(t::composer_staged_remove(name))
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         remove(Act::Remove(id), window, cx)
                     })
-                    .child(svg().path("ui/viewer-close.svg").size(px(8.)).text_color(white_a(0.85))),
+                    .child(svg().path("ui/chrome-close.svg").size(px(8.)).text_color(c(0xd9d9d9))),
             );
         // The slot grows with the tile, so its neighbours slide; the tile itself pops.
         div()
