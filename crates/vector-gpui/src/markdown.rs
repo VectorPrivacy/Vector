@@ -761,17 +761,17 @@ impl Builder<'_> {
         }
         match kind {
             Kind::Link(_) | Kind::LinkTip(..) => {
-                look.color = gpui::rgb(crate::theme::PRIMARY).into();
+                look.color = crate::theme::c(crate::theme::PRIMARY);
                 if look.weight < gpui::FontWeight::MEDIUM {
                     look.weight = gpui::FontWeight::MEDIUM;
                 }
             }
             Kind::Mention(_) | Kind::Tag(None) => {
-                look.color = gpui::rgb(crate::theme::PRIMARY).into();
+                look.color = crate::theme::c(crate::theme::PRIMARY);
                 look.weight = gpui::FontWeight::MEDIUM;
             }
             Kind::Tag(Some(color)) => {
-                look.color = gpui::rgb(color).into();
+                look.color = crate::theme::c(color);
                 look.weight = gpui::FontWeight::MEDIUM;
             }
             _ => {}

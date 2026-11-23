@@ -786,7 +786,7 @@ pub fn popup(
                         div().mt(px(16.)).flex().justify_center().child(
                             div()
                                 .id("popup-link")
-                                .text_color(c(0x59fcb3))
+                                .text_color(c(crate::theme::ACCENT))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .cursor_pointer()
                                 .hover(|s| s.underline())
@@ -856,7 +856,7 @@ pub fn popup(
         .rounded(px(8.))
         .bg(c(APP_BG))
         .shadow(vec![gpui::BoxShadow {
-            color: ca(51, 219, 152, 0.145),
+            color: crate::theme::ta(crate::theme::PRIMARY, 0.145),
             offset: gpui::point(px(0.), px(0.)),
             blur_radius: px(15.),
             spread_radius: px(0.),

@@ -362,7 +362,7 @@ impl LoginView {
                             .rounded(px(13.))
                             .bg(c(PRIMARY))
                             .hover(|d| d.bg(c(ACCENT)))
-                            .text_color(c(0x052b1e))
+                            .text_color(c(crate::theme::BADGE_INK))
                             .font_weight(FontWeight::SEMIBOLD)
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| this.offer_switch(cx)))
@@ -518,7 +518,7 @@ impl LoginView {
                     .border_l_3()
                     .border_color(gpui::transparent_black())
                     .cursor_pointer()
-                    .hover(|s| s.bg(ca(89, 252, 179, 0.1)).border_color(c(ACCENT)))
+                    .hover(|s| s.bg(crate::theme::ta(crate::theme::ACCENT, 0.1)).border_color(c(ACCENT)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(p) = this.picker.as_mut() {
                             p.set_open(false);
@@ -1346,7 +1346,7 @@ fn lg_btn(id: &'static str, label: SharedString, kind: u8) -> gpui::Stateful<gpu
         2 => base
             .border_color(c(PRIMARY))
             .text_color(c(0xffffff))
-            .hover(|s| s.bg(ca(51, 219, 152, 0.08))),
+            .hover(|s| s.bg(crate::theme::ta(crate::theme::PRIMARY, 0.08))),
         _ => base
             .border_color(c(0x393b3c))
             .text_color(c(0xffffff))
@@ -1565,11 +1565,11 @@ impl LoginView {
                         .relative()
                         .child(
                             lg_btn("lg-create", t::login_create_account(), 1)
-                                .when(self.net.hold, |d| d.bg(ca(51, 219, 152, 0.25)).border_color(gpui::transparent_black()))
+                                .when(self.net.hold, |d| d.bg(crate::theme::ta(crate::theme::PRIMARY, 0.25)).border_color(gpui::transparent_black()))
                                 .on_click(cx.listener(|this, _, w, cx| this.create_account(w, cx))),
                         )
                         .child(lg_btn("lg-login", t::login_login(), 2)
-                            .when(self.net.hold, |d| d.border_color(ca(51, 219, 152, 0.25)).text_color(white_a(0.25)))
+                            .when(self.net.hold, |d| d.border_color(crate::theme::ta(crate::theme::PRIMARY, 0.25)).text_color(white_a(0.25)))
                             .on_click(cx.listener(|this, _, w, cx| {
                             if let Err(e) = this.net_ready() {
                                 return this.show_error(e, cx);
@@ -1704,7 +1704,7 @@ impl LoginView {
                             .mt(px(14.))
                             .text_size(px(14.))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(c(0xff2ea9)),
+                            .text_color(c(crate::theme::DANGER)),
                     )
                     .child(
                         kit::spaced(
@@ -1750,7 +1750,7 @@ impl LoginView {
             block = block.child(lg_title(
                 self.title.clone(),
                 true,
-                if self.error { 0xff2ea9 } else { 0xffffff },
+                if self.error { crate::theme::DANGER } else { 0xffffff },
             ));
         }
         if self.busy {

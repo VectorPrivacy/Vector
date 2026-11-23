@@ -580,12 +580,12 @@ impl LoginView {
                             .path("icons/refresh.svg")
                             .size(px(10.))
                             .mr(px(2.))
-                            .text_color(c(0x59fcb3))
+                            .text_color(c(crate::theme::ACCENT))
                             .with_animation("lg-net-spin", gpui::Animation::new(std::time::Duration::from_secs(1)).repeat(), |s, t| {
                                 s.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
                             }),
                     )
-                    .child(div().text_color(c(0x59fcb3)).child(t::login_net_connecting(&label(n.kind))))
+                    .child(div().text_color(c(crate::theme::ACCENT)).child(t::login_net_connecting(&label(n.kind))))
                     .child(t::login_net_keep_open()),
             );
         } else if !n.failed.is_empty() {

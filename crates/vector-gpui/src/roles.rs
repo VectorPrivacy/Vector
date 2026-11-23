@@ -1127,14 +1127,14 @@ fn editor(m: &CommSettings, store: &Store, on: &OnAct, cx: &App) -> AnyElement {
                         .rounded(px(8.))
                         .border_1()
                         .border_color(c(crate::timeline::DANGER).opacity(0.45))
-                        .bg(ca(255, 46, 169, 0.12))
+                        .bg(crate::theme::ta(crate::theme::DANGER, 0.12))
                         .font_weight(FontWeight::MEDIUM)
                         .text_size(px(14.))
                         .text_color(c(crate::timeline::DANGER))
                         .when(r.busy, |d| d.opacity(0.45))
                         .when(!r.busy, |d| {
                             d.cursor_pointer()
-                                .hover(|d| d.bg(ca(255, 46, 169, 0.18)))
+                                .hover(|d| d.bg(crate::theme::ta(crate::theme::DANGER, 0.18)))
                                 .on_click(click(on, || CsAct::Role(Act::Delete)))
                         })
                         .child(t::roles_delete()),

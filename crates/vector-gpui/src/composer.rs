@@ -1761,7 +1761,7 @@ impl TextInput {
         *self.chips.borrow_mut() = spans
             .iter()
             .filter_map(|(r, d)| match d {
-                Deco::Mention => Some((r.clone(), Hsla::from(gpui::Rgba { r: 89. / 255., g: 252. / 255., b: 179. / 255., a: 0.13 }), 4., 2.)),
+                Deco::Mention => Some((r.clone(), crate::theme::ta(crate::theme::ACCENT, 0.13), 4., 2.)),
                 Deco::Code => Some((r.clone(), gpui::hsla(0., 0., 1., 0.08), 3., 2.)),
                 Deco::Spoiler => Some((r.clone(), gpui::hsla(0., 0., 1., 0.16), 3., 0.)),
                 _ => None,
@@ -1803,7 +1803,7 @@ impl TextInput {
                     Deco::Spoiler => {}
                     Deco::Code => styled.font.family = crate::markdown::MONO.into(),
                     Deco::Mention => {
-                        styled.color = gpui::rgb(crate::theme::PRIMARY).into();
+                        styled.color = crate::theme::c(crate::theme::PRIMARY);
                         styled.font.weight = gpui::FontWeight::MEDIUM;
                     }
                     Deco::Subtext => styled.color = base.opacity(0.75),
@@ -1945,14 +1945,14 @@ impl Element for TextElement {
                 Vec::new(),
             )
         } else if layout.has_bidi() {
-            let tint = ca(89, 252, 179, 0.25);
+            let tint = crate::theme::ta(crate::theme::ACCENT, 0.25);
             let rects = layout.spans(start..end, bounds.size.width).into_iter().map(|(x0, x1, y)| {
                 fill(Bounds::from_corners(o + point(x0, y), o + point(x1, y + line_height)), tint)
             });
             (None, rects.collect())
         } else {
             let (a, b) = (layout.position(start), layout.position(end));
-            let tint = ca(89, 252, 179, 0.25);
+            let tint = crate::theme::ta(crate::theme::ACCENT, 0.25);
             let mut rects = Vec::new();
             if a.y == b.y {
                 rects.push(Bounds::from_corners(

@@ -81,7 +81,7 @@ fn tile(i: usize, ch: &Choice, selected: bool, on: &OnAct) -> AnyElement {
         .rounded(px(8.))
         .border_1()
         .border_color(if selected { c(PRIMARY) } else { gpui::transparent_black() })
-        .bg(if selected { ca(89, 252, 179, 0.08) } else { gpui::transparent_black() })
+        .bg(if selected { crate::theme::ta(crate::theme::ACCENT, 0.08) } else { gpui::transparent_black() })
         .hover(|d| d.bg(white_a(0.05)))
         .cursor_pointer()
         .on_click(move |e, w, cx| {
@@ -167,7 +167,7 @@ pub fn render(p: &Picker, win: gpui::Size<gpui::Pixels>, on: &OnAct) -> AnyEleme
         .rounded(px(8.))
         .bg(c(APP_BG))
         .shadow(vec![gpui::BoxShadow {
-            color: ca(51, 219, 152, 0.145),
+            color: crate::theme::ta(crate::theme::PRIMARY, 0.145),
             offset: gpui::point(px(0.), px(0.)),
             blur_radius: px(15.),
             spread_radius: px(0.),

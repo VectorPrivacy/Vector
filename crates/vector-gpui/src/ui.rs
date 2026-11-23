@@ -3322,6 +3322,7 @@ impl VectorApp {
             backend::selfsync::start();
         });
         let rx = backend::run(async {
+            let themed = crate::theme::set_theme(&backend::prefs::sql("theme").unwrap_or_default());
             let early = backend::prefs::sql_bools(&[("strip_tracking", true), ("display_image_types", false), ("autocorrect", true)]);
             crate::untrack::set_enabled(early[0]);
             let b = backend::prefs::sql_bools(&[
@@ -3336,12 +3337,16 @@ impl VectorApp {
                 b[0],
                 (b[1], b[2], b[3], b[4]),
                 (backend::actions::emoji_usage(), backend::prefs::synced_settings()),
+                themed,
             )
         });
         cx.spawn(async move |this, cx| {
-            let Ok((((on, limit), image_types, autocorrect), previews, (emoticons, times, chat_bg, floating), (used, synced))) = rx.await else {
+            let Ok((((on, limit), image_types, autocorrect), previews, (emoticons, times, chat_bg, floating), (used, synced), themed)) = rx.await else {
                 return;
             };
+            if themed {
+                cx.update(|cx| cx.refresh_windows());
+            }
             this.update(cx, |this, cx| {
                 let mut media = this.media.borrow_mut();
                 media.auto_download = crate::media::AutoDownload { on, limit };
@@ -7973,7 +7978,7 @@ impl VectorApp {
                         .flex()
                         .items_center()
                         .text_size(px(13.))
-                        .text_color(c(0x33db98))
+                        .text_color(c(crate::theme::PRIMARY))
                         .cursor_pointer()
                         .hover(|d| d.underline())
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -9060,7 +9065,7 @@ fn get_started(width: f32, cx: &mut Context<VectorApp>) -> impl IntoElement {
             .gap(px(10.))
             .rounded_full()
             .border_1()
-            .border_color(ca(89, 252, 179, 0.5))
+            .border_color(crate::theme::ta(crate::theme::ACCENT, 0.5))
             .bg(c(0x000000))
             .cursor_pointer()
             .on_click(cx.listener(|app, _, window, cx| app.open_new_chat(window, cx)))
@@ -9074,8 +9079,8 @@ fn get_started(width: f32, cx: &mut Context<VectorApp>) -> impl IntoElement {
                     .rounded_r_full()
                     .bg(gpui::linear_gradient(
                         90.,
-                        gpui::linear_color_stop(ca(89, 252, 179, 0.), 0.),
-                        gpui::linear_color_stop(ca(89, 252, 179, 0.3), 1.),
+                        gpui::linear_color_stop(crate::theme::ta(crate::theme::ACCENT, 0.), 0.),
+                        gpui::linear_color_stop(crate::theme::ta(crate::theme::ACCENT, 0.3), 1.),
                     )),
             )
             .child(
@@ -9180,6 +9185,25 @@ fn typing_strip(store: &Store, chat: &str, fade: f32, window: &Window) -> Option
             .child(gpui::img(gpui::ImageSource::Render(typing_dots(window.scale_factor()))).id("typing-dots").size(px(18.)).flex_shrink_0())
             .child(text)
             .into_any_element(),
+    )
+}
+
+/// `.chat-messages::before`: a theme's picture, faint and covering, behind the messages.
+fn theme_backdrop((png, opacity): (&'static [u8], f32)) -> impl IntoElement {
+    thread_local! {
+        static DECODED: RefCell<Option<(usize, Arc<gpui::RenderImage>)>> = const { RefCell::new(None) };
+    }
+    let image = DECODED.with_borrow_mut(|held| {
+        if let Some((_, image)) = held.as_ref().filter(|(at, _)| *at == png.as_ptr() as usize) {
+            return Some(image.clone());
+        }
+        let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+        let image = Arc::new(gpui::RenderImage::new(vec![image::Frame::new(crate::media::to_bgra(img))]));
+        *held = Some((png.as_ptr() as usize, image.clone()));
+        Some(image)
+    });
+    div().absolute().inset_0().overflow_hidden().opacity(opacity).children(
+        image.map(|i| crate::pic::img(gpui::ImageSource::Render(i)).size_full().object_fit(gpui::ObjectFit::Cover)),
     )
 }
 
@@ -10751,7 +10775,7 @@ impl VectorApp {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
+                    .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)).children(crate::theme::chat_backdrop().map(theme_backdrop)))
                     .when(alone.is_some(), |d| d.pt(px(top_pad)))
                     .map(|d| match alone {
                         // Auto margins centre it until it no longer fits, then it scrolls from its top.
@@ -11125,7 +11149,7 @@ fn timeline_row(ctx: &timeline::Ctx, row: &Row, after_message: bool) -> AnyEleme
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(11.))
                 .text_color(c(ACCENT)),
-            ca(89, 252, 179, 0.6),
+            crate::theme::ta(crate::theme::ACCENT, 0.6),
             1.,
         ),
         Row::Notice(text) => div()
@@ -11308,7 +11332,7 @@ fn composer(
         .pb(px(5.))
         .bg(linear_gradient(
             90.,
-            linear_color_stop(c(ACCENT), 0.),
+            linear_color_stop(c(INPUT_FROM), 0.),
             linear_color_stop(c(ACCENT_DEEP), 1.),
         ));
     if let Some(Mode::Reply { id, name, snippet, tags }) = bar {
@@ -19249,6 +19273,10 @@ impl VectorApp {
                     }
                     "theme" => {
                         s.theme = value.to_string();
+                        if crate::theme::set_theme(value) {
+                            // Cached panes and replayed rows hold the old colours.
+                            window.refresh();
+                        }
                         if self.live {
                             backend::prefs::set_sql("theme", value.to_string());
                             pack_reload = true;
@@ -20962,7 +20990,7 @@ impl VectorApp {
                                         .bg(c(if empty { 0x555555 } else { ACCENT }))
                                         .when(!empty, |d| {
                                             d.shadow(vec![gpui::BoxShadow {
-                                                color: ca(89, 252, 179, 0.6),
+                                                color: crate::theme::ta(crate::theme::ACCENT, 0.6),
                                                 offset: gpui::point(px(0.), px(0.)),
                                                 blur_radius: px(6.),
                                                 spread_radius: px(0.),

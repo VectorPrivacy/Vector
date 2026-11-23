@@ -22,7 +22,7 @@ use crate::theme::{ACCENT, c, ca, white_a};
 
 const HISTORY: usize = 60;
 /// The Vector theme's `--danger-color`.
-pub(crate) const DANGER: u32 = 0xff2ea9;
+pub(crate) const DANGER: u32 = crate::theme::DANGER;
 const OPEN_W: f32 = 300.;
 const PILL_MAX_W: f32 = 320.;
 /// How long an ended call stays up to read why.
@@ -47,7 +47,7 @@ pub enum Quality {
 impl Quality {
     pub(crate) fn color(self) -> Hsla {
         match self {
-            Quality::Excellent => c(0x59fcb3),
+            Quality::Excellent => c(crate::theme::ACCENT),
             Quality::Good => c(0xfce459),
             Quality::Fair => c(0xfca559),
             Quality::Poor => c(DANGER),
@@ -756,8 +756,8 @@ pub(crate) fn toggle(id: &'static str, on_state: bool, act: Act, on: &OnAct) -> 
         .bg(if on_state {
             gpui::linear_gradient(
                 90.,
-                gpui::linear_color_stop(c(0x33db98), 0.),
-                gpui::linear_color_stop(c(0x00ff9d), 1.),
+                gpui::linear_color_stop(c(crate::theme::TOGGLE_FROM), 0.),
+                gpui::linear_color_stop(c(crate::theme::TOGGLE_TO), 1.),
             )
         } else {
             c(0x1a1a1a).into()

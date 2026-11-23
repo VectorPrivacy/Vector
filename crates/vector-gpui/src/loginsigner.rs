@@ -58,8 +58,8 @@ fn tone_color(t: Tone) -> u32 {
     match t {
         Tone::Plain => 0xb2b2b2,
         Tone::Connecting => 0xffb84d,
-        Tone::Online => 0x59fcb3,
-        Tone::Error => 0xff2ea9,
+        Tone::Online => crate::theme::ACCENT,
+        Tone::Error => crate::theme::DANGER,
     }
 }
 
@@ -496,7 +496,7 @@ impl LoginView {
                     )
                     .child(
                         btn("lg-qr-close", t::dialog_close())
-                            .bg(c(0x59fcb3))
+                            .bg(c(crate::theme::ACCENT))
                             .text_color(c(0x000000))
                             .on_click(cx.listener(|this, _, _, cx| this.signer_close_qr(cx))),
                     ),

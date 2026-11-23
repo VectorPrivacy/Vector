@@ -278,10 +278,10 @@ fn button(id: &'static str, label: SharedString, primary: bool) -> gpui::Statefu
         .cursor_pointer()
         .map(|d| {
             if primary {
-                d.bg(c(0x59fcb3).opacity(0.18))
+                d.bg(c(crate::theme::ACCENT).opacity(0.18))
                     .border_color(c(PRIMARY))
                     .text_color(c(PRIMARY))
-                    .hover(|s| s.bg(c(0x59fcb3).opacity(0.3)))
+                    .hover(|s| s.bg(c(crate::theme::ACCENT).opacity(0.3)))
             } else {
                 d.bg(c(0x141414).opacity(0.85))
                     .border_color(gpui::white().opacity(0.14))

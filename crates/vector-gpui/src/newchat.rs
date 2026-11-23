@@ -495,7 +495,7 @@ pub fn view(
                                 };
                                 button("create-group-create-btn", label)
                                     .bg(c(0x58fcb3))
-                                    .border_color(ca(90, 252, 180, 0.65))
+                                    .border_color(crate::theme::ta(crate::theme::ACCENT, 0.65))
                                     .text_color(c(0x000000))
                                     .when(!ready, |d| d.opacity(0.45))
                                     .when(ready, |d| {
@@ -539,7 +539,7 @@ pub fn view(
                     .child(
                         button("create-group-create-btn", t::newchat_start())
                             .bg(c(0x58fcb3))
-                            .border_color(ca(90, 252, 180, 0.65))
+                            .border_color(crate::theme::ta(crate::theme::ACCENT, 0.65))
                             .text_color(c(0x000000))
                             .when(!ready, |d| d.opacity(0.45))
                             .when(ready, |d| {
@@ -684,7 +684,7 @@ fn link_card(p: &Preview, member: impl Fn(&str) -> bool) -> impl IntoElement {
                             .pl(px(8.))
                             .pr(px(12.))
                             .rounded_full()
-                            .bg(ca(89, 252, 179, 0.12))
+                            .bg(crate::theme::ta(crate::theme::ACCENT, 0.12))
                             .flex()
                             .items_center()
                             .gap(px(6.))

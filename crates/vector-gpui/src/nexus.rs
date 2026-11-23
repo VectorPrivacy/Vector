@@ -27,7 +27,7 @@ const DIM: u32 = 0xb2b2b2;
 const MUTE: u32 = 0x7a7a7a;
 const CTA: u32 = ACCENT;
 const FAIR: u32 = 0xfca559;
-const DANGER: u32 = 0xff2ea9;
+const DANGER: u32 = crate::theme::DANGER;
 const FEW: usize = 8;
 const PAGE_MAX: f32 = 1040.;
 
@@ -587,7 +587,7 @@ fn action_button(n: &Nexus, app: &MarketplaceApp, lg: bool, on: &OnAct, key: &st
     let busy = action.is_some_and(|a| a.kind != Kind::Failed);
     let failed = action.is_some_and(|a| a.kind == Kind::Failed);
     let (kind_bg, kind_fg) = if failed {
-        (ca(255, 46, 169, 0.15), c(DANGER))
+        (crate::theme::ta(crate::theme::DANGER, 0.15), c(DANGER))
     } else if busy {
         (c(FILL), c(DIM))
     } else if app.update_available || !is_installed(app) {
@@ -1635,9 +1635,9 @@ fn browse(n: &Nexus, q: &str, width: f32, on: &OnAct) -> Vec<AnyElement> {
                 .pr(px(10.))
                 .py(px(10.))
                 .rounded(px(14.))
-                .bg(ca(51, 219, 152, 0.09))
+                .bg(crate::theme::ta(crate::theme::PRIMARY, 0.09))
                 .border_1()
-                .border_color(ca(51, 219, 152, 0.22))
+                .border_color(crate::theme::ta(crate::theme::PRIMARY, 0.22))
                 .child(glyph("arrow-up", 18., c(PRIMARY)))
                 .child(
                     div()
@@ -2103,7 +2103,7 @@ fn details(n: &Nexus, app: &MarketplaceApp, publisher: Option<&(SharedString, Op
                 .when(busy, |d| d.opacity(0.5))
                 .when(!busy, |d| {
                     d.cursor_pointer()
-                        .hover(|s| s.bg(ca(255, 46, 169, 0.12)))
+                        .hover(|s| s.bg(crate::theme::ta(crate::theme::DANGER, 0.12)))
                         .on_click(click(on, move || Act::Uninstall(id.clone())))
                 })
                 .child(label),

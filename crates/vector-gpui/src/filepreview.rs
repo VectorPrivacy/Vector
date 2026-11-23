@@ -689,8 +689,8 @@ pub fn neon_toggle(on: bool) -> gpui::Div {
             if on {
                 d.bg(linear_gradient(
                     90.,
-                    linear_color_stop(c(0x33db98), 0.),
-                    linear_color_stop(c(0x00ff9d), 1.),
+                    linear_color_stop(c(crate::theme::TOGGLE_FROM), 0.),
+                    linear_color_stop(c(crate::theme::TOGGLE_TO), 1.),
                 ))
             } else {
                 d.bg(c(0x1a1a1a))
@@ -766,9 +766,9 @@ impl Render for FilePreview {
                             .size(px(120.))
                             .mb(px(8.))
                             .rounded(px(16.))
-                            .bg(c(0x59fcb3).opacity(0.1))
+                            .bg(c(crate::theme::ACCENT).opacity(0.1))
                             .border_1()
-                            .border_color(c(0x59fcb3).opacity(0.2))
+                            .border_color(c(crate::theme::ACCENT).opacity(0.2))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -806,9 +806,9 @@ impl Render for FilePreview {
                             .size(px(120.))
                             .mb(px(8.))
                             .rounded(px(16.))
-                            .bg(c(0x59fcb3).opacity(0.1))
+                            .bg(c(crate::theme::ACCENT).opacity(0.1))
                             .border_1()
-                            .border_color(c(0x59fcb3).opacity(0.2))
+                            .border_color(c(crate::theme::ACCENT).opacity(0.2))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -816,7 +816,7 @@ impl Render for FilePreview {
                                 svg()
                                     .path("icons/folder.svg")
                                     .size(px(64.))
-                                    .text_color(c(0x59fcb3)),
+                                    .text_color(c(crate::theme::ACCENT)),
                             ),
                     )
                     .child(
@@ -932,13 +932,13 @@ impl Render for FilePreview {
                     .size(px(120.))
                     .mb(px(8.))
                     .rounded(px(16.))
-                    .bg(c(0x59fcb3).opacity(0.1))
+                    .bg(c(crate::theme::ACCENT).opacity(0.1))
                     .border_1()
-                    .border_color(c(0x59fcb3).opacity(0.2))
+                    .border_color(c(crate::theme::ACCENT).opacity(0.2))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(svg().path(self.icon).size(px(64.)).text_color(c(0x59fcb3)))
+                    .child(svg().path(self.icon).size(px(64.)).text_color(c(crate::theme::ACCENT)))
                     .into_any_element(),
             },
         };
@@ -1109,8 +1109,8 @@ impl Render for FilePreview {
                     .when(zipping || self.too_large || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
                     .bg(linear_gradient(
                         90.,
-                        linear_color_stop(c(0x33db98), 0.),
-                        linear_color_stop(c(0x00ff9d), 1.),
+                        linear_color_stop(c(crate::theme::SEND_FROM), 0.),
+                        linear_color_stop(c(crate::theme::SEND_TO), 1.),
                     ))
                     .hover(|s| s.opacity(0.9))
                     .text_color(c(0x000000))

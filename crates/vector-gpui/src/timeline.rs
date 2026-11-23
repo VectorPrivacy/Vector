@@ -20,7 +20,7 @@ use crate::markdown::{self, Block, MONO, Para, ParaKind};
 use crate::media::Linked;
 use crate::theme::*;
 
-pub const DANGER: u32 = 0xff2ea9;
+pub const DANGER: u32 = crate::theme::DANGER;
 pub const TEXT_SIZE: f32 = 15.;
 pub const TEXT_LH: f32 = 21.;
 
@@ -617,10 +617,10 @@ fn row_shell(
                 .when(pinged, |d| d.bg(c(PRIMARY).opacity(0.13)).border_color(c(PRIMARY)))
                 .when(replying, |d| d.bg(white_a(0.05)).border_color(white_a(0.5)))
                 .when_some(ctx.jumped.filter(|(id, _)| *id == m.id), |d, (_, t)| {
-                    d.bg(ca(90, 252, 180, jump_flash(t)))
+                    d.bg(crate::theme::ta(crate::theme::ACCENT, jump_flash(t)))
                 })
                 .when(failed, |d| {
-                    d.bg(ca(255, 46, 169, 0.1)).border_color(c(DANGER))
+                    d.bg(crate::theme::ta(crate::theme::DANGER, 0.1)).border_color(c(DANGER))
                 })
                 .child(gutter)
                 .child(body)
@@ -650,7 +650,7 @@ fn swipe_chip(id: &str, s: Swiped, gap: f32) -> AnyElement {
             if s.past {
                 d.bg(ca(10, 10, 10, 0.9)).border_color(c(ACCENT)).shadow(vec![
                     gpui::BoxShadow { color: c(ACCENT).into(), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.), inset: false },
-                    gpui::BoxShadow { color: ca(89, 252, 179, 0.55), offset: gpui::point(px(0.), px(0.)), blur_radius: px(18.), spread_radius: px(3.), inset: false },
+                    gpui::BoxShadow { color: crate::theme::ta(crate::theme::ACCENT, 0.55), offset: gpui::point(px(0.), px(0.)), blur_radius: px(18.), spread_radius: px(3.), inset: false },
                     gpui::BoxShadow { color: ca(0, 0, 0, 0.4), offset: gpui::point(px(0.), px(3.)), blur_radius: px(10.), spread_radius: px(0.), inset: false },
                 ])
             } else {
@@ -1606,9 +1606,9 @@ fn code_block(lang: &str, text: &SharedString, key: &str, click: &OnClick) -> An
                 .border_1()
                 // Opaque, so code scrolled under it doesn't show through: `.code-copy-btn`'s
                 // black at 60%, at 70% opacity, as it falls on the block.
-                .border_color(ca(89, 252, 179, 0.21))
+                .border_color(crate::theme::ta(crate::theme::ACCENT, 0.21))
                 .bg(c(0x050709))
-                .hover(|s| s.bg(c(0x030405)).border_color(ca(89, 252, 179, 0.5)))
+                .hover(|s| s.bg(c(0x030405)).border_color(crate::theme::ta(crate::theme::ACCENT, 0.5)))
                 .group(SharedString::from(format!("{key}-copy")))
                 .cursor_pointer()
                 .flex()
@@ -1666,9 +1666,9 @@ fn table(
         .overflow_hidden();
     let mut hrow = div()
         .flex()
-        .bg(ca(89, 252, 179, 0.04))
+        .bg(crate::theme::ta(crate::theme::ACCENT, 0.04))
         .border_b_1()
-        .border_color(ca(89, 252, 179, 0.18));
+        .border_color(crate::theme::ta(crate::theme::ACCENT, 0.18));
     for (i, p) in head.iter().enumerate() {
         hrow = hrow.child(cell(p, i, true, format!("{key}-h{i}")));
     }
@@ -1847,7 +1847,7 @@ fn reactions(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .border_1()
                 .opacity(0.9)
                 .when(mine, |d| {
-                    d.bg(ca(89, 252, 179, 0.18)).border_color(c(ACCENT))
+                    d.bg(crate::theme::ta(crate::theme::ACCENT, 0.18)).border_color(c(ACCENT))
                 })
                 .when(!mine, |d| d.bg(white_a(0.05)).border_color(white_a(0.08)))
                 .text_size(px(12.))

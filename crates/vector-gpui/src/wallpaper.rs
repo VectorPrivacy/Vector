@@ -440,7 +440,7 @@ pub fn edit_bar(label: &str, busy: bool, alpha: f32, on: &OnAct) -> impl IntoEle
                 .text_color(white_a(0.6))
                 .child(label.to_string()),
         )
-        .child(side("wallpaper-edit-save-btn", "icons/save.svg", 16., c(0x33DB98), crate::t::dialog_save(), || Act::Save))
+        .child(side("wallpaper-edit-save-btn", "icons/save.svg", 16., c(crate::theme::PRIMARY), crate::t::dialog_save(), || Act::Save))
 }
 
 /// `.wallpaper-preview-bar`: blur and brightness, over the composer.

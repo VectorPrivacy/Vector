@@ -14,8 +14,14 @@ pub const MONO: &str = "Consolas"; // i18n-exempt: font name
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const MONO: &str = "DejaVu Sans Mono"; // i18n-exempt: font name
 
-pub fn c(hex: u32) -> Hsla {
-    rgb(hex).into()
+pub fn c(v: u32) -> Hsla {
+    rgb(hex(v)).into()
+}
+
+/// A theme colour at alpha `a`, as `rgba(...)` over the chosen theme's value.
+pub fn ta(token: u32, a: f32) -> Hsla {
+    let h = hex(token);
+    ca((h >> 16) as u8, (h >> 8) as u8, h as u8, a)
 }
 
 /// `rgba(r, g, b, a)` from CSS.
@@ -33,10 +39,206 @@ pub fn white_a(a: f32) -> Hsla {
     ca(255, 255, 255, a)
 }
 
-// Accent family.
-pub const PRIMARY: u32 = 0x33db98;
-pub const ACCENT: u32 = 0x59fcb3;
-pub const ACCENT_DEEP: u32 = 0x2b976c;
+// Theme colours are tokens above 24 bits, so no stored colour (a role's, a coin's) is ever
+// mistaken for one; `c` and `ta` resolve them against the chosen theme.
+const TOKEN: u32 = 0x100_0000;
+/// `--primary-color`.
+pub const PRIMARY: u32 = TOKEN;
+/// `--accent-color`.
+pub const ACCENT: u32 = TOKEN + 1;
+/// `--danger-color`.
+pub const DANGER: u32 = TOKEN + 2;
+/// `--badge-ink`.
+pub const BADGE_INK: u32 = TOKEN + 3;
+/// `--slider-fill`.
+pub const SLIDER: u32 = TOKEN + 4;
+/// `.input-box`'s gradient, first and last stops.
+pub const INPUT_FROM: u32 = TOKEN + 5;
+pub const ACCENT_DEEP: u32 = TOKEN + 6;
+/// `.progress-bar-fill`'s gradient.
+pub const PROGRESS_FROM: u32 = TOKEN + 7;
+pub const PROGRESS_TO: u32 = TOKEN + 8;
+/// A checked `.neon-toggle`'s gradient.
+pub const TOGGLE_FROM: u32 = TOKEN + 9;
+pub const TOGGLE_TO: u32 = TOKEN + 10;
+/// `.file-preview-btn-send`'s gradient.
+pub const SEND_FROM: u32 = TOKEN + 11;
+pub const SEND_TO: u32 = TOKEN + 12;
+const TOKENS: usize = 13;
+
+/// Vector's own values, also what a theme leaves out falls back to.
+const VECTOR: [u32; TOKENS] = [
+    0x33db98, 0x59fcb3, 0xff2ea9, 0x052b1e, 0x6dd89d, 0x59fcb3, 0x2b976c, 0x33db98, 0x00ff9d, 0x33db98, 0x00ff9d,
+    0x33db98, 0x00ff9d,
+];
+
+static PALETTE: [std::sync::atomic::AtomicU32; TOKENS] = {
+    let mut p = [const { std::sync::atomic::AtomicU32::new(0) }; TOKENS];
+    let mut i = 0;
+    while i < TOKENS {
+        p[i] = std::sync::atomic::AtomicU32::new(VECTOR[i]);
+        i += 1;
+    }
+    p
+};
+static CHOSEN: std::sync::Mutex<&'static str> = std::sync::Mutex::new("vector");
+
+/// A colour's value now: a theme token's under the chosen theme, any other as it is.
+pub fn hex(v: u32) -> u32 {
+    match v.checked_sub(TOKEN) {
+        Some(i) if (i as usize) < TOKENS => PALETTE[i as usize].load(std::sync::atomic::Ordering::Relaxed),
+        _ => v,
+    }
+}
+
+/// The Tauri themes' stylesheets, read at build time so both clients wear the same colours.
+const SHEETS: [(&str, &str); 7] = [
+    ("vector", include_str!("../../../src/themes/vector/dark.css")),
+    ("cyberpunk", include_str!("../../../src/themes/cyberpunk/dark.css")),
+    ("monero", include_str!("../../../src/themes/monero/dark.css")),
+    ("pivx", include_str!("../../../src/themes/pivx/dark.css")),
+    ("satoshi", include_str!("../../../src/themes/satoshi/dark.css")),
+    ("chatstr", include_str!("../../../src/themes/chatstr/dark.css")),
+    ("gifverse", include_str!("../../../src/themes/gifverse/dark.css")),
+];
+
+/// Wear theme `name` (a Tauri theme id; unknown ones wear Vector). Returns whether it changed.
+pub fn set_theme(name: &str) -> bool {
+    let (id, css) = SHEETS.iter().find(|(id, _)| *id == name).copied().unwrap_or(SHEETS[0]);
+    let mut chosen = CHOSEN.lock().unwrap_or_else(|e| e.into_inner());
+    if *chosen == id {
+        return false;
+    }
+    *chosen = id;
+    for (slot, v) in PALETTE.iter().zip(palette(css)) {
+        slot.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    true
+}
+
+pub fn theme() -> &'static str {
+    *CHOSEN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The picture a theme lays faintly behind the messages, and how strongly.
+pub fn chat_backdrop() -> Option<(&'static [u8], f32)> {
+    let id = theme();
+    let png: &'static [u8] = match id {
+        "cyberpunk" => include_bytes!("../../../src/themes/cyberpunk/chat-bg.png"),
+        "monero" => include_bytes!("../../../src/themes/monero/chat-bg.png"),
+        "pivx" => include_bytes!("../../../src/themes/pivx/chat-bg.png"),
+        _ => return None,
+    };
+    let css = SHEETS.iter().find(|(t, _)| *t == id)?.1;
+    let opacity = vars(css).into_iter().find(|(k, _)| *k == "chat-bg-opacity").and_then(|(_, v)| v.trim().parse().ok());
+    Some((png, opacity.unwrap_or(0.1)))
+}
+
+/// Every token's value under one theme's stylesheet.
+fn palette(css: &str) -> [u32; TOKENS] {
+    let vars = vars(css);
+    let var = |name: &str| -> Option<u32> {
+        let mut v = vars.iter().find(|(k, _)| *k == name)?.1;
+        // `var(--other)` chains, as `--badge-bg: var(--accent-color)` does.
+        for _ in 0..4 {
+            match v.trim().strip_prefix("var(--").and_then(|r| r.strip_suffix(')')) {
+                Some(next) => v = vars.iter().find(|(k, _)| *k == next)?.1,
+                None => break,
+            }
+        }
+        colours(v, &vars).first().copied()
+    };
+    let stops = |selector: &str| -> Option<(u32, u32)> {
+        let body = block(css, selector)?;
+        let value = body.split(';').find_map(|d| d.trim().strip_prefix("background:").or_else(|| d.trim().strip_prefix("background-color:")))?;
+        let found = colours(value, &vars);
+        let (first, last) = (*found.first()?, *found.last()?);
+        Some(if value.contains("270deg") { (last, first) } else { (first, last) })
+    };
+    let mut out = VECTOR;
+    let primary = var("primary-color");
+    let set = |out: &mut [u32; TOKENS], token: u32, v: Option<u32>| {
+        if let Some(v) = v {
+            out[(token - TOKEN) as usize] = v;
+        }
+    };
+    set(&mut out, PRIMARY, primary);
+    set(&mut out, ACCENT, var("accent-color"));
+    // styles.css's default, which only Vector's sheet overrides.
+    out[(DANGER - TOKEN) as usize] = var("danger-color").unwrap_or(0xfc595c);
+    set(&mut out, BADGE_INK, var("badge-ink"));
+    set(&mut out, SLIDER, var("slider-fill").or(var("icon-color-primary")));
+    for (selector, from, to) in [
+        (".input-box", INPUT_FROM, ACCENT_DEEP),
+        (".progress-bar-fill", PROGRESS_FROM, PROGRESS_TO),
+        ("input[type=\"checkbox\"]:checked + .neon-toggle", TOGGLE_FROM, TOGGLE_TO), // i18n-exempt: a CSS selector
+        (".file-preview-btn-send", SEND_FROM, SEND_TO),
+    ] {
+        if let Some((a, b)) = stops(selector) {
+            set(&mut out, from, Some(a));
+            set(&mut out, to, Some(b));
+        }
+    }
+    out
+}
+
+/// `:root`'s custom properties, names without their `--`.
+fn vars(css: &str) -> Vec<(&str, &str)> {
+    block(css, ":root")
+        .map(|b| b.split(';').filter_map(|d| d.trim().strip_prefix("--")?.split_once(':')).map(|(k, v)| (k.trim(), v.trim())).collect())
+        .unwrap_or_default()
+}
+
+/// The declarations of the first rule whose selector is exactly `selector`.
+fn block<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
+    let mut rest = css;
+    while let Some(open) = rest.find('{') {
+        let head = rest[..open].rsplit('}').next().unwrap_or("").trim();
+        let close = open + rest[open..].find('}')?;
+        if head == selector {
+            return Some(&rest[open + 1..close]);
+        }
+        rest = &rest[close + 1..];
+    }
+    None
+}
+
+/// The colours a value names, in order: `#rgb`, `#rrggbb(aa)`, `rgb(a)(...)` and `var(--x)`.
+fn colours(value: &str, vars: &[(&str, &str)]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('#') {
+            let n = r.bytes().take_while(u8::is_ascii_hexdigit).count();
+            let h = &r[..n];
+            let v = match n {
+                3 => u32::from_str_radix(h, 16).ok().map(|v| ((v >> 8) & 0xf) * 0x110000 + ((v >> 4) & 0xf) * 0x1100 + (v & 0xf) * 0x11),
+                6 => u32::from_str_radix(h, 16).ok(),
+                8 => u32::from_str_radix(&h[..6], 16).ok(),
+                _ => None,
+            };
+            out.extend(v);
+            rest = &r[n..];
+        } else if let Some(r) = rest.strip_prefix("rgba(").or_else(|| rest.strip_prefix("rgb(")) {
+            let end = r.find(')').unwrap_or(r.len());
+            let parts: Vec<u32> = r[..end].split(',').take(3).filter_map(|p| p.trim().parse().ok()).collect();
+            if let [r, g, b] = parts[..] {
+                out.push((r.min(255) << 16) | (g.min(255) << 8) | b.min(255));
+            }
+            rest = r.get(end + 1..).unwrap_or("");
+        } else if let Some(r) = rest.strip_prefix("var(--") {
+            let end = r.find(')').unwrap_or(r.len());
+            if let Some((_, v)) = vars.iter().find(|(k, _)| *k == &r[..end]) {
+                out.extend(colours(v, vars).first());
+            }
+            rest = r.get(end + 1..).unwrap_or("");
+        } else {
+            let skip = rest.chars().next().map_or(1, char::len_utf8);
+            rest = &rest[skip..];
+        }
+    }
+    out
+}
 
 // Surfaces.
 pub const APP_BG: u32 = 0x030303;
@@ -83,5 +285,36 @@ pub fn chat_header_ground<D: gpui::Styled>(d: D, papered: bool) -> D {
         d.bg(gpui::rgba(0x161616e6)).border_b_1().border_color(gpui::rgb(DIVIDER))
     } else {
         d.bg(gpui::rgb(CHAT_HEADER_BG)).border_b_1().border_color(gpui::rgb(DIVIDER))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_theme_reads_like_its_stylesheet() {
+        let hex = |p: [u32; TOKENS], t: u32| p[(t - TOKEN) as usize];
+        let v = palette(SHEETS[0].1);
+        assert_eq!(v, VECTOR, "Vector's sheet gives Vector's values");
+        let cyber = palette(SHEETS[1].1);
+        assert_eq!((hex(cyber, PRIMARY), hex(cyber, DANGER), hex(cyber, BADGE_INK)), (0x59fcf4, 0xfc59ad, 0x030303));
+        assert_eq!((hex(cyber, INPUT_FROM), hex(cyber, ACCENT_DEEP)), (0x59fcf4, 0xfc59ad), "var() stops resolve");
+        assert_eq!((hex(cyber, TOGGLE_FROM), hex(cyber, TOGGLE_TO)), (0xfc59ad, 0x59fcf4), "270deg runs right to left");
+        let monero = palette(SHEETS[2].1);
+        assert_eq!((hex(monero, ACCENT), hex(monero, DANGER), hex(monero, SLIDER)), (0xff8e43, 0xfc595c, 0xff6600));
+        assert_eq!((hex(monero, INPUT_FROM), hex(monero, ACCENT_DEEP)), (0xff6600, 0xff6600), "a solid fill is both stops");
+        let gif = palette(SHEETS[6].1);
+        assert_eq!((hex(gif, INPUT_FROM), hex(gif, ACCENT_DEEP)), (0xf7ffae, 0xffaece));
+        for (id, css) in SHEETS {
+            let p = palette(css);
+            assert!(p.iter().all(|v| *v <= 0xff_ffff), "{id}");
+        }
+    }
+
+    #[test]
+    fn stored_colours_are_never_themed() {
+        assert_eq!(hex(0x59fcb3), 0x59fcb3);
+        assert_eq!(hex(0xffffff), 0xffffff);
     }
 }

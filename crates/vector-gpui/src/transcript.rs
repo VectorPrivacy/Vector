@@ -215,7 +215,7 @@ pub fn download_view(d: &Download, on_cancel: Rc<dyn Fn(&mut Window, &mut App)>)
                             .border_color(c(crate::timeline::DANGER))
                             .text_color(c(crate::timeline::DANGER))
                             .cursor_pointer()
-                            .hover(|s| s.bg(ca(255, 46, 169, 0.15)))
+                            .hover(|s| s.bg(crate::theme::ta(crate::theme::DANGER, 0.15)))
                             .on_click(move |_, w, cx| {
                                 cx.stop_propagation();
                                 on_cancel(w, cx)

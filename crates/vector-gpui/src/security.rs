@@ -1078,7 +1078,7 @@ pub(crate) fn head(
     title: SharedString,
     close: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>>,
 ) -> impl IntoElement {
-    head_tinted(glyph, title, c(ACCENT), ca(89, 252, 179, 0.1), c(0xffffff), close)
+    head_tinted(glyph, title, c(ACCENT), crate::theme::ta(crate::theme::ACCENT, 0.1), c(0xffffff), close)
 }
 
 /// A head in another colour: the glyph, its badge's fill, and the title.
@@ -1275,7 +1275,7 @@ impl SecurityFlow {
                         .border_1()
                         .border_color(if on { c(ACCENT) } else { c(0x2c2e2f) })
                         .bg(if on {
-                            ca(89, 252, 179, 0.07)
+                            crate::theme::ta(crate::theme::ACCENT, 0.07)
                         } else {
                             c(0x161718).into()
                         })
@@ -1660,7 +1660,7 @@ impl SecurityFlow {
                     .rounded(px(6.))
                     .bg(gpui::linear_gradient(
                         90.,
-                        gpui::linear_color_stop(c(0x59fcb3), 0.),
+                        gpui::linear_color_stop(c(crate::theme::ACCENT), 0.),
                         gpui::linear_color_stop(c(0x00d4ff), 1.),
                     )),
             )

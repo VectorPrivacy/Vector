@@ -273,7 +273,7 @@ pub fn panel(
         .py(px(6.))
         .bg(c(0x0a0a0a))
         .border_1()
-        .border_color(ca(90, 252, 180, 0.36))
+        .border_color(crate::theme::ta(crate::theme::ACCENT, 0.36))
         .rounded(px(12.))
         .overflow_hidden()
         .font_family(INTER)

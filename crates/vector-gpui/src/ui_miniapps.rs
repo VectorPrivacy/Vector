@@ -288,7 +288,7 @@ impl VectorApp {
                             _ => d.bg(white_a(0.1)),
                         })
                         .border_1()
-                        .border_color(if store { c(0x59fcb3) } else { gpui::transparent_black() })
+                        .border_color(if store { c(crate::theme::ACCENT) } else { gpui::transparent_black() })
                         .group_hover(id, |s| s.bg(white_a(0.18)).border_color(c(PRIMARY)))
                         .flex()
                         .items_center()

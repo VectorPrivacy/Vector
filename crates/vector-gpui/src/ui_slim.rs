@@ -1174,7 +1174,7 @@ impl VectorApp {
         if caps.contains("create_invite") || !self.live {
             let id = cid.clone();
             actions = actions.child(
-                button("group-invite-member-btn", "icons/add-user.svg", ACCENT, ca(90, 252, 180, 0.65), t::slim_invite())
+                button("group-invite-member-btn", "icons/add-user.svg", ACCENT, crate::theme::ta(crate::theme::ACCENT, 0.65), t::slim_invite())
                     .on_click(cx.listener(move |app, _, window, cx| app.open_invite(id.clone(), window, cx))),
             );
         }
@@ -1189,7 +1189,7 @@ impl VectorApp {
         } else if caps.contains("manage_channels") {
             let (id, channel) = (cid.clone(), ch.channel_id.clone());
             actions = actions.child(
-                button("group-edit-channel-btn", "icons/edit.svg", ACCENT, ca(90, 252, 180, 0.65), t::community_channel_edit()).on_click(
+                button("group-edit-channel-btn", "icons/edit.svg", ACCENT, crate::theme::ta(crate::theme::ACCENT, 0.65), t::community_channel_edit()).on_click(
                     cx.listener(move |app, _, window, cx| app.open_channel_editor(id.clone(), channel.clone(), false, window, cx)),
                 ),
             );

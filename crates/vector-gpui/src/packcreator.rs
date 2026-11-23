@@ -21,7 +21,7 @@ const NAME_MAX: usize = 26;
 const SHORTCODE_MAX: usize = 22;
 /// The grid's cell: six across the 337px column, 4px apart.
 const CELL_SIDE: f32 = (337. - 4. * 5.) / 6.;
-const DANGER: u32 = 0xff2ea9;
+const DANGER: u32 = crate::theme::DANGER;
 
 /// A crop the creator needs drawn: the picture, its natural size, and where the answer goes.
 pub struct CropFor(
@@ -1433,7 +1433,7 @@ impl EmojiPicker {
                                         2.5,
                                         1.,
                                         0.3,
-                                        ca(255, 46, 169, 0.25),
+                                        crate::theme::ta(crate::theme::DANGER, 0.25),
                                         c(DANGER),
                                     ))
                                     .into_any_element(),
@@ -1470,7 +1470,7 @@ impl EmojiPicker {
             .border_dashed()
             .border_color(if dragover { c(PRIMARY) } else { white_a(0.18) })
             .bg(if dragover {
-                ca(89, 252, 179, 0.06)
+                crate::theme::ta(crate::theme::ACCENT, 0.06)
             } else {
                 white_a(0.02)
             })
@@ -1487,13 +1487,13 @@ impl EmojiPicker {
                     .hover(|s| {
                         s.border_color(c(PRIMARY))
                             .text_color(c(PRIMARY))
-                            .bg(ca(89, 252, 179, 0.06))
+                            .bg(crate::theme::ta(crate::theme::ACCENT, 0.06))
                     })
                     .on_click(cx.listener(|this, _, window, cx| this.pick_emojis(window, cx)))
                     .drag_over::<ExternalPaths>(|s, _, _, _| {
                         s.border_color(c(PRIMARY))
                             .text_color(c(PRIMARY))
-                            .bg(ca(89, 252, 179, 0.06))
+                            .bg(crate::theme::ta(crate::theme::ACCENT, 0.06))
                     })
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                         cx.stop_propagation();
@@ -1577,7 +1577,7 @@ impl EmojiPicker {
             out.push(
                 shell("pc-confirm", c(DANGER))
                     .bg(ca(8, 8, 8, 0.82))
-                    .child(glow(ca(255, 46, 169, 0.22)))
+                    .child(glow(crate::theme::ta(crate::theme::DANGER, 0.22)))
                     .child(
                         div()
                             .relative()
@@ -1692,7 +1692,7 @@ impl EmojiPicker {
             out.push(
                 shell("pc-naming", c(PRIMARY))
                     .bg(ca(8, 8, 8, 0.9))
-                    .child(glow(ca(89, 252, 179, 0.18)))
+                    .child(glow(crate::theme::ta(crate::theme::ACCENT, 0.18)))
                     .child(
                         div()
                             .relative()
@@ -1761,7 +1761,7 @@ impl EmojiPicker {
                                                 c(PRIMARY)
                                             })
                                             .bg(if invalid {
-                                                ca(255, 46, 169, 0.12)
+                                                crate::theme::ta(crate::theme::DANGER, 0.12)
                                             } else {
                                                 c(0x030303)
                                             })
@@ -1823,7 +1823,7 @@ impl EmojiPicker {
             out.push(
                 shell("pc-error", c(DANGER))
                     .bg(ca(8, 8, 8, 0.85))
-                    .child(glow(ca(255, 46, 169, 0.32)))
+                    .child(glow(crate::theme::ta(crate::theme::DANGER, 0.32)))
                     .child(
                         div()
                             .relative()

@@ -39,7 +39,7 @@ pub fn pill(store: &Store, url: &str, here: Option<&str>, look: &Look) -> Option
     look.color = if dim {
         crate::theme::white_a(0.55)
     } else {
-        gpui::rgb(crate::theme::PRIMARY).into()
+        crate::theme::c(crate::theme::PRIMARY)
     };
     look.weight = if dim { gpui::FontWeight::NORMAL } else { gpui::FontWeight::MEDIUM };
     Some(Rc::new(Pill {

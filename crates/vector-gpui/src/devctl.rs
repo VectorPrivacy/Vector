@@ -271,6 +271,11 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
         "community" => app.dev_open_community(rest.to_string(), window, cx),
         "channel" => app.dev_open_channel(rest.to_string(), window, cx),
         "chat" => app.dev_open_chat(rest.to_string().into(), window, cx),
+        "theme" => {
+            if crate::theme::set_theme(rest) {
+                window.refresh();
+            }
+        }
         "scroll" => {
             let dy = rest.parse::<f32>().unwrap_or(0.);
             app.dev_timeline().scroll_by(px(dy));

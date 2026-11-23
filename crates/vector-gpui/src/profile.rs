@@ -715,7 +715,7 @@ pub fn pane(
                         .text_color(tint)
                         .whitespace_nowrap()
                         .cursor_pointer()
-                        .when(danger, |d| d.hover(|s| s.bg(ca(255, 46, 169, 0.1))))
+                        .when(danger, |d| d.hover(|s| s.bg(crate::theme::ta(crate::theme::DANGER, 0.1))))
                         .when(!danger, |d| {
                             d.hover(|s| s.bg(c(0x2a2a2a)).text_color(c(0xffffff)))
                         })

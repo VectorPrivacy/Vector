@@ -57,7 +57,7 @@ fn button(id: &'static str, label: SharedString, accept: bool, on: impl Fn(&mut 
         .justify_center()
         .rounded(px(8.))
         .border_1()
-        .map(|d| if accept { d.border_color(ca(90, 252, 180, 0.65)).bg(ca(89, 252, 179, 0.1)) } else { d.border_color(white_a(0.2)) })
+        .map(|d| if accept { d.border_color(crate::theme::ta(crate::theme::ACCENT, 0.65)).bg(crate::theme::ta(crate::theme::ACCENT, 0.1)) } else { d.border_color(white_a(0.2)) })
         .text_color(c(0xffffff))
         .font_weight(FontWeight::SEMIBOLD)
         .cursor_pointer()

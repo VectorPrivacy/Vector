@@ -107,7 +107,7 @@ fn click(
 /// `.relay-status.relay-status-small`: the socket state as a pill.
 fn pill(status: &str) -> AnyElement {
     let (fg, bg, border) = match status {
-        "connected" => (c(0x59fcb3), ca(90, 252, 180, 0.1), ca(90, 252, 180, 0.5)),
+        "connected" => (c(crate::theme::ACCENT), crate::theme::ta(crate::theme::ACCENT, 0.1), crate::theme::ta(crate::theme::ACCENT, 0.5)),
         "connecting" => (c(0xffc107), ca(255, 193, 7, 0.2), ca(255, 193, 7, 0.3)),
         "disconnected" => (c(0xff5252), ca(255, 82, 82, 0.2), ca(255, 82, 82, 0.3)),
         "pending" => (c(0x9c27b0), ca(156, 39, 176, 0.2), ca(156, 39, 176, 0.3)),
@@ -307,7 +307,7 @@ fn add_relay(input: &Entity<TextInput>, mode: &'static str, on: &OnAct, cx: &App
             )
             .child(
                 button("add-relay-confirm", 42.)
-                    .bg(c(0x59fcb3))
+                    .bg(c(crate::theme::ACCENT))
                     .text_color(c(0x000000))
                     .hover(|d| d.opacity(0.75))
                     .on_click(click(on, || Act::Add))
@@ -421,8 +421,8 @@ fn relay(
     // A relay the network holds back has no live ping: an old reading would say it answers.
     let held = book.route_of(&row.url).is_some_and(|r| r["class"] == "refused" || r["class"] == "blocked");
     let ping_color = match metrics.ping_ms {
-        None => c(0x59fcb3),
-        Some(ms) if ms < 200 => c(0x59fcb3),
+        None => c(crate::theme::ACCENT),
+        Some(ms) if ms < 200 => c(crate::theme::ACCENT),
         Some(ms) if ms < 500 => c(0xfce459),
         Some(ms) if ms < 1000 => c(0xfca559),
         Some(_) => c(DANGER),
@@ -433,7 +433,7 @@ fn relay(
         .map(|ms| format!("{ms}ms"))
         .unwrap_or_else(|| "--".into());
     let checked = metrics.last_check.filter(|_| !held).map(ago).unwrap_or_else(|| "--".into());
-    let ping_color = if held { c(0x59fcb3) } else { ping_color };
+    let ping_color = if held { c(crate::theme::ACCENT) } else { ping_color };
     let metric_label = |text: SharedString| {
         div()
             .text_size(px(11.))
@@ -552,7 +552,7 @@ fn relay(
                 .child(metric_value(ping, ping_color))
                 .child(div().flex_1())
                 .child(metric_label(t::relay_last_check()))
-                .child(metric_value(checked, c(0x59fcb3))),
+                .child(metric_value(checked, c(crate::theme::ACCENT))),
         )
         .child(
             div()

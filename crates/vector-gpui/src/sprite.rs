@@ -17,11 +17,12 @@ pub fn strip(
     period: f32,
     paint: impl Fn(f32, &mut image::RgbaImage, f32),
 ) -> Arc<RenderImage> {
-    thread_local!(static STRIPS: RefCell<HashMap<(&'static str, u32), Arc<RenderImage>>> = RefCell::default());
+    // Per theme: a strip may be drawn in a theme colour.
+    thread_local!(static STRIPS: RefCell<HashMap<(&'static str, u32, &'static str), Arc<RenderImage>>> = RefCell::default());
     let k = scale.ceil().max(1.) as u32;
     STRIPS.with(|s| {
         s.borrow_mut()
-            .entry((name, k))
+            .entry((name, k, crate::theme::theme()))
             .or_insert_with(|| {
                 let frames = times.iter().enumerate().map(|(i, &t)| {
                     let mut buf = image::RgbaImage::new(side * k, side * k);
@@ -47,7 +48,7 @@ pub fn disc(buf: &mut image::RgbaImage, cx: f32, cy: f32, r: f32, rgb: u32, alph
     if alpha <= 0. || r <= 0. {
         return;
     }
-    let [_, red, green, blue] = rgb.to_be_bytes();
+    let [_, red, green, blue] = crate::theme::hex(rgb).to_be_bytes();
     let (x0, x1) = ((cx - r - 1.).max(0.) as u32, ((cx + r + 1.) as u32).min(buf.width()));
     let (y0, y1) = ((cy - r - 1.).max(0.) as u32, ((cy + r + 1.) as u32).min(buf.height()));
     for y in y0..y1 {
@@ -69,7 +70,7 @@ pub fn disc(buf: &mut image::RgbaImage, cx: f32, cy: f32, r: f32, rgb: u32, alph
 
 /// A disc of radius `r` blurred by a Gaussian of `sigma`, as a box-shadow paints one.
 pub fn glow(buf: &mut image::RgbaImage, cx: f32, cy: f32, r: f32, sigma: f32, rgb: u32, alpha: f32) {
-    let [_, red, green, blue] = rgb.to_be_bytes();
+    let [_, red, green, blue] = crate::theme::hex(rgb).to_be_bytes();
     for y in 0..buf.height() {
         for x in 0..buf.width() {
             let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();

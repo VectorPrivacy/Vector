@@ -150,7 +150,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
         .text_size(px(10.))
         .map(|d| {
             if m.public {
-                d.bg(ca(89, 252, 179, 0.18)).text_color(c(ACCENT))
+                d.bg(crate::theme::ta(crate::theme::ACCENT, 0.18)).text_color(c(ACCENT))
             } else {
                 d.bg(white_a(0.08)).text_color(white_a(0.6))
             }
@@ -334,8 +334,8 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                 .h(px(39.))
                 .rounded(px(9.))
                 .border_1()
-                .border_color(ca(89, 252, 179, 0.28))
-                .bg(ca(89, 252, 179, 0.12))
+                .border_color(crate::theme::ta(crate::theme::ACCENT, 0.28))
+                .bg(crate::theme::ta(crate::theme::ACCENT, 0.12))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -346,7 +346,7 @@ fn links(m: &Invite, store: &Store, on: &OnAct) -> impl IntoElement {
                 .when(!live, |d| d.opacity(0.5))
                 .when(live, |d| {
                     d.cursor_pointer()
-                        .hover(|d| d.bg(ca(89, 252, 179, 0.18)))
+                        .hover(|d| d.bg(crate::theme::ta(crate::theme::ACCENT, 0.18)))
                         .on_click(click(on, || Act::Create))
                 })
                 .child(
@@ -402,7 +402,7 @@ pub fn view(m: &Invite, store: &Store, filter: &str, (vw, vh): (f32, f32), on: &
                         .size(px(46.))
                         .flex_shrink_0()
                         .rounded(px(13.))
-                        .bg(ca(89, 252, 179, 0.15))
+                        .bg(crate::theme::ta(crate::theme::ACCENT, 0.15))
                         .flex()
                         .items_center()
                         .justify_center()

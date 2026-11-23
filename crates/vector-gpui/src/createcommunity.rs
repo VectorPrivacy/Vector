@@ -154,7 +154,7 @@ fn choice(
         .border_1()
         .cursor_pointer()
         .when(on_it, |d| {
-            d.border_color(c(PRIMARY)).bg(ca(51, 219, 152, 0.07))
+            d.border_color(c(PRIMARY)).bg(crate::theme::ta(crate::theme::PRIMARY, 0.07))
         })
         .when(!on_it, |d| {
             d.border_color(white_a(0.1))
@@ -488,7 +488,7 @@ fn button(
         .text_size(px(16.))
         .when(primary, |d| {
             d.bg(c(0x58fcb3))
-                .border_color(ca(90, 252, 180, 0.65))
+                .border_color(crate::theme::ta(crate::theme::ACCENT, 0.65))
                 .text_color(c(0x000000))
         })
         .when(!primary, |d| {

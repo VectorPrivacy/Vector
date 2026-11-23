@@ -329,8 +329,8 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
             .rounded(px(10.))
             .border_1()
             .when(builtin, |d| {
-                d.bg(ca(89, 252, 179, 0.045))
-                    .border_color(ca(89, 252, 179, 0.16))
+                d.bg(crate::theme::ta(crate::theme::ACCENT, 0.045))
+                    .border_color(crate::theme::ta(crate::theme::ACCENT, 0.16))
             })
             .when(!builtin, |d| {
                 d.bg(white_a(0.04)).border_color(white_a(0.07))
@@ -367,15 +367,15 @@ fn list(p: &Policies, on: &OnAct) -> impl IntoElement {
                     .py(px(6.))
                     .rounded_full()
                     .border_1()
-                    .border_color(ca(89, 252, 179, 0.28))
+                    .border_color(crate::theme::ta(crate::theme::ACCENT, 0.28))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(12.))
                     .line_height(px(14.))
-                    .text_color(ca(89, 252, 179, 0.85))
+                    .text_color(crate::theme::ta(crate::theme::ACCENT, 0.85))
                     .cursor_pointer()
                     .hover(|d| {
-                        d.bg(ca(89, 252, 179, 0.1))
-                            .border_color(ca(89, 252, 179, 0.5))
+                        d.bg(crate::theme::ta(crate::theme::ACCENT, 0.1))
+                            .border_color(crate::theme::ta(crate::theme::ACCENT, 0.5))
                     })
                     .on_click(click(on, || Act::Inspect))
                     .child(t::policies_inspect()),
@@ -551,7 +551,7 @@ fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
                     .border_dashed()
                     .border_color(white_a(0.14))
                     .cursor_pointer()
-                    .hover(|d| d.border_color(ca(89, 252, 179, 0.45)).bg(white_a(0.02)))
+                    .hover(|d| d.border_color(crate::theme::ta(crate::theme::ACCENT, 0.45)).bg(white_a(0.02)))
                     .on_click(click(on, || Act::Open("blank".into())))
                     .child(
                         div()
@@ -559,7 +559,7 @@ fn gallery(p: &Policies, width: f32, on: &OnAct) -> impl IntoElement {
                             .text_center()
                             .text_size(px(19.))
                             .line_height(px(19.))
-                            .text_color(ca(89, 252, 179, 0.8))
+                            .text_color(crate::theme::ta(crate::theme::ACCENT, 0.8))
                             .child("+"),
                     )
                     .child(
@@ -657,7 +657,7 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                         .border_color(if armed {
                             white_a(0.14)
                         } else {
-                            ca(89, 252, 179, 0.45)
+                            crate::theme::ta(crate::theme::ACCENT, 0.45)
                         })
                         .when(i == 0, |d| d.rounded_tr(px(8.)))
                         .when(i + 1 == n, |d| d.rounded_br(px(8.)))
@@ -716,7 +716,7 @@ fn dial(p: &Policies, mo: &Moderation, d: &Value, on: &OnAct) -> AnyElement {
                                 .border_1()
                                 .border_color(if active { c(ACCENT) } else { white_a(0.1) })
                                 .bg(if active {
-                                    ca(89, 252, 179, 0.08)
+                                    crate::theme::ta(crate::theme::ACCENT, 0.08)
                                 } else {
                                     ca(0, 0, 0, 0.2)
                                 })
@@ -925,7 +925,7 @@ fn rules(p: &Policies, on: &OnAct) -> AnyElement {
                     .text_color(white_a(0.6))
                     .cursor_pointer()
                     .hover(|d| {
-                        d.border_color(ca(89, 252, 179, 0.45))
+                        d.border_color(crate::theme::ta(crate::theme::ACCENT, 0.45))
                             .text_color(c(0xffffff))
                     })
                     .on_click(click(on, move || Act::AddRule(key.clone())))

@@ -704,8 +704,8 @@ pub fn toggle(
         .bg(if on {
             gpui::linear_gradient(
                 90.,
-                gpui::linear_color_stop(c(0x33db98), 0.),
-                gpui::linear_color_stop(c(0x00ff9d), 1.),
+                gpui::linear_color_stop(c(crate::theme::TOGGLE_FROM), 0.),
+                gpui::linear_color_stop(c(crate::theme::TOGGLE_TO), 1.),
             )
         } else {
             c(0x1a1a1a).into()
@@ -2922,7 +2922,7 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                                 .rounded(px(8.))
                                 .bg(ca(0, 0, 0, 0.3))
                                 .border_1()
-                                .border_color(ca(89, 252, 179, 0.2))
+                                .border_color(crate::theme::ta(crate::theme::ACCENT, 0.2))
                                 .text_size(px(14.))
                                 .line_height(px(22.4))
                                 .text_color(white_a(0.8))
@@ -2970,8 +2970,8 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
             .items_center()
             .rounded(px(8.))
             .border_1()
-            .border_color(ca(90, 252, 180, 0.65))
-            .bg(ca(89, 252, 179, 0.1))
+            .border_color(crate::theme::ta(crate::theme::ACCENT, 0.65))
+            .bg(crate::theme::ta(crate::theme::ACCENT, 0.1))
             .text_size(px(16.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(c(0xffffff))
@@ -3018,8 +3018,8 @@ fn updates_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .rounded(px(8.))
                 .bg(gpui::linear_gradient(
                     135.,
-                    gpui::linear_color_stop(c(0x59fcb3), 0.),
-                    gpui::linear_color_stop(c(0x2b976c), 1.),
+                    gpui::linear_color_stop(c(crate::theme::ACCENT), 0.),
+                    gpui::linear_color_stop(c(crate::theme::ACCENT_DEEP), 1.),
                 ))
                 .text_size(px(16.))
                 .font_weight(FontWeight::SEMIBOLD)
@@ -3048,7 +3048,7 @@ fn progress_bar(pct: u8) -> impl IntoElement {
                 .rounded(px(6.))
                 .bg(gpui::linear_gradient(
                     90.,
-                    gpui::linear_color_stop(c(0x59fcb3), 0.),
+                    gpui::linear_color_stop(c(crate::theme::ACCENT), 0.),
                     gpui::linear_color_stop(c(0x00d4ff), 1.),
                 )),
         )
@@ -3233,7 +3233,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
             div()
                 .flex()
                 .items_center()
-                .text_color(c(0x59FCB3))
+                .text_color(c(crate::theme::ACCENT))
                 .child(
                     div()
                         .size(px(16.))
@@ -3259,7 +3259,7 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
     } else if !v.error.is_empty() {
         Some(warn(crate::coretext::say(&v.error).into_owned().into()))
     } else if current.is_some_and(|m| m.downloaded) {
-        Some(div().text_color(c(0x59FCB3)).child(t::settings_voice_ready()).into_any_element())
+        Some(div().text_color(c(crate::theme::ACCENT)).child(t::settings_voice_ready()).into_any_element())
     } else if current.is_some() {
         Some(warn(t::settings_voice_not_downloaded()))
     } else {
@@ -3296,8 +3296,8 @@ fn voice_block(s: &Settings, on: &OnAct) -> AnyElement {
                 .rounded(px(8.))
                 .bg(gpui::linear_gradient(
                     90.,
-                    gpui::linear_color_stop(c(0x33db98), 0.),
-                    gpui::linear_color_stop(c(0x00ff9d), 1.),
+                    gpui::linear_color_stop(c(crate::theme::PROGRESS_FROM), 0.),
+                    gpui::linear_color_stop(c(crate::theme::PROGRESS_TO), 1.),
                 ))
                 .text_size(px(16.))
                 .font_weight(FontWeight::BOLD)
@@ -3557,7 +3557,7 @@ fn slider(key: &'static str, value: f32, s: &Settings, on: &OnAct) -> AnyElement
                     div()
                         .h_full()
                         .rounded(px(3.))
-                        .bg(c(0x6dd89d))
+                        .bg(c(crate::theme::SLIDER))
                         .w(gpui::relative(value)),
                 ),
         )
@@ -3856,7 +3856,7 @@ fn badge_new() -> impl IntoElement {
         .py(px(2.))
         .rounded_full()
         .bg(c(ACCENT))
-        .text_color(c(0x052b1e))
+        .text_color(c(crate::theme::BADGE_INK))
         .text_size(px(10.))
         .line_height(px(12.))
         .font_weight(FontWeight::BOLD)

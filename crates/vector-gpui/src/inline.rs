@@ -1444,7 +1444,7 @@ impl Element for Inline {
             && let Some(picked) = crate::select::range_in(key, || plain_len(&self.atoms))
         {
             for r in rects(&self.atoms, &s, picked, window) {
-                window.paint_quad(fill(Bounds::new(bounds.origin + r.origin, r.size), ca(89, 252, 179, 0.28)));
+                window.paint_quad(fill(Bounds::new(bounds.origin + r.origin, r.size), crate::theme::ta(crate::theme::ACCENT, 0.28)));
             }
         }
         for line in s.lines.iter().filter(|l| shown(l)) {
@@ -1474,10 +1474,10 @@ impl Element for Inline {
                         Kind::Code => {
                             let b = boxed(3.);
                             window.paint_quad(
-                                fill(b, ca(89, 252, 179, 0.05)).corner_radii(Corners::all(px(3.))),
+                                fill(b, crate::theme::ta(crate::theme::ACCENT, 0.05)).corner_radii(Corners::all(px(3.))),
                             );
                             window.paint_quad(
-                                outline(b, ca(89, 252, 179, 0.45), gpui::BorderStyle::Solid)
+                                outline(b, crate::theme::ta(crate::theme::ACCENT, 0.45), gpui::BorderStyle::Solid)
                                     .corner_radii(Corners::all(px(3.)))
                                     .border_widths(Edges::all(px(1.))),
                             );
@@ -1496,7 +1496,7 @@ impl Element for Inline {
                             );
                         }
                         Kind::Tag(Some(color)) => {
-                            let tint: Hsla = gpui::rgb(*color).into();
+                            let tint = crate::theme::c(*color);
                             window.paint_quad(
                                 fill(boxed(1.), tint.opacity(0.16)).corner_radii(Corners::all(px(4.))),
                             );

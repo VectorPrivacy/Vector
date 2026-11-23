@@ -12,7 +12,7 @@ use crate::media::{Custom, Media};
 use crate::packs::State;
 use crate::theme::*;
 
-const DANGER: u32 = 0xff2ea9;
+const DANGER: u32 = crate::theme::DANGER;
 
 pub struct Details {
     pub naddr: String,
@@ -59,7 +59,7 @@ pub fn view(
                 2.5,
                 0.9,
                 0.28,
-                ca(89, 252, 179, 0.2),
+                crate::theme::ta(crate::theme::ACCENT, 0.2),
                 c(PRIMARY),
             )))
             .child(
@@ -271,9 +271,9 @@ pub fn view(
                         .font_weight(FontWeight::BOLD)
                         .when(!subscribed, |d| d.bg(c(PRIMARY)).text_color(c(0x0a0a0a)))
                         .when(subscribed, |d| {
-                            d.bg(ca(255, 46, 169, 0.1))
+                            d.bg(crate::theme::ta(crate::theme::DANGER, 0.1))
                                 .border_1()
-                                .border_color(ca(255, 46, 169, 0.4))
+                                .border_color(crate::theme::ta(crate::theme::DANGER, 0.4))
                                 .text_color(c(DANGER))
                         })
                         .when(busy, |d| d.opacity(0.55))
