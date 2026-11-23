@@ -786,6 +786,7 @@ impl VectorApp {
                     com,
                     self.open.as_deref(),
                     self.raid.get(&com.community_id).is_some_and(|r| r.0 || r.1 > 0),
+                    self.community_caps(&com.community_id).contains("manage_channels"),
                     on_community,
                     (&self.voice, &self.on_voice_handler(cx), &self.anchors),
                     pane_w,
@@ -961,6 +962,9 @@ impl VectorApp {
         let mut items: Vec<(Item, u64)> = Vec::new();
         let mut archived: Vec<(String, u64)> = Vec::new();
         let mut dots: HashMap<Filter, bool> = HashMap::new();
+        if store.has_invites() {
+            dots.insert(Filter::Requests, true);
+        }
         let mut communities_seen = std::collections::HashSet::new();
         for chat in &store.chats {
             if !store.listed(chat) {

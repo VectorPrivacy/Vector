@@ -937,6 +937,11 @@ impl Store {
         }
     }
 
+    /// Community invites waiting under Requests (a blocked inviter's are hidden).
+    pub fn has_invites(&self) -> bool {
+        self.invites.iter().any(|i| !self.profiles.get(i.inviter.as_str()).is_some_and(|p| p.is_blocked))
+    }
+
     /// A DM neither answered nor accepted: it waits under Requests, its media unloaded.
     pub fn is_request(&self, chat: &SerializableChat) -> bool {
         chat.chat_type == vector_core::ChatType::DirectMessage

@@ -435,6 +435,7 @@ pub fn sidebar(
     com: &Community,
     open: Option<&str>,
     raid: bool,
+    manage: bool,
     on: &OnAct,
     (voice, on_voice, anchors): (&crate::voice::Voice, &crate::voice::OnAct, &crate::kit::Anchors),
     width: f32,
@@ -565,6 +566,10 @@ pub fn sidebar(
             .iter()
             .filter(|ch| ch.category_id.as_deref() == Some(cat.category_id.as_str()) && ch.visible())
             .collect();
+        // Nothing here this member can see, and no way to add any.
+        if inside.is_empty() && !manage {
+            continue;
+        }
         let closed = view.folded.contains(&cat.category_id);
         let key = cat.category_id.clone();
         let head = div()

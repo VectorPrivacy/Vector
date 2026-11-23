@@ -8821,7 +8821,7 @@ fn chat_list(
     (requests, slid, no_messages): (bool, bool, bool),
     cx: &mut Context<VectorApp>,
 ) -> impl IntoElement {
-    let (mut dot_messages, mut dot_requests) = (false, false);
+    let (mut dot_messages, mut dot_requests) = (false, store.has_invites());
     let mut ids: Vec<usize> = Vec::new();
     for (i, chat) in store.chats.iter().enumerate() {
         if !store.listed(chat) {
@@ -10119,6 +10119,7 @@ impl VectorApp {
                 self.raid
                     .get(&com.community_id)
                     .is_some_and(|r| r.0 || r.1 > 0),
+                self.community_caps(&com.community_id).contains("manage_channels"),
                 &on_community,
                 (&self.voice, &self.on_voice_handler(cx), &self.anchors),
                 list_w(),
