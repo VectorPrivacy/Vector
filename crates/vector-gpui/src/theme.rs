@@ -136,6 +136,7 @@ pub fn set_theme(name: &str) -> bool {
         if s.len() > 2 { s } else { Vec::new() }
     };
     *STOPS.lock().unwrap_or_else(|e| e.into_inner()) = [many(".input-box"), many(".progress-bar-fill")];
+    *BACKDROP.lock().unwrap_or_else(|e| e.into_inner()) = backdrop_of(id, css);
     true
 }
 
@@ -178,16 +179,20 @@ pub fn theme() -> &'static str {
     *CHOSEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The picture a theme lays faintly behind the messages, and how strongly.
+static BACKDROP: std::sync::Mutex<Option<(&'static [u8], f32)>> = std::sync::Mutex::new(None);
+
+/// The picture a theme lays faintly over the window, and how strongly.
 pub fn chat_backdrop() -> Option<(&'static [u8], f32)> {
-    let id = theme();
+    *BACKDROP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn backdrop_of(id: &str, css: &str) -> Option<(&'static [u8], f32)> {
     let png: &'static [u8] = match id {
         "cyberpunk" => include_bytes!("../../../src/themes/cyberpunk/chat-bg.png"),
         "monero" => include_bytes!("../../../src/themes/monero/chat-bg.png"),
         "pivx" => include_bytes!("../../../src/themes/pivx/chat-bg.png"),
         _ => return None,
     };
-    let css = SHEETS.iter().find(|(t, _)| *t == id)?.1;
     let opacity = vars(css).into_iter().find(|(k, _)| *k == "chat-bg-opacity").and_then(|(_, v)| v.trim().parse().ok());
     Some((png, opacity.unwrap_or(0.1)))
 }

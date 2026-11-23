@@ -7583,6 +7583,11 @@ impl VectorApp {
                             (None, None) => empty_pane(self.viktor.clone()).into_any_element(),
                         })
                     })
+                    .children(
+                        crate::theme::chat_backdrop()
+                            .filter(|_| self.open.is_some() && self.wallpaper_key().is_none())
+                            .and_then(|b| Some(theme_backdrop(b, Some(self.chat_box.get()?)))),
+                    )
                     .children({
                         let rail = rail_mode.width();
                         self.nexus_ghost(f32::from(window.viewport_size().width) - rail, window, cx)
@@ -9188,8 +9193,10 @@ fn typing_strip(store: &Store, chat: &str, fade: f32, window: &Window) -> Option
     )
 }
 
-/// `.chat-messages::before`: a theme's picture, faint and covering, behind the messages.
-fn theme_backdrop((png, opacity): (&'static [u8], f32)) -> impl IntoElement {
+/// `.chat-messages::before`: a theme's picture over the whole window (`position: fixed`), faint
+/// and covering. Drawn within `bounds`, less `hole` (the chat pane, which lays it under its
+/// messages itself).
+fn theme_backdrop((png, opacity): (&'static [u8], f32), hole: Option<gpui::Bounds<gpui::Pixels>>) -> impl IntoElement {
     thread_local! {
         static DECODED: RefCell<Option<(usize, Arc<gpui::RenderImage>)>> = const { RefCell::new(None) };
     }
@@ -9202,9 +9209,28 @@ fn theme_backdrop((png, opacity): (&'static [u8], f32)) -> impl IntoElement {
         *held = Some((png.as_ptr() as usize, image.clone()));
         Some(image)
     });
-    div().absolute().inset_0().overflow_hidden().opacity(opacity).children(
-        image.map(|i| crate::pic::img(gpui::ImageSource::Render(i)).size_full().object_fit(gpui::ObjectFit::Cover)),
-    )
+    div().absolute().inset_0().opacity(opacity).children(image.map(|image| {
+        gpui::canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let whole = gpui::Bounds::new(gpui::Point::default(), window.viewport_size());
+                let cover = gpui::ObjectFit::Cover.get_bounds(whole, image.size(0));
+                let parts = match hole {
+                    None => vec![bounds],
+                    Some(h) => vec![
+                        gpui::Bounds::from_corners(whole.origin, gpui::point(h.left(), whole.bottom())),
+                        gpui::Bounds::from_corners(gpui::point(h.right(), whole.top()), whole.bottom_right()),
+                        gpui::Bounds::from_corners(gpui::point(h.left(), whole.top()), gpui::point(h.right(), h.top())),
+                        gpui::Bounds::from_corners(gpui::point(h.left(), h.bottom()), gpui::point(h.right(), whole.bottom())),
+                    ],
+                };
+                for part in parts {
+                    let _ = window.paint_image(part, cover, gpui::Corners::default(), image.clone(), 0, false);
+                }
+            },
+        )
+        .size_full()
+    }))
 }
 
 /// `typing-wave`: three dots, each up 1.5px and fully lit at 30% of a 1.2s beat.
@@ -10666,7 +10692,7 @@ impl VectorApp {
         });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
         let look = self.wallpaper_look();
-        let keyed = look.is_some();
+        let keyed = look.is_some() || crate::theme::chat_backdrop().is_some();
         let paper = self.wallpaper.image(look.as_ref().map(|(k, _)| k));
         let shade = look.map_or(0., |(_, dim)| 1. - f32::from(dim) / 100.);
         let slim_com = channel.and_then(|_| store.community_of(&id)).filter(|_| self.is_slim);
@@ -10745,8 +10771,8 @@ impl VectorApp {
             .child(
                 gpui::canvas(
                     move |b, window, _| {
-                        // The wallpaper was keyed to the size before this layout: key it again now.
-                        if keyed && chat_box.get().map(|o| o.size) != Some(b.size) {
+                        // The wallpaper and the theme's picture were placed by the bounds before this layout.
+                        if keyed && chat_box.get() != Some(b) {
                             let app = app_box.clone();
                             window.on_next_frame(move |_, cx| {
                                 app.update(cx, |_, cx| cx.notify()).ok();
@@ -10775,7 +10801,7 @@ impl VectorApp {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)).children(crate::theme::chat_backdrop().map(theme_backdrop)))
+                    .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)).children(crate::theme::chat_backdrop().map(|b| theme_backdrop(b, None))))
                     .when(alone.is_some(), |d| d.pt(px(top_pad)))
                     .map(|d| match alone {
                         // Auto margins centre it until it no longer fits, then it scrolls from its top.
