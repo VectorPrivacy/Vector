@@ -7233,6 +7233,16 @@ impl VectorApp {
                 if window.context_stack().iter().any(|k| k.contains("Select") || k.contains("Menu")) {
                     return;
                 }
+                // A clip filling the window is the top layer, above whatever holds focus under it.
+                if e.keystroke.key == "escape" {
+                    let full = app.media.borrow().videos.full.clone();
+                    if let Some((att, input)) = full {
+                        app.media.borrow_mut().videos.act(&att, input, crate::video::Act::Fullscreen);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                }
                 // Cmd/Ctrl+K searches every chat, Cmd/Ctrl+F the open one, from wherever focus is.
                 let m = &e.keystroke.modifiers;
                 let primary = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
@@ -7250,15 +7260,6 @@ impl VectorApp {
                 // i18n-exempt: key context name
                 if window.context_stack().iter().any(|k| k.contains("Timeline")) {
                     return;
-                }
-                if e.keystroke.key == "escape" {
-                    let full = app.media.borrow().videos.full.clone();
-                    if let Some((att, input)) = full {
-                        app.media.borrow_mut().videos.act(&att, input, crate::video::Act::Fullscreen);
-                        cx.stop_propagation();
-                        cx.notify();
-                        return;
-                    }
                 }
                 if e.keystroke.key == "escape"
                     && app.menu.is_none()
