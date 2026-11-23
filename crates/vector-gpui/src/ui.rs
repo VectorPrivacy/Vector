@@ -233,6 +233,10 @@ pub struct VectorApp {
     clip_wake_at: std::cell::Cell<Option<std::time::Instant>>,
     /// The window's width as of this frame, for helpers that don't take a `Window`.
     vw: f32,
+    vh: f32,
+    /// The window less the chat pane, per layout: a chat opening keys its wallpaper to its own
+    /// pane's size on its first frame, before that pane is laid out.
+    chat_margins: Rc<RefCell<HashMap<(bool, bool), (f32, f32)>>>,
     slim: slim_ops::Slim,
     send_btn: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// A press on Send, by number, while it is held; a long one opened the timer instead.
@@ -1104,6 +1108,8 @@ impl VectorApp {
             timeline_w: RefCell::default(),
             clip_wake_at: std::cell::Cell::default(),
             vw: 0.,
+            vh: 0.,
+            chat_margins: Rc::default(),
             slim: slim_ops::Slim::new(),
             send_btn: Rc::default(),
             send_held: None,
@@ -6973,6 +6979,7 @@ impl VectorApp {
         }
         let rail_mode = self.rail_mode(window);
         self.vw = f32::from(window.viewport_size().width);
+        self.vh = f32::from(window.viewport_size().height);
         let slim = self.vw < slim_ops::WIDE_MIN;
         crate::theme::set_slim(slim);
         let list_full = clamp_list_w(self.list_pref, self.vw, rail_mode.width());
@@ -9715,11 +9722,20 @@ impl VectorApp {
         self.wallpaper_look().map(|(k, _)| k)
     }
 
+    /// What sizes the chat pane besides the window: a member list beside it, the phone layout.
+    fn chat_layout(&self) -> (bool, bool) {
+        (self.community.as_ref().is_some_and(|v| v.panel), self.is_slim)
+    }
+
     /// The open chat's wallpaper and how far it is dimmed (100 = not at all).
     fn wallpaper_look(&self) -> Option<(crate::wallpaper::Key, u8)> {
         let id = self.open.as_ref()?;
-        // Before the pane's first layout the size is unknown (0×0): a saved bake can still show.
-        let size = self.chat_box.get().map_or((0, 0), |b| (f32::from(b.size.width).round() as u32, f32::from(b.size.height).round() as u32));
+        // Before the pane's first layout, the size its layout had last time; never seen, unknown
+        // (0×0), when only a saved bake can show.
+        let size = match self.chat_box.get() {
+            Some(b) => (f32::from(b.size.width).round() as u32, f32::from(b.size.height).round() as u32),
+            None => self.chat_margins.borrow().get(&self.chat_layout()).map_or((0, 0), |(w, h)| ((self.vw - w).round() as u32, (self.vh - h).round() as u32)),
+        };
         if let Some(p) = self.wallpaper.preview.as_ref().filter(|p| p.chat == id.as_ref()) {
             return Some((crate::wallpaper::Key { path: p.path.clone(), ts: p.ts, blur: p.blur, size, stored: false }, p.dim.min(100)));
         }
@@ -10747,6 +10763,7 @@ impl VectorApp {
         let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
         let chat_box = self.chat_box.clone();
         let app_box = cx.entity().downgrade();
+        let (margins, layout) = (self.chat_margins.clone(), self.chat_layout());
         let clock = self.started.elapsed().as_secs_f32();
         let app = cx.entity().downgrade();
         let on_act: timeline::OnAct = Rc::new(move |msg_id, act, window, cx| {
@@ -10804,6 +10821,8 @@ impl VectorApp {
                             });
                         }
                         chat_box.set(Some(b));
+                        let vp = window.viewport_size();
+                        margins.borrow_mut().insert(layout, (f32::from(vp.width - b.size.width), f32::from(vp.height - b.size.height)));
                     },
                     |_, _, _, _| {},
                 )

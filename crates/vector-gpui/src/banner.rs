@@ -46,7 +46,7 @@ fn read(dir: &Path, path: &Path, want: (u32, u32)) -> Option<RenderImage> {
     let tag = tag(path);
     let exact = bakes::file(dir, &tag, want);
     let (file, size) = if exact.exists() { (exact, want) } else { bakes::newest(dir, &tag)? };
-    Some(RenderImage::new(vec![image::Frame::new(bakes::load(&file, size)?)]))
+    Some(RenderImage::new(vec![image::Frame::new(bakes::load(&file, Some(size))?)]))
 }
 
 /// Bakes `show` lacks at `want`, and every bake no banner in `all` still has, gone. Disk only;

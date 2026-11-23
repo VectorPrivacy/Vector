@@ -18,7 +18,7 @@ pub fn file(dir: &Path, tag: &str, (w, h): (u32, u32)) -> PathBuf {
 }
 
 /// A bake as written: its size, then its pixels. One left unsealed is dropped.
-pub fn load(file: &Path, (w, h): (u32, u32)) -> Option<image::RgbaImage> {
+pub fn load(file: &Path, want: Option<(u32, u32)>) -> Option<image::RgbaImage> {
     if !vector_core::vcache::is_sealed(file) {
         let _ = std::fs::remove_file(file);
         return None;
@@ -26,7 +26,8 @@ pub fn load(file: &Path, (w, h): (u32, u32)) -> Option<image::RgbaImage> {
     let mut bytes = vector_core::vcache::read(file).ok()?;
     let (head, px) = bytes.split_at_checked(8)?;
     let size = (u32::from_le_bytes(head[..4].try_into().ok()?), u32::from_le_bytes(head[4..].try_into().ok()?));
-    if size != (w, h) || px.len() as u64 != u64::from(w) * u64::from(h) * 4 {
+    let (w, h) = size;
+    if want.is_some_and(|want| want != size) || px.len() as u64 != u64::from(w) * u64::from(h) * 4 {
         return None;
     }
     bytes.drain(..8);
@@ -123,11 +124,11 @@ mod tests {
         store(&f, &img, "abc-", 2);
         assert!(vector_core::vcache::is_sealed(&f));
         assert!(!std::fs::read(&f).unwrap().windows(4).any(|w| w == [1, 2, 3, 255]));
-        assert_eq!(load(&f, (3, 2)).unwrap().as_raw(), img.as_raw());
+        assert_eq!(load(&f, Some((3, 2))).unwrap().as_raw(), img.as_raw());
         assert_eq!(newest(&dir, "abc-").map(|(_, s)| s), Some((3, 2)));
         let plain = file(&dir, "old-", (1, 1));
         std::fs::write(&plain, [1u8, 0, 0, 0, 1, 0, 0, 0, 9, 9, 9, 9]).unwrap();
-        assert!(load(&plain, (1, 1)).is_none());
+        assert!(load(&plain, Some((1, 1))).is_none());
         assert!(!plain.exists());
         sweep(&dir, &[]);
         assert!(!f.exists());
