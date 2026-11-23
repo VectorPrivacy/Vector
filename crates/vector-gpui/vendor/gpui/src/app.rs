@@ -949,6 +949,7 @@ pub struct App {
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
     /// When each cached asset was last asked for, so idle decoded images can be let go.
     asset_used: FxHashMap<(TypeId, u64), std::time::Instant>,
+    pub(crate) frame_hold: FrameHold,
     asset_source: Arc<dyn AssetSource>,
     pub(crate) svg_renderer: SvgRenderer,
     http_client: Arc<dyn HttpClient>,
@@ -1044,6 +1045,7 @@ impl App {
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
                 loading_assets: Default::default(),
                 asset_used: Default::default(),
+                frame_hold: Default::default(),
                 asset_source,
                 http_client,
                 globals_by_type: Default::default(),
@@ -3159,11 +3161,58 @@ impl App {
             let future = A::load(source.clone(), self);
             let entry = CachedLoad::new(future, self);
             self.loading_assets.insert(asset_id, Box::new(entry));
+            if self.frame_hold.until.is_some() && A::holds_frame(source) {
+                self.frame_hold.fresh.push((asset_id, settle_asset::<A>));
+            }
         }
         self.loading_assets
             .get(&asset_id)
             .and_then(|entry| entry.downcast_ref())
             .expect("asset cache entries are keyed by their asset type")
+    }
+
+    /// The next frame waits up to `budget` for what it starts loading from disk (images by
+    /// path, embedded or in memory, never the network), so a page opens complete.
+    pub fn hold_next_frame(&mut self, budget: std::time::Duration) {
+        let b = self.frame_hold.asked.get_or_insert(budget);
+        *b = (*b).max(budget);
+    }
+
+    /// While a held frame is being drawn: when it stops waiting. Work the app starts then may
+    /// wait until this, apply its result and call [`Self::settled_in_hold`].
+    pub fn frame_hold_deadline(&self) -> Option<std::time::Instant> {
+        self.frame_hold.until
+    }
+
+    /// Something a held frame waited for landed: it draws again before it shows.
+    pub fn settled_in_hold(&mut self) {
+        self.frame_hold.settled = true;
+    }
+
+    /// Wait for work the held frame started, alongside its other loads: `wait` gets the
+    /// deadline and returns whether its result landed. Outside a hold it runs at once.
+    pub fn wait_in_hold(&mut self, wait: impl FnOnce(&mut App, std::time::Instant) -> bool + 'static) {
+        if self.frame_hold.until.is_some() {
+            self.frame_hold.waits.push(Box::new(wait));
+        } else {
+            wait(self, std::time::Instant::now());
+        }
+    }
+
+    /// Wait for the held frame's fresh loads; true when anything landed since the last draw.
+    pub(crate) fn settle_held(&mut self) -> bool {
+        let Some(deadline) = self.frame_hold.until else { return false };
+        for (id, settle) in std::mem::take(&mut self.frame_hold.fresh) {
+            if settle(self, id, deadline) {
+                self.frame_hold.settled = true;
+            }
+        }
+        for wait in std::mem::take(&mut self.frame_hold.waits) {
+            if wait(self, deadline) {
+                self.frame_hold.settled = true;
+            }
+        }
+        std::mem::take(&mut self.frame_hold.settled)
     }
 
     /// Obtain a new [`FocusHandle`], which allows you to track and manipulate the keyboard focus
@@ -3968,4 +4017,28 @@ mod test {
     fn missing_glyph(grapheme: &'static str) -> MissingGlyph {
         MissingGlyph::new(grapheme.into(), FallbackFontClass::Proportional)
     }
+}
+
+#[derive(Default)]
+pub(crate) struct FrameHold {
+    pub(crate) asked: Option<std::time::Duration>,
+    pub(crate) until: Option<std::time::Instant>,
+    pub(crate) fresh: Vec<((TypeId, u64), fn(&mut App, (TypeId, u64), std::time::Instant) -> bool)>,
+    pub(crate) waits: Vec<Box<dyn FnOnce(&mut App, std::time::Instant) -> bool>>,
+    settled: bool,
+}
+
+fn settle_asset<A: Asset>(cx: &mut App, id: (TypeId, u64), deadline: std::time::Instant) -> bool {
+    let Some(views) = cx
+        .loading_assets
+        .get(&id)
+        .and_then(|entry| entry.downcast_ref::<CachedLoad<A::Output>>())
+        .and_then(|entry| entry.settle(deadline))
+    else {
+        return false;
+    };
+    for view in views {
+        cx.notify(view);
+    }
+    true
 }

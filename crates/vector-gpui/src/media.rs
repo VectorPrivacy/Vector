@@ -599,13 +599,72 @@ fn decode_slots() -> Arc<tokio::sync::Semaphore> {
 }
 
 /// Start the decodes the last render asked for; the app repaints as each lands.
+fn land(m: &mut Media, key: String, decoded: Option<(RenderImage, u32, u32)>) {
+    match decoded {
+        Some((image, iw, ih)) => {
+            m.images.insert(key, Slot::Ready { image: Arc::new(image), w: iw, h: ih });
+            m.pressed = true;
+        }
+        // A held copy let go meanwhile: the next sight asks again, a couple of times.
+        None if m.retried.get(&key).copied().unwrap_or(0) < RETRIES => {
+            *m.retried.entry(key.clone()).or_default() += 1;
+            m.images.remove(&key);
+        }
+        None => {
+            m.images.insert(key, Slot::Failed);
+        }
+    }
+}
+
+/// `w` read and decoded off this thread.
+fn read_now(w: &Want, live: bool) -> futures::channel::oneshot::Receiver<Option<(RenderImage, u32, u32)>> {
+    let (ext, max, still) = (w.ext.clone(), w.max, w.still);
+    if live {
+        let (hash, path) = (w.hash, w.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+        return crate::backend::run(async move {
+            let b = crate::backend::attachments::bytes(hash, path).await?;
+            tokio::task::spawn_blocking(move || decode_as(&b, &ext, max, still)).await.ok()?
+        });
+    }
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let path = w.path.clone();
+    // spawn-detached: reads and decodes a fixture file; owns no account state.
+    std::thread::spawn(move || {
+        let _ = tx.send(path.and_then(|p| crate::pic::read(p).ok()).and_then(|b| decode_as(&b, &ext, max, still)));
+    });
+    rx
+}
+
 pub fn pump<V: 'static>(
     media: &std::rc::Rc<std::cell::RefCell<Media>>,
     app: WeakEntity<V>,
     live: bool,
     cx: &mut App,
 ) {
-    let wants = std::mem::take(&mut media.borrow_mut().wants);
+    let mut wants = std::mem::take(&mut media.borrow_mut().wants);
+    // A held frame shows the pictures it asked for: read and decoded at once, waited on together.
+    if cx.frame_hold_deadline().is_some() {
+        for w in wants.drain(..) {
+            let mut rx = read_now(&w, live);
+            let (media, app) = (media.clone(), app.clone());
+            cx.wait_in_hold(move |cx, deadline| {
+                if let Some(decoded) = crate::kit::recv_until(&mut rx, deadline) {
+                    land(&mut media.borrow_mut(), w.key, decoded);
+                    if let Some(app) = app.upgrade() {
+                        cx.notify(app.entity_id());
+                    }
+                    return true;
+                }
+                cx.spawn(async move |cx| {
+                    let decoded = rx.await.ok().flatten();
+                    land(&mut media.borrow_mut(), w.key, decoded);
+                    app.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+                false
+            });
+        }
+    }
     for w in wants {
         let media = media.clone();
         let app = app.clone();
@@ -648,23 +707,7 @@ pub fn pump<V: 'static>(
                 }
                 None => None,
             };
-            {
-                let mut m = media.borrow_mut();
-                match decoded {
-                    Some((image, iw, ih)) => {
-                        m.images.insert(w.key, Slot::Ready { image: Arc::new(image), w: iw, h: ih });
-                        m.pressed = true;
-                    }
-                    // A held copy let go meanwhile: the next sight asks again, a couple of times.
-                    None if m.retried.get(&w.key).copied().unwrap_or(0) < RETRIES => {
-                        *m.retried.entry(w.key.clone()).or_default() += 1;
-                        m.images.remove(&w.key);
-                    }
-                    None => {
-                        m.images.insert(w.key, Slot::Failed);
-                    }
-                }
-            }
+            land(&mut media.borrow_mut(), w.key, decoded);
             app.update(cx, |_, cx| cx.notify()).ok();
         })
         .detach();

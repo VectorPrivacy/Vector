@@ -8,6 +8,17 @@ use crate::lang::LangFonts as _;
 use crate::theme::*;
 
 /// CSS `font-variant-numeric: tabular-nums`: every digit as wide as the others.
+/// `rx`'s value if its sender (on another thread) answers by `deadline`.
+pub fn recv_until<T>(rx: &mut futures::channel::oneshot::Receiver<T>, deadline: std::time::Instant) -> Option<T> {
+    loop {
+        match rx.try_recv() {
+            Ok(Some(v)) => return Some(v),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_micros(250)),
+            _ => return None,
+        }
+    }
+}
+
 pub fn tabular() -> gpui::FontFeatures {
     static TNUM: std::sync::LazyLock<gpui::FontFeatures> =
         std::sync::LazyLock::new(|| gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));

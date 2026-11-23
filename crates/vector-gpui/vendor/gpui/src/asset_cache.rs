@@ -9,10 +9,11 @@ use std::marker::PhantomData;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 pub(crate) struct CachedLoad<T> {
     state: Rc<RefCell<CachedLoadState<T>>>,
+    done: Arc<Done<T>>,
     // Keep the owner outside the state so publishing a result cannot cancel its own task.
     _task: Task<()>,
 }
@@ -22,21 +23,35 @@ enum CachedLoadState<T> {
     Loaded(T),
 }
 
+/// Where the background load leaves its result, so a held frame can take it without the
+/// foreground hop.
+struct Done<T> {
+    slot: Mutex<Option<T>>,
+    ready: Condvar,
+}
+
 impl<T: Clone + Send + 'static> CachedLoad<T> {
     pub(crate) fn new(future: impl Future<Output = T> + Send + 'static, cx: &App) -> Self {
         let state = Rc::new(RefCell::new(CachedLoadState::Loading(FxHashSet::default())));
-        let task = cx.background_executor().spawn(future);
+        let done = Arc::new(Done { slot: Mutex::new(None), ready: Condvar::new() });
+        let task = cx.background_executor().spawn({
+            let done = done.clone();
+            async move {
+                let result = future.await;
+                *done.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                done.ready.notify_all();
+            }
+        });
         let task = cx.spawn({
             let state = Rc::downgrade(&state);
+            let done = done.clone();
             async move |cx| {
-                let result = task.await;
+                task.await;
                 let Some(state) = state.upgrade() else {
                     return;
                 };
-                let previous =
-                    mem::replace(&mut *state.borrow_mut(), CachedLoadState::Loaded(result));
-                let CachedLoadState::Loading(views) = previous else {
-                    unreachable!("a cached load completes only once");
+                let Some(views) = publish(&state, &done) else {
+                    return;
                 };
                 cx.update(|cx| {
                     for view in views {
@@ -45,7 +60,25 @@ impl<T: Clone + Send + 'static> CachedLoad<T> {
                 });
             }
         });
-        Self { state, _task: task }
+        Self { state, done, _task: task }
+    }
+
+    /// Wait for the load until `deadline`; returns the views to notify once it lands.
+    pub(crate) fn settle(&self, deadline: std::time::Instant) -> Option<FxHashSet<EntityId>> {
+        if matches!(&*self.state.borrow(), CachedLoadState::Loaded(_)) {
+            return None;
+        }
+        {
+            let mut slot = self.done.slot.lock().unwrap_or_else(|e| e.into_inner());
+            while slot.is_none() {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                slot = self.done.ready.wait_timeout(slot, left).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        }
+        publish(&self.state, &self.done)
     }
 
     pub(crate) fn get(&self) -> Option<T> {
@@ -63,6 +96,17 @@ impl<T: Clone + Send + 'static> CachedLoad<T> {
             }
             CachedLoadState::Loaded(result) => Some(result.clone()),
         }
+    }
+}
+
+fn publish<T>(state: &RefCell<CachedLoadState<T>>, done: &Done<T>) -> Option<FxHashSet<EntityId>> {
+    if matches!(&*state.borrow(), CachedLoadState::Loaded(_)) {
+        return None;
+    }
+    let result = done.slot.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+    match mem::replace(&mut *state.borrow_mut(), CachedLoadState::Loaded(result)) {
+        CachedLoadState::Loading(views) => Some(views),
+        CachedLoadState::Loaded(_) => None,
     }
 }
 
@@ -108,6 +152,12 @@ pub trait Asset: 'static {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static;
+
+    /// Whether a held frame ([`App::hold_next_frame`]) waits for this load: true for local
+    /// work, false for anything on the network.
+    fn holds_frame(_source: &Self::Source) -> bool {
+        false
+    }
 }
 
 /// An asset Loader which logs the [`Err`] variant of a [`Result`] during loading
@@ -132,6 +182,10 @@ where
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         let load = T::load(source, cx);
         load.inspect_err(|e| log::error!("Failed to load asset: {:?}", e))
+    }
+
+    fn holds_frame(source: &Self::Source) -> bool {
+        T::holds_frame(source)
     }
 }
 

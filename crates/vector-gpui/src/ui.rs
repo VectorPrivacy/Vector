@@ -38,6 +38,8 @@ pub(crate) const RAIL_W: f32 = 201.;
 pub(crate) const RAIL_SLIM_W: f32 = 73.;
 /// Narrower than this, the rail can't afford its labels.
 const RAIL_AUTO_COLLAPSE_W: f32 = 1080.;
+/// How long opening a page may wait for what it shows from disk: its first frame shows whole.
+const OPEN_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
 /// The list pane's default width, its border included.
 const LIST_W_DEFAULT: f32 = 240.;
 static LIST_W_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new((LIST_W_DEFAULT - 1.).to_bits());
@@ -2510,6 +2512,7 @@ impl VectorApp {
 
     /// A place the Main Menu or the sidebar's tabs go to.
     fn nav_to(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        cx.hold_next_frame(OPEN_HOLD);
         let me = self.store.borrow().my_npub.clone();
         match id {
             "profile" => self.open_profile(me, cx),
@@ -4494,6 +4497,7 @@ impl VectorApp {
         });
         let switching = self.open.as_ref() != Some(&id);
         if switching {
+            cx.hold_next_frame(OPEN_HOLD);
             self.follow_open(Some(&id), window);
             self.stash_draft(cx);
         }
@@ -4558,55 +4562,66 @@ impl VectorApp {
             );
             (views, pics)
         });
+        let mut rx = rx;
+        if let Some(res) = kit::recv_until(&mut rx, std::time::Instant::now() + OPEN_HOLD) {
+            return self.history_landed(id, Ok(res), cx);
+        }
         cx.spawn(async move |this, cx| {
             let res = rx.await;
-            this.update(cx, |this, cx| {
-                if this.open.as_ref() != Some(&id) {
-                    return;
-                }
-                let Ok((Ok(mut views), pics)) = res else {
-                    this.opening = None;
-                    return;
-                };
-                this.media.borrow_mut().take_linked(pics);
-                views.reverse();
-                views.sort_by_key(|m| m.at);
-                if views.len() < 200 {
-                    this.history_done.insert(id.to_string());
-                }
-                if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
-                    // Anything newer that landed meanwhile stays.
-                    let newest = views.last().map(|m| m.at).unwrap_or(0);
-                    let later: Vec<Message> = chat
-                        .messages
-                        .drain(..)
-                        .filter(|m| m.at > newest && !views.iter().any(|v| v.id == m.id))
-                        .collect();
-                    chat.messages = views;
-                    chat.messages.extend(later);
-                    // The page's reactions were there all along: they settle, not arrive.
-                    let mut media = this.media.borrow_mut();
-                    for m in &chat.messages {
-                        media.settle.forget(&m.id);
-                    }
-                    drop(media);
-                    kit::roll_forget("rx:");
-                }
-                let count = this.rebuild_rows();
-                this.timeline = timeline_state(count, cx.entity().downgrade());
-                this.timeline.scroll_to_end();
-                this.offer_unread_jump(&id);
-                if let Some(Some(jump)) = this.opening.take() {
-                    this.jump_to_message(jump, cx);
-                }
-                if this.history_done.contains(id.as_ref()) && this.timeline.logical_scroll_top().item_ix < 4 {
-                    this.load_older(cx);
-                }
-                cx.notify();
-            })
-            .ok();
+            this.update(cx, |this, cx| this.history_landed(id, res, cx)).ok();
         })
         .detach();
+    }
+
+    fn history_landed(
+        &mut self,
+        id: SharedString,
+        res: Result<(Result<Vec<Message>, String>, Vec<(String, crate::media::Linked)>), futures::channel::oneshot::Canceled>,
+        cx: &mut Context<Self>,
+    ) {
+        let this = self;
+        if this.open.as_ref() != Some(&id) {
+            return;
+        }
+        let Ok((Ok(mut views), pics)) = res else {
+            this.opening = None;
+            return;
+        };
+        this.media.borrow_mut().take_linked(pics);
+        views.reverse();
+        views.sort_by_key(|m| m.at);
+        if views.len() < 200 {
+            this.history_done.insert(id.to_string());
+        }
+        if let Some(chat) = this.store.borrow_mut().chat_mut(&id) {
+            // Anything newer that landed meanwhile stays.
+            let newest = views.last().map(|m| m.at).unwrap_or(0);
+            let later: Vec<Message> = chat
+                .messages
+                .drain(..)
+                .filter(|m| m.at > newest && !views.iter().any(|v| v.id == m.id))
+                .collect();
+            chat.messages = views;
+            chat.messages.extend(later);
+            // The page's reactions were there all along: they settle, not arrive.
+            let mut media = this.media.borrow_mut();
+            for m in &chat.messages {
+                media.settle.forget(&m.id);
+            }
+            drop(media);
+            kit::roll_forget("rx:");
+        }
+        let count = this.rebuild_rows();
+        this.timeline = timeline_state(count, cx.entity().downgrade());
+        this.timeline.scroll_to_end();
+        this.offer_unread_jump(&id);
+        if let Some(Some(jump)) = this.opening.take() {
+            this.jump_to_message(jump, cx);
+        }
+        if this.history_done.contains(id.as_ref()) && this.timeline.logical_scroll_top().item_ix < 4 {
+            this.load_older(cx);
+        }
+        cx.notify();
     }
 
     /// After an open: the pill, when the unread run begins above what the page loaded.
@@ -5875,31 +5890,43 @@ impl VectorApp {
     }
 
     fn video_work(&mut self, work: Vec<crate::video::Work>, cx: &mut Context<Self>) {
+        let held = cx.frame_hold_deadline().is_some();
         for w in work {
-            let rx = crate::video::run(w);
-            cx.spawn(async move |this, cx| {
-                let Ok(crate::video::WorkDone::Probed(att, info)) = rx.await else { return };
-                this.update(cx, |this, cx| {
-                    let mut media = this.media.borrow_mut();
-                    let ok = info.is_some();
-                    media.videos.probed(att.clone(), info);
-                    // A video fetched by a tap plays as soon as it can.
-                    if let Some(url) = att.strip_prefix("embed:")
-                        && media.embed_autoplay.remove(url)
-                        && ok
-                        && let Some(crate::embeds::VideoState::Ready(spec)) = media.embed_videos.get(url)
-                    {
-                        let spec = spec.clone();
-                        media.videos.act(&att, Some(spec), crate::video::Act::Toggle);
-                    }
-                    drop(media);
-                    this.refresh_rows(false);
-                    cx.notify();
+            let local = !matches!(&w, crate::video::Work::Probe(_, crate::audio::AudioInputSpec::Stream(_), _));
+            let mut rx = crate::video::run(w);
+            let this = cx.entity().downgrade();
+            // A held frame shows the posters it asked for from disk.
+            cx.wait_in_hold(move |cx, deadline| {
+                if held && local && let Some(done) = kit::recv_until(&mut rx, deadline) {
+                    return this.update(cx, |this, cx| this.video_done(done, cx)).is_ok();
+                }
+                cx.spawn(async move |cx| {
+                    let Ok(done) = rx.await else { return };
+                    this.update(cx, |this, cx| this.video_done(done, cx)).ok();
                 })
-                .ok();
-            })
-            .detach();
+                .detach();
+                false
+            });
         }
+    }
+
+    fn video_done(&mut self, done: crate::video::WorkDone, cx: &mut Context<Self>) {
+        let crate::video::WorkDone::Probed(att, info) = done;
+        let mut media = self.media.borrow_mut();
+        let ok = info.is_some();
+        media.videos.probed(att.clone(), info);
+        // A video fetched by a tap plays as soon as it can.
+        if let Some(url) = att.strip_prefix("embed:")
+            && media.embed_autoplay.remove(url)
+            && ok
+            && let Some(crate::embeds::VideoState::Ready(spec)) = media.embed_videos.get(url)
+        {
+            let spec = spec.clone();
+            media.videos.act(&att, Some(spec), crate::video::Act::Toggle);
+        }
+        drop(media);
+        self.refresh_rows(false);
+        cx.notify();
     }
 
     fn audio_work(&mut self, work: Vec<crate::audio::Work>, cx: &mut Context<Self>) {
@@ -12355,6 +12382,7 @@ impl VectorApp {
 
     /// The Community's whole view (channel list, members), landing on `to` when given.
     fn open_community_to(&mut self, id: String, to: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        cx.hold_next_frame(OPEN_HOLD);
         let (landing, members) = {
             let store = self.store.borrow();
             let Some(com) = store.community(&id) else {
@@ -17247,6 +17275,7 @@ impl VectorApp {
     }
 
     fn open_profile(&mut self, npub: String, cx: &mut Context<Self>) {
+        cx.hold_next_frame(OPEN_HOLD);
         let back = self.open.take();
         self.new_chat = None;
         if self.live {
@@ -17604,6 +17633,7 @@ impl VectorApp {
     }
 
     fn open_settings(&mut self, cat: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        cx.hold_next_frame(OPEN_HOLD);
         use crate::settings::{Home, Settings};
         let slim = self.is_slim;
         let search = cx.new(|cx| TextInput::new(t::search(), cx).with_look(settings_search_look(slim)));

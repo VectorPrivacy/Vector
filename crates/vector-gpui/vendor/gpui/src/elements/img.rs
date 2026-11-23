@@ -696,6 +696,10 @@ impl Asset for ImageDecoder {
         let renderer = cx.svg_renderer();
         async move { source.to_image_data(renderer).map_err(Into::into) }
     }
+
+    fn holds_frame(_: &Self::Source) -> bool {
+        true
+    }
 }
 
 /// An image loader for the GPUI asset system
@@ -705,6 +709,10 @@ pub enum ImageAssetLoader {}
 impl Asset for ImageAssetLoader {
     type Source = Resource;
     type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn holds_frame(source: &Self::Source) -> bool {
+        !matches!(source, Resource::Uri(_))
+    }
 
     fn load(
         source: Self::Source,

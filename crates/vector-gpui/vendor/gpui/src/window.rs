@@ -2204,7 +2204,20 @@ impl Window {
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || high_rate_input;
-                if should_draw {
+                let hold = if should_draw {
+                    cx.update(|cx| {
+                        let budget = cx.frame_hold.asked.take()?;
+                        cx.frame_hold.until = Some(Instant::now() + budget);
+                        Some(())
+                    })
+                } else {
+                    None
+                };
+                if hold.is_some() {
+                    measure("frame duration", || {
+                        draw_held(&handle, &mut cx, force_render);
+                    })
+                } else if should_draw {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -12141,4 +12154,44 @@ const STREAM_FRAMES_FROM: usize = 2 << 20;
 fn streams_frames(data: &RenderImage) -> bool {
     let s = data.size(0);
     s.width.0.max(0) as usize * s.height.0.max(0) as usize * 4 * data.frame_count() > STREAM_FRAMES_FROM
+}
+
+/// A held frame: drawn, then drawn again as what it waits for lands (each draw's effects
+/// flushed, so work they defer can join), and shown once complete or out of time.
+fn draw_held(handle: &AnyWindowHandle, cx: &mut crate::AsyncApp, force_render: bool) {
+    let mut arena = handle
+        .update(cx, |_, window, cx| {
+            if force_render {
+                window.refresh();
+            }
+            window.draw(cx)
+        })
+        .log_err();
+    while arena.is_some() && cx.update(|cx| cx.settle_held()) {
+        arena = handle
+            .update(cx, |_, window, cx| {
+                if let Some(a) = arena.take() {
+                    a.clear(cx);
+                }
+                window.draw(cx)
+            })
+            .log_err();
+    }
+    cx.update(|cx| {
+        cx.frame_hold.until = None;
+        cx.frame_hold.fresh.clear();
+        // Out of time: each runs once more without waiting, so it hands its work back.
+        let now = Instant::now();
+        for wait in std::mem::take(&mut cx.frame_hold.waits) {
+            wait(cx, now);
+        }
+    });
+    handle
+        .update(cx, |_, window, cx| {
+            window.present();
+            if let Some(a) = arena {
+                a.clear(cx);
+            }
+        })
+        .log_err();
 }
