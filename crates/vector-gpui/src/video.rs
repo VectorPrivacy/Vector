@@ -1294,6 +1294,10 @@ pub(crate) fn press(key: &SharedString) {
     PRESSED.with_borrow_mut(|p| *p = Some(key.clone()));
 }
 
+fn is_pressed(key: &SharedString) -> bool {
+    PRESSED.with_borrow(|p| p.as_ref() == Some(key))
+}
+
 /// Whether this release ends a press on `key`.
 pub(crate) fn release(key: &SharedString) -> bool {
     PRESSED.with_borrow_mut(|p| p.take_if(|k| *k == *key).is_some())
@@ -1417,9 +1421,10 @@ fn slider(key: &str, label: SharedString, value: SharedString, frac: f32, live: 
                         });
                     }
                     if dragging {
-                        let on = on.clone();
+                        // One clip can show several tracks at once (inline and fullscreen): only the pressed one follows.
+                        let (on, name) = (on.clone(), name.clone());
                         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
-                            if phase.bubble() && e.dragging() {
+                            if phase.bubble() && e.dragging() && is_pressed(&name) {
                                 on(act(at(e.position).clamp(0., 1.), false), window, cx);
                             }
                         });
