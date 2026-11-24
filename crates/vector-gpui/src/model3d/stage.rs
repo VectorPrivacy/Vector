@@ -191,7 +191,7 @@ impl Models {
     }
 
     /// The stage's radial glow, drawn once per size.
-    fn backdrop(&mut self, w: u32, h: u32) -> Arc<RenderImage> {
+    pub fn backdrop(&mut self, w: u32, h: u32) -> Arc<RenderImage> {
         if let Some((size, img)) = &self.backdrop
             && *size == (w, h)
         {

@@ -12267,7 +12267,7 @@ impl VectorApp {
             })
             .ok();
         });
-        models.scale = 1.;
+        models.scale = window.scale_factor();
         models.active = window.is_window_active() && !gpui::animations_asleep();
         let tray = crate::staged::tray(&self.staged, &mut models, on, cx);
         if let Some(due) = models.tick() {

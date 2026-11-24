@@ -123,18 +123,22 @@ pub fn tray<V: 'static>(staged: &[Staged], models: &mut crate::model3d::stage::M
         }
         let p = s.preview.read(cx);
         let (name, ext, spoiler) = (p.shown_name(), p.ext().to_string(), p.spoiler());
-        // A model turns on the tile at its own size (no Retina doubling) once it has loaded.
-        let model = (s.live() && crate::model3d::supports(&ext) && crate::backend::pasted::len(p.path()).is_some_and(|n| n <= crate::model3d::stage::GIANT))
+        // A model sits on the stage's backdrop and fades in over it, never over a file icon.
+        let is_model = crate::model3d::supports(&ext) && crate::backend::pasted::len(p.path()).is_some_and(|n| n <= crate::model3d::stage::GIANT);
+        let scale = models.scale;
+        let model = is_model
             .then(|| {
                 let path = p.path().to_path_buf();
                 let v = models.view(&format!("staged:{}", s.id), &ext, || Some(crate::model3d::Src::File(path)))?;
                 v.seen = Some(now);
-                if v.css_size() != (TILE, TILE) {
-                    v.set_size(TILE, TILE, 1.);
-                }
+                v.set_size(TILE, TILE, scale);
                 v.frame.clone().map(|f| (f, v.opacity()))
             })
             .flatten();
+        let backdrop = is_model.then(|| {
+            let side = (TILE * scale).round() as u32;
+            models.backdrop(side, side)
+        });
         let id = s.id;
         let picture = if spoiler { s.blur.clone().or_else(|| s.thumb.clone()) } else { s.thumb.clone() };
         let face = match (picture, s.icon.clone()) {
@@ -149,11 +153,14 @@ pub fn tray<V: 'static>(staged: &[Staged], models: &mut crate::model3d::stage::M
                 .object_fit(ObjectFit::Cover)
                 .into_any_element(),
             (None, None) => {
-                let icon = (model.as_ref().is_none_or(|(_, a)| *a < 1.)).then(|| file_face(&ext));
+                let under = match backdrop {
+                    Some(b) => crate::pic::img(b).absolute().inset_0().size(px(TILE)).rounded(px(8.)).into_any_element(),
+                    None => file_face(&ext).into_any_element(),
+                };
                 div()
                     .size_full()
                     .relative()
-                    .children(icon)
+                    .child(under)
                     .children(model.map(|(frame, alpha)| {
                         crate::pic::img(ImageSource::Render(frame)).absolute().inset_0().size(px(TILE)).rounded(px(8.)).opacity(alpha)
                     }))
