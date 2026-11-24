@@ -41,6 +41,8 @@ preview-zip-deep = Deeply nested...
 preview-spoiler = Spoiler
 preview-spoiler-remove = Remove spoiler
 preview-spoiler-mark = Mark as spoiler
+# Opens the cropper on the picture about to be sent.
+preview-crop = Crop
 # Publishes a Mini App to the App Store.
 preview-publish = Publish
 preview-send = Send

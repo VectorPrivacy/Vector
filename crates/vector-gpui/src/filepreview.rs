@@ -17,7 +17,7 @@ use crate::pic::img;
 
 use crate::composer::{CancelInput, InputChanged, SendText, TextInput};
 use crate::message::types::CachedCompressedImage;
-use crate::theme::{INTER, PRIMARY, c, white_a};
+use crate::theme::{INTER, c, white_a};
 
 pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "jxl", "tiff", "tif", "ico"];
 /// Pictures shown before sending but sent as they are: the send pipeline cannot read them.
@@ -53,6 +53,8 @@ pub enum Event {
     Done,
     /// A staged file taken out of the composer.
     Remove,
+    /// The picture was cropped: it now reads from `path()`, held in memory.
+    Cropped,
 }
 
 impl EventEmitter<Event> for FilePreview {}
@@ -92,7 +94,13 @@ pub struct FilePreview {
     too_large: bool,
     /// Waits in the composer with others: this edits it, and the composer sends them all.
     staged: bool,
+    crop: Option<Entity<crate::cropper::Cropper>>,
+    /// A crop is being made: the picture shows dimmed until it lands.
+    cropping: bool,
 }
+
+/// Pictures the cropper can cut and re-encode as they are (animations frame by frame).
+const CROPPABLE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 /// A folder or a selection being zipped, then what the archive holds.
 enum Zip {
@@ -379,7 +387,75 @@ impl FilePreview {
             check_servers: false,
             too_large: false,
             staged,
+            crop: None,
+            cropping: false,
         }
+    }
+
+    fn can_crop(&self) -> bool {
+        self.image.is_some() && self.zip.is_none() && CROPPABLE.contains(&self.ext.as_str())
+    }
+
+    fn start_crop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((image, w, h)) = self.image.clone().filter(|_| self.can_crop() && !self.cropping) else { return };
+        let cropper = cx.new(|cx| crate::cropper::Cropper::new(image, (w, h), t::crop_file_title(), t::crop_file_hint(), false, window, cx).free());
+        cx.subscribe_in(&cropper, window, |p, _, answer: &crate::cropper::Answer, window, cx| {
+            p.crop = None;
+            window.focus(&p.focus, cx);
+            if let crate::cropper::Answer::Crop(rect) = answer {
+                p.apply_crop(rect.clone(), window, cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        self.crop = Some(cropper);
+        cx.notify();
+    }
+
+    /// The cut is made off the main thread on the file's own bytes; the result is held in
+    /// memory only, under the same name.
+    fn apply_crop(&mut self, rect: vector_core::image_crop::CropRect, window: &mut Window, cx: &mut Context<Self>) {
+        self.cropping = true;
+        let file = self.path.clone();
+        let task = cx.background_executor().spawn(async move {
+            let bytes = crate::backend::pasted::read(&file).ok()?;
+            crate::crop::crop_drawn(bytes.to_vec(), rect)
+                .inspect_err(|e| log::warn!("crop: {e}"))
+                .ok()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let out = task.await;
+            this.update_in(cx, |p, window, cx| {
+                p.cropping = false;
+                match out {
+                    Some(bytes) => p.replace_with(bytes, window, cx),
+                    None => cx.notify(),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn replace_with(&mut self, bytes: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.path.file_name().and_then(|n| n.to_str()).unwrap_or("image").to_string();
+        let path = crate::backend::pasted::hold_named(bytes, &name);
+        self.stop_compressing();
+        self.forget_clip();
+        let mut next = Self::build(path, self.receiver.clone(), self.reply.clone(), self.staged, cx);
+        next.stem = std::mem::take(&mut self.stem);
+        next.edited = self.edited;
+        next.spoiler = self.spoiler;
+        next.compress = self.compress;
+        next.media = self.media.take();
+        next.publish = self.publish;
+        next.check_servers = self.check_servers;
+        crate::backend::archive::forget(&self.path);
+        *self = next;
+        Self::load_image(self.path.clone(), self.ext.clone(), cx);
+        window.focus(&self.focus, cx);
+        cx.emit(Event::Cropped);
+        cx.notify();
     }
 
     fn load_image(file: PathBuf, e: String, cx: &mut Context<Self>) {
@@ -532,6 +608,8 @@ impl FilePreview {
         .detach();
         Self {
             staged: false,
+            crop: None,
+            cropping: false,
             focus,
             path: PathBuf::new(),
             receiver,
@@ -806,31 +884,36 @@ fn option(
         .role(gpui::Role::Switch)
         .aria_toggled(on.into())
         .aria_label(name)
+        .w_full()
         .flex()
         .items_center()
         .justify_between()
-        .px(px(16.))
-        .py(px(12.))
-        .bg(c(0x171717))
-        .border_1()
-        .border_color(gpui::rgba(0x47474750))
-        .rounded(px(8.))
+        .gap(px(12.))
+        .px(px(14.))
+        .py(px(9.))
+        .bg(white_a(0.04))
+        .hover(|s| s.bg(white_a(0.07)))
+        .rounded(px(12.))
         .cursor_pointer()
         .child(
             div()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_baseline()
+                .gap_x(px(8.))
                 .child(
                     div()
-                        .text_size(px(14.))
-                        .line_height(px(16.))
+                        .text_size(px(13.5))
+                        .line_height(px(20.))
                         .text_color(white_a(0.9))
                         .child(label),
                 )
                 .child(
                     div()
-                        .mt(px(2.))
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(white_a(0.5))
+                        .text_size(px(12.5))
+                        .line_height(px(20.))
+                        .text_color(white_a(0.45))
                         .child(sublabel.into()),
                 ),
         )
@@ -839,7 +922,10 @@ fn option(
 
 impl Render for FilePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let max_h = f32::from(window.viewport_size().height) * 0.4;
+        let (vw, vh) = (f32::from(window.viewport_size().width), f32::from(window.viewport_size().height));
+        let card_w = 520f32.min(vw - 32.);
+        let inner = card_w - 32.;
+        let max_h = vh * 0.55;
         let content = match &self.zip {
             Some(Zip::Running(pct)) => {
                 let p = pct.load(Ordering::Relaxed);
@@ -936,21 +1022,36 @@ impl Render for FilePreview {
             None => match &self.image {
                 Some((image, w, h)) => {
                     let (w, h) = (*w as f32, *h as f32);
-                    let room = 500f32.min(f32::from(window.viewport_size().width) - 40.) - 48.;
-                    let s = (room / w).min(max_h / h).min(1.);
-                    let (dw, dh) = (w * s, h * s);
+                    let s = (inner / w).min(max_h / h).min(2.);
+                    let (dw, dh) = ((w * s).round(), (h * s).round());
                     let shown = if self.spoiler {
                         self.blur.clone().unwrap_or(image.clone())
                     } else {
                         image.clone()
                     };
+                    let tool = |id: &'static str, icon: &'static str| {
+                        div()
+                            .id(id)
+                            .size(px(34.))
+                            .rounded_full()
+                            .bg(gpui::black().opacity(0.6))
+                            .border_1()
+                            .border_color(white_a(0.12))
+                            .hover(|s| s.bg(gpui::black().opacity(0.8)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .child(svg().path(icon).size(px(17.)).text_color(c(0xffffff)))
+                    };
                     div()
                         .relative()
                         .w(px(dw))
                         .h(px(dh))
-                        .rounded(px(8.))
+                        .rounded(px(12.))
                         .overflow_hidden()
-                        .child(img(shown).size_full().object_fit(gpui::ObjectFit::Fill).rounded(px(8.)))
+                        .child(img(shown).size_full().object_fit(gpui::ObjectFit::Fill))
+                        .when(self.cropping, |d| d.child(div().absolute().inset_0().bg(gpui::black().opacity(0.5))))
                         .when(self.spoiler && dw >= 80. && dh >= 60., |d| {
                             d.child(
                                 div()
@@ -978,35 +1079,28 @@ impl Render for FilePreview {
                         })
                         .child(
                             div()
-                                .id("spoiler-toggle")
-                                .tip(if self.spoiler { t::preview_spoiler_remove() } else { t::preview_spoiler_mark() })
                                 .absolute()
-                                .bottom(px(8.))
-                                .right(px(8.))
-                                .size(px(32.))
-                                .rounded(px(8.))
-                                .bg(gpui::black().opacity(0.55))
-                                .hover(|s| s.bg(gpui::black().opacity(0.75)))
+                                .bottom(px(10.))
+                                .right(px(10.))
                                 .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|p, _, _, cx| {
-                                    p.spoiler = !p.spoiler;
-                                    if p.spoiler {
-                                        p.make_blur(cx);
-                                    }
-                                    cx.notify();
-                                }))
+                                .gap(px(8.))
+                                .when(self.can_crop(), |d| {
+                                    d.child(
+                                        tool("crop-open", "ui/crop.svg")
+                                            .tip(t::preview_crop())
+                                            .on_click(cx.listener(|p, _, window, cx| p.start_crop(window, cx))),
+                                    )
+                                })
                                 .child(
-                                    svg()
-                                        .path(if self.spoiler {
-                                            "icons/eye-off.svg"
-                                        } else {
-                                            "icons/eye.svg"
-                                        })
-                                        .size(px(18.))
-                                        .text_color(c(0xffffff)),
+                                    tool("spoiler-toggle", if self.spoiler { "icons/eye-off.svg" } else { "icons/eye.svg" })
+                                        .tip(if self.spoiler { t::preview_spoiler_remove() } else { t::preview_spoiler_mark() })
+                                        .on_click(cx.listener(|p, _, _, cx| {
+                                            p.spoiler = !p.spoiler;
+                                            if p.spoiler {
+                                                p.make_blur(cx);
+                                            }
+                                            cx.notify();
+                                        })),
                                 ),
                         )
                         .into_any_element()
@@ -1014,7 +1108,7 @@ impl Render for FilePreview {
                 None if IMAGE_EXTS.contains(&self.ext.as_str()) || SHOWN_ONLY.contains(&self.ext.as_str()) => {
                     div().h(px(100.)).into_any_element()
                 }
-                None if let Some(v) = self.clip_view(500f32.min(f32::from(window.viewport_size().width) - 40.) - 48., max_h, cx) => v,
+                None if let Some(v) = self.clip_view(inner, max_h, cx) => v,
                 None => div()
                     .size(px(120.))
                     .mb(px(8.))
@@ -1031,86 +1125,86 @@ impl Render for FilePreview {
         };
 
         let name = match &self.rename {
-            // `.file-preview-name-input`: 100% of the row, at most 350px.
             Some(input) => div()
-                .w(px(350.))
+                .flex_1()
                 .min_w_0()
-                .flex_shrink(1.)
                 .px(px(8.))
-                .py(px(4.))
-                .rounded(px(6.))
+                .py(px(2.))
+                .rounded(px(8.))
                 .bg(white_a(0.06))
                 .border_1()
-                .border_color(c(PRIMARY))
+                .border_color(white_a(0.25))
                 .child(input.clone())
                 .into_any_element(),
-            // `word-break: break-word`: a long name wraps rather than overflowing.
             None => div()
                 .id("file-preview-name")
                 .min_w_0()
                 .flex_shrink(1.)
-                .text_center()
-                .text_size(px(18.))
-                .line_height(px(24.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(16.))
+                .line_height(px(22.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(white_a(0.9))
-                .hover(|s| s.text_color(c(PRIMARY)))
-                .cursor_pointer()
+                .text_color(white_a(0.92))
+                .hover(|s| s.text_color(c(0xffffff)))
+                .cursor_text()
                 .on_click(cx.listener(|p, _, window, cx| p.start_rename(window, cx)))
                 .child(self.stem.clone())
                 .into_any_element(),
         };
+        let saved = self
+            .compressed
+            .as_ref()
+            .and_then(|c| c.peek().cloned().flatten())
+            .filter(|c| self.compress && !self.keep_metadata && crate::message::savings_percent(c) > 0)
+            .map(|c| c.compressed_size);
+        let size = match &self.zip {
+            Some(Zip::Running(_)) => t::preview_compressing().to_string(),
+            Some(Zip::Done { label, .. }) => label.clone(),
+            None => crate::media::format_bytes(self.size),
+        };
         let info = div()
-            .flex_shrink_0()
             .w_full()
-            .max_w(px(400.))
             .flex()
-            .flex_col()
             .items_center()
+            .gap(px(8.))
+            .child(name)
+            .when(!self.ext.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .px(px(6.))
+                        .rounded(px(5.))
+                        .bg(white_a(0.08))
+                        .text_size(px(11.))
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(white_a(0.6))
+                        .child(crate::kit::spaced(self.ext.to_uppercase(), 0.3)),
+                )
+            })
+            .child(div().flex_1())
             .child(
                 div()
-                    .mb(px(8.))
-                    .max_w_full()
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .gap(px(8.))
-                    .child(name)
-                    .when(!self.ext.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .flex_shrink_0()
-                                .px(px(6.))
-                                .py(px(2.))
-                                .rounded(px(4.))
-                                .bg(c(PRIMARY).opacity(0.15))
-                                .text_size(px(11.))
-                                .line_height(px(24.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(c(PRIMARY))
-                                .child(crate::kit::spaced(format!(".{}", self.ext), 0.3)),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .line_height(px(24.))
-                    .text_color(white_a(0.6))
-                    .child(match &self.zip {
-                        Some(Zip::Running(_)) => t::preview_compressing().to_string(),
-                        Some(Zip::Done { label, .. }) => label.clone(),
-                        None => crate::media::format_bytes(self.size),
+                    .gap(px(6.))
+                    .text_size(px(13.))
+                    .line_height(px(20.))
+                    .child(div().text_color(white_a(if saved.is_some() { 0.4 } else { 0.6 })).child(size))
+                    .when_some(saved, |d, bytes| {
+                        d.child(div().text_color(white_a(0.4)).child("→")) // i18n-exempt: an arrow
+                            .child(div().text_color(white_a(0.85)).child(crate::media::format_bytes(bytes)))
                     }),
             );
 
         let options = div()
-            .flex_shrink_0()
             .w_full()
-            .max_w(px(300.))
             .flex()
             .flex_col()
-            .gap(px(12.))
+            .gap(px(8.))
             .when(self.compress_offered, |d| {
                 let name = if IMAGE_EXTS.contains(&self.ext.as_str()) { t::preview_compress_image() } else { t::preview_compress_video() };
                 d.child(
@@ -1155,28 +1249,47 @@ impl Render for FilePreview {
         let button = |id: &'static str, label: SharedString| {
             div()
                 .id(id)
-                .px(px(32.))
-                .py(px(12.))
-                .rounded(px(8.))
+                .px(px(20.))
+                .py(px(9.))
+                .rounded(px(10.))
                 .text_size(px(14.))
-                .line_height(px(17.))
+                .line_height(px(18.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .child(label)
         };
+        let quiet = |b: gpui::Stateful<gpui::Div>| b.hover(|s| s.bg(white_a(0.06)));
         let buttons = div()
-            .flex_shrink_0()
-            .mt_auto()
+            .w_full()
             .flex()
-            .gap(px(12.))
+            .items_center()
+            .gap(px(8.))
+            .when(self.staged, |d| {
+                d.child(
+                    quiet(button("fp-remove", t::preview_remove()))
+                        .text_color(c(crate::timeline::DANGER))
+                        .on_click(cx.listener(|p, _, _, cx| {
+                            p.forget_clip();
+                            cx.emit(Event::Remove)
+                        })),
+                )
+            })
+            .when(!self.staged, |d| {
+                d.child(
+                    quiet(button("fp-cancel", t::dialog_cancel()))
+                        .text_color(white_a(0.75))
+                        .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
+                )
+            })
+            .child(div().flex_1())
             .when(self.publish && self.ext.eq_ignore_ascii_case("xdc"), |d| {
                 d.child(
                     button("fp-publish", t::preview_publish())
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .bg(white_a(0.15))
-                        .hover(|s| s.bg(white_a(0.25)))
+                        .bg(white_a(0.1))
+                        .hover(|s| s.bg(white_a(0.16)))
                         .text_color(c(0xffffff))
                         .child(svg().path("icons/star.svg").size(px(16.)).text_color(c(0xffffff)))
                         .on_click(cx.listener(|p, _, _, cx| {
@@ -1186,16 +1299,6 @@ impl Render for FilePreview {
             })
             .when(self.staged, |d| {
                 d.child(
-                    button("fp-remove", t::preview_remove())
-                        .bg(white_a(0.1))
-                        .hover(|s| s.bg(white_a(0.15)))
-                        .text_color(c(crate::timeline::DANGER))
-                        .on_click(cx.listener(|p, _, _, cx| {
-                            p.forget_clip();
-                            cx.emit(Event::Remove)
-                        })),
-                )
-                .child(
                     button("fp-done", t::preview_done())
                         .bg(white_a(0.9))
                         .hover(|s| s.bg(white_a(1.)))
@@ -1203,13 +1306,6 @@ impl Render for FilePreview {
                         .on_click(cx.listener(|p, _, _, cx| p.done(cx))),
                 )
             })
-            .when(!self.staged, |d| d.child(
-                button("fp-cancel", t::dialog_cancel())
-                    .bg(white_a(0.1))
-                    .hover(|s| s.bg(white_a(0.15)))
-                    .text_color(white_a(0.9))
-                    .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
-            ))
             .when(!self.staged, |d| d.child(
                 button("fp-send", if zipping { t::preview_compressing() } else if self.too_large { t::preview_too_large() } else if self.held.is_some() { t::preview_sending_when_ready() } else { t::preview_send() })
                     .when(zipping || self.too_large || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
@@ -1223,45 +1319,17 @@ impl Render for FilePreview {
                     .on_click(cx.listener(|p, _, window, cx| p.send(window, cx))),
             ));
 
-        let vh = f32::from(window.viewport_size().height);
-        let vw = f32::from(window.viewport_size().width);
-        let card = div()
-            .id("file-preview-container")
-            .w(px(500f32.min(vw - 40.)))
-            .h(px(650f32.min(vh - 40.)))
-            .p(px(24.))
-            .bg(c(0x0a0a0a))
-            .border_1()
-            .border_color(c(PRIMARY))
-            .rounded(px(16.))
-            .flex()
-            .flex_col()
+        let card = crate::security::card("file-preview-container")
+            .w(px(card_w))
+            .max_h(px(vh - 32.))
+            .p(px(16.))
+            .gap(px(14.))
             .items_center()
-            .gap(px(16.))
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(16.))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(content),
-                    )
-                    .child(info)
-                    .child(options),
-            )
+            .child(content)
+            .child(info)
+            .child(options)
             .child(buttons);
 
         div()
@@ -1270,12 +1338,13 @@ impl Render for FilePreview {
             .absolute()
             .inset_0()
             .font_family(INTER)
-            .bg(gpui::black().opacity(0.85))
+            .bg(gpui::black().opacity(0.7))
+            .backdrop_blur_once(px(6.))
             .flex()
             .items_center()
             .justify_center()
             .on_key_down(cx.listener(|p, e: &KeyDownEvent, window, cx| {
-                if p.rename.is_some() {
+                if p.rename.is_some() || p.crop.is_some() {
                     return;
                 }
                 match e.keystroke.key.as_str() {
@@ -1287,6 +1356,9 @@ impl Render for FilePreview {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|p, _, _, cx| p.close(cx)))
             .child(card)
+            .when_some(self.crop.clone(), |d, crop| {
+                d.child(div().absolute().inset_0().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(crop))
+            })
             .child(crate::kit::pump())
             .with_animation(
                 "fp-fade",

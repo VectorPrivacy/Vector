@@ -1,5 +1,5 @@
-//! `Cropper`: a square (or fixed-aspect) cut of a picture, moved, resized from a corner or drawn afresh, with the
-//! picture shown where it will live. It answers with a rectangle in the picture's own pixels.
+//! `Cropper`: a square, fixed-aspect or free cut of a picture, moved, resized from a corner (or, when free, an
+//! edge) or drawn afresh. It answers with a rectangle in the picture's own pixels.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +37,20 @@ enum Gesture {
     Move(Point<f32>),
     /// The corner that stays put.
     Resize(Point<f32>),
+    /// One side follows the pointer: left, right, top or bottom.
+    Edge(Side),
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// The shapes a free cropper offers: width over height, None for any.
+const SHAPES: [(&str, Option<f32>); 6] = [("free", None), ("original", None), ("1:1", Some(1.)), ("4:3", Some(4. / 3.)), ("16:9", Some(16. / 9.)), ("9:16", Some(9. / 16.))];
 
 pub struct Cropper {
     focus: FocusHandle,
@@ -47,8 +60,10 @@ pub struct Cropper {
     title: SharedString,
     hint: SharedString,
     round: bool,
-    /// Width over height of the cut.
-    aspect: f32,
+    /// Width over height of the cut; None draws any shape.
+    aspect: Option<f32>,
+    /// Offers the shapes in `SHAPES`, and shows the stage large instead of the preview chips.
+    shapes: Option<&'static str>,
     stage: Bounds<Pixels>,
     /// The fitted picture and the box, in stage px.
     img: Rect,
@@ -75,7 +90,8 @@ impl Cropper {
             title: title.into(),
             hint: hint.into(),
             round,
-            aspect: 1.,
+            aspect: Some(1.),
+            shapes: None,
             stage: Bounds::default(),
             img: Rect::default(),
             crop: Rect::default(),
@@ -85,17 +101,49 @@ impl Cropper {
 
     /// A cut of this width over height instead of a square; never round.
     pub fn aspect(mut self, aspect: f32) -> Self {
-        self.aspect = aspect.max(0.05);
+        self.aspect = Some(aspect.max(0.05));
         self.round = false;
         self
     }
 
+    /// Any shape, starting from the whole picture, with the shapes offered.
+    pub fn free(mut self) -> Self {
+        self.aspect = None;
+        self.shapes = Some("free");
+        self.round = false;
+        self
+    }
+
+    fn k(&self) -> f32 {
+        self.aspect.unwrap_or(1.)
+    }
+
     fn max_w(&self) -> f32 {
-        self.img.w.min(self.img.h * self.aspect)
+        self.img.w.min(self.img.h * self.k())
     }
 
     fn min_w(&self) -> f32 {
-        self.max_w().min(MIN_EDGE * self.aspect.max(1.))
+        self.max_w().min(MIN_EDGE * self.k().max(1.))
+    }
+
+    fn shape(&mut self, name: &'static str, aspect: Option<f32>) {
+        self.shapes = Some(name);
+        self.aspect = match name {
+            "original" => Some(self.natural.0.max(1) as f32 / self.natural.1.max(1) as f32),
+            _ => aspect,
+        };
+        let i = self.img;
+        let (cx, cy) = (self.crop.x + self.crop.w / 2., self.crop.y + self.crop.h / 2.);
+        let (w, h) = match self.aspect {
+            Some(k) => (self.max_w(), self.max_w() / k),
+            None => (i.w, i.h),
+        };
+        self.crop = Rect {
+            x: (cx - w / 2.).clamp(i.x, i.x + i.w - w),
+            y: (cy - h / 2.).clamp(i.y, i.y + i.h - h),
+            w,
+            h,
+        };
     }
 
     fn lay_out(&mut self, stage: Bounds<Pixels>) {
@@ -110,7 +158,10 @@ impl Cropper {
             w,
             h,
         };
-        let (bw, bh) = (self.max_w(), self.max_w() / self.aspect);
+        let (bw, bh) = match self.aspect {
+            Some(k) => (self.max_w(), self.max_w() / k),
+            None => (w, h),
+        };
         self.crop = Rect {
             x: self.img.x + (w - bw) / 2.,
             y: self.img.y + (h - bh) / 2.,
@@ -159,12 +210,41 @@ impl Cropper {
                 self.crop.x = (p.x - g.x).clamp(i.x, i.x + i.w - self.crop.w);
                 self.crop.y = (p.y - g.y).clamp(i.y, i.y + i.h - self.crop.h);
             }
+            Some(Gesture::Resize(a)) if self.aspect.is_none() => {
+                let (right, down) = (p.x >= a.x, p.y >= a.y);
+                let room_w = if right { i.x + i.w - a.x } else { a.x - i.x };
+                let room_h = if down { i.y + i.h - a.y } else { a.y - i.y };
+                let w = (p.x - a.x).abs().min(room_w).max(MIN_EDGE.min(room_w));
+                let h = (p.y - a.y).abs().min(room_h).max(MIN_EDGE.min(room_h));
+                self.crop = Rect {
+                    x: if right { a.x } else { a.x - w },
+                    y: if down { a.y } else { a.y - h },
+                    w,
+                    h,
+                };
+            }
+            Some(Gesture::Edge(side)) => {
+                let b = self.crop;
+                let (right, bottom) = (b.x + b.w, b.y + b.h);
+                match side {
+                    Side::Left => {
+                        let x = p.x.clamp(i.x, right - MIN_EDGE);
+                        self.crop = Rect { x, w: right - x, ..b };
+                    }
+                    Side::Right => self.crop.w = (p.x.clamp(b.x + MIN_EDGE, i.x + i.w)) - b.x,
+                    Side::Top => {
+                        let y = p.y.clamp(i.y, bottom - MIN_EDGE);
+                        self.crop = Rect { y, h: bottom - y, ..b };
+                    }
+                    Side::Bottom => self.crop.h = (p.y.clamp(b.y + MIN_EDGE, i.y + i.h)) - b.y,
+                }
+            }
             Some(Gesture::Resize(a)) => {
                 let (right, down) = (p.x >= a.x, p.y >= a.y);
                 // The anchor stays put; the box grows toward the pointer only as far as the picture allows.
                 let room_w = if right { i.x + i.w - a.x } else { a.x - i.x };
                 let room_h = if down { i.y + i.h - a.y } else { a.y - i.y };
-                let k = self.aspect;
+                let k = self.k();
                 let w = (p.x - a.x)
                     .abs()
                     .max((p.y - a.y).abs() * k)
@@ -292,9 +372,45 @@ fn button(id: &'static str, label: SharedString, primary: bool) -> gpui::Statefu
         .child(label)
 }
 
+/// A bar on one side of a free box: dragging it moves only that side.
+fn edge(id: &'static str, side: Side, cx: &mut Context<Cropper>) -> gpui::Stateful<gpui::Div> {
+    let across = matches!(side, Side::Top | Side::Bottom);
+    div()
+        .id(id)
+        .absolute()
+        .flex()
+        .items_center()
+        .justify_center()
+        .map(|d| match side {
+            Side::Left => d.left(px(-12.)).top(px(18.)).bottom(px(18.)).w(px(24.)),
+            Side::Right => d.right(px(-12.)).top(px(18.)).bottom(px(18.)).w(px(24.)),
+            Side::Top => d.top(px(-12.)).left(px(18.)).right(px(18.)).h(px(24.)),
+            Side::Bottom => d.bottom(px(-12.)).left(px(18.)).right(px(18.)).h(px(24.)),
+        })
+        .cursor(if across { gpui::CursorStyle::ResizeUpDown } else { gpui::CursorStyle::ResizeLeftRight })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                v.gesture = Some(Gesture::Edge(side));
+            }),
+        )
+        .child(
+            div()
+                .rounded_full()
+                .bg(c(0xffffff))
+                .border_1()
+                .border_color(gpui::black().opacity(0.55))
+                .map(|d| if across { d.w(px(22.)).h(px(5.)) } else { d.w(px(5.)).h(px(22.)) }),
+        )
+}
+
 impl Render for Cropper {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let narrow = f32::from(window.viewport_size().width) <= 640.;
+        let vh = f32::from(window.viewport_size().height);
+        let large = self.shapes.is_some();
+        let (free, dragging) = (self.aspect.is_none(), self.gesture.is_some());
         let me = cx.entity().downgrade();
         let (i, b, round) = (self.img, self.crop, self.round);
         let ready = i.w > 0.;
@@ -324,6 +440,14 @@ impl Render for Cropper {
         .absolute()
         .inset_0();
 
+        let edges = free.then(|| {
+            [
+                edge("crop-l", Side::Left, cx),
+                edge("crop-r", Side::Right, cx),
+                edge("crop-t", Side::Top, cx),
+                edge("crop-b", Side::Bottom, cx),
+            ]
+        });
         let handle = |corner: &'static str, x: bool, y: bool| {
             div()
                 .id(corner)
@@ -372,6 +496,17 @@ impl Render for Cropper {
                     v.gesture = Some(Gesture::Move(point(p.x - v.crop.x, p.y - v.crop.y)));
                 }),
             )
+            .when(dragging, |d| {
+                d.children([(true, 1. / 3.), (true, 2. / 3.), (false, 1. / 3.), (false, 2. / 3.)].map(|(across, at)| {
+                    let line = div().absolute().bg(gpui::white().opacity(0.35));
+                    if across {
+                        line.left_0().right_0().h(px(1.)).top(gpui::relative(at))
+                    } else {
+                        line.top_0().bottom_0().w(px(1.)).left(gpui::relative(at))
+                    }
+                }))
+            })
+            .when_some(edges, |d, e| d.children(e))
             .child(handle("crop-tl", false, false))
             .child(handle("crop-tr", true, false))
             .child(handle("crop-bl", false, true))
@@ -380,8 +515,9 @@ impl Render for Cropper {
         let stage = div()
             .id("crop-stage")
             .relative()
-            .when(narrow, |d| d.flex_none().w_full().h(px(260.)))
-            .when(!narrow, |d| d.flex_1().h(px(320.)))
+            .when(large, |d| d.flex_none().w_full().h(px(if narrow { (vh * 0.5).min(420.) } else { (vh * 0.6).min(540.) })))
+            .when(!large && narrow, |d| d.flex_none().w_full().h(px(260.)))
+            .when(!large && !narrow, |d| d.flex_1().h(px(320.)))
             .min_w_0()
             .overflow_hidden()
             .rounded(px(12.))
@@ -410,7 +546,7 @@ impl Render for Cropper {
             .child(measure)
             .when(ready, |d| d.child(crop_box));
 
-        let aspect = self.aspect;
+        let aspect = self.k();
         let chip = |size: f32| {
             let size = if aspect > 1. { size * 1.25 } else { size };
             let k = if b.w > 0. { size / b.w } else { 0. };
@@ -477,7 +613,7 @@ impl Render for Cropper {
             .flex_col()
             .gap(px(16.))
             .w_full()
-            .max_w(px(560.))
+            .max_w(px(if large { 720. } else { 560. }))
             .p(px(20.))
             .bg(c(CARD_BG))
             .border_1()
@@ -505,7 +641,40 @@ impl Render for Cropper {
                         )
                     }),
             )
-            .child(div().flex().when(narrow, |d| d.flex_col()).gap(px(16.)).child(stage).child(preview))
+            .child(div().flex().when(narrow, |d| d.flex_col()).gap(px(16.)).child(stage).when(!large, |d| d.child(preview)))
+            .when_some(self.shapes, |d, on| {
+                d.child(div().flex().flex_wrap().gap(px(6.)).children(SHAPES.iter().map(|&(name, aspect)| {
+                    let label: SharedString = match name {
+                        "free" => crate::t::crop_shape_free(),
+                        "original" => crate::t::crop_shape_original(),
+                        _ => name.into(),
+                    };
+                    let chosen = on == name;
+                    div()
+                        .id(name)
+                        .px(px(12.))
+                        .py(px(5.))
+                        .rounded(px(8.))
+                        .text_size(px(12.5))
+                        .line_height(px(16.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .map(|d| {
+                            if chosen {
+                                d.bg(gpui::white().opacity(0.9)).text_color(c(0x000000))
+                            } else {
+                                d.bg(gpui::white().opacity(0.06))
+                                    .text_color(gpui::white().opacity(0.75))
+                                    .hover(|s| s.bg(gpui::white().opacity(0.12)))
+                            }
+                        })
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            v.shape(name, aspect);
+                            cx.notify();
+                        }))
+                        .child(label)
+                })))
+            })
             .child(
                 div()
                     .flex()

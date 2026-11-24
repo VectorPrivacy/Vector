@@ -12098,6 +12098,25 @@ impl VectorApp {
         self.staged.iter().any(|s| s.live())
     }
 
+    fn load_staged_thumb(&mut self, id: u64, file: std::path::PathBuf, ext: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let (thumb, blur, video) = cx
+                .background_executor()
+                .spawn(async move { crate::staged::thumb(&file, &ext) })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(s) = this.staged.iter_mut().chain(this.drafts.values_mut().flat_map(|d| d.staged.iter_mut())).find(|s| s.id == id) {
+                    s.thumb = thumb.map(Arc::new);
+                    s.blur = blur.map(Arc::new);
+                    s.video = video;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The composer's Send and Enter follow whether there's anything to send.
     fn staged_changed(&mut self, cx: &mut Context<Self>) {
         let any = self.has_staged();
@@ -12124,7 +12143,12 @@ impl VectorApp {
         });
         self.staged_seq += 1;
         let id = self.staged_seq;
-        cx.subscribe_in(&preview, window, move |this, _, e: &crate::filepreview::Event, window, cx| {
+        cx.subscribe_in(&preview, window, move |this, preview, e: &crate::filepreview::Event, window, cx| {
+            if let crate::filepreview::Event::Cropped = e {
+                let p = preview.read(cx);
+                let (path, ext) = (p.path().to_path_buf(), p.ext().to_string());
+                return this.load_staged_thumb(id, path, ext, cx);
+            }
             this.file_preview = None;
             window.focus(&this.input.focus_handle(cx), cx);
             match e {
@@ -12139,23 +12163,7 @@ impl VectorApp {
         })
         .detach();
         let ext = preview.read(cx).ext().to_string();
-        let file = path.clone();
-        cx.spawn(async move |this, cx| {
-            let (thumb, blur, video) = cx
-                .background_executor()
-                .spawn(async move { crate::staged::thumb(&file, &ext) })
-                .await;
-            this.update(cx, |this, cx| {
-                if let Some(s) = this.staged.iter_mut().chain(this.drafts.values_mut().flat_map(|d| d.staged.iter_mut())).find(|s| s.id == id) {
-                    s.thumb = thumb.map(Arc::new);
-                    s.blur = blur.map(Arc::new);
-                    s.video = video;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.load_staged_thumb(id, path.clone(), ext, cx);
         self.staged.push(crate::staged::Staged {
             id,
             preview,
@@ -12296,6 +12304,9 @@ impl VectorApp {
             &preview,
             window,
             |this, _, e: &crate::filepreview::Event, window, cx| {
+                if let crate::filepreview::Event::Cropped = e {
+                    return;
+                }
                 this.file_preview = None;
                 window.focus(&this.input.focus_handle(cx), cx);
                 cx.notify();
@@ -12306,7 +12317,7 @@ impl VectorApp {
                     crate::filepreview::Event::Failed(err) => {
                         this.notice(&t::upload_compression_failed(), err.clone(), cx)
                     }
-                    crate::filepreview::Event::Done | crate::filepreview::Event::Remove => {}
+                    crate::filepreview::Event::Done | crate::filepreview::Event::Remove | crate::filepreview::Event::Cropped => {}
                 }
             },
         )
