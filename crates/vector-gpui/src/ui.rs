@@ -11307,6 +11307,14 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
             act(&id, timeline::Act::Text(crate::inline::Target::Mention(npub.clone().into())), w, cx)
         }
     };
+    let key = SharedString::from(format!("sys:{}", line.id));
+    let menu = {
+        let (act, id, npub, key) = (ctx.on_act.clone(), line.id.clone(), line.npub.clone(), key.clone());
+        move |e: &gpui::MouseDownEvent, w: &mut Window, cx: &mut gpui::App| {
+            cx.stop_propagation();
+            act(&id, timeline::Act::AuthorMenu(npub.clone(), key.clone(), e.position), w, cx)
+        }
+    };
     let group = SharedString::from(format!("sys-{}", line.id));
     let label = div()
         .id(SharedString::from(format!("system-event-{}", line.id)))
@@ -11317,7 +11325,14 @@ fn system_row(ctx: &timeline::Ctx, index: usize, count: u32) -> AnyElement {
         .text_color(c(TEXT))
         .cursor_pointer()
         .on_click(open)
-        .child(div().mr(px(5.)).child(crate::ui::avatar(ctx.store, &line.npub, 16.)))
+        .on_mouse_down(gpui::MouseButton::Right, menu)
+        .child(
+            div()
+                .relative()
+                .mr(px(5.))
+                .child(crate::ui::avatar(ctx.store, &line.npub, 16.))
+                .child(crate::kit::anchor(ctx.anchors, key)),
+        )
         .child(div().flex().items_center().keep_ltr().children(crate::kit::visual(crate::kit::runs(&text)).into_iter().enumerate().map(|(i, (run, strong))| {
             let run = run.replace(' ', "\u{a0}");
             if strong {
@@ -17051,14 +17066,20 @@ impl VectorApp {
             let mut out = Vec::with_capacity(channels.len());
             for id in channels {
                 let views = messaging::message_views(id.clone(), 200, 0).await;
-                out.push((id, views));
+                let lines = messaging::system_lines(&id);
+                out.push((id, views, lines));
             }
             out
         });
         cx.spawn(async move |this, cx| {
             let Ok(read) = rx.await else { return };
             this.update(cx, |this, cx| {
-                for (id, views) in read {
+                for (id, views, lines) in read {
+                    // A ban or unban changes whose presence lines show.
+                    this.store.borrow_mut().system.insert(id.clone(), lines);
+                    if this.open.as_deref() == Some(id.as_str()) {
+                        this.refresh_rows(true);
+                    }
                     let Ok(mut views) = views else { continue };
                     views.reverse();
                     views.sort_by_key(|m| m.at);
