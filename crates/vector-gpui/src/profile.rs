@@ -301,8 +301,14 @@ pub fn pane(
     window: &Window,
     cx: &App,
 ) -> AnyElement {
-    let Some(p) = store.profiles.get(&s.npub) else {
-        return div().flex_1().h_full().bg(c(APP_BG)).into_any_element();
+    // Someone who never published a profile still gets the page: their npub and actions.
+    let blank;
+    let p = match store.profiles.get(&s.npub) {
+        Some(p) => p,
+        None => {
+            blank = vector_core::SlimProfile { id: s.npub.clone(), mine: s.npub == store.my_npub, ..Default::default() };
+            &blank
+        }
     };
     let mine = p.mine;
     let name = store.name(&s.npub);
