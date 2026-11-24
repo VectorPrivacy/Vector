@@ -107,6 +107,19 @@ impl Models {
         self.views.get_mut(att)
     }
 
+    /// Lets go of every view `keep` refuses, its frames with it.
+    pub fn keep_only(&mut self, keep: impl Fn(&str) -> bool) {
+        let retired = &mut self.retired;
+        self.views.retain(|att, v| {
+            let k = keep(att);
+            if !k {
+                retired.append(&mut v.retired);
+                retired.extend(v.frame.take());
+            }
+            k
+        });
+    }
+
     pub fn get(&mut self, att: &str) -> Option<&mut View> {
         self.views.get_mut(att)
     }

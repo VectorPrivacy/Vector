@@ -1157,7 +1157,7 @@ impl Render for FilePreview {
             .compressed
             .as_ref()
             .and_then(|c| c.peek().cloned().flatten())
-            .filter(|c| self.compress && !self.keep_metadata && crate::message::savings_percent(c) > 0)
+            .filter(|c| self.compress && crate::message::savings_percent(c) > 0)
             .map(|c| c.compressed_size);
         let size = match &self.zip {
             Some(Zip::Running(_)) => t::preview_compressing().to_string(),
@@ -1246,78 +1246,37 @@ impl Render for FilePreview {
             });
 
         let zipping = matches!(self.zip, Some(Zip::Running(_)));
-        let button = |id: &'static str, label: SharedString| {
-            div()
-                .id(id)
-                .px(px(20.))
-                .py(px(9.))
-                .rounded(px(10.))
-                .text_size(px(14.))
-                .line_height(px(18.))
-                .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .child(label)
+        let me = cx.entity().downgrade();
+        let act = move |f: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            let me = me.clone();
+            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut gpui::App| {
+                me.update(cx, |p, cx| f(p, window, cx)).ok();
+            }
         };
-        let quiet = |b: gpui::Stateful<gpui::Div>| b.hover(|s| s.bg(white_a(0.06)));
+        let publish = self.publish && self.ext.eq_ignore_ascii_case("xdc");
         let buttons = div()
             .w_full()
             .flex()
-            .items_center()
             .gap(px(8.))
-            .when(self.staged, |d| {
-                d.child(
-                    quiet(button("fp-remove", t::preview_remove()))
-                        .text_color(c(crate::timeline::DANGER))
-                        .on_click(cx.listener(|p, _, _, cx| {
-                            p.forget_clip();
-                            cx.emit(Event::Remove)
-                        })),
-                )
-            })
-            .when(!self.staged, |d| {
-                d.child(
-                    quiet(button("fp-cancel", t::dialog_cancel()))
-                        .text_color(white_a(0.75))
-                        .on_click(cx.listener(|p, _, _, cx| p.close(cx))),
-                )
-            })
-            .child(div().flex_1())
-            .when(self.publish && self.ext.eq_ignore_ascii_case("xdc"), |d| {
-                d.child(
-                    button("fp-publish", t::preview_publish())
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .bg(white_a(0.1))
-                        .hover(|s| s.bg(white_a(0.16)))
-                        .text_color(c(0xffffff))
-                        .child(svg().path("icons/star.svg").size(px(16.)).text_color(c(0xffffff)))
-                        .on_click(cx.listener(|p, _, _, cx| {
-                            cx.emit(Event::Publish(p.path.clone()));
-                        })),
-                )
-            })
-            .when(self.staged, |d| {
-                d.child(
-                    button("fp-done", t::preview_done())
-                        .bg(white_a(0.9))
-                        .hover(|s| s.bg(white_a(1.)))
-                        .text_color(c(0x000000))
-                        .on_click(cx.listener(|p, _, _, cx| p.done(cx))),
-                )
-            })
-            .when(!self.staged, |d| d.child(
-                button("fp-send", if zipping { t::preview_compressing() } else if self.too_large { t::preview_too_large() } else if self.held.is_some() { t::preview_sending_when_ready() } else { t::preview_send() })
-                    .when(zipping || self.too_large || self.held.is_some(), |d| d.opacity(0.5).cursor_default())
-                    .bg(linear_gradient(
-                        90.,
-                        linear_color_stop(c(crate::theme::SEND_FROM), 0.),
-                        linear_color_stop(c(crate::theme::SEND_TO), 1.),
-                    ))
-                    .hover(|s| s.opacity(0.9))
-                    .text_color(c(0x000000))
-                    .on_click(cx.listener(|p, _, window, cx| p.send(window, cx))),
-            ));
+            .children(publish.then(|| {
+                div().flex_1().child(crate::security::button("fp-publish", t::preview_publish(), true, true, act(|p, _, cx| cx.emit(Event::Publish(p.path.clone())))))
+            }))
+            .child(div().flex_1().child(if self.staged {
+                crate::security::button("fp-remove", t::preview_remove(), true, true, act(|p, _, cx| {
+                    p.forget_clip();
+                    cx.emit(Event::Remove)
+                }))
+                .into_any_element()
+            } else {
+                crate::security::button("fp-cancel", t::dialog_cancel(), true, true, act(|p, _, cx| p.close(cx))).into_any_element()
+            }))
+            .child(div().flex_1().child(if self.staged {
+                crate::security::button("fp-done", t::preview_done(), false, true, act(|p, _, cx| p.done(cx))).into_any_element()
+            } else {
+                let busy = zipping || self.too_large || self.held.is_some();
+                let label = if zipping { t::preview_compressing() } else if self.too_large { t::preview_too_large() } else if self.held.is_some() { t::preview_sending_when_ready() } else { t::preview_send() };
+                crate::security::button("fp-send", label, false, !busy, act(|p, window, cx| p.send(window, cx))).into_any_element()
+            }));
 
         let card = crate::security::card("file-preview-container")
             .w(px(card_w))

@@ -1902,8 +1902,10 @@ impl Element for TextElement {
         let line_height = window.line_height();
         let wrap = input.multiline.map(|_| bounds.size.width);
         let mut layout = Layout::shape(text, &runs, font_size, wrap, bounds.size.width, line_height, window);
-        layout.align = (input.center || input.right).then_some(bounds.size.width);
-        layout.right = input.right;
+        // A one-line text wider than the field scrolls to its caret instead of aligning.
+        let fits = input.multiline.is_some() || layout.first_width() <= bounds.size.width - px(2.);
+        layout.align = ((input.center || input.right) && fits).then_some(bounds.size.width);
+        layout.right = input.right && fits;
         let (start, end) = if input.content.is_empty() {
             (0, 0)
         } else {

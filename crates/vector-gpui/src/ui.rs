@@ -269,6 +269,8 @@ pub struct VectorApp {
     drafts: HashMap<String, Draft>,
     /// Files waiting in the composer for the next message, and the next tile's id.
     staged: Vec<crate::staged::Staged>,
+    /// The composer tiles' turning 3D models, kept apart from the chat's.
+    tray_models: Rc<RefCell<crate::model3d::stage::Models>>,
     staged_seq: u64,
     /// The chat the composer's text and reply belong to, which a close leaving no chat open
     /// keeps until another opens.
@@ -1130,6 +1132,7 @@ impl VectorApp {
             root_focus: cx.focus_handle(),
             drafts: HashMap::new(),
             staged: Vec::new(),
+            tray_models: Default::default(),
             staged_seq: 0,
             draft_owner: None,
             shared: None,
@@ -1394,6 +1397,19 @@ impl VectorApp {
         }
     }
 
+    fn listen_tray_models(&mut self, cx: &mut Context<Self>) {
+        let Some(mut rx) = self.tray_models.borrow_mut().take_wake() else { return };
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while rx.next().await.is_some() {
+                if this.update(cx, |app, cx| crate::pane::notify(&app.panes.chat, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn listen_models(&mut self, cx: &mut Context<Self>) {
         let Some(mut rx) = self.media.borrow_mut().models.take_wake() else { return };
         cx.spawn(async move |this, cx| {
@@ -1425,6 +1441,7 @@ impl VectorApp {
         let mut app = Self::base(store, false, window, cx);
         Self::start_sweeps(window, cx);
         app.listen_models(cx);
+        app.listen_tray_models(cx);
         app.listen_video(cx);
         app.reload_picker_packs(cx);
         if let Some(v) = app.net_initial() {
@@ -1942,6 +1959,7 @@ impl VectorApp {
     ) -> Self {
         let mut app = Self::base(Store::live(), true, window, cx);
         app.listen_models(cx);
+        app.listen_tray_models(cx);
         app.listen_video(cx);
         crate::callvideo::announce_caps();
         backend::notify::set_focused(window.is_window_active());
@@ -10787,7 +10805,7 @@ impl VectorApp {
         let edit_bar = self.wallpaper.edit_alpha().filter(|_| staged.is_some() || self.wallpaper.preview.is_none()).map(|a| {
             crate::wallpaper::edit_bar(&self.wallpaper.label, self.wallpaper.busy, a, &on_wp)
         });
-        let staged_tray = self.staged_tray(cx);
+        let staged_tray = self.staged_tray(window, cx);
         let preview_bar = staged.map(|p| crate::wallpaper::preview_bar(p.blur, p.dim, self.wallpaper.dragging.clone(), &on_wp));
         let chat_box = self.chat_box.clone();
         let app_box = cx.entity().downgrade();
@@ -12215,7 +12233,14 @@ impl VectorApp {
     }
 
     /// The composer's tray, while it holds or is folding away tiles.
-    fn staged_tray(&self, cx: &mut Context<Self>) -> Option<(AnyElement, bool)> {
+    fn staged_tray(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<(AnyElement, bool)> {
+        let models = self.tray_models.clone();
+        let mut models = models.borrow_mut();
+        let live: Vec<String> = self.staged.iter().map(|s| format!("staged:{}", s.id)).collect();
+        models.keep_only(|att| live.iter().any(|l| l == att));
+        for old in models.retired.drain(..) {
+            let _ = window.drop_image(old);
+        }
         if self.staged.is_empty() || matches!(self.mode, Mode::Edit { .. }) {
             return None;
         }
@@ -12227,7 +12252,13 @@ impl VectorApp {
             })
             .ok();
         });
-        Some((crate::staged::tray(&self.staged, on, cx), self.has_staged()))
+        models.scale = 1.;
+        models.active = window.is_window_active() && !gpui::animations_asleep();
+        let tray = crate::staged::tray(&self.staged, &mut models, on, cx);
+        if let Some(due) = models.tick() {
+            crate::model3d::stage::ask(window, cx, due);
+        }
+        Some((tray, self.has_staged()))
     }
 
     /// Words and every staged file as one message. A video still encoding is waited for,

@@ -81,6 +81,29 @@ pub fn thumb(path: &std::path::Path, ext: &str) -> (Option<RenderImage>, Option<
     (image, blur, video)
 }
 
+/// A file with no picture: its type's icon over its extension.
+fn file_face(ext: &str) -> gpui::Div {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        .child(svg().path(if ext == "xdc" { "icons/gamepad.svg" } else { crate::filepreview::file_icon(ext) }).size(px(22.)).text_color(white_a(0.7)))
+        .child(
+            div()
+                .max_w(px(TILE - 8.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(10.))
+                .line_height(px(12.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(white_a(0.55))
+                .child(SharedString::from(ext.to_uppercase())),
+        )
+}
+
 /// What a tile asks of the app.
 pub enum Act {
     Open(u64),
@@ -91,7 +114,7 @@ pub type On = std::rc::Rc<dyn Fn(Act, &mut gpui::Window, &mut gpui::App)>;
 
 /// The row of tiles. Arriving tiles grow in and leaving ones fold away, so the row beside
 /// them slides rather than jumps.
-pub fn tray<V: 'static>(staged: &[Staged], on: On, cx: &mut Context<V>) -> AnyElement {
+pub fn tray<V: 'static>(staged: &[Staged], models: &mut crate::model3d::stage::Models, on: On, cx: &mut Context<V>) -> AnyElement {
     let now = Instant::now();
     let tiles = staged.iter().map(|s| {
         let shown = s.shown(now);
@@ -100,6 +123,18 @@ pub fn tray<V: 'static>(staged: &[Staged], on: On, cx: &mut Context<V>) -> AnyEl
         }
         let p = s.preview.read(cx);
         let (name, ext, spoiler) = (p.shown_name(), p.ext().to_string(), p.spoiler());
+        // A model turns on the tile at its own size (no Retina doubling) once it has loaded.
+        let model = (s.live() && crate::model3d::supports(&ext) && crate::backend::pasted::len(p.path()).is_some_and(|n| n <= crate::model3d::stage::GIANT))
+            .then(|| {
+                let path = p.path().to_path_buf();
+                let v = models.view(&format!("staged:{}", s.id), &ext, || Some(crate::model3d::Src::File(path)))?;
+                v.seen = Some(now);
+                if v.css_size() != (TILE, TILE) {
+                    v.set_size(TILE, TILE, 1.);
+                }
+                v.frame.clone().map(|f| (f, v.opacity()))
+            })
+            .flatten();
         let id = s.id;
         let picture = if spoiler { s.blur.clone().or_else(|| s.thumb.clone()) } else { s.thumb.clone() };
         let face = match (picture, s.icon.clone()) {
@@ -113,26 +148,17 @@ pub fn tray<V: 'static>(staged: &[Staged], on: On, cx: &mut Context<V>) -> AnyEl
                 .rounded(px(8.))
                 .object_fit(ObjectFit::Cover)
                 .into_any_element(),
-            (None, None) => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(4.))
-                .child(svg().path(if ext == "xdc" { "icons/gamepad.svg" } else { crate::filepreview::file_icon(&ext) }).size(px(22.)).text_color(white_a(0.7)))
-                .child(
-                    div()
-                        .max_w(px(TILE - 8.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(px(10.))
-                        .line_height(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(white_a(0.55))
-                        .child(SharedString::from(ext.to_uppercase())),
-                )
-                .into_any_element(),
+            (None, None) => {
+                let icon = (model.as_ref().is_none_or(|(_, a)| *a < 1.)).then(|| file_face(&ext));
+                div()
+                    .size_full()
+                    .relative()
+                    .children(icon)
+                    .children(model.map(|(frame, alpha)| {
+                        crate::pic::img(ImageSource::Render(frame)).absolute().inset_0().size(px(TILE)).rounded(px(8.)).opacity(alpha)
+                    }))
+                    .into_any_element()
+            }
         };
         let open = on.clone();
         let remove = on.clone();
