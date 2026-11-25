@@ -4446,6 +4446,10 @@ impl VectorApp {
     }
 
     fn open_chat(&mut self, id: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        // A DM opens before its first message, so its pending send has a chat to land in.
+        if id.starts_with("npub1") {
+            self.store.borrow_mut().ensure_dm(&id);
+        }
         if self.open.as_ref() != Some(&id) {
             // Measured in the last chat's layout (a Community's pane is narrower): a wallpaper
             // keyed to it would show cropped until the real size rebakes it.

@@ -163,7 +163,12 @@ pub async fn message_views(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
-    let id = db::id_cache::get_chat_id_by_identifier(&chat_id)?;
+    // A chat the database has never seen (a DM before its first message) has no history.
+    let id = match db::id_cache::get_chat_id_by_identifier(&chat_id) {
+        Ok(id) => id,
+        Err(e) if e.starts_with("Chat not found") => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
     db::events::get_message_views(id, limit, offset).await
 }
 
