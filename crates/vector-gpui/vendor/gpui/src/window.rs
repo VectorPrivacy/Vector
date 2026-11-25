@@ -12090,6 +12090,18 @@ pub mod draw_stats {
     pub(crate) fn presented(took: std::time::Duration) {
         PRESENTS.fetch_add(1, Ordering::Relaxed);
         keep(&PRESENT_MICROS, took);
+        let now = Instant::now();
+        if let Some(last) = LAST_PRESENT.lock().unwrap_or_else(|e| e.into_inner()).replace(now) {
+            keep(&GAP_MICROS, now - last);
+        }
+    }
+
+    static LAST_PRESENT: Mutex<Option<Instant>> = Mutex::new(None);
+    static GAP_MICROS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+    /// `[p50, p95, max]` milliseconds between presents since the last call.
+    pub fn gap_take() -> [f64; 3] {
+        spread(&GAP_MICROS)
     }
 
     const KEPT: usize = 4096;

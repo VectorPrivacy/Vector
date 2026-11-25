@@ -67,6 +67,10 @@ pub struct Viewer {
     opened: Instant,
     zoomed_at: Option<Instant>,
     settled: bool,
+    /// A long animation, played from its bytes at the size the window can show it.
+    stream: Option<crate::media::Stream>,
+    /// When a timer already wakes the viewer for its stream's next frame.
+    wake_at: Option<Instant>,
 }
 
 impl EventEmitter<Closed> for Viewer {}
@@ -75,6 +79,12 @@ impl Viewer {
     pub fn new(open: Open, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        // An animation draws no larger than the window, at its pixel density.
+        let room = {
+            let (v, k) = (window.viewport_size(), window.scale_factor());
+            let side = |p: Pixels| ((f32::from(p) * k).ceil() as u32).clamp(1, FULL_MAX.0);
+            (side(v.width), side(v.height))
+        };
         if let Some(full) = open.full.clone() {
             cx.spawn(async move |this, cx| {
                 let bytes = if let Some(url) = full.url.clone() {
@@ -104,18 +114,23 @@ impl Viewer {
                     Some(_) => crate::backend::inline::sniff(&bytes).unwrap_or("png").to_string(),
                     None => full.ext.clone(),
                 };
-                let Some((image, w, h)) = cx
+                let Some(picture) = cx
                     .background_executor()
-                    .spawn(async move { crate::media::decode(&bytes, &ext, FULL_MAX) })
+                    .spawn(async move { crate::media::decode_or_stream(Arc::new(bytes), &ext, FULL_MAX, false, room) })
                     .await
                 else {
                     return;
                 };
                 this.update(cx, |v, cx| {
+                    let (image, w, h, stream) = match picture {
+                        crate::media::Picture::Held(image, w, h) => (Arc::new(image), w, h, None),
+                        crate::media::Picture::Stream(s) => (s.current.clone(), s.w, s.h, Some(s)),
+                    };
                     // A sharper copy of the same picture: the box on screen stays put.
                     if (w, h) == (v.w, v.h) {
-                        v.image = Arc::new(image);
+                        v.image = image;
                         v.shown = turned(&v.image, v.turns);
+                        v.stream = stream;
                         cx.notify();
                     }
                 })
@@ -150,7 +165,43 @@ impl Viewer {
             opened: Instant::now(),
             zoomed_at: Some(Instant::now()),
             settled: false,
+            stream: None,
+            wake_at: None,
         }
+    }
+
+    /// The stream's due frame shown, and a wake set for the next.
+    fn step_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.stream.as_mut() else { return };
+        let now = Instant::now();
+        s.seen = now;
+        let mut retired = Vec::new();
+        let due = s.tick(now, window.is_window_active() && !gpui::animations_asleep(), &mut retired);
+        if !retired.is_empty() {
+            self.image = s.current.clone();
+            let old = std::mem::replace(&mut self.shown, turned(&self.image, self.turns));
+            if self.turns != 0 {
+                let _ = window.drop_image(old);
+            }
+            for old in retired {
+                let _ = window.drop_image(old);
+            }
+        }
+        let Some(due) = due else { return };
+        let at = now + due;
+        if self.wake_at.is_some_and(|w| w <= at && w > now) {
+            return;
+        }
+        self.wake_at = Some(at);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(due).await;
+            this.update(cx, |v, cx| {
+                v.wake_at = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -324,6 +375,7 @@ fn round_button(id: &'static str) -> gpui::Stateful<gpui::Div> {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.step_stream(window, cx);
         let me = cx.entity().downgrade();
         let (sw, sh) = self.visual();
         let settled = self.settled;

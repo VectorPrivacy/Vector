@@ -10740,6 +10740,12 @@ impl VectorApp {
                     {
                         crate::model3d::stage::ask(window, cx, due);
                     }
+                    if let Some(due) = media.tick_streams(window.is_window_active() && !gpui::animations_asleep()) {
+                        crate::model3d::stage::ask(window, cx, due);
+                    }
+                    for old in media.stream_retired.drain(..) {
+                        let _ = window.drop_image(old);
+                    }
                     if app.clips_in_timeline(&media) {
                         if let Some(due) = media.videos.tick() {
                             app.clip_wake(due, window, cx);

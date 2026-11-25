@@ -153,6 +153,10 @@ struct Want {
 pub struct Media {
     /// Audio attachments and the engine sources behind them.
     pub audio: crate::audio::Audio,
+    /// Animations too long to hold, playing from their bytes, by picture key.
+    streams: HashMap<String, Stream>,
+    /// Frames a stream stepped past, for the window to let go of.
+    pub stream_retired: Vec<Arc<RenderImage>>,
     pub videos: crate::video::Videos,
     pub models: crate::model3d::stage::Models,
     thumbs: HashMap<String, Option<Arc<RenderImage>>>,
@@ -306,6 +310,25 @@ impl Media {
         }
     }
 
+    /// Steps every stream on screen to its due frame; a stream not drawn for [`STREAM_UNSEEN`]
+    /// while the window moves is let go. When the next frame is due.
+    pub fn tick_streams(&mut self, moving: bool) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let retired = &mut self.stream_retired;
+        let mut next: Option<std::time::Duration> = None;
+        self.streams.retain(|_, s| {
+            if moving && now.saturating_duration_since(s.seen) > STREAM_UNSEEN {
+                retired.push(s.current.clone());
+                return false;
+            }
+            if let Some(d) = s.tick(now, moving, retired) {
+                next = Some(next.map_or(d, |n| n.min(d)));
+            }
+            true
+        });
+        next
+    }
+
     /// As `image`, an animation kept to its first frame.
     pub fn still(&mut self, key: &str, source: Source, ext: &str, max: (u32, u32)) -> Slot {
         self.image_as(key, source, ext, max, true)
@@ -315,6 +338,11 @@ impl Media {
         let now = std::time::Instant::now();
         self.asked = Some(now);
         self.used.insert((1, key.to_string()), now);
+        if !still && let Some(s) = self.streams.get_mut(key) {
+            s.seen = now;
+            gpui::keyed_volatile();
+            return Slot::Ready { image: s.current.clone(), w: s.w, h: s.h };
+        }
         if let Some(s) = self.images.get(key) {
             if matches!(s, Slot::Loading) {
                 gpui::keyed_volatile();
@@ -409,6 +437,8 @@ impl Media {
             "linked": tally(self.linked.values().filter_map(|l| match l { Linked::Ready { image, .. } => Some(image), _ => None })),
             "custom": tally(self.custom.values().filter_map(|c| match c { Custom::Ready(image) => Some(image), _ => None })),
             "video_clips": self.videos.dev_clips(),
+            // The frame on screen; each stream holds up to AHEAD more in its ring.
+            "streams": tally(self.streams.values().map(|s| &s.current)),
         })
     }
 
@@ -607,10 +637,17 @@ fn decode_slots() -> Arc<tokio::sync::Semaphore> {
 }
 
 /// Start the decodes the last render asked for; the app repaints as each lands.
-fn land(m: &mut Media, key: String, decoded: Option<(RenderImage, u32, u32)>) {
+fn land(m: &mut Media, key: String, decoded: Option<Picture>) {
     match decoded {
-        Some((image, iw, ih)) => {
+        Some(Picture::Held(image, iw, ih)) => {
             m.images.insert(key, Slot::Ready { image: Arc::new(image), w: iw, h: ih });
+            m.pressed = true;
+        }
+        Some(Picture::Stream(stream)) => {
+            m.images.remove(&key);
+            if let Some(old) = m.streams.insert(key, stream) {
+                m.stream_retired.push(old.current.clone());
+            }
             m.pressed = true;
         }
         // A held copy let go meanwhile: the next sight asks again, a couple of times.
@@ -625,20 +662,20 @@ fn land(m: &mut Media, key: String, decoded: Option<(RenderImage, u32, u32)>) {
 }
 
 /// `w` read and decoded off this thread.
-fn read_now(w: &Want, live: bool) -> futures::channel::oneshot::Receiver<Option<(RenderImage, u32, u32)>> {
+fn read_now(w: &Want, live: bool) -> futures::channel::oneshot::Receiver<Option<Picture>> {
     let (ext, max, still) = (w.ext.clone(), w.max, w.still);
     if live {
         let (hash, path) = (w.hash, w.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
         return crate::backend::run(async move {
             let b = crate::backend::attachments::bytes(hash, path).await?;
-            tokio::task::spawn_blocking(move || decode_as(&b, &ext, max, still)).await.ok()?
+            tokio::task::spawn_blocking(move || decode_or_stream(Arc::new(b), &ext, max, still, max)).await.ok()?
         });
     }
     let (tx, rx) = futures::channel::oneshot::channel();
     let path = w.path.clone();
     // spawn-detached: reads and decodes a fixture file; owns no account state.
     std::thread::spawn(move || {
-        let _ = tx.send(path.and_then(|p| crate::pic::read(p).ok()).and_then(|b| decode_as(&b, &ext, max, still)));
+        let _ = tx.send(path.and_then(|p| crate::pic::read(p).ok()).and_then(|b| decode_or_stream(Arc::new(b), &ext, max, still, max)));
     });
     rx
 }
@@ -710,7 +747,7 @@ pub fn pump<V: 'static>(
             let decoded = match bytes {
                 Some(b) => {
                     cx.background_executor()
-                        .spawn(async move { decode_as(&b, &ext, max, still) })
+                        .spawn(async move { decode_or_stream(Arc::new(b), &ext, max, still, max) })
                         .await
                 }
                 None => None,
@@ -904,9 +941,7 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
     if bytes.starts_with(b"GIF8") {
         let gif = GifCanvas::new(bytes)?;
         let (w, h) = (gif.canvas.width(), gif.canvas.height());
-        // Each frame's Graphic Control Extension: a count close enough to size the budget by.
-        let count = bytes.windows(3).filter(|w| *w == [0x21, 0xF9, 0x04]).count();
-        return frames_of(gif, w, h, count, &to);
+        return frames_of(gif, w, h, &to);
     }
     if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         // An animation's VP8X chunk names the canvas, which libwebp allocates on opening.
@@ -923,12 +958,11 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
             return None;
         }
         let (w, h) = dec.dimensions();
-        let count = dec.frame_count() as usize;
         let frames = dec.map(|f| {
             f.map(|(rgba, ms)| Frame::from_parts(rgba, 0, 0, image::Delay::from_numer_denom_ms(ms, 1)))
                 .map_err(|e| image::ImageError::IoError(std::io::Error::other(e)))
         });
-        return frames_of(Decoded::new(image::Frames::new(Box::new(frames))), w, h, count, &to);
+        return frames_of(Decoded::new(image::Frames::new(Box::new(frames))), w, h, &to);
     }
     // An APNG declares itself with `acTL` before its first `IDAT`.
     if bytes.starts_with(b"\x89PNG") {
@@ -938,8 +972,7 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
             return None;
         }
         let (frames, w, h) = apng_frames(bytes)?;
-        let count = frames.len();
-        return frames_of(Decoded::new(image::Frames::new(Box::new(frames.into_iter().map(Ok)))), w, h, count, &to);
+        return frames_of(Decoded::new(image::Frames::new(Box::new(frames.into_iter().map(Ok)))), w, h, &to);
     }
     None
 }
@@ -1038,26 +1071,156 @@ fn over(src: image::Rgba<u8>, dst: image::Rgba<u8>) -> image::Rgba<u8> {
     image::Rgba([mix(src[0], dst[0]), mix(src[1], dst[1]), mix(src[2], dst[2]), a as u8])
 }
 
-/// The size an animation of `count` frames decodes at to fit [`ANIMATION_BUDGET`] with every
-/// frame kept: shrunk as far as needed, but never below [`MIN_SHRINK`] of `size`. Past that,
-/// frames are dropped instead.
-fn fit_budget(size: (u32, u32), count: usize) -> (u32, u32) {
-    let full = size.0 as f64 * size.1 as f64 * 4. * count.max(1) as f64;
-    if full <= ANIMATION_BUDGET as f64 {
-        return size;
-    }
-    // A little under the budget, so rounding never tips it over and halves the frames.
-    let s = (ANIMATION_BUDGET as f64 * 0.98 / full).sqrt().max(MIN_SHRINK);
-    (((size.0 as f64 * s) as u32).max(1), ((size.1 as f64 * s) as u32).max(1))
+
+/// Decoded bytes one held animation may hold at its drawn size. A GIF or WebP past it streams;
+/// an APNG or HEICS sequence keeps every other frame (twice as long each) until it fits.
+const ANIMATION_BUDGET: usize = 24 << 20;
+
+/// What a picture decodes to: every frame held, or an animation too long to hold at the size it
+/// draws, played from its bytes a few frames ahead.
+pub enum Picture {
+    Held(RenderImage, u32, u32),
+    Stream(Stream),
 }
 
-/// The smallest an animation is shrunk to keep all its frames: smaller still would soften it
-/// more than dropping every other frame costs.
-const MIN_SHRINK: f64 = 0.75;
+/// `decode_as`, streaming a GIF or animated WebP whose frames at `max` outgrow
+/// [`ANIMATION_BUDGET`], at `stream_max`: never shrunk below the drawn size, never a frame dropped.
+pub fn decode_or_stream(bytes: Arc<Vec<u8>>, ext: &str, max: (u32, u32), still: bool, stream_max: (u32, u32)) -> Option<Picture> {
+    if ext != "svg"
+        && !still
+        && let Some((w, h, count)) = streamable(&bytes)
+    {
+        let to = within_max((w, h), max);
+        if to.0 as usize * to.1 as usize * 4 * count > ANIMATION_BUDGET {
+            if let Some(s) = Stream::start(bytes.clone(), (w, h), within_max((w, h), stream_max)) {
+                return Some(Picture::Stream(s));
+            }
+        }
+    }
+    decode_as(&bytes, ext, max, still).map(|(i, w, h)| Picture::Held(i, w, h))
+}
 
-/// Decoded bytes one animation may hold. Every frame is kept whole in memory and again on
-/// the GPU, so a long animation keeps every other frame (twice as long each) until it fits.
-const ANIMATION_BUDGET: usize = 24 << 20;
+/// `(w, h)` shrunk to fit `max`, never enlarged.
+fn within_max((w, h): (u32, u32), max: (u32, u32)) -> (u32, u32) {
+    let s = (max.0 as f32 / w.max(1) as f32).min(max.1 as f32 / h.max(1) as f32).min(1.);
+    (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
+}
+
+/// A GIF or animated WebP's canvas and about how many frames it has.
+fn streamable(bytes: &[u8]) -> Option<(u32, u32, usize)> {
+    if bytes.starts_with(b"GIF8") {
+        let gif = GifCanvas::new(bytes)?;
+        // Each frame's Graphic Control Extension: a count close enough to size the budget by.
+        let count = bytes.windows(3).filter(|w| *w == [0x21, 0xF9, 0x04]).count();
+        return (count > 1).then(|| (gif.canvas.width(), gif.canvas.height(), count));
+    }
+    if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let dec = crate::shared::animated_webp::Decoder::new(bytes).ok()?;
+        let (w, h) = dec.dimensions();
+        let count = dec.frame_count() as usize;
+        return (count > 1 && canvas_fits(w, h)).then_some((w, h, count));
+    }
+    None
+}
+
+fn frame_source(bytes: &[u8]) -> Option<Box<dyn FrameSource + '_>> {
+    if bytes.starts_with(b"GIF8") {
+        return Some(Box::new(GifCanvas::new(bytes)?));
+    }
+    let dec = crate::shared::animated_webp::Decoder::new(bytes).ok()?;
+    let frames = dec.map(|f| {
+        f.map(|(rgba, ms)| Frame::from_parts(rgba, 0, 0, image::Delay::from_numer_denom_ms(ms, 1)))
+            .map_err(|e| image::ImageError::IoError(std::io::Error::other(e)))
+    });
+    Some(Box::new(Decoded::new(image::Frames::new(Box::new(frames)))))
+}
+
+/// Browsers play a delay of 10 ms or less as 100 ms.
+fn browser_delay(v: u32) -> u32 {
+    if v <= 10 { 100 } else { v }
+}
+
+/// Frames decoded ahead of the one shown: enough to ride out a slow frame, little to hold.
+const AHEAD: usize = 2;
+/// Not drawn for this long while the window moves: off screen, so it is let go, ring, decoder
+/// and texture, and starts again from its bytes when it comes back.
+const STREAM_UNSEEN: std::time::Duration = std::time::Duration::from_millis(1000);
+/// Fallen this far behind its clock: it carries on from now rather than racing to catch up.
+const STREAM_LATE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// An animation played from its bytes: a decoder thread keeps [`AHEAD`] frames at the drawn
+/// size ready, and each due frame replaces the one shown.
+pub struct Stream {
+    frames: std::sync::mpsc::Receiver<(Arc<RenderImage>, u32)>,
+    pub current: Arc<RenderImage>,
+    pub w: u32,
+    pub h: u32,
+    delay: u32,
+    due: Option<std::time::Instant>,
+    pub seen: std::time::Instant,
+}
+
+impl Stream {
+    /// Started on `bytes`, its first frame decoded before it returns.
+    pub fn start(bytes: Arc<Vec<u8>>, natural: (u32, u32), to: (u32, u32)) -> Option<Self> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(AHEAD);
+        // spawn-detached: decodes frames from bytes in hand; ends when the stream is dropped.
+        std::thread::Builder::new()
+            .name("anim-stream".into())
+            .spawn(move || stream_frames(&bytes, natural, to, &tx))
+            .ok()?;
+        let (current, delay) = rx.recv().ok()?;
+        Some(Self { frames: rx, current, w: natural.0, h: natural.1, delay, due: None, seen: std::time::Instant::now() })
+    }
+
+    /// Steps to the frame now due, while it may move; how long until the next is due.
+    pub fn tick(&mut self, now: std::time::Instant, moving: bool, retired: &mut Vec<Arc<RenderImage>>) -> Option<std::time::Duration> {
+        if !moving {
+            self.due = None;
+            return None;
+        }
+        let due = *self.due.get_or_insert(now + std::time::Duration::from_millis(self.delay.into()));
+        if now < due {
+            return Some(due - now);
+        }
+        match self.frames.try_recv() {
+            Ok((frame, delay)) => {
+                retired.push(std::mem::replace(&mut self.current, frame));
+                self.delay = delay;
+                let from = if now - due > STREAM_LATE { now } else { due };
+                let next = from + std::time::Duration::from_millis(delay.into());
+                self.due = Some(next);
+                Some(next.saturating_duration_since(now))
+            }
+            // The decoder is a frame behind: look again shortly.
+            Err(std::sync::mpsc::TryRecvError::Empty) => Some(std::time::Duration::from_millis(4)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        }
+    }
+}
+
+/// Every frame of `bytes` at `to`, over and over, until the stream lets go.
+fn stream_frames(bytes: &[u8], natural: (u32, u32), to: (u32, u32), tx: &std::sync::mpsc::SyncSender<(Arc<RenderImage>, u32)>) {
+    let scale = (to != natural).then_some(to);
+    loop {
+        let Some(mut source) = frame_source(bytes) else { return };
+        let mut any = false;
+        // A damaged frame ends the pass there, as browsers play what decodes.
+        while let Some(delay) = source.advance() {
+            let delay = browser_delay(delay);
+            let buf = source.take(scale);
+            let buf = if source.bgra() { buf } else { to_bgra(buf) };
+            let frame = RenderImage::new(vec![Frame::from_parts(buf, 0, 0, image::Delay::from_numer_denom_ms(delay, 1))]);
+            if tx.send((Arc::new(frame), delay)).is_err() {
+                return;
+            }
+            any = true;
+        }
+        if !any {
+            return;
+        }
+    }
+}
 
 /// An animation one frame at a time: its delay first, its pixels only for a frame that is kept.
 trait FrameSource {
@@ -1188,11 +1351,10 @@ fn frames_of(
     mut frames: impl FrameSource,
     w: u32,
     h: u32,
-    count: usize,
     to: &impl Fn(u32, u32) -> (u32, u32),
 ) -> Option<(Vec<Frame>, u32, u32)> {
     let bgra = frames.bgra();
-    let (tw, th) = fit_budget(to(w, h), count);
+    let (tw, th) = to(w, h);
     let scale = (tw < w || th < h).then_some((tw.max(1), th.max(1)));
     // Browsers play 10ms or less as 100ms.
     let ms = |v: u32| match v {
@@ -1409,8 +1571,8 @@ fn heif(bytes: &[u8], max: (u32, u32), still: bool) -> Option<(RenderImage, u32,
     #[cfg(feature = "video")]
     if !still
         && crate::heif::has_track(bytes)
-        && let Some((seq, w, h, count)) = crate::video::Sequence::open(bytes.to_vec())
-        && let Some((frames, w, h)) = frames_of(seq, w, h, count, &|w, h| crate::heif::fit((w, h), max))
+        && let Some((seq, w, h, _)) = crate::video::Sequence::open(bytes.to_vec())
+        && let Some((frames, w, h)) = frames_of(seq, w, h, &|w, h| crate::heif::fit((w, h), max))
         && frames.len() > 1
     {
         return Some((RenderImage::new(frames), w, h));
@@ -1852,16 +2014,59 @@ mod apng_tests {
 mod budget_tests {
     use super::*;
 
+    /// `count` frames of `w`×`h`, each `delay_cs` hundredths of a second.
+    fn gif(w: u16, h: u16, count: usize, delay_cs: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, w, h, &[0, 0, 0, 255, 255, 255]).unwrap();
+            enc.set_repeat(gif::Repeat::Infinite).unwrap();
+            for i in 0..count {
+                let buffer: Vec<u8> = (0..w as usize * h as usize).map(|p| ((p + i) % 7 == 0) as u8).collect();
+                let frame = gif::Frame { width: w, height: h, delay: delay_cs, buffer: buffer.into(), ..Default::default() };
+                enc.write_frame(&frame).unwrap();
+            }
+        }
+        out
+    }
+
     #[test]
-    fn an_over_budget_animation_shrinks_before_it_drops_frames() {
-        // 137 frames at 360×213 come to 42 MB: shrunk to fit, every frame kept.
-        let (w, h) = fit_budget((360, 213), 137);
-        assert!(w as usize * h as usize * 4 * 137 <= ANIMATION_BUDGET);
-        assert!(w as f64 >= 360. * MIN_SHRINK && h as f64 >= 213. * MIN_SHRINK);
-        // One that fits is left alone.
-        assert_eq!(fit_budget((128, 128), 30), (128, 128));
-        // One far over shrinks no further than the floor; dropping frames does the rest.
-        assert_eq!(fit_budget((1000, 1000), 500), (750, 750));
+    fn an_animation_that_fits_is_held_whole_at_its_drawn_size() {
+        let bytes = gif(200, 150, 300, 4);
+        let Some(Picture::Held(image, w, h)) = decode_or_stream(Arc::new(bytes), "gif", (100, 100), false, (100, 100)) else {
+            panic!("a 9 MB animation is held");
+        };
+        assert_eq!((w, h), (200, 150));
+        assert_eq!(image.frame_count(), 300, "no frame dropped");
+        assert_eq!((image.size(0).width.0, image.size(0).height.0), (100, 75), "decoded at the drawn size");
+    }
+
+    #[test]
+    fn an_over_budget_animation_streams_at_its_drawn_size_and_native_delays() {
+        let bytes = gif(200, 150, 300, 4);
+        let Some(Picture::Stream(mut s)) = decode_or_stream(Arc::new(bytes), "gif", (400, 400), false, (400, 400)) else {
+            panic!("36 MB of frames at the drawn size stream");
+        };
+        assert_eq!((s.w, s.h), (200, 150));
+        assert_eq!((s.current.size(0).width.0, s.current.size(0).height.0), (200, 150), "never enlarged, never shrunk");
+        let mut retired = Vec::new();
+        let mut now = std::time::Instant::now();
+        assert_eq!(s.tick(now, true, &mut retired), Some(std::time::Duration::from_millis(40)));
+        for k in 1..=20 {
+            now += std::time::Duration::from_millis(40);
+            loop {
+                match s.tick(now, true, &mut retired) {
+                    Some(d) if retired.len() == k => {
+                        assert_eq!(d, std::time::Duration::from_millis(40), "the GIF's own pace");
+                        break;
+                    }
+                    // The decoder is a frame behind: it asks again shortly.
+                    Some(d) => std::thread::sleep(d),
+                    None => panic!("the stream ended"),
+                }
+            }
+        }
+        assert_eq!(retired.len(), 20, "one frame per 40 ms, none skipped");
+        assert_eq!(s.tick(now, false, &mut retired), None, "a still window steps nothing");
     }
 }
 

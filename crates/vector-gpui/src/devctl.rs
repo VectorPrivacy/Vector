@@ -234,6 +234,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 "presents": presents,
                 "draw_ms_p50_p95_max": draw_spread,
                 "present_ms_p50_p95_max": present_spread,
+                "present_gap_ms_p50_p95_max": gpui::draw_stats::gap_take(),
                 "draw_ms": draw_ns as f64 / 1e6,
                 "renders": renders,
                 "render_ms": render_ns as f64 / 1e6,
