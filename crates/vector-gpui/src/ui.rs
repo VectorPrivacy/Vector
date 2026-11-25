@@ -6007,7 +6007,7 @@ impl VectorApp {
                 .position(|m| m.attachments.iter().any(|a| a.id == att))?;
             let voice = |a: &vector_core::Attachment| {
                 a.name.is_empty()
-                    && (a.downloaded || a.resident)
+                    && (a.downloaded || crate::attachments::held(a))
                     && crate::audio::EXTENSIONS.contains(&a.extension.to_ascii_lowercase().as_str())
             };
             if !chat.messages[at].attachments.iter().any(|a| a.id == att && voice(a)) {

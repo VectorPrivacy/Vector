@@ -122,3 +122,17 @@ pub fn write(paths: Vec<PathBuf>, _cx: &mut gpui::App) -> Result<(), String> {
 pub fn write(_paths: Vec<PathBuf>, _cx: &mut gpui::App) -> Result<(), String> {
     Err(crate::t::clip_unsupported().into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::named;
+
+    #[test]
+    fn a_copied_file_always_carries_its_type() {
+        assert_eq!(named("", "0123456789abcdef0123", "png"), "0123456789abcdef.png");
+        assert_eq!(named("jojo", "ab", "png"), "jojo.png");
+        assert_eq!(named("jojo.PNG", "ab", "png"), "jojo.PNG");
+        assert_eq!(named("notes.tar", "ab", "gz"), "notes.tar.gz");
+        assert_eq!(named("README", "ab", ""), "README");
+    }
+}

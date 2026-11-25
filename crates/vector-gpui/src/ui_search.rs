@@ -408,7 +408,7 @@ fn thumb(media: &mut crate::media::Media, root: &std::path::Path, att: &vector_c
     if !picture && !video {
         return None;
     }
-    let source = (att.downloaded || att.resident).then(|| match vector_core::simd::hex::hex_to_bytes_32_checked(&att.id) {
+    let source = (att.downloaded || crate::attachments::held(att)).then(|| match vector_core::simd::hex::hex_to_bytes_32_checked(&att.id) {
         Some(h) if att.resident || att.path.is_empty() => Source::Held(h),
         _ => {
             let p = std::path::Path::new(&att.path);
