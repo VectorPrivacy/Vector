@@ -66,7 +66,7 @@ impl VectorApp {
                 rows.push((kit::MenuItem::new(t::msg_edit(), "edit"), act(MsgAct::Act(timeline::Act::Edit))));
             }
         }
-        let file = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty()));
+        let file = m.attachments.iter().find(|a| crate::attachments::held(a) || (a.downloaded && !a.path.is_empty()));
         // Beside a file, a bare "Copy" would not say which of the two it takes.
         let (copy_file, copy_text) = match (file.is_some(), m.content.is_empty()) {
             (true, false) => (t::msg_copy_file(), t::msg_copy_text()),
@@ -272,7 +272,27 @@ impl VectorApp {
             return;
         }
         let hash = vector_core::simd::hex::hex_to_bytes_32_checked(&a.id);
-        let rx = crate::backend::run(crate::fileclip::materialize(hash, path, a.name));
+        let ext = a.extension.to_ascii_lowercase();
+        // A held picture goes on the clipboard as itself: it never touches disk, and pastes typed.
+        let picture = gpui::ImageFormat::from_mime_type(&vector_core::crypto::mime_from_extension(&ext));
+        if let (Some(format), Some(h), true) = (picture, hash, path.is_empty()) {
+            let rx = crate::backend::run(crate::backend::attachments::bytes(Some(h), String::new()));
+            cx.spawn(async move |this, cx| {
+                let Ok(got) = rx.await else { return };
+                this.update(cx, |this, cx| match got {
+                    Some(bytes) => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes)));
+                        this.show_toast(&t::msg_file_copied(), cx);
+                    }
+                    None => this.show_toast(&t::clip_file_gone(), cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        let name = crate::fileclip::named(&a.name, &a.id, &ext);
+        let rx = crate::backend::run(crate::fileclip::materialize(hash, path, name));
         cx.spawn(async move |this, cx| {
             let Ok(got) = rx.await else { return };
             this.update(cx, |this, cx| {

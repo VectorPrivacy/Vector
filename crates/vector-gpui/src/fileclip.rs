@@ -2,6 +2,13 @@
 
 use std::path::PathBuf;
 
+/// A copied file's name with its type on the end, so whatever it is pasted into knows it.
+pub fn named(name: &str, id: &str, ext: &str) -> String {
+    let base = if name.is_empty() { id.get(..16).unwrap_or(id) } else { name };
+    let has = std::path::Path::new(base).extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
+    if ext.is_empty() || has { base.to_string() } else { format!("{base}.{ext}") }
+}
+
 /// A sealed or held file written out under this launch's exports, for another app to read.
 pub async fn materialize(hash: Option<[u8; 32]>, path: String, name: String) -> Result<PathBuf, String> {
     let bytes = match path.is_empty() {

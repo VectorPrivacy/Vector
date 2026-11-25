@@ -45,6 +45,12 @@ fn spoiler(att: &Attachment) -> bool {
     att.name.to_uppercase().starts_with("SPOILER_")
 }
 
+/// Held in memory right now: memory lets go of an idle file, which is then fetched again
+/// rather than drawn blank.
+pub fn held(att: &Attachment) -> bool {
+    att.resident && vector_core::simd::hex::hex_to_bytes_32_checked(&att.id).is_some_and(|h| vector_core::media::resident(&h))
+}
+
 fn source(ctx: &Ctx, att: &Attachment) -> Source {
     if att.resident || att.path.is_empty() {
         if let Some(h) = vector_core::simd::hex::hex_to_bytes_32_checked(&att.id) {
@@ -70,7 +76,7 @@ pub fn attachments(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
     for (i, att) in m.attachments.iter().enumerate() {
         let e = ext(att);
         let unsent = m.mine && att.url.is_empty();
-        let ready = att.downloaded || att.resident;
+        let ready = att.downloaded || held(att);
         let failed = media.failed.get(&att.id).cloned();
         let auto = media.auto_download.on
             && !ready

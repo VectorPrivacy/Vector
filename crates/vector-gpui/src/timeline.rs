@@ -2052,7 +2052,7 @@ fn toolbar(ctx: &Ctx, m: &Message, first: bool) -> Option<AnyElement> {
         if !dissolved && m.mine && !m.content.is_empty() && m.attachments.is_empty() && crate::data::command(m, ctx.commands).is_none() {
             acts.push(("icons/edit.svg", crate::t::msg_edit(), Act::Edit, false, false));
         }
-        if let Some(a) = m.attachments.iter().find(|a| a.downloaded && (a.resident || !a.path.is_empty())) {
+        if let Some(a) = m.attachments.iter().find(|a| crate::attachments::held(a) || (a.downloaded && !a.path.is_empty())) {
             acts.push(("icons/copy.svg", crate::t::msg_copy(), Act::CopyFile(a.id.clone()), false, false));
             acts.push(if a.resident {
                 ("icons/download.svg", crate::t::msg_save(), Act::RevealFile(a.id.clone()), false, false)

@@ -579,6 +579,14 @@ impl Media {
         [url.to_string(), format!("{url}{SMALL}")].iter().any(|k| matches!(self.custom.get(k), Some(Custom::Missing(_))))
     }
 
+    /// A picture fetched again: whatever its key failed to load before is forgotten.
+    pub fn refetched(&mut self, key: &str) {
+        if matches!(self.images.get(key), Some(Slot::Failed)) {
+            self.images.remove(key);
+        }
+        self.retried.remove(key);
+    }
+
     pub fn linked_progress(&mut self, url: &str, pct: f32) {
         if let Some(Linked::Loading(p)) = self.linked.get_mut(url) {
             *p = Some(pct);
