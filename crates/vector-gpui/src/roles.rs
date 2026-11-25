@@ -218,11 +218,10 @@ impl Roles {
 
     pub fn edit_dirty(&self, name: &str) -> bool {
         self.edit.as_ref().is_some_and(|e| {
-            e.id.is_none()
-                || Draft {
-                    name: name.to_string(),
-                    ..e.draft.clone()
-                } != e.base
+            Draft {
+                name: name.to_string(),
+                ..e.draft.clone()
+            } != e.base
         })
     }
 

@@ -14025,11 +14025,12 @@ impl VectorApp {
                     name: t::roles_new_name().into(),
                     ..Default::default()
                 };
+                // Untouched, a new role is nothing to save: backing out of it asks nothing.
                 Some(Edit {
                     id: None,
                     everyone: false,
                     draft: d.clone(),
-                    base: Draft::default(),
+                    base: d,
                 })
             }
         };
@@ -14797,14 +14798,7 @@ impl VectorApp {
                 m.relay_edit = None;
                 m.roles.order = None;
                 if let Some(e) = m.roles.edit.as_mut() {
-                    e.draft = if e.id.is_none() {
-                        crate::roles::Draft {
-                            name: t::roles_new_name().into(),
-                            ..Default::default()
-                        }
-                    } else {
-                        e.base.clone()
-                    };
+                    e.draft = e.base.clone();
                     let name = e.draft.name.clone();
                     m.role_name.update(cx, |t, cx| t.set_text(&name, cx));
                 }
