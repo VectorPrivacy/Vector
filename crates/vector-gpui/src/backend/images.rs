@@ -72,6 +72,11 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// An avatar already on disk, without fetching it.
+/// A Community's icon or banner, when it is already on disk: never a download.
+pub fn cached_community_image(image: &vector_core::community::CommunityImage, banner: bool) -> Option<String> {
+    cached(&image.url, if banner { Kind::Banner } else { Kind::Avatar })
+}
+
 pub fn cached_avatar(url: &str) -> Option<String> {
     cached(url, Kind::Avatar)
 }

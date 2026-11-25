@@ -644,7 +644,7 @@ impl VectorApp {
                 store
                     .communities
                     .iter()
-                    .filter(|c| !store.art.contains_key(&c.community_id))
+                    .filter(|c| store.art.get(&c.community_id).is_none_or(|a| a.icon.is_none() || a.banner.is_none()))
                     .map(|c| c.community_id.clone())
                     .collect()
             }

@@ -93,10 +93,28 @@ async fn hydrate() {
         .map(|p| SlimProfile::from_profile(p, &state.interner))
         .collect();
     drop(state);
+    // In the same read as the chats, before sync starts writing: the rail fills with the list.
+    let communities = super::community::list();
+    let art = communities
+        .iter()
+        .filter_map(|c| c.get("community_id").and_then(|v| v.as_str()))
+        .map(|id| {
+            let cached = |banner| {
+                db::community::community_image(id, banner)
+                    .ok()
+                    .flatten()
+                    .and_then(|img| super::images::cached_community_image(&img, banner))
+            };
+            (id.to_string(), crate::data::Art { icon: cached(false), banner: cached(true) })
+        })
+        .collect();
     super::send(UiEvent::Booted(Boot {
         npub,
         chats,
         profiles,
+        communities,
+        hidden_banners: super::community::hidden_banners(),
+        art,
     }));
     db::spawn_bound(super::images::cache_all_profile_images());
 }

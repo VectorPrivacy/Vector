@@ -73,6 +73,11 @@ pub struct Boot {
     pub npub: String,
     pub chats: Vec<SerializableChat>,
     pub profiles: Vec<SlimProfile>,
+    /// The rail's Communities, read before any sync can hold the database.
+    pub communities: Vec<serde_json::Value>,
+    pub hidden_banners: Vec<String>,
+    /// Each Community's icon and banner already on disk, by id.
+    pub art: Vec<(String, crate::data::Art)>,
 }
 
 pub(crate) fn send(ev: UiEvent) {

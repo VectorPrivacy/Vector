@@ -40,6 +40,8 @@ pub(crate) const RAIL_SLIM_W: f32 = 73.;
 const RAIL_AUTO_COLLAPSE_W: f32 = 1080.;
 /// How long opening a page may wait for what it shows from disk: its first frame shows whole.
 const OPEN_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
+/// The longest the login screen waits for the account's first read before fading out.
+const BOOT_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 /// The list pane's default width, its border included.
 const LIST_W_DEFAULT: f32 = 240.;
 static LIST_W_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new((LIST_W_DEFAULT - 1.).to_bits());
@@ -314,6 +316,9 @@ pub struct VectorApp {
     fades: Fades,
     /// The unlocked login screen, fading out before the app shows (`.fadeout-anim`, 0.5 s).
     login_out: Option<(Entity<LoginView>, std::time::Instant)>,
+    /// The account's chats and Communities are in the store: the login's fade may begin.
+    booted: bool,
+    login_at: std::time::Instant,
     /// When the app first showed after login: the chat list rises in (`.intro-anim`), the rail fades in.
     intro: Option<std::time::Instant>,
     /// Wide panes that fade in as they appear: the chat (`.fadein-anim`), a profile (`.fadein-subtle-anim`).
@@ -1178,6 +1183,8 @@ impl VectorApp {
             qr: None,
             fades: Fades::default(),
             login_out: None,
+            booted: false,
+            login_at: std::time::Instant::now(),
             intro: None,
             chat_in: kit::Reveal::default(),
             profile_in: kit::Reveal::default(),
@@ -3343,6 +3350,8 @@ impl VectorApp {
         if let Screen::Login(view) = std::mem::replace(&mut self.screen, Screen::Main) {
             self.login_out = Some((view, std::time::Instant::now()));
         }
+        self.booted = !self.live;
+        self.login_at = std::time::Instant::now();
         self.intro = None;
         self.share_arrived(cx);
         if let Some(v) = self.net_initial() {
@@ -3467,12 +3476,20 @@ impl VectorApp {
                         .collect();
                     store.chats = boot.chats;
                     store.resort();
+                    store.communities = boot.communities.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect();
+                    store.hidden_banners = boot.hidden_banners;
+                    store.art.extend(boot.art);
                 }
+                self.booted = true;
+                // The first paint after login shows the rail's icons it already has on disk.
+                cx.hold_next_frame(OPEN_HOLD);
                 self.load_chatlist_prefs();
                 self.load_rail();
                 self.load_voice_calls(cx);
                 self.refresh_unread(cx);
-                self.reload_communities(cx);
+                self.resolve_art(None, cx);
+                self.prefetch_banners(cx);
+                self.prefetch_rosters(cx);
                 self.reload_invites(cx);
             }
             UiEvent::Core(name, payload) => self.on_core_event(&name, payload, window, cx),
@@ -7398,7 +7415,12 @@ impl VectorApp {
                     }));
             }
             Screen::Main => {
-                if let Some((view, at)) = &self.login_out {
+                if let Some((view, at)) = &mut self.login_out {
+                    // The fade starts once the account is in the store, so the screen it uncovers
+                    // is whole; a store that takes too long is uncovered anyway.
+                    if !self.booted && self.login_at.elapsed() < BOOT_WAIT {
+                        *at = std::time::Instant::now();
+                    }
                     let t = at.elapsed().as_secs_f32() / 0.5;
                     if t < 1. {
                         window.request_animation_frame();
