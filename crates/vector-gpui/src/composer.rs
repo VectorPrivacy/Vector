@@ -1080,6 +1080,10 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((bytes, name)) = crate::fileclip::read_private(cx) {
+            cx.emit(Pasted::Held { bytes, name });
+            return;
+        }
         let files = crate::fileclip::read(cx);
         if !files.is_empty() {
             cx.emit(Pasted::Paths(files));
@@ -2323,6 +2327,8 @@ pub struct CancelInput;
 pub enum Pasted {
     Image { bytes: Vec<u8>, ext: &'static str },
     Paths(Vec<std::path::PathBuf>),
+    /// A file copied under Private Clipboard, straight from memory.
+    Held { bytes: Vec<u8>, name: String },
 }
 
 impl EventEmitter<SendText> for TextInput {}

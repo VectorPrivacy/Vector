@@ -9,14 +9,54 @@ pub fn named(name: &str, id: &str, ext: &str) -> String {
     if ext.is_empty() || has { base.to_string() } else { format!("{base}.{ext}") }
 }
 
-/// A sealed or held file written out under this launch's exports, for another app to read.
-pub async fn materialize(hash: Option<[u8; 32]>, path: String, name: String) -> Result<PathBuf, String> {
-    let bytes = match path.is_empty() {
-        false => vector_core::vcache::read(std::path::Path::new(&path))?.to_vec(),
+/// A file's bytes: from its place on disk (sealed or not), else its held copy.
+pub async fn bytes_of(hash: Option<[u8; 32]>, path: String) -> Result<Vec<u8>, String> {
+    match path.is_empty() {
+        false => Ok(vector_core::vcache::read(std::path::Path::new(&path))?.to_vec()),
         true => crate::backend::attachments::bytes(hash, String::new())
             .await
-            .ok_or_else(|| crate::t::clip_file_gone().to_string())?,
-    };
+            .ok_or_else(|| crate::t::clip_file_gone().to_string()),
+    }
+}
+
+/// Private Clipboard: copied files stay in Vector's memory, and other apps see only a marker.
+pub fn is_private() -> bool {
+    crate::backend::prefs::sql_bools(&[("private_clipboard", true)])[0]
+}
+
+/// The privately copied file: the token the OS clipboard carries, its bytes and its name.
+#[derive(Default)]
+struct Private(std::sync::Mutex<Option<(String, std::sync::Arc<Vec<u8>>, String)>>);
+
+fn private() -> std::sync::Arc<Private> {
+    vector_core::db::current_session().scoped::<Private, Private>()
+}
+
+/// Copy a file inside Vector only: its bytes never leave this process.
+pub fn write_private(bytes: Vec<u8>, name: String, cx: &mut gpui::App) {
+    let mut id = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
+    let token = vector_core::simd::hex::bytes_to_hex_string(&id);
+    *private().0.lock().unwrap_or_else(|e| e.into_inner()) = Some((token.clone(), std::sync::Arc::new(bytes), name));
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string_with_json_metadata(crate::t::clip_private_marker().to_string(), token));
+}
+
+/// The privately copied file, while the OS clipboard still names it.
+pub fn read_private(cx: &mut gpui::App) -> Option<(Vec<u8>, String)> {
+    let item = cx.read_from_clipboard()?;
+    let token = item.entries().iter().find_map(|e| match e {
+        gpui::ClipboardEntry::String(s) => s.metadata_json::<String>(),
+        _ => None,
+    })?;
+    let slot = private();
+    let held = slot.0.lock().unwrap_or_else(|e| e.into_inner());
+    let (t, bytes, name) = held.as_ref()?;
+    (*t == token).then(|| (bytes.to_vec(), name.clone()))
+}
+
+/// A sealed or held file written out under this launch's exports, for another app to read.
+pub async fn materialize(hash: Option<[u8; 32]>, path: String, name: String) -> Result<PathBuf, String> {
+    let bytes = bytes_of(hash, path).await?;
     let mut id = [0u8; 8];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
     let dir = root()?.join(vector_core::simd::hex::bytes_to_hex_string(&id));

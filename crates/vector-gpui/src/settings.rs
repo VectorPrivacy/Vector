@@ -194,11 +194,12 @@ pub const DISPLAY: [Toggle; 8] = [
 /// Display's slim-only row: the rail folded with nothing to pull it out.
 pub const RAIL_HIDDEN: Toggle = t("cc_rail_hidden", t::settings_toggle_cc_rail_hidden, "hideRail", Home::Device("true", "false", false), "chat-list");
 
-pub const PRIVACY: [Toggle; 4] = [
+pub const PRIVACY: [Toggle; 5] = [
     t("web_previews", t::settings_toggle_web_previews, "webPreviews", Home::Sql(true), ""),
     t("strip_tracking", t::settings_toggle_strip_tracking, "stripTracking", Home::Sql(true), ""),
     t("send_typing_indicators", t::settings_toggle_send_typing_indicators, "sendTyping", Home::Sql(true), ""),
     t("privacy_proxy_media", t::settings_toggle_privacy_proxy_media, "proxyMedia", Home::Sql(true), ""),
+    t("private_clipboard", t::settings_toggle_private_clipboard, "privateClipboard", Home::Sql(true), ""),
 ];
 
 pub const PLAYERS: Toggle = t("players", t::settings_toggle_players, "players", Home::Synced, "");
@@ -265,6 +266,7 @@ pub fn help(key: &str) -> Option<(SharedString, String)> {
         "stripTracking" => (t::settings_help_strip_tracking(), t::settings_help_strip_tracking_text()),
         "sendTyping" => (t::settings_help_send_typing(), t::settings_help_send_typing_text()),
         "proxyMedia" => (t::settings_help_proxy_media(), t::settings_help_proxy_media_text()),
+        "privateClipboard" => (t::settings_help_private_clipboard(), t::settings_help_private_clipboard_text()),
         "torMultiCircuit" => (t::settings_help_tor_multi_circuit(), t::settings_help_tor_multi_circuit_text()),
         "torExternal" => (t::settings_help_tor_external(), t::settings_help_tor_external_text()),
         "torBridges" => (t::settings_help_tor_bridges(), t::settings_help_tor_bridges_text()),

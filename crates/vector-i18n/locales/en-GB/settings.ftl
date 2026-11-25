@@ -74,6 +74,7 @@ settings-toggle-floating-player = Floating Player
 settings-toggle-cc-rail-hidden = Hide Community Rail
 settings-toggle-web-previews = Display Web Previews
 settings-toggle-strip-tracking = Prevent URL Tracking
+settings-toggle-private-clipboard = Private Clipboard
 settings-toggle-send-typing-indicators = Send Typing Indicators
 settings-toggle-privacy-proxy-media = Proxy Previews & Media
 settings-toggle-players = Video Players

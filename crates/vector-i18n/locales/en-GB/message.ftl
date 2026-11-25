@@ -31,6 +31,7 @@ msg-copy-link = Copy Link
 
 msg-link-copied = Copied Message Link
 msg-file-copied = Copied file to clipboard
+msg-file-copied-private = Copied file: paste it anywhere in Vector
 
 ## Confirmations. <br> is a line break and <b> is bold.
 
@@ -107,6 +108,7 @@ edit-history-edited = Edited
 ## Copying a file to the clipboard
 
 clip-file-gone = This file isn't on this device any more
+clip-private-marker = A file copied in Vector (Private Clipboard is on)
 # $error is why.
 clip-prepare-failed = Couldn't prepare the file: { $error }
 clip-no-cache = No cache folder

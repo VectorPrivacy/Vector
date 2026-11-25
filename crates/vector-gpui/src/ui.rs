@@ -12040,6 +12040,7 @@ impl VectorApp {
                 return self.open_paths_preview(p.clone(), window, cx);
             }
             crate::composer::Pasted::Image { bytes, ext } => backend::pasted::hold(bytes.clone(), ext),
+            crate::composer::Pasted::Held { bytes, name } => backend::pasted::hold_named(bytes.clone(), name),
         };
         self.open_file_preview(path, window, cx);
     }

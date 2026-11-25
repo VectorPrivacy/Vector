@@ -264,31 +264,30 @@ impl VectorApp {
             let p = if p.is_absolute() { p } else { self.store.borrow().media_root.join(p) };
             std::path::absolute(&p).unwrap_or(p).to_string_lossy().into_owned()
         };
+        let hash = vector_core::simd::hex::hex_to_bytes_32_checked(&a.id);
+        let ext = a.extension.to_ascii_lowercase();
+        if crate::fileclip::is_private() {
+            let name = crate::fileclip::named(&a.name, &a.id, &ext);
+            let rx = crate::backend::run(crate::fileclip::bytes_of(hash, path));
+            cx.spawn(async move |this, cx| {
+                let Ok(got) = rx.await else { return };
+                this.update(cx, |this, cx| match got {
+                    Ok(bytes) => {
+                        crate::fileclip::write_private(bytes, name, cx);
+                        this.show_toast(&t::msg_file_copied_private(), cx);
+                    }
+                    Err(e) => this.show_toast(&e, cx),
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         if !path.is_empty() && !vector_core::vcache::is_sealed(std::path::Path::new(&path)) {
             match crate::fileclip::write(vec![path.into()], cx) {
                 Ok(()) => self.show_toast(&t::msg_file_copied(), cx),
                 Err(e) => self.show_toast(&e, cx),
             }
-            return;
-        }
-        let hash = vector_core::simd::hex::hex_to_bytes_32_checked(&a.id);
-        let ext = a.extension.to_ascii_lowercase();
-        // A held picture goes on the clipboard as itself: it never touches disk, and pastes typed.
-        let picture = gpui::ImageFormat::from_mime_type(&vector_core::crypto::mime_from_extension(&ext));
-        if let (Some(format), Some(h), true) = (picture, hash, path.is_empty()) {
-            let rx = crate::backend::run(crate::backend::attachments::bytes(Some(h), String::new()));
-            cx.spawn(async move |this, cx| {
-                let Ok(got) = rx.await else { return };
-                this.update(cx, |this, cx| match got {
-                    Some(bytes) => {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&gpui::Image::from_bytes(format, bytes)));
-                        this.show_toast(&t::msg_file_copied(), cx);
-                    }
-                    None => this.show_toast(&t::clip_file_gone(), cx),
-                })
-                .ok();
-            })
-            .detach();
             return;
         }
         let name = crate::fileclip::named(&a.name, &a.id, &ext);
