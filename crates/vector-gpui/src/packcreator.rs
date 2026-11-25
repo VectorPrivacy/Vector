@@ -14,7 +14,7 @@ use crate::pic::img;
 use vector_core::image_crop::CropRect;
 
 use super::*;
-use crate::backend::packs::{IMPORT_EXTS, MAX_EMOJI_BYTES};
+use crate::backend::packs::{IMPORT_EXTS, MAX_EMOJI_BYTES, MAX_EMOJI_SOURCE};
 use crate::composer::{CancelInput, InputChanged, Look, SendText, TextInput};
 
 const NAME_MAX: usize = 26;
@@ -563,7 +563,7 @@ impl EmojiPicker {
                     failed += 1;
                     continue;
                 };
-                if bytes.len() > MAX_EMOJI_BYTES {
+                if bytes.len() > MAX_EMOJI_SOURCE {
                     size = true;
                     continue;
                 }
@@ -581,6 +581,14 @@ impl EmojiPicker {
                         Ok(out) => out,
                         Err(e) => {
                             this.update(cx, |this, cx| this.show_error(&t::packs_crop_failed(), &e, "", "", cx)).ok();
+                            continue;
+                        }
+                    }
+                } else if bytes.len() > MAX_EMOJI_BYTES {
+                    match cx.background_executor().spawn(async move { fit(bytes, w) }).await {
+                        Ok(out) if out.len() <= MAX_EMOJI_BYTES => out,
+                        _ => {
+                            size = true;
                             continue;
                         }
                     }
@@ -682,7 +690,7 @@ impl EmojiPicker {
             let Ok(bytes) = cx.background_executor().spawn(async move { crate::backend::packs::import(&p) }).await else {
                 return error(&this, cx, &t::packs_bad_format(), &t::packs_bad_format_text());
             };
-            if bytes.len() > MAX_EMOJI_BYTES {
+            if bytes.len() > MAX_EMOJI_SOURCE {
                 return error(&this, cx, &t::packs_too_big(), &t::packs_too_big_text());
             }
             let Some((w, h)) = crate::backend::packs::dims(&bytes) else {
@@ -706,6 +714,11 @@ impl EmojiPicker {
                         return;
                     }
                     Err(e) => return error(&this, cx, &t::packs_crop_failed(), &e),
+                }
+            } else if bytes.len() > MAX_EMOJI_BYTES {
+                match cx.background_executor().spawn(async move { fit(bytes, w) }).await {
+                    Ok(out) if out.len() <= MAX_EMOJI_BYTES => out,
+                    _ => return error(&this, cx, &t::packs_too_big(), &t::packs_too_big_text()),
                 }
             } else {
                 bytes
@@ -1945,5 +1958,31 @@ impl Render for DragCell {
                     .clone()
                     .map(|p| img(gpui::ImageSource::Render(p)).size(px(CELL_SIDE * 0.42))),
             )
+    }
+}
+
+/// A square picture over the upload cap, shrunk (and re-encoded, frames and all) until it fits.
+fn fit(bytes: Vec<u8>, side: u32) -> Result<Vec<u8>, String> {
+    let whole = vector_core::image_crop::CropRect { x: 0, y: 0, w: side, h: side, sw: None, sh: None };
+    crate::crop::crop_emoji(bytes, whole, MAX_EMOJI_BYTES)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_picture_over_the_cap_is_shrunk_to_fit_rather_than_refused() {
+        let mut seed = 0x2545_f491_u32;
+        let img = image::RgbaImage::from_fn(512, 512, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            image::Rgba(seed.to_le_bytes())
+        });
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        assert!(png.len() > super::MAX_EMOJI_BYTES);
+        let out = super::fit(png, 512).unwrap();
+        assert!(out.len() <= super::MAX_EMOJI_BYTES, "{} bytes", out.len());
+        assert!(image::load_from_memory(&out).is_ok());
     }
 }

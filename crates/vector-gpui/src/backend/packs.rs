@@ -7,6 +7,8 @@ use vector_core::emoji_packs::{self, EmojiPack, PackEmoji};
 use crate::shared::image::{UploadImageKind, prepare_upload_image, upload_mime_for};
 
 pub const MAX_EMOJI_BYTES: usize = 256 * 1024;
+/// The largest picture taken in to become an emoji: anything over the upload cap is shrunk to fit.
+pub const MAX_EMOJI_SOURCE: usize = 16 * 1024 * 1024;
 
 /// What the picker accepts: web formats as they are, and what the image crate reads, as PNG.
 pub const IMPORT_EXTS: &[&str] = &[

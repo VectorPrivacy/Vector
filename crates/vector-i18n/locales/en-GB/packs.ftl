@@ -55,7 +55,7 @@ packs-shortcode-taken-title = Duplicate Shortcode.
 
 packs-crop-failed = Oops! Couldn’t Crop That!
 packs-too-big = Oops! File Size Exceeded!
-packs-too-big-text = File Size must be under 256Kb.
+packs-too-big-text = This picture couldn't be shrunk under 256 KB. Try a smaller or simpler one.
 packs-crop-too-big = Oops! Too Big After Cropping!
 packs-crop-too-big-text = Cropping this to a square re-encoded it over the 256 KB limit. Try an already-square version, or shrink it a little before adding.
 packs-crop-too-big-title = Crop Pushed It Over.
