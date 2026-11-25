@@ -260,12 +260,24 @@ pub async fn download(chat: String, msg_id: String, attachment_id: String, auto:
     };
     // Files that go to disk anyway fetch through a checkpointed partial, so a stop resumes.
     let resumable = !vector_core::media::ram::cache().admits(attachment.size) || vector_core::media::keep_media();
-    let got = if resumable {
-        VectorCore.download_attachment_resumable(&attachment, author.as_deref(), report).await
-    } else {
-        VectorCore
-            .download_attachment_reporting(&attachment, author.as_deref(), 1024 * 1024 * 1024, report)
-            .await
+    let fetch = async {
+        if resumable {
+            VectorCore.download_attachment_resumable(&attachment, author.as_deref(), report).await
+        } else {
+            VectorCore
+                .download_attachment_reporting(&attachment, author.as_deref(), 1024 * 1024 * 1024, report)
+                .await
+        }
+    };
+    // A stalled link (Tor, I2P) may never report a chunk, so a stop can't wait for one.
+    let stopped = async {
+        while !active.cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    };
+    let got = tokio::select! {
+        got = fetch => got,
+        () = stopped => Err(DownloadError::Cancelled),
     };
     let bytes = match got {
         Ok(b) => b,
