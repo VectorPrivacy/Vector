@@ -244,6 +244,7 @@ impl Scene {
     }
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
+        let _timed = crate::draw_stats::Stage::start(crate::draw_stats::REPLAY, range.len());
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
@@ -256,6 +257,7 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
+        let _timed = crate::draw_stats::Stage::start(crate::draw_stats::FINISH, self.paint_operations.len());
         let keys = &mut self.sort_keys;
         let order = |order: DrawOrder| (order as u64) << 32;
         sort_stable(&mut self.shadows, keys, |shadow| order(shadow.order));

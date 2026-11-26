@@ -1075,6 +1075,14 @@ pub(crate) struct DeferredDraw {
     accessed_entities: FxHashSet<EntityId>,
 }
 
+/// A glow restyled every frame from `level` without a redraw: [`Window::paint_live_shadows`].
+#[derive(Clone)]
+pub struct LiveShadow {
+    pub level: Rc<Cell<f32>>,
+    /// The glow's two shadows at a level.
+    pub make: Rc<dyn Fn(f32) -> [BoxShadow; 2]>,
+}
+
 /// An animated picture as last painted: enough to swap its frame in the scene without a redraw.
 #[derive(Clone)]
 pub(crate) struct AnimatedSprite {
@@ -1087,7 +1095,12 @@ pub(crate) struct AnimatedSprite {
     pub(crate) at: Bounds<ScaledPixels>,
     pub(crate) visible: Bounds<Pixels>,
     pub(crate) image: Bounds<Pixels>,
+    /// A picture someone else steps: [`Window::present_live`] shows whatever it holds now.
+    pub(crate) live: Option<LiveImage>,
 }
+
+/// A picture whose owner swaps it for the next one: [`Window::paint_live_image`].
+pub type LiveImage = Rc<RefCell<Arc<RenderImage>>>;
 
 pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
@@ -1418,6 +1431,8 @@ pub struct Window {
         SingleSubscriberSet<Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    /// Glows painted live, by the tag their shadows carry: see [`Window::paint_live_shadows`].
+    live_shadows: FxHashMap<u32, (LiveShadow, f32)>,
     last_full_draw: Instant,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
@@ -2604,6 +2619,7 @@ impl Window {
             visibility_observers: SingleSubscriberSet::new(),
             hovered,
             needs_present,
+            live_shadows: FxHashMap::default(),
             last_full_draw: Instant::now(),
             input_rate_tracker,
             #[cfg(feature = "profiler")]
@@ -5718,6 +5734,118 @@ impl Window {
         self.paint_outset_shadows(bounds, corner_radii, shadows, 2);
     }
 
+    /// Paints `live`'s two shadows as [`Self::paint_box_shadows`] would, then lets
+    /// [`Self::present_live`] restyle them from `live.level` each frame without a redraw. `key`
+    /// names the glow while its view goes unredrawn: the same key paints the same glow.
+    pub fn paint_live_shadows(&mut self, bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>, key: u64, live: LiveShadow) {
+        let tag = ((key ^ (key >> 32)) as u32 & 0x7fff_fffe) | 1;
+        let shadows = (live.make)(live.level.get());
+        self.live_shadows.insert(tag, (live, self.element_opacity()));
+        let first = self.next_frame.scene.paint_operations.len();
+        self.paint_outset_shadows(bounds, corner_radii, &shadows, 2);
+        let mut nth = 0u32;
+        for op in &mut self.next_frame.scene.paint_operations[first..] {
+            if let crate::scene::PaintOperation::Primitive(crate::Primitive::Shadow(s)) = op {
+                s.pad = tag | (nth << 31);
+                nth += 1;
+            }
+        }
+        for s in self.next_frame.scene.shadows.iter_mut().rev().take(shadows.len()) {
+            nth -= 1;
+            s.pad = tag | (nth << 31);
+        }
+    }
+
+    /// Restyles every live glow on screen from its level and presents the frame as drawn:
+    /// no render, layout or paint. Whether anything changed.
+    pub fn present_live(&mut self) -> bool {
+        let swapped = self.swap_live_images();
+        if self.live_shadows.is_empty() {
+            if swapped && !self.invalidator.is_dirty() {
+                self.needs_present.set(true);
+                self.invalidator.wake_platform();
+            }
+            return swapped;
+        }
+        let scale = self.scale_factor();
+        let live = &self.live_shadows;
+        let mut changed = false;
+        let mut restyle = |s: &mut Shadow| {
+            if s.pad == 0 {
+                return;
+            }
+            let Some((l, opacity)) = live.get(&(s.pad & 0x7fff_ffff)) else { return };
+            let all = (l.make)(l.level.get());
+            let Some(shadow) = all.get((s.pad >> 31) as usize) else { return };
+            let spread = ScaledPixels(shadow.spread_radius.0 * scale);
+            let color = shadow.color.opacity(*opacity);
+            let blur = shadow.blur_radius.scale(scale);
+            if s.color != color || s.blur_radius != blur {
+                changed = true;
+            }
+            s.color = color;
+            s.blur_radius = blur;
+            s.bounds = s.element_bounds.dilate(spread);
+            let grow = |r: ScaledPixels| if r > ScaledPixels(0.) { ScaledPixels((r.0 + spread.0).max(0.)) } else { r };
+            let r = s.element_corner_radii;
+            s.corner_radii = Corners { top_left: grow(r.top_left), top_right: grow(r.top_right), bottom_right: grow(r.bottom_right), bottom_left: grow(r.bottom_left) };
+        };
+        let scene = &mut self.rendered_frame.scene;
+        for s in scene.shadows.iter_mut() {
+            restyle(s);
+        }
+        // A cached view's next frame replays these recorded copies.
+        for op in scene.paint_operations.iter_mut() {
+            if let crate::scene::PaintOperation::Primitive(crate::Primitive::Shadow(s)) = op {
+                restyle(s);
+            }
+        }
+        let changed = changed || swapped;
+        if changed && !self.invalidator.is_dirty() {
+            self.needs_present.set(true);
+            self.invalidator.wake_platform();
+        }
+        changed
+    }
+
+    /// Each live picture whose owner moved on, its new picture's tile swapped in.
+    fn swap_live_images(&mut self) -> bool {
+        let mut swaps: Vec<(AtlasTile, Bounds<ScaledPixels>, AtlasTile)> = Vec::new();
+        let mut records = std::mem::take(&mut self.rendered_frame.animated);
+        for r in &mut records {
+            let Some(live) = &r.live else { continue };
+            let now = live.borrow().clone();
+            if Arc::ptr_eq(&now, &r.data) {
+                continue;
+            }
+            if let Ok(Some(tile)) = image_tile(&*self.sprite_atlas, &now, 0) {
+                let sub = sub_tile(tile, r.visible, r.image);
+                swaps.push((r.tile, r.at, sub));
+                r.tile = sub;
+                r.data = now;
+            }
+        }
+        self.rendered_frame.animated = records;
+        if swaps.is_empty() {
+            return false;
+        }
+        let due = |tile: &AtlasTile, at: &Bounds<ScaledPixels>| swaps.iter().find(|(shown, w, _)| shown == tile && w == at).map(|s| s.2);
+        let scene = &mut self.rendered_frame.scene;
+        for sprite in scene.polychrome_sprites.iter_mut() {
+            if let Some(tile) = due(&sprite.tile, &sprite.bounds) {
+                sprite.tile = tile;
+            }
+        }
+        for op in scene.paint_operations.iter_mut() {
+            if let crate::scene::PaintOperation::Primitive(crate::Primitive::PolychromeSprite(sprite)) = op
+                && let Some(tile) = due(&sprite.tile, &sprite.bounds)
+            {
+                sprite.tile = tile;
+            }
+        }
+        true
+    }
+
     fn paint_outset_shadows(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -6282,9 +6410,37 @@ impl Window {
                 at,
                 visible: bounds.intersect(&image_bounds),
                 image: image_bounds,
+                live: None,
             });
         }
         Ok(())
+    }
+
+    /// Paints what `live` holds, and lets [`Self::present_live`] show whatever it holds later
+    /// by swapping its tile in the presented frame: no render, layout or paint.
+    pub fn paint_live_image(&mut self, bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>, live: LiveImage) -> Result<()> {
+        let data = live.borrow().clone();
+        let before = self.next_frame.scene.polychrome_sprites.len();
+        self.paint_image(bounds, bounds, corner_radii, data.clone(), 0, false)?;
+        if let Some(sprite) = self.next_frame.scene.polychrome_sprites.get(before) {
+            let (tile, at) = (sprite.tile, sprite.bounds);
+            self.next_frame.animated.push(AnimatedSprite {
+                data,
+                clock: Rc::default(),
+                shown: 0,
+                tile,
+                at,
+                visible: bounds,
+                image: bounds,
+                live: Some(live),
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether the presented frame shows `live`.
+    pub fn live_shown(&self, live: &LiveImage) -> bool {
+        self.rendered_frame.animated.iter().any(|a| a.live.as_ref().is_some_and(|l| Rc::ptr_eq(l, live)))
     }
 
     /// Moves every animated picture on screen to its due frame by swapping tiles in the
@@ -12215,6 +12371,32 @@ pub mod draw_stats {
     /// `[p50, p95, max]` milliseconds between presents since the last call.
     pub fn gap_take() -> [f64; 3] {
         spread(&GAP_MICROS)
+    }
+
+    /// Stages of a draw timed on their own: copying clean views' primitives, the scene's sort.
+    pub(crate) const REPLAY: usize = 0;
+    pub(crate) const FINISH: usize = 1;
+    static STAGE_NANOS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static STAGE_ITEMS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+    pub(crate) struct Stage(usize, Instant);
+
+    impl Stage {
+        pub(crate) fn start(stage: usize, items: usize) -> Self {
+            STAGE_ITEMS[stage].fetch_add(items as u64, Ordering::Relaxed);
+            Self(stage, Instant::now())
+        }
+    }
+
+    impl Drop for Stage {
+        fn drop(&mut self) {
+            STAGE_NANOS[self.0].fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// `[(ms, items)]` per stage since the last call: replay, then finish.
+    pub fn stages_take() -> [(f64, u64); 2] {
+        [0, 1].map(|i| (STAGE_NANOS[i].swap(0, Ordering::Relaxed) as f64 / 1e6, STAGE_ITEMS[i].swap(0, Ordering::Relaxed)))
     }
 
     const KEPT: usize = 4096;

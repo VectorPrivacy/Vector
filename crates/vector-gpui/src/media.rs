@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, RenderImage, WeakEntity};
@@ -155,6 +156,8 @@ pub struct Media {
     pub audio: crate::audio::Audio,
     /// Animations too long to hold, playing from their bytes, by picture key.
     streams: HashMap<String, Stream>,
+    /// Each stream's picture as the screen shows it, swapped without a redraw.
+    stream_live: HashMap<String, gpui::LiveImage>,
     /// Frames a stream stepped past, for the window to let go of.
     pub stream_retired: Vec<Arc<RenderImage>>,
     pub videos: crate::video::Videos,
@@ -312,17 +315,44 @@ impl Media {
 
     /// Steps every stream on screen to its due frame; a stream not drawn for [`STREAM_UNSEEN`]
     /// while the window moves is let go. When the next frame is due.
+    /// The live picture behind `key`, when it streams.
+    pub fn live_of(&self, key: &str) -> Option<gpui::LiveImage> {
+        self.stream_live.get(key).cloned()
+    }
+
+    /// Streams the presented frame shows count as seen, though nothing redrew them.
+    pub fn mark_streams_seen(&mut self, window: &gpui::Window) {
+        let now = std::time::Instant::now();
+        for (key, s) in self.streams.iter_mut() {
+            if self.stream_live.get(key).is_some_and(|l| window.live_shown(l)) {
+                s.seen = now;
+            }
+        }
+    }
+
+    pub fn any_streams(&self) -> bool {
+        !self.streams.is_empty()
+    }
+
     pub fn tick_streams(&mut self, moving: bool) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
         let retired = &mut self.stream_retired;
         let mut next: Option<std::time::Duration> = None;
-        self.streams.retain(|_, s| {
+        let lives = &mut self.stream_live;
+        self.streams.retain(|key, s| {
             if moving && now.saturating_duration_since(s.seen) > STREAM_UNSEEN {
                 retired.push(s.current.clone());
+                lives.remove(key);
                 return false;
             }
+            let before = s.current.clone();
             if let Some(d) = s.tick(now, moving, retired) {
                 next = Some(next.map_or(d, |n| n.min(d)));
+            }
+            if !Arc::ptr_eq(&before, &s.current)
+                && let Some(live) = lives.get(key)
+            {
+                *live.borrow_mut() = s.current.clone();
             }
             true
         });
@@ -340,7 +370,6 @@ impl Media {
         self.used.insert((1, key.to_string()), now);
         if !still && let Some(s) = self.streams.get_mut(key) {
             s.seen = now;
-            gpui::keyed_volatile();
             return Slot::Ready { image: s.current.clone(), w: s.w, h: s.h };
         }
         if let Some(s) = self.images.get(key) {
@@ -645,6 +674,7 @@ fn land(m: &mut Media, key: String, decoded: Option<Picture>) {
         }
         Some(Picture::Stream(stream)) => {
             m.images.remove(&key);
+            m.stream_live.insert(key.clone(), Rc::new(std::cell::RefCell::new(stream.current.clone())));
             if let Some(old) = m.streams.insert(key, stream) {
                 m.stream_retired.push(old.current.clone());
             }

@@ -396,13 +396,24 @@ fn picture(ctx: &Ctx, media: &mut Media, m: &Message, att: &Attachment) -> Optio
                     .when(!pending, |d| {
                         d.cursor_pointer().on_click(act(ctx, m, Act::View(open)))
                     })
-                    .child(
-                        img(image)
+                    .child(match media.live_of(&att.id) {
+                        // A stream's frames swap in the presented frame, without redrawing the row.
+                        Some(live) => gpui::canvas(
+                            |_, _, _| {},
+                            move |b, _, window, _| {
+                                let _ = window.paint_live_image(b, gpui::Corners::all(px(8.)), live);
+                            },
+                        )
+                        .w(px(fw))
+                        .h(px(fh))
+                        .into_any_element(),
+                        None => img(image)
                             .w(px(fw))
                             .h(px(fh))
                             .rounded(px(8.))
-                            .when(pending, |i| i.opacity(0.25)),
-                    )
+                            .when(pending, |i| i.opacity(0.25))
+                            .into_any_element(),
+                    })
                     .when(pending, |d| d.child(upload_overlay(ctx, m, media.transfers.get(&m.id), fw, fh)))
                     .when(!pending && media.image_types, |d| d.children(ext_badge(&ext(att), fw, fh)))
                     .into_any_element(),

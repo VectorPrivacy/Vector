@@ -126,7 +126,8 @@ pub struct Voice {
 /// to fade, as a meter reads.
 #[derive(Default)]
 pub struct Glow {
-    shown: HashMap<String, f32>,
+    /// Each glow's level, shared with the shadows painted from it: they follow it live.
+    shown: HashMap<String, Rc<Cell<f32>>>,
     at: Option<Instant>,
 }
 
@@ -143,7 +144,12 @@ pub fn ease_glow(cur: f32, target: f32, dt: f32) -> f32 {
 
 impl Glow {
     pub fn get(&self, npub: &str) -> f32 {
-        self.shown.get(npub).copied().unwrap_or(0.)
+        self.shown.get(npub).map_or(0., |c| c.get())
+    }
+
+    /// The level `npub`'s glow follows, for painting it live.
+    pub fn cell(&mut self, npub: &str) -> Rc<Cell<f32>> {
+        self.shown.entry(npub.to_string()).or_default().clone()
     }
 
     /// Eased toward `targets` (npub, 0..1), anyone missing toward silence; whether any glow
@@ -154,21 +160,25 @@ impl Glow {
         self.at = Some(now);
         for (npub, target) in targets {
             if *target > 0. || self.shown.contains_key(npub) {
-                let v = self.shown.entry(npub.clone()).or_default();
-                *v = ease_glow(*v, *target, dt);
+                let c = self.shown.entry(npub.clone()).or_default();
+                c.set(ease_glow(c.get(), *target, dt));
             }
         }
-        self.shown.retain(|npub, v| {
+        let mut lit = false;
+        for (npub, c) in &self.shown {
             if !targets.iter().any(|(n, _)| n == npub) {
-                *v = ease_glow(*v, 0., dt);
+                let v = ease_glow(c.get(), 0., dt);
+                c.set(if v > 0.003 { v } else { 0. });
             }
-            *v > 0.003
-        });
-        !self.shown.is_empty()
+            lit |= c.get() > 0.003;
+        }
+        lit
     }
 
     pub fn clear(&mut self) {
-        self.shown.clear();
+        for c in self.shown.values() {
+            c.set(0.);
+        }
         self.at = None;
     }
 }
@@ -310,7 +320,7 @@ impl Voice {
         } else {
             Vec::new()
         };
-        glow.step(&targets, now) || self.any_leaving()
+        glow.step(&targets, now)
     }
 
     /// Members of `channel`'s call who left within [`LEAVE_MS`], and how far gone (0..1).
@@ -330,7 +340,7 @@ impl Voice {
         gone.iter().map(|(g, at)| (g.clone(), now.saturating_duration_since(*at).as_millis() as f32 / LEAVE_MS as f32)).collect()
     }
 
-    fn any_leaving(&self) -> bool {
+    pub fn any_leaving(&self) -> bool {
         self.ghosts.borrow().values().any(|(_, gone)| !gone.is_empty())
     }
 
@@ -512,7 +522,7 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                         .relative()
                         .flex_shrink_0()
                         .rounded_full()
-                        .child(glow_layer(glow, 1.5, None))
+                        .child(glow_layer(voice.glow.borrow_mut().cell(&p.npub), 1.5, None, &format!("side-{}", p.npub)))
                         .child(crate::ui::avatar(store, &p.npub, 18.)),
                 )
                 .child(div().flex_1().min_w_0().truncate().child(store.chat_name(&p.npub, channel)))
@@ -863,21 +873,50 @@ const GLOW_REACH: f32 = 20.;
 
 /// The speaking glow behind a face, painted past the clips around it (a scroll area, the
 /// stage) by its own reach, and not at all for a face scrolled out of view.
-fn glow_layer(glow: f32, width: f32, radius: Option<f32>) -> impl IntoElement {
+pub(crate) fn glow_layer(level: Rc<Cell<f32>>, width: f32, radius: Option<f32>, key: &str) -> impl IntoElement {
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        h.finish()
+    };
     canvas(
         |_, _, _| {},
         move |b, _, window, _| {
-            if glow <= 0.01 || !window.content_mask().bounds.intersects(&b) {
+            if !window.content_mask().bounds.intersects(&b) {
                 return;
             }
             let r = radius.map_or(b.size.width / 2., px);
+            let make: Rc<dyn Fn(f32) -> [BoxShadow; 2]> = Rc::new(move |g| glow_pair(g, width));
             window.with_content_mask_grown(px(GLOW_REACH), |w| {
-                w.paint_box_shadows(b, gpui::Corners::all(r), &glow_ring(glow, width, false))
+                w.paint_live_shadows(b, gpui::Corners::all(r), key, gpui::LiveShadow { level, make })
             });
         },
     )
     .absolute()
     .inset_0()
+}
+
+/// [`glow_ring`]'s ring and light, unlit at silence rather than gone, so a live glow keeps
+/// its two shadows to restyle.
+fn glow_pair(glow: f32, width: f32) -> [BoxShadow; 2] {
+    let g = if glow <= 0.01 { 0. } else { glow };
+    [
+        BoxShadow {
+            color: c(ACCENT).opacity(if g > 0. { 0.35 + 0.6 * g } else { 0. }),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(width),
+            inset: false,
+        },
+        BoxShadow {
+            color: c(ACCENT).opacity(0.45 * g),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(4. + 12. * g),
+            spread_radius: px(g),
+            inset: false,
+        },
+    ]
 }
 
 /// A muted or deafened mark, `size` across.
@@ -977,7 +1016,6 @@ fn face(
     p: &Member,
     me: &str,
     size: f32,
-    glow: f32,
     camera: Option<(f32, f32)>,
     community: &str,
     channel: &str,
@@ -997,9 +1035,9 @@ fn face(
         .map(|d| match picture {
             Some((image, (w, h))) => d
                 .rounded(px(8.))
-                .child(glow_layer(glow, 2., Some(8.)))
+                .child(glow_layer(voice.glow.borrow_mut().cell(&p.npub), 2., Some(8.), &format!("face-{size}-{}", p.npub)))
                 .child(img(image).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Cover)),
-            None => d.rounded_full().child(glow_layer(glow, if size >= 64. { 3. } else { 2. }, None)).child(crate::ui::avatar(store, &p.npub, size)),
+            None => d.rounded_full().child(glow_layer(voice.glow.borrow_mut().cell(&p.npub), if size >= 64. { 3. } else { 2. }, None, &format!("face-{size}-{}", p.npub))).child(crate::ui::avatar(store, &p.npub, size)),
         })
         .children(badges(p, badge).map(|b| b.absolute().right(px(-4.)).bottom(px(-4.))))
         .child(crate::kit::anchor(anchors, key))
@@ -1132,7 +1170,7 @@ pub fn stage(
                     let pending = session.is_some() && !connected(&p.npub);
                     crate::kit::pop(
                         SharedString::from(format!("voice-row-in-{}", p.npub)),
-                        face(store, voice, seen, p, me, ROW_FACE, glow(&p.npub), Some((52., ROW_FACE)), community, channel, on, anchors)
+                        face(store, voice, seen, p, me, ROW_FACE, Some((52., ROW_FACE)), community, channel, on, anchors)
                             .tip(name_of(&p.npub))
                             .when(pending, |d| d.opacity(0.5)),
                         180,
@@ -1257,7 +1295,7 @@ pub fn stage(
                                     .child(name_of(&p.npub)),
                             ),
                         None => d
-                            .child(face(store, voice, seen, p, me, tr.avatar, g, None, community, channel, on, anchors))
+                            .child(face(store, voice, seen, p, me, tr.avatar, None, community, channel, on, anchors))
                             .child(name)
                             .children(note.map(|n| div().mt(px(-6.)).text_size(px(10.)).text_color(white_a(0.4)).child(n))),
                     })

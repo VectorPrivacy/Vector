@@ -1254,23 +1254,14 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
 fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::Size<Pixels>, top: f32, on: &OnAct) -> AnyElement {
     let live = call.live();
     let ended = call.phase == Some(Phase::Ended);
-    let talk = call.glow.borrow().get("peer");
-    let ring = vec![
-        BoxShadow {
-            color: accent_mix(0.12 + talk * 0.88),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(2.),
-            inset: false,
-        },
-        BoxShadow {
-            color: accent_mix(talk * 0.7),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(talk * 12.),
-            spread_radius: px(0.),
-            inset: false,
-        },
-    ];
+    // The resting ring; the voice's glow lights over it live.
+    let ring = vec![BoxShadow {
+        color: accent_mix(0.12),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+        inset: false,
+    }];
     let status = div()
         .flex()
         .items_center()
@@ -1354,8 +1345,10 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
             div()
                 .flex()
                 .flex_shrink_0()
+                .relative()
                 .rounded_full()
                 .shadow(ring)
+                .child(crate::voice::glow_layer(call.glow.borrow_mut().cell("peer"), 2., None, "call-pill"))
                 .child(crate::ui::avatar(store, &call.peer, 30.)),
         )
         .child(

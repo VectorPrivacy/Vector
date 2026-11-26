@@ -316,6 +316,10 @@ pub struct VectorApp {
     fades: Fades,
     /// The unlocked login screen, fading out before the app shows (`.fadeout-anim`, 0.5 s).
     login_out: Option<(Entity<LoginView>, std::time::Instant)>,
+    /// A frame callback is set to step the speaking glows.
+    glows_armed: std::cell::Cell<bool>,
+    /// A frame callback or its timer is set to step the streaming animations.
+    streams_armed: std::cell::Cell<bool>,
     /// The account's chats and Communities are in the store: the login's fade may begin.
     booted: bool,
     login_at: std::time::Instant,
@@ -1183,6 +1187,8 @@ impl VectorApp {
             qr: None,
             fades: Fades::default(),
             login_out: None,
+            glows_armed: Default::default(),
+            streams_armed: Default::default(),
             booted: false,
             login_at: std::time::Instant::now(),
             intro: None,
@@ -7578,7 +7584,7 @@ impl VectorApp {
                                             && window.is_window_active()
                                             && !gpui::animations_asleep()
                                         {
-                                            window.request_animation_frame();
+                                            app.arm_glows(window, cx);
                                         }
                                         app.side_pane(cx)
                                     },
@@ -7848,7 +7854,7 @@ impl VectorApp {
                 };
                 // The peer's glow follows their voice every frame while it is lit.
                 if self.call.tick_glow(self.live) && window.is_window_active() && !gpui::animations_asleep() {
-                    window.request_animation_frame();
+                    self.arm_glows(window, cx);
                 }
                 crate::call::render(
                     &self.call,
@@ -10118,6 +10124,69 @@ impl VectorApp {
         self.menu = Some((at, items, acts));
     }
 
+    /// Speaking glows step every frame while any is lit: their shadows are restyled in the
+    /// presented frame, so nothing renders, lays out or paints for them.
+    pub(super) fn arm_glows(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.glows_armed.replace(true) {
+            return;
+        }
+        let app = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            app.update(cx, |app, cx| {
+                app.glows_armed.set(false);
+                let me = app.store.borrow().my_npub.clone();
+                let channel = app.voice.session.as_ref().map(|s| s.channel_id.clone());
+                // Fixtures: VECTOR_GLOW_UNFOCUSED lets a test window measure them behind another app.
+                let shown = window.is_window_active() || cfg!(feature = "devctl") && std::env::var_os("VECTOR_GLOW_UNFOCUSED").is_some();
+                let mut lit = channel.is_some_and(|ch| app.voice.tick_glow(&ch, &me, app.live));
+                lit |= app.call.tick_glow(app.live);
+                window.present_live();
+                if lit && shown && !gpui::animations_asleep() {
+                    app.arm_glows(window, cx);
+                }
+            })
+            .ok();
+        });
+    }
+
+    /// Streaming animations step in the presented frame, each at its own pace: no render,
+    /// layout or paint unless something else asks for one.
+    pub(super) fn arm_streams(&self, due: std::time::Duration, window: &mut Window, cx: &mut Context<Self>) {
+        if self.streams_armed.replace(true) {
+            return;
+        }
+        let app = cx.entity().downgrade();
+        let step = move |window: &mut Window, cx: &mut gpui::App| {
+            app.update(cx, |app, cx| {
+                app.streams_armed.set(false);
+                let moving = window.is_window_active() && !gpui::animations_asleep();
+                let mut media = app.media.borrow_mut();
+                media.mark_streams_seen(window);
+                let next = media.tick_streams(moving);
+                window.present_live();
+                for old in media.stream_retired.drain(..) {
+                    let _ = window.drop_image(old);
+                }
+                drop(media);
+                if let Some(due) = next {
+                    app.arm_streams(due, window, cx);
+                }
+            })
+            .ok();
+        };
+        // A frame early, so the swap lands on the frame it is due for.
+        match due.checked_sub(std::time::Duration::from_millis(8)) {
+            None => window.on_next_frame(step),
+            Some(wait) => {
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.background_executor().timer(wait).await;
+                    cx.update(|window, _| window.on_next_frame(step)).ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     fn on_voice_handler(&self, cx: &mut Context<Self>) -> crate::voice::OnAct {
         let app = cx.entity().downgrade();
         Rc::new(move |act, window, cx| {
@@ -10776,8 +10845,8 @@ impl VectorApp {
                     {
                         crate::model3d::stage::ask(window, cx, due);
                     }
-                    if let Some(due) = media.tick_streams(window.is_window_active() && !gpui::animations_asleep()) {
-                        crate::model3d::stage::ask(window, cx, due);
+                    if media.any_streams() {
+                        app.arm_streams(std::time::Duration::ZERO, window, cx);
                     }
                     for old in media.stream_retired.drain(..) {
                         let _ = window.drop_image(old);
@@ -10817,6 +10886,10 @@ impl VectorApp {
             // Fixtures: VECTOR_GLOW_UNFOCUSED lets a test window measure them behind another app.
             let shown = window.is_window_active() || cfg!(feature = "devctl") && std::env::var_os("VECTOR_GLOW_UNFOCUSED").is_some();
             if self.voice.tick_glow(&ch.channel_id, &store.my_npub, self.live) && shown && !gpui::animations_asleep() {
+                self.arm_glows(window, cx);
+            }
+            // Leavers fade with the stage's own frames.
+            if self.voice.any_leaving() {
                 window.request_animation_frame();
             }
             Some(crate::voice::stage(
