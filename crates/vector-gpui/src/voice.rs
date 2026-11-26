@@ -110,6 +110,9 @@ pub struct Voice {
     pub expanded: bool,
     /// How much of the pane the stage takes, as this device last left it.
     pub mode: StageMode,
+    /// The stage's width as last laid out, and whether its faces then fit one row.
+    stage_w: Rc<Cell<f32>>,
+    pub compact_fits: Cell<bool>,
     pub glow: std::cell::RefCell<Glow>,
     /// Who was in each call at the last draw, and who has since left, fading out.
     ghosts: std::cell::RefCell<HashMap<String, (Vec<Member>, Vec<(Member, Instant)>)>>,
@@ -294,13 +297,15 @@ impl Voice {
                     Some((npub, (level * 2.).min(1.)))
                 })
                 .collect()
-        } else if std::env::var_os("VECTOR_VOICE_TALK").is_some() {
+        } else if let Some(talk) = std::env::var_os("VECTOR_VOICE_TALK") {
+            // `max`: everyone unmuted at full voice, for the widest glows.
+            let loud = talk == "max";
             let t = self.since.map_or(0., |a| now.saturating_duration_since(a).as_secs_f32());
             self.present(channel)
                 .iter()
                 .enumerate()
-                .filter(|(i, p)| !p.muted && i % 3 != 2)
-                .map(|(i, p)| (p.npub.clone(), ((t * (3. + i as f32 * 0.7) + i as f32).sin() * 0.8).max(0.)))
+                .filter(|(i, p)| !p.muted && (loud || i % 3 != 2))
+                .map(|(i, p)| (p.npub.clone(), if loud { 1. } else { ((t * (3. + i as f32 * 0.7) + i as f32).sin() * 0.8).max(0.) }))
                 .collect()
         } else {
             Vec::new()
@@ -504,9 +509,10 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                 .on_mouse_down(gpui::MouseButton::Right, menu(on, community, channel, &p.npub))
                 .child(
                     div()
+                        .relative()
                         .flex_shrink_0()
                         .rounded_full()
-                        .shadow(glow_ring(glow, 1.5, false))
+                        .child(glow_layer(glow, 1.5, None))
                         .child(crate::ui::avatar(store, &p.npub, 18.)),
                 )
                 .child(div().flex_1().min_w_0().truncate().child(store.chat_name(&p.npub, channel)))
@@ -757,14 +763,13 @@ fn leave_btn(on: &OnAct) -> impl IntoElement {
         .child(phone(20., c(0xffffff), true))
 }
 
-/// `.voice-stage`: who is in the call, and joining it or the call's own controls once in.
-#[allow(clippy::too_many_arguments)]
-/// How much of the pane the stage takes: all of it the call needs, a strip, or a bar.
+/// How much of the pane the stage takes: every member's tile, their faces, or one row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StageMode {
     #[default]
     Expanded,
     Compact,
+    /// One row, offered only when the faces need more than one.
     Minimised,
 }
 
@@ -779,46 +784,55 @@ impl StageMode {
 
     pub fn from_key(key: &str) -> Self {
         match key {
-            "compact" => StageMode::Compact,
+            "compact" | "bar" => StageMode::Compact,
             "minimised" => StageMode::Minimised,
             _ => StageMode::Expanded,
         }
     }
 
-    /// The chevron: each tap folds the stage one step further, and the bar opens it again.
-    pub fn next(self) -> Self {
-        match self {
+    /// The state shown: one row of faces already is the minimised row.
+    pub fn shown(self, fits: bool) -> Self {
+        if self == StageMode::Minimised && fits { StageMode::Compact } else { self }
+    }
+
+    /// The chevron, through the states the call offers: `fits` when its faces take one row.
+    pub fn next(self, fits: bool) -> Self {
+        match self.shown(fits) {
             StageMode::Expanded => StageMode::Compact,
-            StageMode::Compact => StageMode::Minimised,
-            StageMode::Minimised => StageMode::Expanded,
+            StageMode::Compact if !fits => StageMode::Minimised,
+            _ => StageMode::Expanded,
         }
     }
 }
 
-/// A member's tile at a call's size: a few get large, personal tiles, a crowd a tight grid.
+/// A member's tile at a call's size: a few get large, personal faces, a crowd a tight grid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tier {
     pub avatar: f32,
     pub w: f32,
     pub h: f32,
     pub name: f32,
-    /// No tile behind the avatar: a crowd reads as faces, not boxes.
-    pub bare: bool,
 }
 
 pub fn tier(members: usize) -> Tier {
     match members {
-        0..=4 => Tier { avatar: 96., w: 184., h: 168., name: 14., bare: false },
-        5..=12 => Tier { avatar: 64., w: 124., h: 120., name: 13., bare: false },
-        _ => Tier { avatar: 40., w: 72., h: 72., name: 11., bare: true },
+        0..=4 => Tier { avatar: 96., w: 168., h: 156., name: 14. },
+        5..=12 => Tier { avatar: 64., w: 116., h: 112., name: 13. },
+        _ => Tier { avatar: 40., w: 72., h: 76., name: 11. },
     }
 }
 
-/// The stage's card: Vector's modal surface.
-const CARD_BG: u32 = 0x101010;
-const CARD_EDGE: u32 = 0x2c2e2f;
-const TILE_BG: u32 = 0x181818;
-const TILE_EDGE: u32 = 0x232425;
+/// The controls' pill: the composer's dark.
+const PILL_BG: u32 = 0x1b1c1d;
+/// What a badge's ring cuts out of: the chat's own black.
+const BADGE_RING: u32 = 0x030303;
+/// A face in the compact and minimised rows, and the gap after it.
+const ROW_FACE: f32 = 32.;
+const ROW_GAP: f32 = 8.;
+/// What the row's controls pill and chevron take beside the faces.
+const ROW_CONTROLS: f32 = 128. + 28. + 24.;
+/// The compact faces' height before they scroll: three rows.
+const COMPACT_MAX_H: f32 = 3. * (ROW_FACE + ROW_GAP) + 8.;
 
 /// The speaking ring and its soft light, at `glow` (0 silent, 1 loud).
 fn glow_ring(glow: f32, width: f32, inset: bool) -> Vec<BoxShadow> {
@@ -844,6 +858,28 @@ fn glow_ring(glow: f32, width: f32, inset: bool) -> Vec<BoxShadow> {
     out
 }
 
+/// How far a glow's light reaches past its face.
+const GLOW_REACH: f32 = 20.;
+
+/// The speaking glow behind a face, painted past the clips around it (a scroll area, the
+/// stage) by its own reach, and not at all for a face scrolled out of view.
+fn glow_layer(glow: f32, width: f32, radius: Option<f32>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            if glow <= 0.01 || !window.content_mask().bounds.intersects(&b) {
+                return;
+            }
+            let r = radius.map_or(b.size.width / 2., px);
+            window.with_content_mask_grown(px(GLOW_REACH), |w| {
+                w.paint_box_shadows(b, gpui::Corners::all(r), &glow_ring(glow, width, false))
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// A muted or deafened mark, `size` across.
 fn state_badge(path: &'static str, server: bool, tip: SharedString, size: f32) -> gpui::Stateful<gpui::Div> {
     div()
@@ -853,7 +889,7 @@ fn state_badge(path: &'static str, server: bool, tip: SharedString, size: f32) -
         .flex_shrink_0()
         .rounded_full()
         .border_2()
-        .border_color(c(CARD_BG))
+        .border_color(c(BADGE_RING))
         .bg(if server { c(crate::call::DANGER) } else { c(0x262626) })
         .flex()
         .items_center()
@@ -875,13 +911,12 @@ fn badges(p: &Member, size: f32) -> Option<gpui::Div> {
     })
 }
 
-fn chevron(mode: StageMode, on: &OnAct) -> impl IntoElement {
-    let tip = match mode {
-        StageMode::Expanded => t::voice_stage_compact(),
-        StageMode::Compact => t::voice_stage_minimise(),
-        StageMode::Minimised => t::voice_stage_expand(),
+fn chevron(mode: StageMode, fits: bool, on: &OnAct) -> impl IntoElement {
+    let (tip, turn) = match mode.next(fits) {
+        StageMode::Compact => (t::voice_stage_compact(), std::f32::consts::PI),
+        StageMode::Minimised => (t::voice_stage_minimise(), std::f32::consts::PI),
+        StageMode::Expanded => (t::voice_stage_expand(), 0.),
     };
-    let turn = if mode == StageMode::Minimised { std::f32::consts::PI } else { 0. };
     div()
         .id("voice-stage-fold")
         .tip(tip)
@@ -900,7 +935,7 @@ fn chevron(mode: StageMode, on: &OnAct) -> impl IntoElement {
                 .path("icons/chevron-down.svg")
                 .size(px(16.))
                 .text_color(white_a(0.6))
-                .with_transformation(gpui::Transformation::rotate(gpui::radians(turn + std::f32::consts::PI))),
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(turn))),
         )
 }
 
@@ -933,6 +968,45 @@ fn ghost(store: &Store, m: &Member, gone: f32, avatar: f32, w: f32, h: f32) -> A
     .into_any_element()
 }
 
+/// A member's face that opens their mini profile beside it, and their menu on a right-click.
+#[allow(clippy::too_many_arguments)]
+fn face(
+    store: &Store,
+    voice: &Voice,
+    seen: &Seen,
+    p: &Member,
+    me: &str,
+    size: f32,
+    glow: f32,
+    camera: Option<(f32, f32)>,
+    community: &str,
+    channel: &str,
+    on: &OnAct,
+    anchors: &crate::kit::Anchors,
+) -> gpui::Stateful<gpui::Div> {
+    let key = SharedString::from(format!("voice-face-{channel}-{}", p.npub));
+    let picture = camera.and_then(|wh| camera_of(voice, seen, p, me).map(|image| (image, wh)));
+    let badge = (size * 0.3).clamp(16., 26.);
+    div()
+        .id(key.clone())
+        .relative()
+        .flex_shrink_0()
+        .cursor_pointer()
+        .on_click(click(on, Act::Profile(p.npub.clone(), community.to_string(), key.clone())))
+        .on_mouse_down(gpui::MouseButton::Right, menu(on, community, channel, &p.npub))
+        .map(|d| match picture {
+            Some((image, (w, h))) => d
+                .rounded(px(8.))
+                .child(glow_layer(glow, 2., Some(8.)))
+                .child(img(image).w(px(w)).h(px(h)).rounded(px(8.)).object_fit(ObjectFit::Cover)),
+            None => d.rounded_full().child(glow_layer(glow, if size >= 64. { 3. } else { 2. }, None)).child(crate::ui::avatar(store, &p.npub, size)),
+        })
+        .children(badges(p, badge).map(|b| b.absolute().right(px(-4.)).bottom(px(-4.))))
+        .child(crate::kit::anchor(anchors, key))
+}
+
+/// `.voice-stage`: who is in the call, and joining it or the call's own controls once in.
+#[allow(clippy::too_many_arguments)]
 pub fn stage(
     voice: &Voice,
     store: &Store,
@@ -943,9 +1017,15 @@ pub fn stage(
     me: &str,
     slim: bool,
     on: &OnAct,
+    anchors: &crate::kit::Anchors,
 ) -> AnyElement {
     let session = voice.in_call(channel);
-    let mode = voice.mode;
+    let people_n = voice.present(channel).len();
+    // Room for faces in one row beside the controls, from the stage's last width.
+    let row_room = (voice.stage_w.get() - 32. - ROW_CONTROLS).max(0.);
+    let fits = people_n as f32 * (ROW_FACE + ROW_GAP) <= row_room + ROW_GAP;
+    voice.compact_fits.set(fits);
+    let mode = voice.mode.shown(fits);
     let viewing = voice.viewing(channel, me).filter(|_| mode == StageMode::Expanded);
     let people = voice.present(channel);
     let leaving = voice.leaving(channel);
@@ -996,15 +1076,15 @@ pub fn stage(
                     .child(t::voice_unstable()),
             )
         });
-    let controls = |compact: bool| {
-        let row = div().flex().items_center().gap(px(if compact { 6. } else { 8. }));
+    let controls = |bar: bool| {
+        let row = div().flex().items_center().gap(px(6.));
         match session {
             Some(s) => row
-                .when(s.can_video && !compact, |d| {
+                .when(s.can_video && !bar, |d| {
                     d.child(video_btn("voice-camera", "icons/video.svg", 18.7, s.camera, Act::Camera(!s.camera), on))
                         .child(video_btn("voice-share", "ui/call-screen.svg", 20., s.sharing, Act::Share(!s.sharing), on))
                 })
-                .when(!compact, |d| d.children(route_btn("voice-stage-route", on)))
+                .when(!bar, |d| d.children(route_btn("voice-stage-route", on)))
                 .child(mic_btn(s, on))
                 .child(deafen_btn(s, on))
                 .child(leave_btn(on))
@@ -1033,99 +1113,61 @@ pub fn stage(
                 .into_any_element(),
         }
     };
-    let card = || {
-        div()
-            .rounded(px(18.))
-            .bg(c(CARD_BG))
-            .border_1()
-            .border_color(c(CARD_EDGE))
-    };
     let body = match mode {
-        StageMode::Minimised => {
-            // Who is speaking, a few faces deep.
-            let speakers: Vec<&Member> = people.iter().filter(|p| glow(&p.npub) > 0.15).take(4).collect();
-            card()
-                .h(px(52.))
-                .px(px(12.))
+        StageMode::Compact | StageMode::Minimised => {
+            let row = mode == StageMode::Minimised;
+            // Minimised: as many faces as fit beside the count, then how many more.
+            let room = if row { row_room - 16. - 12. - 120. - 36. } else { row_room };
+            let take = if row { ((room + ROW_GAP) / (ROW_FACE + ROW_GAP)).floor().max(1.) as usize } else { people.len() };
+            let shown = people.len().min(take);
+            let more = people.len() - shown;
+            let faces = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                // Room on every side for the rings and their light.
+                .p(px(6.))
+                .gap(px(ROW_GAP))
+                .children(people.iter().take(shown).map(|p| {
+                    let pending = session.is_some() && !connected(&p.npub);
+                    crate::kit::pop(
+                        SharedString::from(format!("voice-row-in-{}", p.npub)),
+                        face(store, voice, seen, p, me, ROW_FACE, glow(&p.npub), Some((52., ROW_FACE)), community, channel, on, anchors)
+                            .tip(name_of(&p.npub))
+                            .when(pending, |d| d.opacity(0.5)),
+                        180,
+                    )
+                }))
+                .children(leaving.iter().map(|(m, gone)| ghost(store, m, *gone, ROW_FACE, ROW_FACE, ROW_FACE)))
+                .when(more > 0, |d| {
+                    d.child(div().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(white_a(0.6)).child(format!("+{more}")))
+                });
+            div()
+                .min_h(px(52.))
                 .flex()
                 .items_center()
-                .gap(px(10.))
-                .child(icon("icons/volume-max.svg", 16., c(ACCENT)))
-                .child(status)
-                .child(div().flex().items_center().children(speakers.into_iter().enumerate().map(|(i, p)| {
-                    // A speaker on camera shows it, small.
-                    let face = match camera_of(voice, seen, p, me) {
-                        Some(image) => img(image).w(px(40.)).h(px(24.)).rounded(px(6.)).object_fit(ObjectFit::Cover).into_any_element(),
-                        None => crate::ui::avatar(store, &p.npub, 22.).into_any_element(),
-                    };
-                    let cam = voice.cam(p, me);
+                .gap(px(12.))
+                .when(row, |d| d.child(icon("icons/volume-max.svg", 16., c(ACCENT))).child(status))
+                .child(
                     div()
-                        .when(i > 0, |d| d.ml(px(if cam { 4. } else { -6. })))
-                        .when(!cam, |d| d.rounded_full().border_2().border_color(c(CARD_BG)))
-                        .when(cam, |d| d.rounded(px(7.)))
-                        .shadow(glow_ring(glow(&p.npub), 1.5, false))
-                        .child(face)
-                })))
-                .child(div().flex_1())
-                .child(controls(true))
-                .child(chevron(mode, on))
+                        .id("voice-faces")
+                        .flex_1()
+                        .min_w_0()
+                        .when(!row, |d| d.max_h(px(COMPACT_MAX_H)).overflow_y_scroll())
+                        .child(faces),
+                )
+                .child(
+                    div()
+                        .p(px(4.))
+                        .rounded_full()
+                        .bg(c(PILL_BG))
+                        .border_1()
+                        .border_color(white_a(0.08))
+                        .child(controls(true)),
+                )
+                .child(chevron(mode, fits, on))
                 .into_any_element()
         }
-        StageMode::Compact => card()
-            .h(px(64.))
-            .pl(px(12.))
-            .pr(px(10.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .child(
-                div()
-                    .id("voice-strip")
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .overflow_x_scroll()
-                    .edge_fades(gpui::Edges { left: px(16.), right: px(16.), ..Default::default() })
-                    .children(people.iter().map(|p| {
-                        let key = SharedString::from(format!("voice-m-{channel}-{}", p.npub));
-                        let pending = session.is_some() && !connected(&p.npub);
-                        let (on_tap, on_menu) = (click(on, Act::Profile(p.npub.clone(), community.to_string(), key.clone())), menu(on, community, channel, &p.npub));
-                        crate::kit::pop(
-                            SharedString::from(format!("voice-strip-in-{}", p.npub)),
-                            div()
-                                .id(key.clone())
-                                .tip(name_of(&p.npub))
-                                .relative()
-                                .flex_shrink_0()
-                                .cursor_pointer()
-                                .when(pending, |d| d.opacity(0.5))
-                                .on_click(on_tap)
-                                .on_mouse_down(gpui::MouseButton::Right, on_menu)
-                                .child(match camera_of(voice, seen, p, me) {
-                                    Some(image) => div()
-                                        .rounded(px(8.))
-                                        .shadow(glow_ring(glow(&p.npub), 2., false))
-                                        .child(img(image).w(px(64.)).h(px(40.)).rounded(px(8.)).object_fit(ObjectFit::Cover))
-                                        .into_any_element(),
-                                    None => div()
-                                        .rounded_full()
-                                        .shadow(glow_ring(glow(&p.npub), 2., false))
-                                        .child(crate::ui::avatar(store, &p.npub, 36.))
-                                        .into_any_element(),
-                                })
-                                .when(voice.sharing(p, me), |d| d.child(div().absolute().top(px(-4.)).right(px(-6.)).child(live_tag(8., 12., 4.))))
-                                .children(badges(p, 16.).map(|b| b.absolute().right(px(-4.)).bottom(px(-3.)))),
-                            180,
-                        )
-                    }))
-                    .children(leaving.iter().map(|(m, gone)| ghost(store, m, *gone, 36., 36., 36.))),
-            )
-            .child(controls(true))
-            .child(chevron(mode, on))
-            .into_any_element(),
         StageMode::Expanded => {
             let tr = {
                 // A size tier change eases the tiles from one size to the next.
@@ -1137,15 +1179,7 @@ pub fn stage(
                 let g = glow(&p.npub);
                 let pending = session.is_some() && !connected(&p.npub);
                 let sharing = voice.sharing(p, me);
-                let picture = if voice.cam(p, me) {
-                    if p.npub == me {
-                        seen.mine[0].clone()
-                    } else {
-                        voice.key_of(&p.npub).and_then(|k| seen.members.get(&(k.to_string(), 0)).cloned())
-                    }
-                } else {
-                    None
-                };
+                let picture = camera_of(voice, seen, p, me);
                 let has_cam = voice.cam(p, me) && (p.npub == me || voice.key_of(&p.npub).is_some());
                 let is_viewing = viewing.as_deref() == Some(p.npub.as_str());
                 let note = if p.elsewhere {
@@ -1165,80 +1199,67 @@ pub fn stage(
                     Some(_) => t::voice_show_their_screen(),
                     None => t::voice_sharing_their_screen(),
                 };
-                let badge = (tr.avatar * 0.28).clamp(16., 26.);
+                let name = div()
+                    .max_w_full()
+                    .px(px(6.))
+                    .truncate()
+                    .text_size(px(tr.name))
+                    .line_height(px(tr.name + 4.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(if p.npub == me || p.deafened { white_a(0.55) } else { white_a(0.95) })
+                    .child(name_of(&p.npub));
+                let (cam_w, cam_h) = (tr.w.max(184.), tr.h.max(120.));
                 let tile = div()
                     .id(SharedString::from(format!("voice-tile-{}", p.npub)))
                     .when_some(path, |d, tip| d.tip(tip))
                     .relative()
                     .flex_shrink_0()
-                    .w(px(if has_cam { tr.w.max(184.) } else { tr.w }))
-                    .h(px(if has_cam { tr.h.max(132.) } else { tr.h }))
-                    .rounded(px(14.))
+                    .w(px(if has_cam { cam_w } else { tr.w }))
+                    .h(px(if has_cam { cam_h } else { tr.h }))
+                    .rounded(px(16.))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(if tr.bare { 4. } else { 10. }))
-                    .when(!tr.bare || has_cam, |d| d.bg(c(TILE_BG)).border_1().border_color(c(TILE_EDGE)))
+                    .gap(px(if tr.avatar < 64. { 4. } else { 10. }))
+                    .hover(|d| d.bg(white_a(0.04)))
                     .when(pending, |d| d.opacity(0.5))
-                    .when(is_viewing, |d| d.border_color(c(ACCENT)))
                     .when_some(pick, |d, o| d.cursor_pointer().on_click(move |_, w, cx| o(Act::Pick(npub.clone()), w, cx)))
                     .on_mouse_down(gpui::MouseButton::Right, menu(on, community, channel, &p.npub))
-                    .map(|d| {
-                        if has_cam {
-                            d.overflow_hidden()
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .rounded(px(14.))
-                                        .bg(c(0x000000))
-                                        .children(picture.map(|image| {
-                                            img(image).absolute().inset_0().size_full().rounded(px(14.)).object_fit(ObjectFit::Cover)
-                                        }))
-                                        .child(div().absolute().inset_0().rounded(px(14.)).shadow(glow_ring(g, 2., true))),
-                                )
-                                .children(badges(p, badge).map(|b| b.absolute().right(px(6.)).bottom(px(6.))))
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(8.))
-                                        .bottom(px(8.))
-                                        .max_w(px(tr.w.max(184.) - 48.))
-                                        .px(px(8.))
-                                        .py(px(2.))
-                                        .rounded(px(8.))
-                                        .bg(ca(0, 0, 0, 0.6))
-                                        .truncate()
-                                        .text_size(px(13.))
-                                        .line_height(px(20.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(c(TEXT))
-                                        .child(name_of(&p.npub)),
-                                )
-                        } else {
-                            d.when(!tr.bare, |d| d.shadow(glow_ring(g * 0.6, 1., true)))
-                                .child(
-                                    div()
-                                        .relative()
-                                        .rounded_full()
-                                        .shadow(glow_ring(g, if tr.bare { 2. } else { 3. }, false))
-                                        .child(crate::ui::avatar(store, &p.npub, tr.avatar))
-                                        .children(badges(p, badge).map(|b| b.absolute().right(px(-4.)).bottom(px(-4.)))),
-                                )
-                                .child(
-                                    div()
-                                        .max_w_full()
-                                        .px(px(6.))
-                                        .truncate()
-                                        .text_size(px(tr.name))
-                                        .line_height(px(tr.name + 4.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(if p.deafened { white_a(0.5) } else { c(TEXT) })
-                                        .child(name_of(&p.npub)),
-                                )
-                                .children(note.map(|n| div().mt(px(-6.)).text_size(px(10.)).text_color(white_a(0.4)).child(n)))
-                        }
+                    .map(|d| match picture.filter(|_| has_cam) {
+                        Some(image) => d
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(px(14.))
+                                    .bg(c(0x000000))
+                                    .when(is_viewing, |d| d.border_1().border_color(c(ACCENT)))
+                                    .child(img(image).absolute().inset_0().size_full().rounded(px(14.)).object_fit(ObjectFit::Cover))
+                                    .child(div().absolute().inset_0().rounded(px(14.)).shadow(glow_ring(g, 2., true))),
+                            )
+                            .children(badges(p, 22.).map(|b| b.absolute().right(px(6.)).bottom(px(6.))))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(8.))
+                                    .bottom(px(8.))
+                                    .max_w(px(cam_w - 48.))
+                                    .px(px(8.))
+                                    .py(px(2.))
+                                    .rounded(px(8.))
+                                    .bg(ca(0, 0, 0, 0.6))
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .line_height(px(20.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(c(TEXT))
+                                    .child(name_of(&p.npub)),
+                            ),
+                        None => d
+                            .child(face(store, voice, seen, p, me, tr.avatar, g, None, community, channel, on, anchors))
+                            .child(name)
+                            .children(note.map(|n| div().mt(px(-6.)).text_size(px(10.)).text_color(white_a(0.4)).child(n))),
                     })
                     // A weak link to us, then LIVE.
                     .when(sharing || flag.is_some(), |d| {
@@ -1287,14 +1308,11 @@ pub fn stage(
                 w => w,
             };
             let record = voice.grid_w.clone();
-            card()
-                .pt(px(10.))
-                .px(px(12.))
-                .pb(px(12.))
+            div()
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(div().h(px(28.)).flex().items_center().gap(px(8.)).child(status).child(div().flex_1()).child(chevron(mode, on)))
+                .child(div().h(px(28.)).flex().items_center().gap(px(8.)).child(status).child(div().flex_1()).child(chevron(mode, fits, on)))
                 .when_some(viewing.as_deref(), |d, v| d.child(screen(voice, store, seen, v, channel, me, w, win_h, on)))
                 .when(!people.is_empty(), |d| {
                     d.child(
@@ -1322,20 +1340,45 @@ pub fn stage(
                                     .flex()
                                     .flex_wrap()
                                     .justify_center()
-                                    .gap(px(if tr.bare { 6. } else { 8. }))
+                                    .gap(px(4.))
                                     .children(tiles)
                                     .children(leaving.iter().map(|(m, gone)| ghost(store, m, *gone, tr.avatar, tr.w, tr.h))),
                             ),
                     )
                 })
-                .child(div().flex().justify_center().child(controls(false)))
+                .child(
+                    div().flex().justify_center().child(
+                        div()
+                            .p(px(6.))
+                            .rounded_full()
+                            .bg(c(PILL_BG))
+                            .border_1()
+                            .border_color(white_a(0.08))
+                            .child(controls(false)),
+                    ),
+                )
                 .into_any_element()
         }
     };
+    let record = voice.stage_w.clone();
     div()
-        .px(px(12.))
-        .pt(px(10.))
-        .pb(px(6.))
+        .relative()
+        .px(px(16.))
+        .py(px(if mode == StageMode::Expanded { 12. } else { 4. }))
+        .child(
+            // The stage's width, for how many faces a row holds.
+            gpui::canvas(
+                move |b, window, _| {
+                    let w = f32::from(b.size.width);
+                    if (record.replace(w) - w).abs() > 0.5 {
+                        window.refresh();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
         .child(crate::kit::rise(
             SharedString::from(format!("voice-stage-{}", mode.key())),
             body,
@@ -1367,7 +1410,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
     };
     // Only our own connection: a member's weak link shows on their tile.
     let own = s.own_trouble();
-    let talk = ((linked.iter().map(|p| p.level).fold(0f32, f32::max) - 0.3) / 0.55).clamp(0., 1.);
+    let talk = linked.iter().map(|p| voice.glow.borrow().get(&p.npub)).fold(0f32, f32::max);
     let name = store
         .community(&s.community_id)
         .and_then(|c| c.channel(&s.channel_id))
@@ -1457,7 +1500,9 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
             div()
                 .flex()
                 .flex_col()
-                .flex_1()
+                // A fixed column: the clock's and the count's changes never move the buttons.
+                .w(px(150.))
+                .flex_shrink_0()
                 .min_w_0()
                 .child(
                     div()
@@ -1479,6 +1524,7 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
                         .text_size(px(11.5))
                         .line_height(px(13.2))
                         .text_color(c(0xb2b2b2))
+                        .font_features(crate::kit::tabular())
                         .when_some(own, |d, q| d.child(div().id("voice-bar-ping").tip(t::voice_unstable()).child(dot(q))))
                         .child(div().truncate().child(status)),
                 ),
@@ -1495,10 +1541,10 @@ pub fn bar(voice: &Voice, store: &Store, pos: Option<Point<Pixels>>, top: f32, o
         .id("voice-bar")
         .relative()
         .max_w(px(420.))
-        .rounded(px(16.))
-        .bg(ca(20, 20, 20, 0.95))
+        .rounded(px(18.))
+        .bg(c(0x101010))
         .border_1()
-        .border_color(c(0x333333))
+        .border_color(c(0x2c2e2f))
         .shadow(vec![BoxShadow {
             color: ca(0, 0, 0, 0.4),
             offset: point(px(0.), px(8.)),
@@ -1541,7 +1587,6 @@ mod stage_tests {
         assert_eq!(tier(5).avatar, 64.);
         assert_eq!(tier(12).avatar, 64.);
         assert_eq!(tier(13).avatar, 40.);
-        assert!(tier(40).bare && !tier(6).bare);
     }
 
     #[test]
@@ -1580,13 +1625,18 @@ mod stage_tests {
     }
 
     #[test]
-    fn the_stage_folds_in_steps_and_remembers_by_name() {
-        let mut m = StageMode::default();
-        for want in [StageMode::Compact, StageMode::Minimised, StageMode::Expanded] {
-            m = m.next();
-            assert_eq!(m, want);
+    fn the_chevron_offers_the_one_row_only_when_the_faces_need_more() {
+        // Everyone fits one row: compact is that row.
+        assert_eq!(StageMode::Expanded.next(true), StageMode::Compact);
+        assert_eq!(StageMode::Compact.next(true), StageMode::Expanded);
+        assert_eq!(StageMode::Minimised.shown(true), StageMode::Compact);
+        // A crowd: compact wraps, and the single row follows it.
+        assert_eq!(StageMode::Compact.next(false), StageMode::Minimised);
+        assert_eq!(StageMode::Minimised.next(false), StageMode::Expanded);
+        for m in [StageMode::Expanded, StageMode::Compact, StageMode::Minimised] {
             assert_eq!(StageMode::from_key(m.key()), m);
         }
+        assert_eq!(StageMode::from_key("bar"), StageMode::Compact);
         assert_eq!(StageMode::from_key("nonsense"), StageMode::Expanded);
     }
 }

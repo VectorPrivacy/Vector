@@ -1335,6 +1335,7 @@ fn album_view(
                     .flex_shrink_0()
                     .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(white_a(0.34))
+                    .font_features(crate::kit::tabular())
                     .child(format_time(len)),
             )
     });
@@ -1766,9 +1767,11 @@ pub fn view(
         .child(
             div()
                 .text_color(if pos > 0 { white_a(0.92) } else { white_a(0.34) })
+                .font_features(crate::kit::tabular())
                 .child(format_time(pos.saturating_sub(span.0))),
         )
         .child(div().mx(px(4.)).text_color(white_a(0.34)).child("/"))
+        .font_features(crate::kit::tabular())
         .child(format_time(span.1.saturating_sub(span.0)));
     let skip = |dir: &'static str, icon: &'static str, act: AlbumAct| {
         let on = on_album.clone();

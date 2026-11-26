@@ -431,6 +431,7 @@ impl VectorApp {
                             .flex_none()
                             .font_weight(gpui::FontWeight::NORMAL)
                             .text_color(white_a(0.34))
+                            .font_features(crate::kit::tabular())
                             .child(crate::audio::format_time(len)),
                     )
             });

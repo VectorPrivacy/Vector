@@ -449,6 +449,7 @@ pub fn strip(r: &Recorder) -> AnyElement {
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(gpui::white())
                 .opacity(timer_o)
+                .font_features(crate::kit::tabular())
                 .child(r.elapsed()),
         );
     match out {
@@ -722,6 +723,7 @@ pub fn preview(r: &Recorder, on: On) -> AnyElement {
                         .flex_shrink_0()
                         .text_size(px(12.))
                         .text_color(white_a(0.6))
+                        .font_features(crate::kit::tabular())
                         .child(crate::audio::format_time(pos)),
                 ),
         )

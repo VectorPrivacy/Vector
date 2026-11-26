@@ -10829,6 +10829,7 @@ impl VectorApp {
                 &store.my_npub,
                 self.is_slim,
                 &self.on_voice_handler(cx),
+                &self.anchors,
             ))
         });
         let panel = self.community.as_ref().is_some_and(|v| v.panel);
@@ -10940,7 +10941,15 @@ impl VectorApp {
                     .when(shade > 0., |d| d.child(div().absolute().inset_0().bg(gpui::black().opacity(shade))))
             }))
             .child(div().relative().flex_shrink_0().child(header).children(edit_bar))
-            .children(stage)
+            // The chat's own ground under the stage, and the header's hairline below it.
+            .children(stage.map(|s| {
+                div()
+                    .flex_shrink_0()
+                    .when(paper.is_none(), |d| d.bg(c(MESSAGES_BG)))
+                    .border_b_1()
+                    .border_color(white_a(0.06))
+                    .child(s)
+            }))
             .child(
                 div()
                     .relative()

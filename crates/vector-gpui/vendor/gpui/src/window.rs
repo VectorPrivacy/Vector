@@ -5239,6 +5239,18 @@ impl Window {
         }
     }
 
+    /// Runs `f` with the current clip grown by `by` on every side: for a glow that spills past
+    /// the box its owner is clipped to, by no more than its own reach.
+    pub fn with_content_mask_grown<R>(&mut self, by: Pixels, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        let mut mask = self.content_mask();
+        mask.bounds = mask.bounds.dilate(by);
+        self.content_mask_stack.push(mask);
+        let result = f(self);
+        self.content_mask_stack.pop();
+        result
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during the prepaint phase of element drawing.
     pub fn with_element_offset<R>(

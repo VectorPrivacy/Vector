@@ -165,7 +165,7 @@ impl VectorApp {
             Act::HideScreen => self.voice.focus = Some(String::new()),
             Act::Expand => self.voice.expanded = !self.voice.expanded,
             Act::Fold => {
-                self.voice.mode = self.voice.mode.next();
+                self.voice.mode = self.voice.mode.next(self.voice.compact_fits.get());
                 if self.live {
                     backend::device::set(STAGE_KEY, self.voice.mode.key());
                 }

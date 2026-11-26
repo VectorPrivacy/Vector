@@ -1279,6 +1279,7 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
         .text_size(px(11.5))
         .line_height(px(13.2))
         .text_color(c(0xb2b2b2))
+        .font_features(crate::kit::tabular())
         .when_some(call.quality.filter(|_| live), |d, q| d.child(div().id("call-pill-quality").tip(q.label()).child(dot(q))))
         .child(div().truncate().child(if live && call.peer_muted {
             t::call_status_muted(call.status())

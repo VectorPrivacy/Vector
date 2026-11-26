@@ -475,6 +475,7 @@ fn blur(
                     .line_height(px(11.))
                     .text_color(white_a(0.82))
                     .whitespace_nowrap()
+                    .font_features(crate::kit::tabular())
                     .child(note),
             );
         }
@@ -928,6 +929,7 @@ fn file_box_on(
                         .flex()
                         .text_size(px(12.75))
                         .text_color(white_a(0.34))
+                        .font_features(crate::kit::tabular())
                         .child(size.map(|s| format!(" — {s}")).unwrap_or_default())
                         .child(div().ml(px(4.5)).w(px(112.)).child(if note.is_empty() {
                             String::new()
