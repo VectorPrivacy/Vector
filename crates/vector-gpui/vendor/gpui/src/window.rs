@@ -1462,6 +1462,8 @@ pub struct Window {
     cache_root: bool,
     /// When content last scrolled under a pointer that stayed put.
     scrolled_under_pointer: Option<Instant>,
+    /// The scroll gesture under way: its axis and the scroller it latched.
+    scroll_gesture: ScrollGesture,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2635,6 +2637,7 @@ impl Window {
             each_prepaint: None,
             cache_root: false,
             scrolled_under_pointer: None,
+            scroll_gesture: ScrollGesture::default(),
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -7093,7 +7096,7 @@ impl Window {
                 }
                 self.mouse_position = scroll_wheel.position;
                 self.modifiers = scroll_wheel.modifiers;
-                PlatformInput::Scroll(scroll_wheel)
+                PlatformInput::Scroll(self.scroll_gesture.filter(scroll_wheel, Instant::now()))
             }
             PlatformInput::Pinch(pinch) => {
                 self.mouse_position = pinch.position;
@@ -7406,6 +7409,40 @@ impl Window {
         });
     }
 
+    /// Whether the scroller keyed `key` takes the scroll gesture under way. The first one under
+    /// the pointer that `can_move` along the gesture's axis takes it, and keeps it until the
+    /// gesture ends: its ancestors get nothing, even once it reaches an edge.
+    pub fn latch_scroll(&mut self, key: usize, can_move: bool) -> bool {
+        let g = &mut self.scroll_gesture;
+        match g.latched {
+            Some((k, _)) => k == key,
+            None if can_move => {
+                g.latched = Some((key, false));
+                g.cross = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the gesture under way latched `key` through [`Window::offer_cross_scroll`].
+    pub fn scroll_latched_across(&self, key: usize) -> bool {
+        self.scroll_gesture.latched == Some((key, true))
+    }
+
+    /// A one-axis scroller under a wheel turned along the other axis: it takes the gesture, moving
+    /// along its own axis, only when no scroller along the wheel's axis does. The innermost offer
+    /// stands.
+    pub fn offer_cross_scroll(&mut self, key: usize, scroll: impl FnOnce(&mut Window, &mut App) + 'static) {
+        let g = &mut self.scroll_gesture;
+        if g.latched.is_none() && g.cross.is_none() {
+            g.cross = Some(Box::new(move |window, cx| {
+                window.scroll_gesture.latched = Some((key, true));
+                scroll(window, cx);
+            }));
+        }
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
         self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
 
@@ -7441,6 +7478,14 @@ impl Window {
         }
 
         self.rendered_frame.mouse_listeners = mouse_listeners;
+
+        // A wheel turned over a one-axis scroller no scroller along that axis took moves it
+        // along its own.
+        if let Some(cross) = self.scroll_gesture.cross.take()
+            && self.scroll_gesture.latched.is_none()
+        {
+            cross(self, cx);
+        }
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
@@ -11987,6 +12032,62 @@ pub fn no_punch() -> bool {
 pub fn no_replay() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var_os("GPUI_NO_REPLAY").is_some())
+}
+
+/// A pause this long between scroll events ends a gesture that reports no phases (a wheel).
+const SCROLL_GESTURE_GAP: Duration = Duration::from_millis(150);
+
+/// One scroll gesture, from its first event through its momentum: the axis it moves along, and
+/// the scroller that took it (keyed by its state, which outlives a frame's hitbox ids).
+#[derive(Default)]
+struct ScrollGesture {
+    last: Option<Instant>,
+    axis: Option<crate::Axis>,
+    /// Movement so far along each axis, until the axis is decided.
+    seen: Point<Pixels>,
+    /// The scroller that took it, and whether it took it across axes.
+    latched: Option<(usize, bool)>,
+    cross: Option<Box<dyn FnOnce(&mut Window, &mut App)>>,
+}
+
+impl ScrollGesture {
+    /// `event` held to the gesture's axis, a new gesture begun when this one has ended.
+    fn filter(&mut self, mut event: crate::ScrollEvent, now: Instant) -> crate::ScrollEvent {
+        let ended = self.last.is_none_or(|t| now.saturating_duration_since(t) > SCROLL_GESTURE_GAP);
+        if event.touch_phase == crate::TouchPhase::Started || ended {
+            *self = Self::default();
+        }
+        self.last = Some(now);
+        self.cross = None;
+        // A finger's pan keeps the touch recognizer's own axis rules.
+        if event.source == crate::ScrollSource::Touch {
+            return event;
+        }
+        if self.axis.is_none() {
+            let d = event.delta.pixel_delta(px(20.));
+            self.seen += point(d.x.abs(), d.y.abs());
+            let (x, y) = (self.seen.x, self.seen.y);
+            self.axis = if x > y * 1.5 && x >= px(2.) {
+                Some(crate::Axis::Horizontal)
+            } else if y > x * 1.5 && y >= px(2.) {
+                Some(crate::Axis::Vertical)
+            } else if x + y >= px(8.) || !event.delta.precise() && x + y > Pixels::ZERO {
+                Some(if x > y { crate::Axis::Horizontal } else { crate::Axis::Vertical })
+            } else {
+                None
+            };
+        }
+        let keep = |p: Point<f32>| match self.axis {
+            Some(crate::Axis::Horizontal) => point(p.x, 0.),
+            Some(crate::Axis::Vertical) => point(0., p.y),
+            None => point(0., 0.),
+        };
+        event.delta = match event.delta {
+            crate::ScrollDelta::Pixels(p) => crate::ScrollDelta::Pixels(keep(p.map(f32::from)).map(px)),
+            crate::ScrollDelta::Lines(l) => crate::ScrollDelta::Lines(keep(l)),
+        };
+        event
+    }
 }
 
 pub mod draw_stats {

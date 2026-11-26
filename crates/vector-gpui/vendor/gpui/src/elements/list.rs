@@ -1673,6 +1673,11 @@ impl Element for List {
         let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
+                // A list takes a vertical gesture even at its ends, where its pulls live.
+                let key = Rc::as_ptr(&list_state.0) as usize;
+                if !window.latch_scroll(key, event.delta.pixel_delta(px(20.)).y != Pixels::ZERO) {
+                    return;
+                }
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
                 list_state.0.borrow_mut().scroll(

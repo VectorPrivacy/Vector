@@ -3695,8 +3695,7 @@ impl Interactivity {
             let scroll_max = self.scroll_max.get();
             window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                    let mut scroll_offset = scroll_offset.borrow_mut();
-                    let old_scroll_offset = *scroll_offset;
+                    let key = Rc::as_ptr(&scroll_offset) as usize;
                     let mut delta = event.delta.pixel_delta(line_height);
 
                     if restrict_scroll_to_axis
@@ -3708,45 +3707,65 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
-                    // A wheel turned over a one-axis scroller moves it along that axis; a
-                    // finger moves what it drags, and a sideways drag is a swipe's.
-                    let cross = !restrict_scroll_to_axis && event.source != crate::ScrollSource::Touch;
-                    let mut delta_x = match overflow.x {
-                        Overflow::Scroll if !delta.x.is_zero() => delta.x,
-                        Overflow::Scroll if cross && overflow.y != Overflow::Scroll => {
-                            if mirrored { -delta.y } else { delta.y }
+                    let step = |across: bool| {
+                        let mut delta_x = match overflow.x {
+                            Overflow::Scroll if !delta.x.is_zero() && !across => delta.x,
+                            Overflow::Scroll if across && overflow.y != Overflow::Scroll => {
+                                if mirrored { -delta.y } else { delta.y }
+                            }
+                            _ => Pixels::ZERO,
+                        };
+                        let mut delta_y = match overflow.y {
+                            Overflow::Scroll if !delta.y.is_zero() && !across => delta.y,
+                            Overflow::Scroll if across && overflow.x != Overflow::Scroll => delta.x,
+                            _ => Pixels::ZERO,
+                        };
+                        if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
+                            if delta_x.abs() > delta_y.abs() {
+                                delta_y = Pixels::ZERO;
+                            } else {
+                                delta_x = Pixels::ZERO;
+                            }
                         }
-                        _ => Pixels::ZERO,
+                        point(delta_x, delta_y)
                     };
-                    let mut delta_y = match overflow.y {
-                        Overflow::Scroll if !delta.y.is_zero() => delta.y,
-                        Overflow::Scroll if cross && overflow.x != Overflow::Scroll => {
-                            delta.x
-                        }
-                        _ => Pixels::ZERO,
-                    };
-                    if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
-                        if delta_x.abs() > delta_y.abs() {
-                            delta_y = Pixels::ZERO;
-                        } else {
-                            delta_x = Pixels::ZERO;
-                        }
-                    }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
                     // Held at the edges here, not only at the next layout, so a push past the
                     // end moves nothing and says so.
-                    if let Some(max) = scroll_max {
-                        scroll_offset.y = scroll_offset.y.clamp(-max.y, px(0.));
-                        scroll_offset.x = if mirrored {
-                            scroll_offset.x.clamp(px(0.), max.x)
-                        } else {
-                            scroll_offset.x.clamp(-max.x, px(0.))
-                        };
+                    let moved = move |from: Point<Pixels>, by: Point<Pixels>| {
+                        let mut to = from + by;
+                        if let Some(max) = scroll_max {
+                            to.y = to.y.clamp(-max.y, px(0.));
+                            to.x = if mirrored { to.x.clamp(px(0.), max.x) } else { to.x.clamp(-max.x, px(0.)) };
+                        }
+                        to
+                    };
+                    let apply = {
+                        let (scroll_offset, hitbox) = (scroll_offset.clone(), hitbox.clone());
+                        move |by: Point<Pixels>, window: &mut Window, cx: &mut App| {
+                            let mut offset = scroll_offset.borrow_mut();
+                            let to = moved(*offset, by);
+                            if to != *offset {
+                                *offset = to;
+                                window.report_scroll_moved(hitbox.bounds);
+                                cx.notify_motion(current_view);
+                            }
+                        }
+                    };
+                    let at = *scroll_offset.borrow();
+                    let own = step(false);
+                    if window.latch_scroll(key, moved(at, own) != at) {
+                        apply(step(window.scroll_latched_across(key)), window, cx);
+                        return;
                     }
-                    if *scroll_offset != old_scroll_offset {
-                        window.report_scroll_moved(hitbox.bounds);
-                        cx.notify_motion(current_view);
+                    // A wheel, not a trackpad or a finger: a one-axis scroller under it moves
+                    // along its own axis when nothing along the wheel's does.
+                    let across = step(true);
+                    if !restrict_scroll_to_axis
+                        && !event.delta.precise()
+                        && event.source != crate::ScrollSource::Touch
+                        && moved(at, across) != at
+                    {
+                        window.offer_cross_scroll(key, move |window, cx| apply(across, window, cx));
                     }
                 }
             });

@@ -321,7 +321,7 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                 app.dev_typing(chat, who, cx);
             }
         }
-        "move" | "click" | "rclick" | "wheel" => {
+        "move" | "click" | "rclick" | "wheel" | "swipe" | "notch" => {
             let n: Vec<f32> = rest.split(',').filter_map(|v| v.trim().parse().ok()).collect();
             let Some((&x, &y)) = n.first().zip(n.get(1)) else {
                 return answer(json!({ "error": "expected x,y" }));
@@ -349,6 +349,24 @@ pub fn run(app: &mut VectorApp, cmd: &str, window: &mut Window, cx: &mut Context
                         }));
                     }
                 }
+                // x,y,dx,dy,count: a trackpad gesture of `count` steps, its first a finger landing.
+                "swipe" => {
+                    let (dx, dy) = (n.get(2).copied().unwrap_or(0.), n.get(3).copied().unwrap_or(0.));
+                    for k in 0..n.get(4).map_or(1, |&k| k.max(1.) as usize) {
+                        events.push(PlatformInput::Scroll(ScrollEvent {
+                            position: at,
+                            delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+                            touch_phase: if k == 0 { gpui::TouchPhase::Started } else { gpui::TouchPhase::Moved },
+                            ..Default::default()
+                        }));
+                    }
+                }
+                // x,y,dx,dy: one mouse-wheel notch, in lines.
+                "notch" => events.push(PlatformInput::Scroll(ScrollEvent {
+                    position: at,
+                    delta: ScrollDelta::Lines(point(n.get(2).copied().unwrap_or(0.), n.get(3).copied().unwrap_or(0.))),
+                    ..Default::default()
+                })),
                 _ => {}
             }
             later(window, cx, move |window, cx| {
