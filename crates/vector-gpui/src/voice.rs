@@ -78,13 +78,6 @@ impl Session {
         }
         Some(if poor * 2 > grades.len() { Quality::Poor } else { Quality::Fair })
     }
-
-    fn level(&self, npub: &str, me: &str) -> f32 {
-        if npub == me {
-            return if self.mic_off() || !self.mic { 0. } else { self.mic_level };
-        }
-        self.peers.iter().find(|p| p.npub == npub).map_or(0., |p| p.level)
-    }
 }
 
 /// A member in a voice Channel's call, as every client lists them.
@@ -118,6 +111,8 @@ pub struct Voice {
     /// How much of the pane the stage takes, as this device last left it.
     pub mode: StageMode,
     pub glow: std::cell::RefCell<Glow>,
+    /// Who was in each call at the last draw, and who has since left, fading out.
+    ghosts: std::cell::RefCell<HashMap<String, (Vec<Member>, Vec<(Member, Instant)>)>>,
     /// What we asked of each member's pictures, (screen, camera).
     pub watched: HashMap<String, (bool, bool)>,
     /// Each member's last link flag and when it was earned.
@@ -133,6 +128,8 @@ pub struct Glow {
 }
 
 const GLOW_RISE: f32 = 0.03;
+/// How long a member who left takes to fade from the stage.
+const LEAVE_MS: u128 = 220;
 const GLOW_FALL: f32 = 0.18;
 
 /// `cur` eased toward `target` over `dt` seconds.
@@ -308,7 +305,28 @@ impl Voice {
         } else {
             Vec::new()
         };
-        glow.step(&targets, now)
+        glow.step(&targets, now) || self.any_leaving()
+    }
+
+    /// Members of `channel`'s call who left within [`LEAVE_MS`], and how far gone (0..1).
+    fn leaving(&self, channel: &str) -> Vec<(Member, f32)> {
+        let now = Instant::now();
+        let people = self.present(channel);
+        let mut all = self.ghosts.borrow_mut();
+        let (last, gone) = all.entry(channel.to_string()).or_default();
+        for m in last.iter() {
+            if !people.iter().any(|p| p.npub == m.npub) && !gone.iter().any(|(g, _)| g.npub == m.npub) {
+                gone.push((m.clone(), now));
+            }
+        }
+        gone.retain(|(g, at)| now.saturating_duration_since(*at).as_millis() < LEAVE_MS && !people.iter().any(|p| p.npub == g.npub));
+        last.clear();
+        last.extend(people.iter().cloned());
+        gone.iter().map(|(g, at)| (g.clone(), now.saturating_duration_since(*at).as_millis() as f32 / LEAVE_MS as f32)).collect()
+    }
+
+    fn any_leaving(&self) -> bool {
+        self.ghosts.borrow().values().any(|(_, gone)| !gone.is_empty())
     }
 
     fn in_call(&self, channel: &str) -> Option<&Session> {
@@ -439,7 +457,6 @@ fn icon(path: &'static str, size: f32, color: gpui::Hsla) -> gpui::Svg {
 
 /// `.chatlist-voice-member` rows under a voice channel: who is in its call, whether or not we are.
 pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on: &OnAct, anchors: &crate::kit::Anchors) -> AnyElement {
-    let me = store.my_npub.as_str();
     let live = voice.session.as_ref().filter(|s| s.channel_id == channel);
     let mut list = div().flex().flex_col();
     if voice.joining.as_deref() == Some(channel) {
@@ -457,7 +474,8 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
         );
     }
     for p in voice.present(channel) {
-        let speaking = live.is_some_and(|s| !p.muted && s.level(&p.npub, me) > SPEAKING);
+        let glow = if live.is_some() && !p.muted { voice.glow.borrow().get(&p.npub) } else { 0. };
+        let speaking = glow > SPEAKING;
         let flag = |path: &'static str, server: bool, tip: SharedString| {
             div()
                 .id(path)
@@ -488,7 +506,7 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
                     div()
                         .flex_shrink_0()
                         .rounded_full()
-                        .when(speaking, |d| d.shadow(ring(2., c(ACCENT))))
+                        .shadow(glow_ring(glow, 1.5, false))
                         .child(crate::ui::avatar(store, &p.npub, 18.)),
                 )
                 .child(div().flex_1().min_w_0().truncate().child(store.chat_name(&p.npub, channel)))
@@ -514,16 +532,6 @@ pub fn members(voice: &Voice, store: &Store, community: &str, channel: &str, on:
         );
     }
     list.into_any_element()
-}
-
-fn ring(width: f32, color: gpui::Hsla) -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color,
-        offset: point(px(0.), px(0.)),
-        blur_radius: px(0.),
-        spread_radius: px(width),
-        inset: false,
-    }]
 }
 
 fn live_tag(size: f32, line: f32, pad: f32) -> impl IntoElement {
@@ -896,6 +904,35 @@ fn chevron(mode: StageMode, on: &OnAct) -> impl IntoElement {
         )
 }
 
+/// A member's camera picture, when they show one and it has arrived.
+fn camera_of(voice: &Voice, seen: &Seen, p: &Member, me: &str) -> Option<Arc<RenderImage>> {
+    if !voice.cam(p, me) {
+        return None;
+    }
+    if p.npub == me {
+        seen.mine[0].clone()
+    } else {
+        voice.key_of(&p.npub).and_then(|k| seen.members.get(&(k.to_string(), 0)).cloned())
+    }
+}
+
+/// A member who left, shrinking and fading out over [`LEAVE_MS`].
+fn ghost(store: &Store, m: &Member, gone: f32, avatar: f32, w: f32, h: f32) -> AnyElement {
+    gpui::zoom(
+        div()
+            .w(px(w))
+            .h(px(h))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(crate::ui::avatar(store, &m.npub, avatar)),
+    )
+    .scale(1. - 0.25 * gone)
+    .opacity(1. - gone)
+    .into_any_element()
+}
+
 pub fn stage(
     voice: &Voice,
     store: &Store,
@@ -911,6 +948,7 @@ pub fn stage(
     let mode = voice.mode;
     let viewing = voice.viewing(channel, me).filter(|_| mode == StageMode::Expanded);
     let people = voice.present(channel);
+    let leaving = voice.leaving(channel);
     let joining = voice.joining.as_deref() == Some(channel);
     let connected = |npub: &str| npub == me || session.is_some_and(|s| s.peers.iter().any(|p| p.npub == npub && p.connected));
     // Our own trouble says so once, here, rather than flagging everyone we can't reach well.
@@ -1015,13 +1053,18 @@ pub fn stage(
                 .child(icon("icons/volume-max.svg", 16., c(ACCENT)))
                 .child(status)
                 .child(div().flex().items_center().children(speakers.into_iter().enumerate().map(|(i, p)| {
+                    // A speaker on camera shows it, small.
+                    let face = match camera_of(voice, seen, p, me) {
+                        Some(image) => img(image).w(px(40.)).h(px(24.)).rounded(px(6.)).object_fit(ObjectFit::Cover).into_any_element(),
+                        None => crate::ui::avatar(store, &p.npub, 22.).into_any_element(),
+                    };
+                    let cam = voice.cam(p, me);
                     div()
-                        .when(i > 0, |d| d.ml(px(-6.)))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(c(CARD_BG))
+                        .when(i > 0, |d| d.ml(px(if cam { 4. } else { -6. })))
+                        .when(!cam, |d| d.rounded_full().border_2().border_color(c(CARD_BG)))
+                        .when(cam, |d| d.rounded(px(7.)))
                         .shadow(glow_ring(glow(&p.npub), 1.5, false))
-                        .child(crate::ui::avatar(store, &p.npub, 22.))
+                        .child(face)
                 })))
                 .child(div().flex_1())
                 .child(controls(true))
@@ -1061,17 +1104,35 @@ pub fn stage(
                                 .when(pending, |d| d.opacity(0.5))
                                 .on_click(on_tap)
                                 .on_mouse_down(gpui::MouseButton::Right, on_menu)
-                                .child(div().rounded_full().shadow(glow_ring(glow(&p.npub), 2., false)).child(crate::ui::avatar(store, &p.npub, 36.)))
+                                .child(match camera_of(voice, seen, p, me) {
+                                    Some(image) => div()
+                                        .rounded(px(8.))
+                                        .shadow(glow_ring(glow(&p.npub), 2., false))
+                                        .child(img(image).w(px(64.)).h(px(40.)).rounded(px(8.)).object_fit(ObjectFit::Cover))
+                                        .into_any_element(),
+                                    None => div()
+                                        .rounded_full()
+                                        .shadow(glow_ring(glow(&p.npub), 2., false))
+                                        .child(crate::ui::avatar(store, &p.npub, 36.))
+                                        .into_any_element(),
+                                })
+                                .when(voice.sharing(p, me), |d| d.child(div().absolute().top(px(-4.)).right(px(-6.)).child(live_tag(8., 12., 4.))))
                                 .children(badges(p, 16.).map(|b| b.absolute().right(px(-4.)).bottom(px(-3.)))),
                             180,
                         )
-                    })),
+                    }))
+                    .children(leaving.iter().map(|(m, gone)| ghost(store, m, *gone, 36., 36., 36.))),
             )
             .child(controls(true))
             .child(chevron(mode, on))
             .into_any_element(),
         StageMode::Expanded => {
-            let tr = tier(people.len());
+            let tr = {
+                // A size tier change eases the tiles from one size to the next.
+                let to = tier(people.len());
+                let ease = |part: &str, v: f32| crate::kit::ease(SharedString::from(format!("voice-tier-{part}-{channel}")), v, 0.22, crate::kit::bezier(0.2, 0.8, 0.2, 1.));
+                Tier { avatar: ease("a", to.avatar), w: ease("w", to.w), h: ease("h", to.h), ..to }
+            };
             let tiles = people.iter().map(|p| {
                 let g = glow(&p.npub);
                 let pending = session.is_some() && !connected(&p.npub);
@@ -1256,7 +1317,15 @@ pub fn stage(
                                 .absolute()
                                 .size_full(),
                             )
-                            .child(div().flex().flex_wrap().justify_center().gap(px(if tr.bare { 6. } else { 8. })).children(tiles)),
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .justify_center()
+                                    .gap(px(if tr.bare { 6. } else { 8. }))
+                                    .children(tiles)
+                                    .children(leaving.iter().map(|(m, gone)| ghost(store, m, *gone, tr.avatar, tr.w, tr.h))),
+                            ),
                     )
                 })
                 .child(div().flex().justify_center().child(controls(false)))

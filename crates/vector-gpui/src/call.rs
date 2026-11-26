@@ -119,6 +119,8 @@ pub struct Call {
     history: VecDeque<Sample>,
     quality: Option<Quality>,
     levels: (f32, f32),
+    /// The peer's speaking glow, eased every frame from their live level.
+    pub glow: std::cell::RefCell<crate::voice::Glow>,
     pub expanded: bool,
     pub pos: Option<Point<Pixels>>,
     pub ended_at: Option<Instant>,
@@ -176,6 +178,7 @@ impl Default for Call {
             history: VecDeque::new(),
             quality: None,
             levels: (0., 0.),
+            glow: Default::default(),
             expanded: false,
             pos: None,
             ended_at: None,
@@ -304,6 +307,20 @@ impl Call {
     /// The mic's level while a call is up, for the audio settings' meter.
     pub fn live_mic(&self) -> Option<f32> {
         (self.id.is_some() && self.phase.is_some_and(|p| p != Phase::Ended)).then_some(self.levels.0)
+    }
+
+    /// Steps the peer's glow toward their level, read live (fixtures: the last event's);
+    /// whether another frame is wanted.
+    pub fn tick_glow(&self, live: bool) -> bool {
+        let level = if !self.live() || self.peer_muted {
+            0.
+        } else if live {
+            vector_core::calls::session::levels_now().map_or(0., |l| l.1)
+        } else {
+            self.levels.1
+        };
+        let target = ((level - 0.3) / 0.55).clamp(0., 1.);
+        self.glow.borrow_mut().step(&[("peer".to_string(), target)], Instant::now())
     }
 
     pub fn apply_level(&mut self, l: &Value) {
@@ -1237,11 +1254,7 @@ fn panel(call: &Call, proc_: &Processing, seen: &Seen, on: &OnAct) -> impl IntoE
 fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::Size<Pixels>, top: f32, on: &OnAct) -> AnyElement {
     let live = call.live();
     let ended = call.phase == Some(Phase::Ended);
-    let talk = if live && !call.peer_muted {
-        ((call.levels.1 - 0.3) / 0.55).clamp(0., 1.)
-    } else {
-        0.
-    };
+    let talk = call.glow.borrow().get("peer");
     let ring = vec![
         BoxShadow {
             color: accent_mix(0.12 + talk * 0.88),
@@ -1330,11 +1343,11 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
         .pb(px(6.))
         .pl(px(6.))
         .pr(px(8.))
-        .bg(c(0x262626))
-        .rounded_t(px(15.))
-        .when(!call.expanded, |d| d.rounded_b(px(15.)))
+        .bg(c(0x181818))
+        .rounded_t(px(17.))
+        .when(!call.expanded, |d| d.rounded_b(px(17.)))
         .cursor_grab()
-        .when(call.expanded, |d| d.border_b_1().border_color(c(0x333333)))
+        .when(call.expanded, |d| d.border_b_1().border_color(c(0x232425)))
         .on_mouse_down(gpui::MouseButton::Left, down)
         .child(
             div()
@@ -1372,10 +1385,10 @@ fn pill(call: &Call, store: &Store, proc_: &Processing, seen: &Seen, win: gpui::
         .when(pictures, |d| d.w(px(wide + 2.)))
         .when(!pictures && call.expanded, |d| d.w(px(OPEN_W)))
         .when(!pictures && !call.expanded, |d| d.max_w(px(PILL_MAX_W)))
-        .rounded(px(16.))
-        .bg(ca(20, 20, 20, 0.95))
+        .rounded(px(18.))
+        .bg(c(0x101010))
         .border_1()
-        .border_color(c(0x333333))
+        .border_color(c(0x2c2e2f))
         .shadow(vec![BoxShadow {
             color: ca(0, 0, 0, 0.4),
             offset: point(px(0.), px(8.)),

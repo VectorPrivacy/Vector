@@ -7571,7 +7571,17 @@ impl VectorApp {
                                 .child(crate::pane::cached(
                                     &self.panes.side,
                                     gpui::StyleRefinement::default().size_full(),
-                                    |app, _, cx| app.side_pane(cx),
+                                    |app, window, cx| {
+                                        // The call's channel rows glow with its voices while that Community is open.
+                                        if let Some(ch) = app.voice.session.as_ref().filter(|s| app.community.as_ref().is_some_and(|v| v.id == s.community_id)).map(|s| s.channel_id.clone())
+                                            && app.voice.tick_glow(&ch, &app.store.borrow().my_npub, app.live)
+                                            && window.is_window_active()
+                                            && !gpui::animations_asleep()
+                                        {
+                                            window.request_animation_frame();
+                                        }
+                                        app.side_pane(cx)
+                                    },
                                     cx,
                                 )),
                         )
@@ -7836,6 +7846,10 @@ impl VectorApp {
                     echo_cancel: a.echo_cancel,
                     noise_suppress: a.noise_suppress,
                 };
+                // The peer's glow follows their voice every frame while it is lit.
+                if self.call.tick_glow(self.live) && window.is_window_active() && !gpui::animations_asleep() {
+                    window.request_animation_frame();
+                }
                 crate::call::render(
                     &self.call,
                     &self.store.borrow(),
