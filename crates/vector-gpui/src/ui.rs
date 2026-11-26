@@ -10799,6 +10799,12 @@ impl VectorApp {
         let staged_voice = channel.is_some_and(|ch| ch.is_voice());
         let stage = channel.filter(|ch| ch.is_voice()).and_then(|ch| {
             let com = store.community_of(&id)?;
+            // The glows follow each voice every frame while any is lit, and rest at silence.
+            // Fixtures: VECTOR_GLOW_UNFOCUSED lets a test window measure them behind another app.
+            let shown = window.is_window_active() || cfg!(feature = "devctl") && std::env::var_os("VECTOR_GLOW_UNFOCUSED").is_some();
+            if self.voice.tick_glow(&ch.channel_id, &store.my_npub, self.live) && shown && !gpui::animations_asleep() {
+                window.request_animation_frame();
+            }
             Some(crate::voice::stage(
                 &self.voice,
                 store,

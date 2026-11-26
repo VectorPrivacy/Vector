@@ -998,6 +998,25 @@ fn refresh_awake(v: &Voice) {
     *slot = Some((level, hold));
 }
 
+/// Each linked member's level by public key (hex), and ours under an empty key, read as it
+/// stands: for meters a client draws every frame, between the five-a-second events.
+pub fn levels_now() -> Vec<(String, f32)> {
+    let Some(v) = live() else { return Vec::new() };
+    let Some(engine) = v.engine() else { return Vec::new() };
+    let levels = engine.levels();
+    if levels.len() < 2 {
+        return levels.into_iter().map(|(_, l)| (String::new(), l)).collect();
+    }
+    let present = presence::present(&v.channel_hex, now_ms());
+    levels
+        .into_iter()
+        .filter_map(|(ep, l)| match ep {
+            None => Some((String::new(), l)),
+            Some(ep) => present.iter().find(|p| p.endpoint == Some(ep)).map(|p| (p.author.to_hex(), l)),
+        })
+        .collect()
+}
+
 /// Who is speaking, five times a second while there is audio to show it.
 async fn levels(v: Arc<Voice>) {
     loop {

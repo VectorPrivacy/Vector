@@ -25,6 +25,9 @@ voice-deafened-by-mod = Deafened by a moderator
 # A tag on someone sharing their screen. Shown in capitals.
 voice-live = Live
 voice-you = You
+voice-stage-compact = Shrink the call
+voice-stage-minimise = Minimise the call
+voice-stage-expand = Show the whole call
 voice-note-elsewhere = another app
 voice-note-connecting = connecting
 voice-elsewhere-tip = In this call on another app: you can't hear each other

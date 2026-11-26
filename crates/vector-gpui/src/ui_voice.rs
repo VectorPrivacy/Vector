@@ -7,9 +7,15 @@ use super::{CHROME_H, MenuAct, PopupAct, VectorApp};
 use crate::voice::{Act, Member, Session};
 use crate::{backend, kit, t};
 
+/// The device key for how folded the voice stage was left.
+const STAGE_KEY: &str = "voice_stage";
+
 impl VectorApp {
     /// What a session holds now: ours, live; fixtures under VECTOR_VOICE.
     pub(super) fn load_voice_calls(&mut self, cx: &mut Context<Self>) {
+        // Fixtures: VECTOR_VOICE_STAGE=expanded|compact|minimised.
+        let mode = if self.live { backend::device::get(STAGE_KEY) } else { std::env::var("VECTOR_VOICE_STAGE").ok() };
+        self.voice.mode = crate::voice::StageMode::from_key(mode.as_deref().unwrap_or_default());
         if self.live {
             self.voice_state(backend::voice::state(), cx);
             return;
@@ -158,6 +164,12 @@ impl VectorApp {
             }
             Act::HideScreen => self.voice.focus = Some(String::new()),
             Act::Expand => self.voice.expanded = !self.voice.expanded,
+            Act::Fold => {
+                self.voice.mode = self.voice.mode.next();
+                if self.live {
+                    backend::device::set(STAGE_KEY, self.voice.mode.key());
+                }
+            }
             Act::MicAccess => self.mic_access(cx),
         }
         cx.notify();
