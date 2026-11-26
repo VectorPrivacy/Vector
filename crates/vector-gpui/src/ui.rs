@@ -320,6 +320,8 @@ pub struct VectorApp {
     glows_armed: std::cell::Cell<bool>,
     /// A frame callback or its timer is set to step the streaming animations.
     streams_armed: std::cell::Cell<bool>,
+    /// The same for the chat's 3D models.
+    models_armed: std::cell::Cell<bool>,
     /// The account's chats and Communities are in the store: the login's fade may begin.
     booted: bool,
     login_at: std::time::Instant,
@@ -1189,6 +1191,7 @@ impl VectorApp {
             login_out: None,
             glows_armed: Default::default(),
             streams_armed: Default::default(),
+            models_armed: Default::default(),
             booted: false,
             login_at: std::time::Instant::now(),
             intro: None,
@@ -1430,8 +1433,11 @@ impl VectorApp {
             while rx.next().await.is_some() {
                 // A model's new frame redraws only the timeline it plays in; full screen, the app.
                 let woke = this.update(cx, |app, cx| {
-                    if app.media.borrow().models.front {
+                    let models = &app.media.borrow().models;
+                    if models.front {
                         cx.notify();
+                    } else if models.all_live() && app.models_armed.get() {
+                        // Its frames swap in the presented frame: the next step takes this one.
                     } else {
                         crate::pane::notify(&app.panes.timeline, cx);
                     }
@@ -10187,6 +10193,47 @@ impl VectorApp {
         }
     }
 
+    /// The chat's 3D models step in the presented frame once they have faded in: no render,
+    /// layout or paint while they turn.
+    pub(super) fn arm_models(&self, due: std::time::Duration, window: &mut Window, cx: &mut Context<Self>) {
+        if self.models_armed.replace(true) {
+            return;
+        }
+        let app = cx.entity().downgrade();
+        let step = move |window: &mut Window, cx: &mut gpui::App| {
+            app.update(cx, |app, cx| {
+                app.models_armed.set(false);
+                let mut media = app.media.borrow_mut();
+                let models = &mut media.models;
+                models.active = window.is_window_active() && !gpui::animations_asleep();
+                models.mark_seen(window);
+                let next = models.tick();
+                window.present_live();
+                for old in models.retired.drain(..) {
+                    let _ = window.drop_image(old);
+                }
+                let live = models.all_live();
+                drop(media);
+                match next {
+                    Some(due) if live => app.arm_models(due, window, cx),
+                    Some(_) => crate::pane::notify(&app.panes.timeline, cx),
+                    None => {}
+                }
+            })
+            .ok();
+        };
+        match due.checked_sub(std::time::Duration::from_millis(8)) {
+            None => window.on_next_frame(step),
+            Some(wait) => {
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.background_executor().timer(wait).await;
+                    cx.update(|window, _| window.on_next_frame(step)).ok();
+                })
+                .detach();
+            }
+        }
+    }
+
     fn on_voice_handler(&self, cx: &mut Context<Self>) -> crate::voice::OnAct {
         let app = cx.entity().downgrade();
         Rc::new(move |act, window, cx| {
@@ -10843,7 +10890,11 @@ impl VectorApp {
                     if !media.models.front
                         && let Some(due) = media.models.tick()
                     {
-                        crate::model3d::stage::ask(window, cx, due);
+                        if media.models.all_live() {
+                            app.arm_models(due, window, cx);
+                        } else {
+                            crate::model3d::stage::ask(window, cx, due);
+                        }
                     }
                     if media.any_streams() {
                         app.arm_streams(std::time::Duration::ZERO, window, cx);

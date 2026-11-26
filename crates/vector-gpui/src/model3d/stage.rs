@@ -153,6 +153,21 @@ impl Models {
         false
     }
 
+    /// Views the presented frame shows count as seen, though nothing redrew them.
+    pub fn mark_seen(&mut self, window: &gpui::Window) {
+        let now = Instant::now();
+        for v in self.views.values_mut() {
+            if v.live.as_ref().is_some_and(|l| window.live_shown(l)) {
+                v.seen = Some(now);
+            }
+        }
+    }
+
+    /// Whether every view on screen shows its frames live, so none needs its row redrawn.
+    pub fn all_live(&self) -> bool {
+        self.sighted.is_empty() && self.views.values().all(|v| v.live.is_some() && v.opacity() >= 1. && !v.dragging())
+    }
+
     /// One frame: when the next is wanted, while any view on screen moves on its own.
     pub fn tick(&mut self) -> Option<Duration> {
         let now = Instant::now();
@@ -388,10 +403,25 @@ pub fn stage(models: &mut Models, f: &Facts, src: impl FnOnce() -> Option<Src>, 
     let size = v.css_size();
     let dragging = v.dragging();
     // A background window or the idle pause asks for no frames, or the driver keeps its pool.
-    let moving = v.moving_hint().filter(|_| runs);
+    // A view shown live steps itself in the presented frame: its row asks for no frames.
+    let live = v.live.is_some() && v.opacity() >= 1. && !dragging;
+    let moving = v.moving_hint().filter(|_| runs && !live);
     el = el.child(measure(size, dragging, moving, on.clone()));
     if let Some(frame) = v.frame.clone() {
-        el = el.child(img(frame).absolute().inset_0().size_full().opacity(v.opacity()));
+        el = el.child(if v.opacity() >= 1. && !dragging {
+            // Faded in: its frames swap in the presented frame, without redrawing the row.
+            let live = v.live.get_or_insert_with(|| std::rc::Rc::new(std::cell::RefCell::new(frame.clone()))).clone();
+            *live.borrow_mut() = frame;
+            canvas(|_, _, _| {}, move |b, _, window, _| {
+                let _ = window.paint_live_image(b, gpui::Corners::default(), live);
+            })
+            .absolute()
+            .inset_0()
+            .size_full()
+            .into_any_element()
+        } else {
+            img(frame).absolute().inset_0().size_full().opacity(v.opacity()).into_any_element()
+        });
     }
     match &v.phase {
         Phase::Loading => el = el.child(note("Loading model…".into(), ca(255, 255, 255, 0.5))),

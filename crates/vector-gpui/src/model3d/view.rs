@@ -54,6 +54,8 @@ pub struct View {
     press: Option<Press>,
     coast: Option<((f32, f32), Instant)>,
     pub frame: Option<Arc<RenderImage>>,
+    /// The frame as the screen shows it, swapped without a redraw once the view has faded in.
+    pub live: Option<gpui::LiveImage>,
     ready_at: Option<Instant>,
     inflight: bool,
     dirty: bool,
@@ -104,6 +106,7 @@ impl View {
             fullscreen,
             retired: Vec::new(),
             seen: None,
+            live: None,
         }
     }
 
@@ -162,6 +165,9 @@ impl View {
                     self.inflight = false;
                     if let Some(buf) = image::RgbaImage::from_raw(w, h, bgra) {
                         let img = Arc::new(RenderImage::new(vec![image::Frame::new(buf)]));
+                        if let Some(live) = &self.live {
+                            *live.borrow_mut() = img.clone();
+                        }
                         if let Some(old) = self.frame.replace(img) {
                             self.retired.push(old);
                         }
