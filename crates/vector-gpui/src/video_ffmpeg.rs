@@ -251,7 +251,7 @@ pub struct Sequence {
 
 impl Sequence {
     /// The track with the most frames, its size as shown, and how many frames it says it has.
-    pub fn open(bytes: Vec<u8>) -> Option<(Sequence, u32, u32, usize)> {
+    pub fn open(bytes: impl AsRef<[u8]> + Send + 'static) -> Option<(Sequence, u32, u32, usize)> {
         let src = Source::open(Box::new(std::io::Cursor::new(bytes)))?;
         let (index, count, rate) = src
             .input

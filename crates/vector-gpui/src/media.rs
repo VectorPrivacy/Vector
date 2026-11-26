@@ -966,82 +966,113 @@ fn gif_frames(bytes: &[u8], to: impl Fn(u32, u32) -> (u32, u32)) -> Option<(Vec<
     }
     // An APNG declares itself with `acTL` before its first `IDAT`.
     if bytes.starts_with(b"\x89PNG") {
+        let (w, h, _) = ApngCanvas::shape(bytes)?;
+        return frames_of(ApngCanvas::new(bytes)?, w, h, &to);
+    }
+    None
+}
+
+/// An APNG composited on its canvas by the spec, a frame at a time: each region blended (source
+/// or over) at its offset, then disposed (kept, cleared, or put back as it was). The image
+/// crate's own compositing gets "dispose to previous" wrong, leaving earlier frames behind.
+struct ApngCanvas<'a> {
+    reader: png::Reader<Cursor<&'a [u8]>>,
+    canvas: image::RgbaImage,
+    /// The frame just reached, drawn over the canvas before its disposal.
+    shown: image::RgbaImage,
+    buf: Vec<u8>,
+    /// The default image is a frame only when its own fcTL comes before it.
+    default_shown: bool,
+    first: bool,
+    left: usize,
+}
+
+impl<'a> ApngCanvas<'a> {
+    fn new(bytes: &'a [u8]) -> Option<Self> {
+        let mut dec = png::Decoder::new(Cursor::new(bytes));
+        dec.set_transformations(png::Transformations::normalize_to_color8());
+        let reader = dec.read_info().ok()?;
+        let (w, h) = (reader.info().width, reader.info().height);
+        if !canvas_fits(w, h) {
+            return None;
+        }
+        let left = reader.info().animation_control?.num_frames as usize;
+        let default_shown = reader.info().frame_control.is_some();
+        let buf = vec![0u8; reader.output_buffer_size()?];
+        Some(Self { reader, canvas: image::RgbaImage::new(w, h), shown: image::RgbaImage::new(w, h), buf, default_shown, first: true, left })
+    }
+
+    /// The canvas size and how many frames the file says it has.
+    fn shape(bytes: &[u8]) -> Option<(u32, u32, usize)> {
         let head = &bytes[..bytes.len().min(64 * 1024)];
         let idat = head.windows(4).position(|w| w == b"IDAT").unwrap_or(head.len());
         if !head[..idat].windows(4).any(|w| w == b"acTL") {
             return None;
         }
-        let (frames, w, h) = apng_frames(bytes)?;
-        return frames_of(Decoded::new(image::Frames::new(Box::new(frames.into_iter().map(Ok)))), w, h, &to);
+        let a = ApngCanvas::new(bytes)?;
+        Some((a.canvas.width(), a.canvas.height(), a.left))
     }
-    None
 }
 
-/// An APNG's frames composited on its canvas by the spec: each region blended (source or over)
-/// at its offset, then disposed (kept, cleared, or put back as it was). The image crate's own
-/// compositing gets "dispose to previous" wrong, leaving earlier frames behind.
-fn apng_frames(bytes: &[u8]) -> Option<(Vec<Frame>, u32, u32)> {
-    use png::{BlendOp, DisposeOp};
-    let mut dec = png::Decoder::new(Cursor::new(bytes));
-    dec.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = dec.read_info().ok()?;
-    let (w, h) = (reader.info().width, reader.info().height);
-    if !canvas_fits(w, h) {
-        return None;
-    }
-    let count = reader.info().animation_control?.num_frames as usize;
-    // The default image is a frame only when its own fcTL comes before it.
-    let default_shown = reader.info().frame_control.is_some();
-    let mut canvas = image::RgbaImage::new(w, h);
-    let mut buf = vec![0u8; reader.output_buffer_size()?];
-    let mut frames = Vec::with_capacity(count);
-    let mut first = true;
-    loop {
-        let Ok(out) = reader.next_frame(&mut buf) else { break };
-        if first && !default_shown {
-            first = false;
-            continue;
-        }
-        let Some(fc) = reader.info().frame_control else { break };
-        let (color, _) = reader.output_color_type();
-        let rgba = to_rgba(&buf[..out.buffer_size()], color, out.width, out.height)?;
-        let (fx, fy) = (fc.x_offset, fc.y_offset);
-        if fx.saturating_add(out.width) > w || fy.saturating_add(out.height) > h {
+impl FrameSource for ApngCanvas<'_> {
+    fn advance(&mut self) -> Option<u32> {
+        use png::{BlendOp, DisposeOp};
+        if self.left == 0 {
             return None;
         }
-        let dispose = if first && fc.dispose_op == DisposeOp::Previous { DisposeOp::Background } else { fc.dispose_op };
-        first = false;
-        let saved = (dispose == DisposeOp::Previous).then(|| image::imageops::crop_imm(&canvas, fx, fy, out.width, out.height).to_image());
-        for (x, y, src) in rgba.enumerate_pixels() {
-            let dst = canvas.get_pixel_mut(fx + x, fy + y);
-            *dst = match fc.blend_op {
-                BlendOp::Source => *src,
-                BlendOp::Over => over(*src, *dst),
-            };
-        }
-        let den = if fc.delay_den == 0 { 100 } else { fc.delay_den as u32 };
-        let delay = image::Delay::from_numer_denom_ms(fc.delay_num as u32 * 1000, den);
-        frames.push(Frame::from_parts(canvas.clone(), 0, 0, delay));
-        match dispose {
-            DisposeOp::None => {}
-            DisposeOp::Background => {
-                for y in fy..fy + out.height {
-                    for x in fx..fx + out.width {
-                        canvas.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+        loop {
+            let out = self.reader.next_frame(&mut self.buf).ok()?;
+            if self.first && !self.default_shown {
+                self.first = false;
+                continue;
+            }
+            let fc = self.reader.info().frame_control?;
+            let (color, _) = self.reader.output_color_type();
+            let rgba = to_rgba(&self.buf[..out.buffer_size()], color, out.width, out.height)?;
+            let (fx, fy) = (fc.x_offset, fc.y_offset);
+            let (w, h) = self.canvas.dimensions();
+            if fx.saturating_add(out.width) > w || fy.saturating_add(out.height) > h {
+                return None;
+            }
+            let dispose = if self.first && fc.dispose_op == DisposeOp::Previous { DisposeOp::Background } else { fc.dispose_op };
+            self.first = false;
+            let saved = (dispose == DisposeOp::Previous).then(|| image::imageops::crop_imm(&self.canvas, fx, fy, out.width, out.height).to_image());
+            for (x, y, src) in rgba.enumerate_pixels() {
+                let dst = self.canvas.get_pixel_mut(fx + x, fy + y);
+                *dst = match fc.blend_op {
+                    BlendOp::Source => *src,
+                    BlendOp::Over => over(*src, *dst),
+                };
+            }
+            self.shown.copy_from_slice(&self.canvas);
+            match dispose {
+                DisposeOp::None => {}
+                DisposeOp::Background => {
+                    for y in fy..fy + out.height {
+                        for x in fx..fx + out.width {
+                            self.canvas.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+                        }
+                    }
+                }
+                DisposeOp::Previous => {
+                    if let Some(saved) = saved {
+                        image::imageops::replace(&mut self.canvas, &saved, fx as i64, fy as i64);
                     }
                 }
             }
-            DisposeOp::Previous => {
-                if let Some(saved) = saved {
-                    image::imageops::replace(&mut canvas, &saved, fx as i64, fy as i64);
-                }
-            }
-        }
-        if frames.len() >= count {
-            break;
+            self.left -= 1;
+            let den = if fc.delay_den == 0 { 100 } else { u32::from(fc.delay_den) };
+            return Some(u32::from(fc.delay_num) * 1000 / den);
         }
     }
-    (!frames.is_empty()).then_some((frames, w, h))
+
+    fn take(&mut self, to: Option<(u32, u32)>) -> image::RgbaImage {
+        match to {
+            // `shown` is drawn afresh from the canvas each frame, so it may be scaled in place.
+            Some((w, h)) => gpui::resize_premultiplied_from(&mut self.shown, w, h),
+            None => self.shown.clone(),
+        }
+    }
 }
 
 /// A decoded PNG frame (8 bits a channel, palettes expanded) as RGBA.
@@ -1072,8 +1103,8 @@ fn over(src: image::Rgba<u8>, dst: image::Rgba<u8>) -> image::Rgba<u8> {
 }
 
 
-/// Decoded bytes one held animation may hold at its drawn size. A GIF or WebP past it streams;
-/// an APNG or HEICS sequence keeps every other frame (twice as long each) until it fits.
+/// Decoded bytes one held animation may hold at its drawn size: past it, it streams. A caller
+/// that asks for every frame held keeps every other frame (twice as long each) until it fits.
 const ANIMATION_BUDGET: usize = 24 << 20;
 
 /// What a picture decodes to: every frame held, or an animation too long to hold at the size it
@@ -1083,7 +1114,7 @@ pub enum Picture {
     Stream(Stream),
 }
 
-/// `decode_as`, streaming a GIF or animated WebP whose frames at `max` outgrow
+/// `decode_as`, streaming a GIF, animated WebP, APNG or HEIF sequence whose frames at `max` outgrow
 /// [`ANIMATION_BUDGET`], at `stream_max`: never shrunk below the drawn size, never a frame dropped.
 pub fn decode_or_stream(bytes: Arc<Vec<u8>>, ext: &str, max: (u32, u32), still: bool, stream_max: (u32, u32)) -> Option<Picture> {
     if ext != "svg"
@@ -1107,7 +1138,7 @@ fn within_max((w, h): (u32, u32), max: (u32, u32)) -> (u32, u32) {
 }
 
 /// A GIF or animated WebP's canvas and about how many frames it has.
-fn streamable(bytes: &[u8]) -> Option<(u32, u32, usize)> {
+fn streamable(bytes: &Arc<Vec<u8>>) -> Option<(u32, u32, usize)> {
     if bytes.starts_with(b"GIF8") {
         let gif = GifCanvas::new(bytes)?;
         // Each frame's Graphic Control Extension: a count close enough to size the budget by.
@@ -1120,12 +1151,36 @@ fn streamable(bytes: &[u8]) -> Option<(u32, u32, usize)> {
         let count = dec.frame_count() as usize;
         return (count > 1 && canvas_fits(w, h)).then_some((w, h, count));
     }
+    if bytes.starts_with(b"\x89PNG") {
+        return ApngCanvas::shape(bytes).filter(|&(_, _, n)| n > 1);
+    }
+    #[cfg(feature = "video")]
+    if crate::heif::sniff(bytes) && crate::heif::has_track(bytes) {
+        let (_, w, h, count) = crate::video::Sequence::open(Shared(bytes.clone()))?;
+        return Some((w, h, count));
+    }
     None
 }
 
-fn frame_source(bytes: &[u8]) -> Option<Box<dyn FrameSource + '_>> {
+/// Bytes a decoder reads without a copy of its own.
+struct Shared(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for Shared {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+fn frame_source(bytes: &Arc<Vec<u8>>) -> Option<Box<dyn FrameSource + '_>> {
     if bytes.starts_with(b"GIF8") {
         return Some(Box::new(GifCanvas::new(bytes)?));
+    }
+    if bytes.starts_with(b"\x89PNG") {
+        return Some(Box::new(ApngCanvas::new(bytes)?));
+    }
+    #[cfg(feature = "video")]
+    if crate::heif::sniff(bytes) {
+        return Some(Box::new(crate::video::Sequence::open(Shared(bytes.clone()))?.0));
     }
     let dec = crate::shared::animated_webp::Decoder::new(bytes).ok()?;
     let frames = dec.map(|f| {
@@ -1200,7 +1255,7 @@ impl Stream {
 }
 
 /// Every frame of `bytes` at `to`, over and over, until the stream lets go.
-fn stream_frames(bytes: &[u8], natural: (u32, u32), to: (u32, u32), tx: &std::sync::mpsc::SyncSender<(Arc<RenderImage>, u32)>) {
+fn stream_frames(bytes: &Arc<Vec<u8>>, natural: (u32, u32), to: (u32, u32), tx: &std::sync::mpsc::SyncSender<(Arc<RenderImage>, u32)>) {
     let scale = (to != natural).then_some(to);
     loop {
         let Some(mut source) = frame_source(bytes) else { return };
@@ -1967,7 +2022,7 @@ mod apng_tests {
 
     /// A 4×1 APNG: red everywhere, then green over the left half disposed back to what was
     /// there, then blue over the right half.
-    fn sample() -> Vec<u8> {
+    pub(super) fn sample() -> Vec<u8> {
         let mut out = Vec::new();
         {
             let mut enc = png::Encoder::new(&mut out, 4, 1);
@@ -2002,7 +2057,13 @@ mod apng_tests {
 
     #[test]
     fn dispose_to_previous_puts_the_region_back() {
-        let (frames, w, h) = apng_frames(&sample()).unwrap();
+        let bytes = sample();
+        let mut a = ApngCanvas::new(&bytes).unwrap();
+        let (w, h) = a.canvas.dimensions();
+        let mut frames = Vec::new();
+        while let Some(d) = a.advance() {
+            frames.push(Frame::from_parts(a.take(None), 0, 0, image::Delay::from_numer_denom_ms(d, 1)));
+        }
         assert_eq!((w, h, frames.len()), (4, 1, 3));
         assert_eq!(row(&frames[0]), "RRRR".chars().collect::<Vec<_>>());
         assert_eq!(row(&frames[1]), "GGRR".chars().collect::<Vec<_>>());
@@ -2067,6 +2128,77 @@ mod budget_tests {
         }
         assert_eq!(retired.len(), 20, "one frame per 40 ms, none skipped");
         assert_eq!(s.tick(now, false, &mut retired), None, "a still window steps nothing");
+    }
+
+    #[test]
+    fn an_over_budget_apng_streams_too() {
+        let (w, h, count) = (200u32, 150u32, 300u32);
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_animated(count, 0).unwrap();
+            enc.set_frame_delay(1, 25).unwrap();
+            let mut wr = enc.write_header().unwrap();
+            for i in 0..count {
+                let px: Vec<u8> = (0..w * h).flat_map(|p| [((p + i) % 251) as u8, 0, 0, 255]).collect();
+                wr.write_image_data(&px).unwrap();
+            }
+            wr.finish().unwrap();
+        }
+        let Some(Picture::Stream(s)) = decode_or_stream(Arc::new(out), "png", (400, 400), false, (400, 400)) else {
+            panic!("36 MB of APNG frames at the drawn size stream");
+        };
+        assert_eq!((s.w, s.h), (200, 150));
+        assert_eq!(s.delay, 40, "its own 1/25 s");
+    }
+
+    /// Steps `s` through `n` frames at their own pace, returning each frame's delay.
+    fn play(s: &mut Stream, n: usize) -> Vec<u32> {
+        let mut retired = Vec::new();
+        let mut now = std::time::Instant::now();
+        let mut delays = vec![s.delay];
+        s.tick(now, true, &mut retired);
+        while retired.len() < n {
+            now += std::time::Duration::from_millis(s.delay.into());
+            let before = retired.len();
+            while retired.len() == before {
+                if s.tick(now, true, &mut retired) == Some(std::time::Duration::from_millis(4)) {
+                    std::thread::sleep(std::time::Duration::from_millis(4));
+                }
+            }
+            delays.push(s.delay);
+        }
+        delays
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn a_heif_sequence_streams_every_frame_at_its_rate() {
+        let bytes = std::fs::read(format!("{}/reference/media/sequence.heics", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut s = Stream::start(Arc::new(bytes), (64, 48), (64, 48)).expect("a sequence streams");
+        assert_eq!((s.current.size(0).width.0, s.current.size(0).height.0), (64, 48));
+        // Two passes: the end starts it over, every frame 100 ms.
+        assert_eq!(play(&mut s, 12), vec![100; 13]);
+    }
+
+    #[test]
+    fn a_streamed_apng_draws_what_the_held_one_does() {
+        let bytes = Arc::new(apng_tests::sample());
+        let mut s = Stream::start(bytes.clone(), (4, 1), (4, 1)).expect("an APNG streams");
+        let mut held = ApngCanvas::new(&bytes).unwrap();
+        for _ in 0..3 {
+            held.advance().unwrap();
+            let want = to_bgra(held.take(None));
+            let mut retired = Vec::new();
+            assert_eq!(s.current.as_bytes(0).unwrap(), &*want);
+            let now = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            s.due = Some(now - std::time::Duration::from_millis(1));
+            while retired.is_empty() {
+                s.tick(now, true, &mut retired);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
     }
 }
 
