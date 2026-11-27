@@ -256,8 +256,8 @@ fn safe_url(url: &str) -> Option<String> {
     matches!(u.scheme(), "http" | "https").then(|| u.to_string())
 }
 
-fn is_image_text(text: &str) -> bool {
-    urls(text).any(crate::timeline::is_image_url)
+fn is_media_text(text: &str) -> bool {
+    urls(text).any(|u| crate::timeline::is_image_url(u) || crate::timeline::is_video_url(u))
 }
 
 /// The card for `m`, or `None`; a message with a link and no metadata yet asks for it once.
@@ -266,7 +266,8 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         return None;
     }
     let lower = m.content.to_ascii_lowercase();
-    if lower.contains("vectorapp.io/profile/npub1") {
+    // A video link plays as its own card instead.
+    if lower.contains("vectorapp.io/profile/npub1") || m.content.split(char::is_whitespace).any(crate::timeline::is_video_url) {
         return None;
     }
     let shared = |u: &str| {
@@ -288,7 +289,7 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 && vector_core::nostr_embed::EmbedRef::from_url(u).is_none()
                 && !u.starts_with('<')
         });
-        if previewable && !is_image_text(&m.content) {
+        if previewable && !is_media_text(&m.content) {
             let mut media = ctx.media.borrow_mut();
             if media.meta_asked.insert(m.id.clone()) {
                 media.meta_queue.push((ctx.chat.id.clone(), m.id.clone()));

@@ -579,7 +579,38 @@ pub fn cards(ctx: &Ctx, m: &Message) -> Vec<AnyElement> {
     if ctx.held || m.content.is_empty() || ctx.media.borrow().web_previews_off {
         return Vec::new();
     }
-    refs(&m.content).iter().map(|r| card(ctx, m, r)).collect()
+    let mut out: Vec<AnyElement> = refs(&m.content).iter().map(|r| card(ctx, m, r)).collect();
+    out.extend(video_links(ctx, m));
+    out
+}
+
+/// Links straight to a video file, each a poster that fetches and plays in place like a Nostr video.
+fn video_links(ctx: &Ctx, m: &Message) -> Vec<AnyElement> {
+    let mut seen = HashSet::new();
+    let links: Vec<&str> = m
+        .content
+        .split(char::is_whitespace)
+        .filter_map(crate::timeline::video_link)
+        .filter(|u| ctx.store.stream_mask(u).is_none())
+        .filter(|u| seen.insert(*u))
+        .take(PER_MSG)
+        .collect();
+    if links.is_empty() {
+        return Vec::new();
+    }
+    let send: Send = {
+        let (act, id) = (ctx.on_act.clone(), m.id.clone());
+        Rc::new(move |a: Act, w: &mut gpui::Window, cx: &mut gpui::App| act(&id, RowAct::Embed(a), w, cx))
+    };
+    let env = Env { store: ctx.store, media: ctx.media, clock: ctx.clock, send: send.clone(), modal: false };
+    links
+        .into_iter()
+        .map(|url| {
+            let v = Media { url: url.to_string(), is_video: true, width: None, height: None, poster: None, size: None, duration: None, sha256: None, fallbacks: Vec::new() };
+            let key = format!("nv-{}-{url}", m.id);
+            div().mt(px(8.)).w_full().max_w(px(CARD_W)).child(poster_in(&env, false, None, Some(v), &key, None, None, &send)).into_any_element()
+        })
+        .collect()
 }
 
 fn card(ctx: &Ctx, m: &Message, r: &Ref) -> AnyElement {

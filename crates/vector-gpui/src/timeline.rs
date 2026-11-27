@@ -1089,6 +1089,21 @@ fn url_ext(url: &str) -> String {
 }
 
 /// `isImageUrl`: the path ends in a picture's extension, or the text names one anywhere.
+/// A link straight to a video file the player opens.
+pub fn is_video_url(url: &str) -> bool {
+    video_link(url).is_some()
+}
+
+/// `token` as an https link to a video file, without the punctuation prose wraps it in.
+pub fn video_link(token: &str) -> Option<&str> {
+    let url = token
+        .trim_start_matches(['(', '<', '[', '"', '\''])
+        .trim_end_matches([')', '>', ']', '"', '\'', '.', ',', '!', '?', ';', ':']);
+    let lower = url.to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or("");
+    (lower.starts_with("https://") && ["mp4", "webm", "mov", "m4v"].iter().any(|e| path.ends_with(&format!(".{e}")))).then_some(url)
+}
+
 pub fn is_image_url(url: &str) -> bool {
     const EXTS: [&str; 9] = ["png", "jpg", "jpeg", "gif", "webp", "jxl", "bmp", "ico", "svg"];
     let lower = url.to_ascii_lowercase();
@@ -2328,6 +2343,17 @@ fn pivx_bubble(ctx: &Ctx, m: &Message, pay: &crate::data::PivxPay) -> AnyElement
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_links_are_https_video_files_without_their_punctuation() {
+        let u = "https://media.contra.com/video/upload/fl_progressive/q_auto:best,w_2500/qfcjmxrewmjarz70qihp.mp4";
+        assert_eq!(video_link(u), Some(u));
+        assert_eq!(video_link(&format!("({u}).")), Some(u));
+        assert_eq!(video_link("https://x.io/a.WEBM?t=3#s"), Some("https://x.io/a.WEBM?t=3#s"));
+        assert_eq!(video_link("http://x.io/a.mp4"), None);
+        assert_eq!(video_link("https://x.io/a.mp4.html"), None);
+        assert_eq!(video_link("https://x.io/mp4"), None);
+    }
 
     #[test]
     fn a_code_block_is_highlighted_once_while_it_stays() {

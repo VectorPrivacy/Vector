@@ -249,6 +249,10 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         if vector_core::nostr_embed::EmbedRef::from_url(url).is_some() {
             continue;
         }
+        // A video file plays in its own card; its "page" is only a file name.
+        if crate::timeline::is_video_url(url) {
+            continue;
+        }
         let Ok(metadata) = site_metadata(url).await else {
             continue;
         };
