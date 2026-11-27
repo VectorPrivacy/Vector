@@ -13239,7 +13239,7 @@ impl VectorApp {
         rows.extend(self.start_pin_row(format!("c/{id}")));
         rows.push((
             kit::MenuItem::new(t::copy_link(), "share"),
-            MenuAct::Copy(format!("https://vectorapp.io/c/{id}")),
+            MenuAct::Copy(vector_core::golink::GoLink::Community { community: id.clone() }.url()),
         ));
         if self.advanced() && !self.store.borrow().stream_hidden(&id) {
             rows.push((
@@ -13304,7 +13304,9 @@ impl VectorApp {
         rows.extend(self.start_pin_row(format!("c/{community}/{channel}")));
         rows.push((
             kit::MenuItem::new(t::copy_link(), "share"),
-            MenuAct::Copy(format!("https://vectorapp.io/c/{community}/{channel}")),
+            MenuAct::Copy(
+                vector_core::golink::GoLink::Channel { community: community.clone(), channel: channel.clone() }.url(),
+            ),
         ));
         if self.advanced() && !self.store.borrow().stream_hidden(&channel) {
             rows.push((
