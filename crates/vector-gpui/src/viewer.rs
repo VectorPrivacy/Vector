@@ -481,6 +481,8 @@ impl Render for Viewer {
             .bg(gpui::black().opacity(0.95))
             .font_family(INTER)
             .cursor(gpui::CursorStyle::PointingHand)
+            .occlude()
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     v.close(cx);
