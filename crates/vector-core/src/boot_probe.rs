@@ -53,7 +53,7 @@ pub async fn run() {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 /// This process's user and system CPU seconds and context switches so far.
 fn rusage() -> (f64, f64, u64) {
     let mut u: libc::rusage = unsafe { std::mem::zeroed() };
@@ -63,4 +63,9 @@ fn rusage() -> (f64, f64, u64) {
     }
     let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
     (secs(u.ru_utime), secs(u.ru_stime), (u.ru_nvcsw + u.ru_nivcsw) as u64)
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn rusage() -> (f64, f64, u64) {
+    (0., 0., 0)
 }
