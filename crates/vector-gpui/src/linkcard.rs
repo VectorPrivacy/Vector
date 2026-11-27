@@ -11,6 +11,8 @@ use crate::theme::*;
 use crate::timeline::{Act, Ctx, TEXT_LH, TEXT_SIZE};
 
 const MAX_W: f32 = 480.;
+/// A description longer than this ends in "…" so a card never outgrows its message.
+const DESC_MAX: usize = 200;
 
 /// What a card's play button asks for: the player window, on `provider`'s `id`.
 #[derive(Clone)]
@@ -320,6 +322,10 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         .clone()
         .or(meta.description.clone())
         .unwrap_or_default();
+    let description = match description.char_indices().nth(DESC_MAX) {
+        Some((cut, _)) => format!("{}…", description[..cut].trim_end()),
+        None => description,
+    };
     if meta.og_image.is_none() && title.is_none() && description.is_empty() {
         return None;
     }
@@ -341,24 +347,20 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
         }
     };
 
-    let favicon: AnyElement = match meta
+    // The favicon sits in the title's first line, which wraps under it like Tauri's float.
+    let (favicon, indent): (Option<AnyElement>, f32) = match meta
         .favicon
         .as_deref()
         .map(|f| ctx.media.borrow_mut().linked(f))
     {
         Some(Linked::Ready { image, w, h }) => {
             let wide = 15. * w as f32 / h.max(1) as f32;
-            img(image)
-                .h(px(15.))
-                .w(px(wide))
-                .mr(px(8.))
-                .mt(px(1.))
-                .flex_shrink_0()
-                .into_any_element()
+            let el = img(image).absolute().top(px(1.)).left_0().h(px(15.)).w(px(wide)).into_any_element();
+            (Some(el), wide + 8.)
         }
         // An image with no picture yet is only its margin; one that failed is gone.
-        Some(Linked::Loading(_)) => div().w(px(8.)).into_any_element(),
-        _ => div().into_any_element(),
+        Some(Linked::Loading(_)) => (None, 8.),
+        _ => (None, 0.),
     };
     let lines: Vec<String> = {
         let parts: Vec<&str> = split_br(&description);
@@ -409,20 +411,21 @@ pub fn card(ctx: &Ctx, m: &Message) -> Option<AnyElement> {
                 .w(px(1.))
                 .bg(c(PRIMARY)),
         )
-        .child(
+        .child({
+            use crate::inline::{Atom, Kind, Look};
+            let look = Look::new(crate::theme::RUBIK, TEXT_SIZE, TEXT_LH, white_a(0.85));
+            let text: gpui::SharedString = title.clone().unwrap_or_else(|| crate::t::embed_link_preview().into()).into();
+            let mut atoms = Vec::with_capacity(2);
+            if indent > 0. {
+                atoms.push(Atom::Gap(indent));
+            }
+            atoms.push(Atom::Text { text, look: look.clone(), kind: Kind::Plain });
             div()
-                .flex()
-                .items_start()
-                .text_size(px(TEXT_SIZE))
-                .line_height(px(TEXT_LH))
-                .text_color(white_a(0.85))
-                .child(favicon)
-                .child(
-                    div()
-                        .min_w_0()
-                        .child(title.clone().unwrap_or_else(|| crate::t::embed_link_preview().into())),
-                ),
-        );
+                .relative()
+                .min_w_0()
+                .children(favicon)
+                .child(crate::inline::inline(atoms, look).clamp(2))
+        });
     if !description.is_empty() {
         use crate::inline::{Atom, Kind, Look};
         let look = Look::new(crate::theme::RUBIK, 13., 18.2, white_a(0.7));
