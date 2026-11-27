@@ -1625,9 +1625,9 @@ impl LiveTransport {
             return c;
         }
         // Each cold plane dials every community relay and authenticates on each: unbounded,
-        // a cold boot opens dozens at once and churns the pool. A few at a time, and a plane
-        // another read built while this one waited is reused.
-        let _permit = COLD_PLANES.acquire().await.ok();
+        // a cold boot opens dozens at once. Background sync dials a few at a time, the reader's
+        // own fetch without waiting, and a plane another read built meanwhile is reused.
+        let _permit = if super::cache::is_foreground() { None } else { COLD_PLANES.acquire().await.ok() };
         let (hit, evicted) = PLANE_POOL.take(generation, &key);
         disconnect_clients(evicted);
         if let Some(c) = hit {

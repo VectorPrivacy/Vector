@@ -160,7 +160,9 @@ pub async fn sync_focused(channel_id: String) -> Result<bool, String> {
     }
     {
         let _first = vector_core::community::cache::foreground();
-        let _ = db::scoped(VectorCore.sync_community_channel_head(&channel_id, 50)).await;
+        let asked = std::time::Instant::now();
+        let _ = vector_core::community::cache::in_foreground(db::scoped(VectorCore.sync_community_channel_head(&channel_id, 50))).await;
+        vector_core::boot_probe::note_focused(asked.elapsed());
     }
     sync_channel(channel_id, None).await
 }

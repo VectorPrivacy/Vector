@@ -9,6 +9,18 @@ pub static OPEN_DIALS: AtomicU64 = AtomicU64::new(0);
 /// Community reads asked of relays.
 pub static FETCHES: AtomicU64 = AtomicU64::new(0);
 
+/// When login began, for the census and the first focused page.
+static START: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+
+/// A channel opened in the census window has its newest page: how long that took, and since login.
+pub fn note_focused(took: std::time::Duration) {
+    let Some(start) = START.get() else { return };
+    if start.elapsed() > std::time::Duration::from_secs(300) {
+        return;
+    }
+    crate::log_net_fail!("[boot-probe] focused page in {} ms, {} ms after login, plane dials {}", took.as_millis(), start.elapsed().as_millis(), PLANE_DIALS.load(Relaxed));
+}
+
 pub fn note(c: &AtomicU64) {
     c.fetch_add(1, Relaxed);
 }
@@ -29,7 +41,7 @@ fn planes_seen() -> usize {
 #[cfg(not(target_arch = "wasm32"))]
 /// One line every 10 s for the first 5 minutes after login.
 pub async fn run() {
-    let start = web_time::Instant::now();
+    let start = *START.get_or_init(web_time::Instant::now);
     let mut last = rusage();
     for _ in 0..30 {
         crate::rt::time::sleep(std::time::Duration::from_secs(10)).await;

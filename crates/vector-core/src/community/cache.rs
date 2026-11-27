@@ -73,6 +73,20 @@ pub fn foreground() -> Foreground {
     Foreground(gate)
 }
 
+tokio::task_local! {
+    static FOREGROUND_TASK: ();
+}
+
+/// Runs `fut` as the reader's own fetch: what it dials skips the queue background sync waits in.
+pub async fn in_foreground<F: std::future::Future>(fut: F) -> F::Output {
+    FOREGROUND_TASK.scope((), fut).await
+}
+
+/// Whether this task is the reader's own fetch.
+pub fn is_foreground() -> bool {
+    FOREGROUND_TASK.try_with(|_| ()).is_ok()
+}
+
 /// The longest a background walk waits on foreground fetches: one that hangs can't stall the rest.
 const FOREGROUND_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
