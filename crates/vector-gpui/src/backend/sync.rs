@@ -117,6 +117,7 @@ async fn hydrate() {
         art,
     }));
     db::spawn_bound(super::images::cache_all_profile_images());
+    db::spawn_bound(vector_core::boot_probe::run());
 }
 
 /// Paint from the database, then catch up behind it. `init` is a login.

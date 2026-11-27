@@ -1,0 +1,66 @@
+//! A startup census in vector.log: what a cold boot fans out to (clients, sockets, reads, CPU).
+//! Persisted like a network failure because the log file keeps nothing quieter.
+
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+/// Plane connections built: authed per plane key, and open per relay.
+pub static PLANE_DIALS: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_DIALS: AtomicU64 = AtomicU64::new(0);
+/// Community reads asked of relays.
+pub static FETCHES: AtomicU64 = AtomicU64::new(0);
+
+pub fn note(c: &AtomicU64) {
+    c.fetch_add(1, Relaxed);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// One line every 10 s for the first 5 minutes after login.
+pub async fn run() {
+    let start = web_time::Instant::now();
+    let mut last = rusage();
+    for _ in 0..30 {
+        crate::rt::time::sleep(std::time::Duration::from_secs(10)).await;
+        let (pooled, open, mut clients) = crate::community::transport::plane_census();
+        if let Some(main) = crate::state::nostr_client() {
+            clients.push(main);
+        }
+        let (mut handles, mut connected) = (0usize, 0usize);
+        for c in &clients {
+            for r in c.relays().await.values() {
+                handles += 1;
+                connected += usize::from(r.status() == nostr_sdk::prelude::RelayStatus::Connected);
+            }
+        }
+        let now = rusage();
+        let tasks = tokio::runtime::Handle::try_current().map_or(0, |h| h.metrics().num_alive_tasks());
+        crate::log_net_fail!(
+            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} open={} fetches={} tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
+            start.elapsed().as_secs(),
+            clients.len(),
+            pooled,
+            open,
+            handles,
+            connected,
+            PLANE_DIALS.load(Relaxed),
+            OPEN_DIALS.load(Relaxed),
+            FETCHES.load(Relaxed),
+            tasks,
+            now.0 - last.0,
+            now.1 - last.1,
+            now.2.saturating_sub(last.2),
+        );
+        last = now;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// This process's user and system CPU seconds and context switches so far.
+fn rusage() -> (f64, f64, u64) {
+    let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage fills the struct it is given.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } != 0 {
+        return (0., 0., 0);
+    }
+    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+    (secs(u.ru_utime), secs(u.ru_stime), (u.ru_nvcsw + u.ru_nivcsw) as u64)
+}

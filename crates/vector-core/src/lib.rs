@@ -114,6 +114,7 @@ pub mod deep_link;
 pub mod golink;
 pub mod badges;
 pub mod history_gaps;
+pub mod boot_probe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod resume;
 pub mod bot_interface;

@@ -663,6 +663,14 @@ struct PlanePool {
     sweep_armed: std::sync::atomic::AtomicBool,
 }
 
+/// The plane connections held now: how many pooled, how many open, and their clients.
+pub fn plane_census() -> (usize, usize, Vec<Client>) {
+    let pooled = PLANE_POOL.lock();
+    let open = OPEN_PLANES.lock();
+    let clients = pooled.1.values().chain(open.1.values()).map(|p| p.client.clone()).collect();
+    (pooled.1.len(), open.1.len(), clients)
+}
+
 static PLANE_POOL: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(PlanePool::default);
 static OPEN_PLANES: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(PlanePool::default);
 
@@ -996,6 +1004,7 @@ fn open_read_permits(key: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
 /// relay options, so it routes as they do.
 fn open_entry(generation: u64, key: &str) -> Option<(Client, InUse)> {
     let (client, hold, evicted) = OPEN_PLANES.take_or_insert(generation, key, || {
+        crate::boot_probe::note(&crate::boot_probe::OPEN_DIALS);
         crate::apply_transport(
             nostr_sdk::prelude::Client::builder().notification_channel_size(std::num::NonZeroUsize::MIN),
             crate::transport::Lane::Shared,
@@ -1616,6 +1625,7 @@ impl LiveTransport {
             // Authenticates as the PLANE key, not the user — hence its own
             // authenticator rather than `nostr_client_builder()`, which resolves the
             // session identity.
+            crate::boot_probe::note(&crate::boot_probe::PLANE_DIALS);
             let auth = nostr_sdk::prelude::SignerAuthenticator::new(plane.clone());
             #[cfg(test)]
             let auth = tests::SlowAuth(auth);
@@ -1725,6 +1735,7 @@ impl LiveTransport {
     /// reads the counts to decide whether its cursor may advance (full coverage
     /// only — a majority return must not skip a down relay's pending editions).
     pub async fn fetch_counted(&self, query: &Query, relays: &[String]) -> Result<(Vec<Event>, usize, usize), String> {
+        crate::boot_probe::note(&crate::boot_probe::FETCHES);
         let client = Self::warm_client(relays, self.timeout).await?;
         let base_timeout = self.timeout;
         let filter = query.to_filter();
