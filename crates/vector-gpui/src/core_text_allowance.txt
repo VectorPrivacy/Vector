@@ -1,4 +1,4 @@
-# vector-core text with no coretext entry (2697 in all): logs and internal errors. See coretext.rs.
+# vector-core text with no coretext entry (2700 in all): logs and internal errors. See coretext.rs.
 badges.rs 8
 blossom.rs 57
 blossom_capabilities.rs 17
@@ -6,6 +6,7 @@ blossom_error.rs 10
 blossom_info.rs 4
 blossom_servers.rs 7
 blossom_stats.rs 3
+boot_probe.rs 1
 bot_interface.rs 26
 calls/session.rs 9
 calls/video.rs 1
