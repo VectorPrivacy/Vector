@@ -13,6 +13,19 @@ pub fn note(c: &AtomicU64) {
     c.fetch_add(1, Relaxed);
 }
 
+/// Planes dialled, told apart: a dial of one already dialled is the pool's churn.
+static PLANES_SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+pub fn note_plane(key: &str) {
+    note(&PLANE_DIALS);
+    let mut seen = PLANES_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    seen.get_or_insert_with(Default::default).insert(key.to_string());
+}
+
+fn planes_seen() -> usize {
+    PLANES_SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |s| s.len())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 /// One line every 10 s for the first 5 minutes after login.
 pub async fn run() {
@@ -26,7 +39,7 @@ pub async fn run() {
         }
         let (mut handles, mut connected) = (0usize, 0usize);
         for c in &clients {
-            for r in c.relays().await.values() {
+            for r in c.relays().all().await.values() {
                 handles += 1;
                 connected += usize::from(r.status() == nostr_sdk::prelude::RelayStatus::Connected);
             }
@@ -34,7 +47,7 @@ pub async fn run() {
         let now = rusage();
         let tasks = tokio::runtime::Handle::try_current().map_or(0, |h| h.metrics().num_alive_tasks());
         crate::log_net_fail!(
-            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} open={} fetches={} tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
+            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} ({} distinct) open={} fetches={} tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
             start.elapsed().as_secs(),
             clients.len(),
             pooled,
@@ -42,6 +55,7 @@ pub async fn run() {
             handles,
             connected,
             PLANE_DIALS.load(Relaxed),
+            planes_seen(),
             OPEN_DIALS.load(Relaxed),
             FETCHES.load(Relaxed),
             tasks,

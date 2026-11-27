@@ -681,8 +681,13 @@ const PLANE_POOL_IDLE_TTL: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_secs(90)
 };
-/// Hard cap on simultaneously-pooled plane connections (LRU-evicted).
-const PLANE_POOL_MAX: usize = 24;
+/// Plane connections dialling at once.
+const COLD_PLANES_AT_ONCE: usize = 4;
+static COLD_PLANES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(COLD_PLANES_AT_ONCE);
+
+/// Hard cap on simultaneously-pooled plane connections (LRU-evicted). Room for a large account's
+/// whole first sync: an evicted plane is dialled and authenticated again a moment later.
+const PLANE_POOL_MAX: usize = 96;
 
 /// Remove the entries idle past the TTL, returning their clients to disconnect.
 fn take_expired(pool: &mut std::collections::HashMap<String, PooledPlane>, now: web_time::Instant) -> Vec<Client> {
@@ -1617,6 +1622,15 @@ impl LiveTransport {
         let (hit, evicted) = PLANE_POOL.take(generation, &key);
         disconnect_clients(evicted);
         if let Some(c) = hit {
+            return c;
+        }
+        // Each cold plane dials every community relay and authenticates on each: unbounded,
+        // a cold boot opens dozens at once and churns the pool. A few at a time, and a plane
+        // another read built while this one waited is reused.
+        let _permit = COLD_PLANES.acquire().await.ok();
+        let (hit, evicted) = PLANE_POOL.take(generation, &key);
+        disconnect_clients(evicted);
+        if let Some(c) = hit {
             c
         } else {
             let opened = web_time::Instant::now();
@@ -1625,7 +1639,7 @@ impl LiveTransport {
             // Authenticates as the PLANE key, not the user — hence its own
             // authenticator rather than `nostr_client_builder()`, which resolves the
             // session identity.
-            crate::boot_probe::note(&crate::boot_probe::PLANE_DIALS);
+            crate::boot_probe::note_plane(&key);
             let auth = nostr_sdk::prelude::SignerAuthenticator::new(plane.clone());
             #[cfg(test)]
             let auth = tests::SlowAuth(auth);
