@@ -655,12 +655,19 @@ fn next_pooled_id() -> u64 {
 
 type PlaneSlots = (u64, std::collections::HashMap<String, PooledPlane>);
 
-#[derive(Default)]
 struct PlanePool {
     /// The session generation the entries belong to, and the entries by key.
     slots: std::sync::Mutex<PlaneSlots>,
     /// Whether a sweep is waiting on the pool's next expiry: one at a time, none for an empty pool.
     sweep_armed: std::sync::atomic::AtomicBool,
+    /// How long an unused entry is kept.
+    ttl: std::time::Duration,
+}
+
+impl Default for PlanePool {
+    fn default() -> Self {
+        Self::with_ttl(PLANE_POOL_IDLE_TTL)
+    }
 }
 
 /// The plane connections held now: how many pooled, how many open, and their clients.
@@ -672,7 +679,7 @@ pub fn plane_census() -> (usize, usize, Vec<Client>) {
 }
 
 static PLANE_POOL: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(PlanePool::default);
-static OPEN_PLANES: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(PlanePool::default);
+static OPEN_PLANES: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(|| PlanePool::with_ttl(OPEN_PLANE_IDLE_TTL));
 
 /// A pooled connection unused for this long is closed — long enough to span a
 /// community's whole backfill, short enough not to hoard sockets.
@@ -680,6 +687,13 @@ const PLANE_POOL_IDLE_TTL: std::time::Duration = if cfg!(test) {
     std::time::Duration::from_millis(200)
 } else {
     std::time::Duration::from_secs(90)
+};
+/// An open connection is one per relay and signed in as nobody, so any later read reuses it:
+/// kept for most of a session rather than redialled minutes after a sync.
+const OPEN_PLANE_IDLE_TTL: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(200)
+} else {
+    std::time::Duration::from_secs(30 * 60)
 };
 /// Plane connections dialling at once.
 const COLD_PLANES_AT_ONCE: usize = 4;
@@ -690,15 +704,19 @@ static COLD_PLANES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(C
 const PLANE_POOL_MAX: usize = 96;
 
 /// Remove the entries idle past the TTL, returning their clients to disconnect.
-fn take_expired(pool: &mut std::collections::HashMap<String, PooledPlane>, now: web_time::Instant) -> Vec<Client> {
+fn take_expired(pool: &mut std::collections::HashMap<String, PooledPlane>, now: web_time::Instant, ttl: std::time::Duration) -> Vec<Client> {
     let expired: Vec<String> = pool.iter()
-        .filter(|(_, p)| p.idle() && now.duration_since(p.last_used) >= PLANE_POOL_IDLE_TTL)
+        .filter(|(_, p)| p.idle() && now.duration_since(p.last_used) >= ttl)
         .map(|(k, _)| k.clone())
         .collect();
     expired.into_iter().filter_map(|k| pool.remove(&k)).map(|p| p.client).collect()
 }
 
 impl PlanePool {
+    fn with_ttl(ttl: std::time::Duration) -> Self {
+        Self { slots: Default::default(), sweep_armed: Default::default(), ttl }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, PlaneSlots> {
         self.slots.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -720,11 +738,11 @@ impl PlanePool {
                     break;
                 }
                 // Only entries in use: look again a TTL on, as releasing one restarts its clock.
-                let due = next.map_or(PLANE_POOL_IDLE_TTL, |oldest| {
-                    PLANE_POOL_IDLE_TTL.saturating_sub(web_time::Instant::now().duration_since(oldest))
+                let due = next.map_or(self.ttl, |oldest| {
+                    self.ttl.saturating_sub(web_time::Instant::now().duration_since(oldest))
                 });
                 crate::rt::time::sleep(due).await;
-                let expired = take_expired(&mut self.lock().1, web_time::Instant::now());
+                let expired = take_expired(&mut self.lock().1, web_time::Instant::now(), self.ttl);
                 disconnect_clients(expired);
             }
             self.sweep_armed.store(false, std::sync::atomic::Ordering::Release);
@@ -739,7 +757,7 @@ impl PlanePool {
     /// idle TTL expired and resets the whole pool if the session generation advanced
     /// (a swap). Returns `(Some(client_if_hit), clients_to_disconnect)`.
     fn take(&self, generation: u64, key: &str) -> (Option<Client>, Vec<Client>) {
-        let (hit, evicted) = take_locked(&mut self.lock(), generation, key);
+        let (hit, evicted) = take_locked(&mut self.lock(), generation, key, self.ttl);
         (hit.map(|(client, _)| client), evicted)
     }
 
@@ -750,7 +768,7 @@ impl PlanePool {
         if generation < g.0 {
             return None;
         }
-        let (_, mut evicted) = take_locked(&mut g, generation, key);
+        let (_, mut evicted) = take_locked(&mut g, generation, key, self.ttl);
         if !g.1.contains_key(key) {
             evicted.extend(make_room(&mut g.1));
             g.1.insert(key.to_string(), PooledPlane::new(make()));
@@ -815,7 +833,7 @@ impl PlanePool {
 /// Drops entries idle past the TTL, and every entry if the session generation advanced (a
 /// swap); a previous session's caller finds nothing and resets nothing. Returns the hit and
 /// the clients to disconnect.
-fn take_locked(g: &mut PlaneSlots, generation: u64, key: &str) -> (Option<(Client, u64)>, Vec<Client>) {
+fn take_locked(g: &mut PlaneSlots, generation: u64, key: &str, ttl: std::time::Duration) -> (Option<(Client, u64)>, Vec<Client>) {
     if generation < g.0 {
         return (None, Vec::new());
     }
@@ -825,7 +843,7 @@ fn take_locked(g: &mut PlaneSlots, generation: u64, key: &str) -> (Option<(Clien
         g.0 = generation;
     }
     let now = web_time::Instant::now();
-    evicted.extend(take_expired(&mut g.1, now));
+    evicted.extend(take_expired(&mut g.1, now, ttl));
     let hit = g.1.get_mut(key).map(|p| {
         p.last_used = now;
         (p.client.clone(), p.id)
