@@ -3112,6 +3112,7 @@ mod tests {
     /// A plane key and the one wrap it authored, held by `relay`.
     /// Not a check: what concurrent reads on one connection cost, against the same reads in turn.
     /// `cargo nextest run -p vector-core read_fanout --run-ignored only --no-capture`
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore]
     async fn read_fanout() {
@@ -3123,7 +3124,7 @@ mod tests {
             relay.hold((0..600).map(|i| EventBuilder::new(Kind::Custom(1059), format!("{i}{body}")).finalize(a).unwrap()));
         }
         let client = nostr_sdk::prelude::Client::builder().build();
-        client.add_relay(relay.url()).await.unwrap();
+        crate::ClientRelayExt::add_managed_relay(&client, relay.url()).await.unwrap();
         client.connect().await;
         client.relay(relay.url()).await.unwrap().unwrap().wait_for_connection(std::time::Duration::from_secs(5)).await;
         let read = |a: &Keys| {
