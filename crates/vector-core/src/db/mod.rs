@@ -1307,7 +1307,10 @@ impl Drop for ConnectionGuard {
         if !self.pooled {
             return;
         }
-        trim_for_idle(&conn);
+        // Only the last reader home trims: amid a burst, a released cache is read back at once.
+        if self.session.readers_out.load(std::sync::atomic::Ordering::Relaxed) <= 1 {
+            trim_for_idle(&conn);
+        }
         let mut pool = self.session.read_pool.lock().unwrap_or_else(|e| e.into_inner());
         // fetch_update: its rename, try_update, is newer than the toolchains Vector builds with.
         #[allow(deprecated)]
@@ -1367,7 +1370,9 @@ impl Drop for WriteConnectionGuard {
             }
         }
         if let Some(conn) = self.conn.take() {
-            trim_for_idle(&conn);
+            if self.session.readers_out.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                trim_for_idle(&conn);
+            }
             let mut spare = None;
             {
                 let mut slot = self.session.write_conn.lock().unwrap_or_else(|e| e.into_inner());

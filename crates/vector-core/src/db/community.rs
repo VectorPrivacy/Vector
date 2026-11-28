@@ -1286,6 +1286,22 @@ fn activity_sql(placeholders: &str) -> String {
     format!("SELECT npub, MAX(created_at) FROM events WHERE chat_id IN ({placeholders}) AND kind != {sys} AND npub IS NOT NULL AND npub != '' GROUP BY chat_id, kind, npub")
 }
 
+/// [`activity_sql`] over only the rows stored after a rowid (bound first): a range of the
+/// table's own key, whatever the history holds.
+fn activity_since_sql(placeholders: &str) -> String {
+    let sys = crate::stored_event::event_kind::APPLICATION_SPECIFIC;
+    format!("SELECT npub, MAX(created_at) FROM events NOT INDEXED WHERE rowid > ? AND chat_id IN ({placeholders}) AND kind != {sys} AND npub IS NOT NULL AND npub != '' GROUP BY npub")
+}
+
+struct ActivityKey;
+/// Per Community: the Channel rows it was read for, the newest rowid read, and each author's
+/// newest post.
+type ActivityCache = std::sync::Mutex<std::collections::HashMap<String, (Vec<i64>, i64, std::collections::HashMap<String, u64>)>>;
+
+fn activity_cache() -> std::sync::Arc<ActivityCache> {
+    crate::db::current_session().scoped::<ActivityKey, ActivityCache>()
+}
+
 /// The authors with a post that is no sign of membership, one indexed read per kind of sign.
 /// Binds the Channel rows once per sign.
 fn flagged_sql(placeholders: &str, strict: bool) -> String {
@@ -1341,18 +1357,28 @@ fn member_activity(community_id: &str, capped: bool, strict: bool) -> Result<Vec
     let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     {
-        // Each author's newest across Channels and kinds is taken here.
-        let mut stmt = conn.prepare(&activity_sql(&placeholders)).map_err(|e| e.to_string())?;
+        // Each author's newest across Channels and kinds: read whole once a session, then only
+        // the rows stored since, so a recount costs what arrived rather than the history.
+        let cache = activity_cache();
+        let held = cache.lock().unwrap_or_else(|e| e.into_inner()).get(community_id).filter(|c| c.0 == chat_ints).map(|c| (c.1, c.2.clone()));
+        let top: i64 = conn.query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        let (since, mut newest) = held.unwrap_or_default();
+        let (sql, from) = if since > 0 { (activity_since_sql(&placeholders), Some(since)) } else { (activity_sql(&placeholders), None) };
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| e.to_string())?;
+        let args = from.into_iter().chain(chat_ints.iter().copied());
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
+            .query_map(rusqlite::params_from_iter(args), |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
             let (npub, at) = row.map_err(|e| e.to_string())?;
-            let newest = active.entry(npub).or_insert(at);
-            *newest = (*newest).max(at);
+            let n = newest.entry(npub).or_insert(at);
+            *n = (*n).max(at);
         }
+        drop(stmt);
+        active.clone_from(&newest);
+        cache.lock().unwrap_or_else(|e| e.into_inner()).insert(community_id.to_string(), (chat_ints.clone(), top, newest));
     }
 
     // A post its Channel's rules held, kept marked on a manager's device, is no sign of membership;
