@@ -655,16 +655,31 @@ fn next_pooled_id() -> u64 {
 
 type PlaneSlots = (u64, std::collections::HashMap<String, PooledPlane>);
 
-#[derive(Default)]
 struct PlanePool {
     /// The session generation the entries belong to, and the entries by key.
     slots: std::sync::Mutex<PlaneSlots>,
     /// Whether a sweep is waiting on the pool's next expiry: one at a time, none for an empty pool.
     sweep_armed: std::sync::atomic::AtomicBool,
+    /// How long an unused entry is kept.
+    ttl: std::time::Duration,
+}
+
+impl Default for PlanePool {
+    fn default() -> Self {
+        Self::with_ttl(PLANE_POOL_IDLE_TTL)
+    }
+}
+
+/// The plane connections held now: how many pooled, how many open, and their clients.
+pub fn plane_census() -> (usize, usize, Vec<Client>) {
+    let pooled = PLANE_POOL.lock();
+    let open = OPEN_PLANES.lock();
+    let clients = pooled.1.values().chain(open.1.values()).map(|p| p.client.clone()).collect();
+    (pooled.1.len(), open.1.len(), clients)
 }
 
 static PLANE_POOL: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(PlanePool::default);
-static OPEN_PLANES: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(PlanePool::default);
+static OPEN_PLANES: std::sync::LazyLock<PlanePool> = std::sync::LazyLock::new(|| PlanePool::with_ttl(OPEN_PLANE_IDLE_TTL));
 
 /// A pooled connection unused for this long is closed — long enough to span a
 /// community's whole backfill, short enough not to hoard sockets.
@@ -673,19 +688,35 @@ const PLANE_POOL_IDLE_TTL: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_secs(90)
 };
-/// Hard cap on simultaneously-pooled plane connections (LRU-evicted).
-const PLANE_POOL_MAX: usize = 24;
+/// An open connection is one per relay and signed in as nobody, so any later read reuses it:
+/// kept for most of a session rather than redialled minutes after a sync.
+const OPEN_PLANE_IDLE_TTL: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(200)
+} else {
+    std::time::Duration::from_secs(30 * 60)
+};
+/// Plane connections dialling at once.
+const COLD_PLANES_AT_ONCE: usize = 4;
+static COLD_PLANES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(COLD_PLANES_AT_ONCE);
+
+/// Hard cap on simultaneously-pooled plane connections (LRU-evicted). Room for a large account's
+/// whole first sync: an evicted plane is dialled and authenticated again a moment later.
+const PLANE_POOL_MAX: usize = 96;
 
 /// Remove the entries idle past the TTL, returning their clients to disconnect.
-fn take_expired(pool: &mut std::collections::HashMap<String, PooledPlane>, now: web_time::Instant) -> Vec<Client> {
+fn take_expired(pool: &mut std::collections::HashMap<String, PooledPlane>, now: web_time::Instant, ttl: std::time::Duration) -> Vec<Client> {
     let expired: Vec<String> = pool.iter()
-        .filter(|(_, p)| p.idle() && now.duration_since(p.last_used) >= PLANE_POOL_IDLE_TTL)
+        .filter(|(_, p)| p.idle() && now.duration_since(p.last_used) >= ttl)
         .map(|(k, _)| k.clone())
         .collect();
     expired.into_iter().filter_map(|k| pool.remove(&k)).map(|p| p.client).collect()
 }
 
 impl PlanePool {
+    fn with_ttl(ttl: std::time::Duration) -> Self {
+        Self { slots: Default::default(), sweep_armed: Default::default(), ttl }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, PlaneSlots> {
         self.slots.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -707,11 +738,11 @@ impl PlanePool {
                     break;
                 }
                 // Only entries in use: look again a TTL on, as releasing one restarts its clock.
-                let due = next.map_or(PLANE_POOL_IDLE_TTL, |oldest| {
-                    PLANE_POOL_IDLE_TTL.saturating_sub(web_time::Instant::now().duration_since(oldest))
+                let due = next.map_or(self.ttl, |oldest| {
+                    self.ttl.saturating_sub(web_time::Instant::now().duration_since(oldest))
                 });
                 crate::rt::time::sleep(due).await;
-                let expired = take_expired(&mut self.lock().1, web_time::Instant::now());
+                let expired = take_expired(&mut self.lock().1, web_time::Instant::now(), self.ttl);
                 disconnect_clients(expired);
             }
             self.sweep_armed.store(false, std::sync::atomic::Ordering::Release);
@@ -726,7 +757,7 @@ impl PlanePool {
     /// idle TTL expired and resets the whole pool if the session generation advanced
     /// (a swap). Returns `(Some(client_if_hit), clients_to_disconnect)`.
     fn take(&self, generation: u64, key: &str) -> (Option<Client>, Vec<Client>) {
-        let (hit, evicted) = take_locked(&mut self.lock(), generation, key);
+        let (hit, evicted) = take_locked(&mut self.lock(), generation, key, self.ttl);
         (hit.map(|(client, _)| client), evicted)
     }
 
@@ -737,7 +768,7 @@ impl PlanePool {
         if generation < g.0 {
             return None;
         }
-        let (_, mut evicted) = take_locked(&mut g, generation, key);
+        let (_, mut evicted) = take_locked(&mut g, generation, key, self.ttl);
         if !g.1.contains_key(key) {
             evicted.extend(make_room(&mut g.1));
             g.1.insert(key.to_string(), PooledPlane::new(make()));
@@ -802,7 +833,7 @@ impl PlanePool {
 /// Drops entries idle past the TTL, and every entry if the session generation advanced (a
 /// swap); a previous session's caller finds nothing and resets nothing. Returns the hit and
 /// the clients to disconnect.
-fn take_locked(g: &mut PlaneSlots, generation: u64, key: &str) -> (Option<(Client, u64)>, Vec<Client>) {
+fn take_locked(g: &mut PlaneSlots, generation: u64, key: &str, ttl: std::time::Duration) -> (Option<(Client, u64)>, Vec<Client>) {
     if generation < g.0 {
         return (None, Vec::new());
     }
@@ -812,7 +843,7 @@ fn take_locked(g: &mut PlaneSlots, generation: u64, key: &str) -> (Option<(Clien
         g.0 = generation;
     }
     let now = web_time::Instant::now();
-    evicted.extend(take_expired(&mut g.1, now));
+    evicted.extend(take_expired(&mut g.1, now, ttl));
     let hit = g.1.get_mut(key).map(|p| {
         p.last_used = now;
         (p.client.clone(), p.id)
@@ -996,6 +1027,7 @@ fn open_read_permits(key: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
 /// relay options, so it routes as they do.
 fn open_entry(generation: u64, key: &str) -> Option<(Client, InUse)> {
     let (client, hold, evicted) = OPEN_PLANES.take_or_insert(generation, key, || {
+        crate::boot_probe::note(&crate::boot_probe::OPEN_DIALS);
         crate::apply_transport(
             nostr_sdk::prelude::Client::builder().notification_channel_size(std::num::NonZeroUsize::MIN),
             crate::transport::Lane::Shared,
@@ -1065,6 +1097,7 @@ fn watch_for_challenge(generation: u64, key: &str, relay: &Relay) {
     // spawn-detached: one socket's frames into the generation-keyed gate map; no account state.
     crate::rt::spawn(async move {
         while let Some(n) = notifications.next().await {
+            crate::boot_probe::note(&crate::boot_probe::READ_FRAMES);
             match n {
                 RelayNotification::Message { message } if matches!(*message, RelayMessage::Auth { .. }) => {
                     return mark_auth(generation, &key);
@@ -1285,6 +1318,7 @@ async fn read_relay_eose(
     let relay = client.relay(url).await.map_err(|_| ReadFail::Eose(Gone))?.ok_or(ReadFail::Eose(Gone))?;
     // Subscribe to notifications BEFORE the REQ so the EOSE can't slip past.
     let mut notifications = relay.notifications();
+    let _reader = crate::boot_probe::Reader::new();
     let sub_id = SubscriptionId::generate();
     // Close on every exit — this REQ bypasses the pool's subscription map.
     // Constructed BEFORE the send: cancellation during the send await must
@@ -1321,7 +1355,10 @@ async fn read_relay_eose(
         // the stream ending is the closed case, and the deadline is still a
         // failure rather than a false EOSE.
         let notification = match crate::rt::time::timeout_at(deadline, notifications.next()).await {
-            Ok(Some(n)) => n,
+            Ok(Some(n)) => {
+                crate::boot_probe::note(&crate::boot_probe::READ_FRAMES);
+                n
+            }
             Ok(None) => return Err(ReadFail::Eose(Gone)),
             Err(_) => return Err(ReadFail::Eose(Deadline)), // timeout is NOT EOSE
         };
@@ -1329,12 +1366,14 @@ async fn read_relay_eose(
             RelayNotification::Event { subscription_id, event }
                 if subscription_id == sub_id && seen.insert(event.id) =>
             {
+                crate::boot_probe::note(&crate::boot_probe::READ_KEPT);
                 events.push(*event);
             }
             RelayNotification::Message { message } => match *message {
                 RelayMessage::Event { subscription_id, event }
                     if *subscription_id == sub_id && seen.insert(event.id) =>
                 {
+                    crate::boot_probe::note(&crate::boot_probe::READ_KEPT);
                     events.push(event.into_owned());
                 }
                 RelayMessage::EndOfStoredEvents(id) if *id == sub_id => return Ok(events),
@@ -1608,6 +1647,15 @@ impl LiveTransport {
         let (hit, evicted) = PLANE_POOL.take(generation, &key);
         disconnect_clients(evicted);
         if let Some(c) = hit {
+            return c;
+        }
+        // Each cold plane dials every community relay and authenticates on each: unbounded,
+        // a cold boot opens dozens at once. Background sync dials a few at a time, the reader's
+        // own fetch without waiting, and a plane another read built meanwhile is reused.
+        let _permit = if super::cache::is_foreground() { None } else { COLD_PLANES.acquire().await.ok() };
+        let (hit, evicted) = PLANE_POOL.take(generation, &key);
+        disconnect_clients(evicted);
+        if let Some(c) = hit {
             c
         } else {
             let opened = web_time::Instant::now();
@@ -1616,6 +1664,7 @@ impl LiveTransport {
             // Authenticates as the PLANE key, not the user — hence its own
             // authenticator rather than `nostr_client_builder()`, which resolves the
             // session identity.
+            crate::boot_probe::note_plane(&key);
             let auth = nostr_sdk::prelude::SignerAuthenticator::new(plane.clone());
             #[cfg(test)]
             let auth = tests::SlowAuth(auth);
@@ -1725,6 +1774,7 @@ impl LiveTransport {
     /// reads the counts to decide whether its cursor may advance (full coverage
     /// only — a majority return must not skip a down relay's pending editions).
     pub async fn fetch_counted(&self, query: &Query, relays: &[String]) -> Result<(Vec<Event>, usize, usize), String> {
+        crate::boot_probe::note(&crate::boot_probe::FETCHES);
         let client = Self::warm_client(relays, self.timeout).await?;
         let base_timeout = self.timeout;
         let filter = query.to_filter();
@@ -3060,6 +3110,52 @@ mod tests {
     // ── Plane connections by relay gate ───────────────────────────────────────
 
     /// A plane key and the one wrap it authored, held by `relay`.
+    /// Not a check: what concurrent reads on one connection cost, against the same reads in turn.
+    /// `cargo nextest run -p vector-core read_fanout --run-ignored only --no-capture`
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore]
+    async fn read_fanout() {
+        use nostr_sdk::prelude::FinalizeEvent;
+        let relay = wire::WireRelay::start().await;
+        let authors: Vec<Keys> = (0..8).map(|_| Keys::generate()).collect();
+        let body = "x".repeat(1500);
+        for a in &authors {
+            relay.hold((0..600).map(|i| EventBuilder::new(Kind::Custom(1059), format!("{i}{body}")).finalize(a).unwrap()));
+        }
+        let client = nostr_sdk::prelude::Client::builder().build();
+        crate::ClientRelayExt::add_managed_relay(&client, relay.url()).await.unwrap();
+        client.connect().await;
+        client.relay(relay.url()).await.unwrap().unwrap().wait_for_connection(std::time::Duration::from_secs(5)).await;
+        let read = |a: &Keys| {
+            let (client, url, f) = (client.clone(), relay.url(), Filter::new().author(a.public_key()));
+            async move { fetch_relay_eose_filters(&client, &url, vec![f], std::time::Duration::from_secs(60)).await.unwrap().len() }
+        };
+        fn usage() -> (f64, i64, i64) {
+            let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
+            let t = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
+            (t(u.ru_utime) + t(u.ru_stime), u.ru_minflt as i64, (u.ru_nvcsw + u.ru_nivcsw) as i64)
+        }
+        for round in 0..2 {
+            let (c0, f0, s0) = usage();
+            let r0 = crate::boot_probe::READ_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            let n: usize = futures_util::future::join_all(authors.iter().map(read)).await.iter().sum();
+            let (c1, f1, s1) = usage();
+            let r1 = crate::boot_probe::READ_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+            println!("round {round} together: {n} events in {:?}, cpu {:.2}s faults {} switches {} frames read {}", started.elapsed(), c1 - c0, f1 - f0, s1 - s0, r1 - r0);
+            let started = std::time::Instant::now();
+            let mut n = 0;
+            for a in &authors {
+                n += read(a).await;
+            }
+            let (c2, f2, s2) = usage();
+            let r2 = crate::boot_probe::READ_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+            println!("round {round} in turn:   {n} events in {:?}, cpu {:.2}s faults {} switches {} frames read {}", started.elapsed(), c2 - c1, f2 - f1, s2 - s1, r2 - r1);
+        }
+    }
+
     fn plane_on(relay: &wire::WireRelay) -> (Keys, Event) {
         use nostr_sdk::prelude::FinalizeEvent;
         let plane = Keys::generate();

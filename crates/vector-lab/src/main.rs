@@ -2,6 +2,7 @@
 //! roles as child processes of this same binary (a bot is one identity per process), which meet
 //! through files in a shared working directory and each write the checks they made.
 
+mod backlog;
 mod events;
 mod flood;
 mod gap;
@@ -184,6 +185,7 @@ fn roles(scenario: &str, opts: &Opts) -> Option<(Vec<String>, u64)> {
         "voice" => (vec!["owner".into(), "a".into(), "b".into()], 600),
         "flood" => (std::iter::once("owner".to_string()).chain((0..opts.bots).map(|i| format!("bot{i}"))).collect(), 900),
         "gate" => (["owner", "gate"].map(String::from).into_iter().chain((0..opts.bots).map(|i| format!("m{i}"))).collect(), 1200),
+        "backlog" => (std::iter::once("owner".to_string()).chain((0..opts.bots).map(|i| format!("bot{i}"))).collect(), 7200),
         _ => return None,
     })
 }
@@ -196,6 +198,7 @@ async fn run_role(scenario: &str, role: &str, lab: Lab) {
         "voice" => voice::run(role, lab).await,
         "flood" => flood::run(role, lab).await,
         "gate" => gate::run(role, lab).await,
+        "backlog" => backlog::run(role, lab).await,
         _ => {}
     }
 }

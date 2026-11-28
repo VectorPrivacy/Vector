@@ -1,0 +1,1943 @@
+//! The slim layout below widescreen (`console.css`, `ChatListPane.svelte`): a header over the
+//! community rail and the pane beside it, the tab bar, and screens that take the window.
+
+use crate::kit::Tipped as _;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use gpui::prelude::*;
+use gpui::{AnimationExt, Focusable};
+use gpui::{AnyElement, Bounds, Context, Entity, FontWeight, ListAlignment, ListState, Pixels, SharedString, Window, div, list, px, svg};
+use crate::pic::img;
+use vector_core::chat::SerializableChat;
+
+use super::{MenuAct, VectorApp, avatar, preview_line_at, slim_badge};
+use crate::composer::TextInput;
+use crate::data::{self, Community, Store};
+use crate::kit;
+use crate::pull::{self, Step};
+use crate::t;
+use crate::theme::*;
+
+/// `--cc-peek` (lib/drawer.js PEEK).
+const DRAWER_PEEK: f32 = 64.;
+/// How far past its edge the drawer parks, so its shadow is off screen too (drawer.js SHADOW).
+const DRAWER_SHADOW: f32 = 32.;
+/// Narrowest window that gets the multi-pane layout (`WS_MIN_W`).
+pub(super) const WIDE_MIN: f32 = 900.;
+
+const SURFACE: u32 = 0x171717;
+const EDGE: u32 = 0x474747;
+const RAIL_W: f32 = 68.;
+const HEADER_H: f32 = 52.;
+const NAV_H: f32 = 65.;
+const GUTTER: f32 = 16.;
+/// A list row and the gap under it.
+pub(super) const ROW_PITCH: f32 = 72.;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Filter {
+    All,
+    Messages,
+    Communities,
+    Requests,
+}
+
+impl Filter {
+    fn id(self) -> &'static str {
+        match self {
+            Filter::All => "all",
+            Filter::Messages => "messages",
+            Filter::Communities => "communities",
+            Filter::Requests => "requests",
+        }
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            Filter::All => t::slim_filter_all(),
+            Filter::Messages => t::chats_tab_messages(),
+            Filter::Communities => t::slim_filter_communities(),
+            Filter::Requests => t::chats_tab_requests(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum Item {
+    Archive,
+    Chat(String),
+    /// Unfolded under the archive row; the last closes the group with a rule.
+    Archived(String, bool),
+    Community(String),
+}
+
+pub(super) struct Slim {
+    /// The community rail is out (Discord) rather than folded (Telegram).
+    pub rail: bool,
+    /// Display's Hide Community Rail: folded with no pull tab.
+    pub hidden: bool,
+    pub filter: Filter,
+    /// How far out the rail is, 0 folded to 1 out: eased to `rail`, or held to a finger.
+    rail_p: pull::Eased,
+    rail_pull: pull::Pull,
+    /// A community's channels stand over the channel on screen.
+    pub drawer: bool,
+    /// How far out that drawer is, eased to `drawer` or held to a finger.
+    drawer_p: pull::Eased,
+    drawer_pull: pull::Pull,
+    /// The list was on screen at the last render, so a chat opening now came from it.
+    on_list: bool,
+    /// How far a channel's details sheet is slid off to the right, 0 covering the channel.
+    sheet_p: pull::Eased,
+    sheet_pull: pull::Pull,
+    /// Drawn at the last render; on its way away, to close once it is off.
+    sheet_shown: bool,
+    sheet_closing: bool,
+    /// The rail's pull tab as last drawn, and the span of the screen's left edge claimed for it.
+    tab_probe: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    edge_claim: Option<(f32, f32)>,
+    /// The channel whose community details slide over it.
+    pub details: Option<String>,
+    pub search: Option<Entity<TextInput>>,
+    pub(super) list: ListState,
+    keys: RefCell<Vec<Item>>,
+    tabs: Rc<RefCell<HashMap<Filter, Bounds<Pixels>>>>,
+    /// Where the tab bar slides from: the tab last marked.
+    bar_from: Option<(Filter, f32, f32)>,
+    /// When the bar began its slide; past it, the bar rests in its tab.
+    bar_at: Option<std::time::Instant>,
+    new_btn: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl Slim {
+    pub fn new() -> Self {
+        let rail = crate::backend::device::get("cc_rail").is_none_or(|v| v != "false");
+        Self {
+            rail,
+            rail_p: pull::Eased::at(if rail { 1. } else { 0. }),
+            rail_pull: pull::Pull::default(),
+            hidden: crate::backend::device::get("cc_rail_hidden").is_some_and(|v| v == "true"),
+            filter: Filter::Messages,
+            drawer: false,
+            drawer_p: pull::Eased::at(0.),
+            drawer_pull: pull::Pull::default(),
+            on_list: false,
+            sheet_p: pull::Eased::at(1.),
+            sheet_pull: pull::Pull::default(),
+            sheet_shown: false,
+            sheet_closing: false,
+            tab_probe: Rc::default(),
+            edge_claim: None,
+            details: None,
+            search: None,
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
+            keys: RefCell::new(Vec::new()),
+            tabs: Rc::default(),
+            bar_from: None,
+            bar_at: None,
+            new_btn: Rc::default(),
+        }
+    }
+
+    /// The tabs on offer: communities live on the rail while it shows.
+    fn rail_out(&self) -> bool {
+        self.rail && !self.hidden
+    }
+
+    fn filters(&self) -> &'static [Filter] {
+        if self.rail_out() {
+            &[Filter::Messages, Filter::Requests]
+        } else {
+            &[Filter::All, Filter::Messages, Filter::Communities, Filter::Requests]
+        }
+    }
+
+    /// The tab in force, which a fold or an unfold can leave pointing at one that's gone.
+    fn active(&self) -> Filter {
+        let f = self.filters();
+        if f.contains(&self.filter) { self.filter } else { f[0] }
+    }
+}
+
+fn community_unread(store: &Store, com: &Community) -> bool {
+    com.channels
+        .iter()
+        .any(|ch| store.chat(&ch.channel_id).is_some_and(|chat| store.unread_count(chat) > 0))
+}
+
+/// A community's newest channel message: (its channel, when).
+fn community_latest<'a>(store: &'a Store, com: &Community) -> Option<(&'a SerializableChat, u64)> {
+    com.channels
+        .iter()
+        .filter_map(|ch| store.chat(&ch.channel_id))
+        .filter_map(|chat| chat.messages.last().map(|m| (chat, m.at)))
+        .max_by_key(|(_, at)| *at)
+}
+
+impl VectorApp {
+    pub(super) fn slim_set_rail(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.slim.rail = open;
+        self.slim.rail_p.go(if open { 1. } else { 0. });
+        crate::backend::device::set("cc_rail", open.to_string());
+        cx.notify();
+    }
+
+    /// A chat on screen, which a sideways pull draws its drawer over.
+    fn slim_layer(&self) -> bool {
+        self.open.is_some() && self.slim.details.is_none()
+    }
+
+    /// The rail's pull, by the rail itself, the screen's edge or the tab. In a channel's drawer
+    /// a sideways pull moves the drawer, so the rail stays as it is.
+    fn rail_scroll(&mut self, e: &gpui::ScrollEvent, cx: &mut Context<Self>) {
+        if self.slim_layer() || self.slim.hidden {
+            return;
+        }
+        // The rail moves by itself, by the screen's edge while folded, and by its tab.
+        let (x, y) = (f32::from(e.position.x), f32::from(e.position.y));
+        let tab = self.slim.edge_claim.is_some_and(|(top, bottom)| x < 26. && (top..bottom).contains(&y));
+        let Slim { rail_pull, rail_p, .. } = &mut self.slim;
+        let p = rail_p.value();
+        let grabs = x < RAIL_W * p || (p < 1. && x < 20.) || tab;
+        match rail_pull.feed(e, |_| grabs.then(|| (rail_p.stop(), RAIL_W))) {
+            Some(Step::Move(v)) => self.slim.rail_p.set(v),
+            Some(Step::End(open)) if open != self.slim.rail => self.slim_set_rail(open, cx),
+            Some(Step::End(open)) => self.slim.rail_p.go(if open { 1. } else { 0. }),
+            None => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The drawer's pull: out from the channel, back from the drawer or its shade, either way
+    /// mid-slide. What scrolls sideways itself keeps the gesture, and the composer is its own.
+    fn drawer_scroll(&mut self, e: &gpui::ScrollEvent, from_chat: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.slim_layer() {
+            return;
+        }
+        if from_chat && !self.slim.drawer_pull.pulling() && self.composer_box.get().is_some_and(|b| e.position.y >= b.top()) {
+            return;
+        }
+        let peek = if self.slim_flat() { 0. } else { DRAWER_PEEK };
+        let span = f32::from(window.viewport_size().width) - peek + DRAWER_SHADOW;
+        let was = self.slim.drawer_pull.pulling();
+        let Slim { drawer_pull, drawer_p, .. } = &mut self.slim;
+        let step = drawer_pull.feed(e, |dx| pull::takes(drawer_p, dx).then(|| (drawer_p.stop(), span)));
+        if !was && self.slim.drawer_pull.pulling() {
+            // What floats over the conversation goes as the drawer starts over it, and the
+            // keyboard belongs to the conversation going under.
+            window.blur(cx);
+            self.menu = None;
+            self.picker = None;
+            self.attach = None;
+        }
+        match step {
+            Some(Step::Move(v)) => self.slim.drawer_p.set(v),
+            Some(Step::End(open)) => {
+                self.slim.drawer = open;
+                self.slim.drawer_p.go(if open { 1. } else { 0. });
+            }
+            None => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The details slide away to the right, then close.
+    pub(super) fn slim_close_details(&mut self, cx: &mut Context<Self>) {
+        if self.slim.details.is_some() {
+            self.slim.sheet_closing = true;
+            cx.notify();
+        }
+    }
+
+    /// A pull to the right takes the details sheet away.
+    fn sheet_scroll(&mut self, e: &gpui::ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let width = f32::from(window.viewport_size().width);
+        let Slim { sheet_pull, sheet_p, .. } = &mut self.slim;
+        match sheet_pull.feed(e, |dx| pull::takes(sheet_p, dx).then(|| (sheet_p.stop(), width))) {
+            Some(Step::Move(v)) => self.slim.sheet_p.set(v),
+            Some(Step::End(gone)) => {
+                self.slim.sheet_closing = gone;
+                self.slim.sheet_p.go(if gone { 1. } else { 0. });
+            }
+            None => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn drawer_listener(cx: &mut Context<Self>) -> impl Fn(&gpui::ScrollEvent, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(|app, e: &gpui::ScrollEvent, window, cx| app.drawer_scroll(e, false, window, cx))
+    }
+
+    /// The system back gesture gives way where the rail's pull tab meets the screen's edge.
+    fn claim_edge(&mut self) {
+        let span = self.slim.tab_probe.take().map(|b| (f32::from(b.top()), f32::from(b.bottom())));
+        if span == self.slim.edge_claim {
+            return;
+        }
+        self.slim.edge_claim = span;
+        #[cfg(target_os = "android")]
+        crate::android::claim_left_edge(span);
+    }
+
+    fn slim_query(&self, cx: &gpui::App) -> String {
+        self.slim_raw_query(cx).to_lowercase()
+    }
+
+    fn slim_raw_query(&self, cx: &gpui::App) -> String {
+        self.slim
+            .search
+            .as_ref()
+            .map(|s| s.read(cx).text().trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Out of the chat on screen: a community of many channels to its drawer, else the list,
+    /// which a flat chat's drawer is, pulled the rest of the way over it.
+    pub(super) fn slim_back(&mut self, cx: &mut Context<Self>) {
+        self.slim.details = None;
+        if self.open.is_some() && self.slim_flat() {
+            self.slim.drawer = true;
+        } else if !self.slim_flat() && !self.slim.drawer && self.open.is_some() {
+            self.slim.drawer = true;
+        } else {
+            self.slim_leave_chat();
+        }
+        cx.notify();
+    }
+
+    fn slim_leave_chat(&mut self) {
+        self.slim.drawer = false;
+        self.slim.drawer_p.set(0.);
+        if self.community.is_some() {
+            self.leave_community();
+        } else {
+            self.open = None;
+            if self.live {
+                crate::backend::messaging::set_active_chat(None);
+            }
+        }
+    }
+
+    /// A chat with no drawer of its own: a DM, or a community of one channel. Its drawer is the
+    /// whole list, out only to leave for it.
+    fn slim_flat(&self) -> bool {
+        self.community.as_ref().is_none_or(|v| self.store.borrow().community(&v.id).is_none_or(|c| c.channels.len() <= 1))
+    }
+
+    fn slim_home(&mut self, cx: &mut Context<Self>) {
+        self.settings = None;
+        self.nexus = None;
+        self.profile = None;
+        self.new_chat = None;
+        self.create_community = None;
+        self.slim.drawer = false;
+        cx.notify();
+    }
+
+    fn slim_new_menu(&mut self, cx: &mut Context<Self>) {
+        let b = self.slim.new_btn.get().unwrap_or_default();
+        self.show_menu(
+            gpui::point(b.right() - px(180.), b.bottom() + px(6.)),
+            vec![
+                (kit::MenuItem::new(t::chats_new_message(), "chat-circle").lead(), MenuAct::NewMessage),
+                (kit::MenuItem::new(t::chats_new_community(), "users-multi").lead(), MenuAct::NewCommunity),
+                (kit::MenuItem::new(t::slim_add_friend(), "add-user").lead(), MenuAct::AddFriend),
+                (kit::MenuItem::new(t::slim_bookmark(), "bookmark").lead(), MenuAct::Bookmark),
+                (kit::MenuItem::new(t::start_app_store(), "nexus").lead(), MenuAct::AppStore),
+            ],
+            cx,
+        );
+    }
+
+    /// Everything under the window chrome while the window is slim.
+    pub(super) fn slim_main(
+        &mut self,
+        store: &Store,
+        on_community: &crate::community::OnAct,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.claim_edge();
+        let from_list = std::mem::take(&mut self.slim.on_list);
+        let width = f32::from(window.viewport_size().width);
+        let screen = |body: AnyElement| div().flex_1().min_h_0().w_full().flex().flex_col().child(body);
+        if self.settings.is_some() {
+            let view = div().flex_1().min_h_0().child(self.settings_cached(None, cx));
+            return screen(view.into_any_element()).child(self.slim_navbar(store, cx)).into_any_element();
+        }
+        if self.nexus.is_some() {
+            return screen(div().flex_1().min_h_0().children(self.nexus_view(width, cx)).into_any_element())
+                .into_any_element();
+        }
+        if let Some(m) = self.create_community.as_ref() {
+            let app = cx.entity().downgrade();
+            let on: crate::createcommunity::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_create_community(act, window, cx)).ok();
+            });
+            return screen(crate::createcommunity::view(m, store, width, &on, cx)).into_any_element();
+        }
+        if let Some(nc) = self.new_chat.as_ref() {
+            let app = cx.entity().downgrade();
+            let on: crate::newchat::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_new_chat(act, window, cx)).ok();
+            });
+            let text = nc.filter.read(cx).text();
+            let invite = crate::newchat::invite_key(text)
+                .map(|k| self.invite_previews.get(&k).cloned().unwrap_or(crate::newchat::Preview::Loading))
+                .or_else(|| crate::newchat::go_link(text).map(crate::newchat::Preview::Go));
+            return screen(crate::newchat::view(nc, store, width, invite.as_ref(), &on, cx).into_any_element())
+                .into_any_element();
+        }
+        if let Some(p) = self.profile.as_ref() {
+            let app = cx.entity().downgrade();
+            let on: crate::profile::OnAct = Rc::new(move |act, window, cx| {
+                app.update(cx, |app, cx| app.on_profile(act, window, cx)).ok();
+            });
+            let fade = crate::kit::bezier(0., 0., 0.58, 1.)(self.profile_in.shown(0.4, window));
+            let pane = crate::profile::pane(store, &self.media, p, &on, window, cx);
+            return screen(div().flex_1().min_h_0().flex().relative().child(pane).children(crate::kit::veil(fade)).into_any_element())
+                .child(self.slim_navbar(store, cx))
+                .into_any_element();
+        }
+        let drawer = self.slim.drawer && self.community.is_some();
+        let sheet_was = std::mem::take(&mut self.slim.sheet_shown);
+        if let Some(id) = self.open.clone() {
+            let sheet = if !drawer && self.slim.details.as_deref() == Some(&*id) {
+                self.slim_details(store, &id, window, cx)
+            } else {
+                None
+            };
+            let flat = self.slim_flat();
+            let drawer = self.slim.drawer;
+            let pulling = self.slim.drawer_pull.pulling();
+            // Opened from the list, which slides away off it.
+            if from_list && !pulling {
+                self.slim.drawer_p.set(1.);
+            }
+            let target = if drawer { 1. } else { 0. };
+            if !pulling && self.slim.drawer_p.target() != target {
+                self.slim.drawer_p.go(target);
+            }
+            let p = self.slim.drawer_p.get(window);
+            // A flat chat's drawer all the way out is the list it left for.
+            if flat && drawer && p >= 1. && !pulling {
+                self.slim_leave_chat();
+                return self.slim_main(store, on_community, window, cx);
+            }
+            let entrance = self.chat_in.shown(0.28, window);
+            // Under a drawer, the drawer's slide is the chat's entrance.
+            let t = if p > 0. || drawer { 1. } else { kit::bezier(0.22, 1., 0.36, 1.)(entrance) };
+            let back = cx.listener(|app, _: &gpui::ClickEvent, _, cx| app.slim_back(cx));
+            let chat = div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .left(px(width * 0.35 * (1. - t)))
+                .flex()
+                .on_scroll(cx.listener(|app, e: &gpui::ScrollEvent, window, cx| {
+                    // A pull that slid the details sheet off its start carries on over the chat.
+                    if app.slim.details.is_some() {
+                        app.sheet_scroll(e, window, cx)
+                    } else {
+                        app.drawer_scroll(e, true, window, cx)
+                    }
+                }))
+                .child(self.chat_cached(id, cx))
+                .child(
+                    // .nav-back-btn
+                    div()
+                        .id("chat-back-btn")
+                        .aria_label(t::slim_back())
+                        .absolute()
+                        .left(px(5.))
+                        .top(px(10.))
+                        .size(px(40.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .on_click(back)
+                        .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
+                )
+                .children(crate::kit::veil(0.4 + 0.6 * t));
+            if let Some(sheet) = sheet {
+                // Slid in over the channel, which stays open beneath.
+                if !sheet_was {
+                    self.slim.sheet_p.set(1.);
+                }
+                let pulling = self.slim.sheet_pull.pulling();
+                let target = if self.slim.sheet_closing { 1. } else { 0. };
+                if !pulling && self.slim.sheet_p.target() != target {
+                    self.slim.sheet_p.go(target);
+                }
+                let away = self.slim.sheet_p.get(window);
+                if self.slim.sheet_closing && away >= 1. && !pulling {
+                    self.slim.details = None;
+                    self.slim.sheet_closing = false;
+                    return self.slim_main(store, on_community, window, cx);
+                }
+                self.slim.sheet_shown = true;
+                return div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .relative()
+                    .flex()
+                    .child(chat)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(away * width))
+                            .w(px(width))
+                            .flex()
+                            .occlude()
+                            .on_scroll(cx.listener(|app, e: &gpui::ScrollEvent, window, cx| app.sheet_scroll(e, window, cx)))
+                            .child(sheet),
+                    )
+                    .into_any_element();
+            }
+            self.slim.sheet_closing = false;
+            if p <= 0. {
+                return chat.into_any_element();
+            }
+            // .cc-drawer-shade + `--cc-peek`: a channel stays on screen beside its drawer, and
+            // only the drawer moves. A flat chat's is the whole list, the tab bar rising with
+            // it on the way to leave.
+            let span = width - if flat { 0. } else { DRAWER_PEEK };
+            let header = self.slim_header(store, window, cx);
+            let body = self.slim_body(store, span, on_community, window, cx);
+            let col = div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(c(if flat { 0x050505 } else { 0x0b0b0b }))
+                .child(header)
+                .child(body)
+                .when(flat && drawer, |d| {
+                    d.child(div().flex_shrink_0().relative().top(px(NAV_H * (1. - p))).child(self.slim_navbar(store, cx)))
+                });
+            let left = (p - 1.) * (span + DRAWER_SHADOW);
+            // Translucent fill is what a tiled phone GPU pays for: the shade covers only what the
+            // drawer leaves showing, and its shadow is a strip at the edge, not a blurred box.
+            let edge = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(left + span))
+                .w(px(DRAWER_SHADOW))
+                .bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(gpui::black().opacity(0.3), 0.),
+                    gpui::linear_color_stop(gpui::black().opacity(0.), 1.),
+                ));
+            let drawer_el = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(left))
+                .w(px(span))
+                .flex()
+                .occlude()
+                .on_scroll(Self::drawer_listener(cx))
+                .child(col);
+            // On its way away, a tap is for the conversation coming back, not the shade leaving it.
+            let shade = div()
+                .id("cc-drawer-shade")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .left(px((left + span).max(0.)))
+                .bg(gpui::black().opacity(0.55))
+                .opacity(p)
+                .on_scroll(Self::drawer_listener(cx))
+                .when(drawer, |d| {
+                    d.occlude().on_click(cx.listener(|app, _, _, cx| {
+                        app.slim.drawer = false;
+                        cx.notify();
+                    }))
+                });
+            return div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .relative()
+                .flex()
+                .child(chat)
+                .child(shade)
+                .child(edge)
+                .child(drawer_el)
+                .into_any_element();
+        }
+        self.slim.on_list = true;
+        let header = self.slim_header(store, window, cx);
+        let body = self.slim_body(store, width, on_community, window, cx);
+        let col = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .bg(c(if drawer { 0x0b0b0b } else { 0x050505 }))
+            .child(header)
+            .child(body);
+        if drawer {
+            let key = self.community.as_ref().map(|v| v.id.clone()).unwrap_or_default();
+            col.with_animation(
+                SharedString::from(format!("slim-drawer-in-{key}")),
+                gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::kit::bezier(0.22, 1., 0.36, 1.)),
+                move |d, t| {
+                    d.relative()
+                        .left(px(-width * 0.2 * (1. - t)))
+                        .children(crate::kit::veil(0.5 + 0.5 * t))
+                },
+            )
+            .into_any_element()
+        } else {
+            let (fade, rise) = self.intro_ease();
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(c(0x050505))
+                .child(col.relative().top(px(50. * (1. - rise))).opacity(rise))
+                .child(div().flex_shrink_0().opacity(fade).child(self.slim_navbar(store, cx)))
+                .into_any_element()
+        }
+    }
+
+    /// `.cc-header`: your account, search, the scanner and the New menu.
+    fn slim_header(&mut self, store: &Store, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let search = match &self.slim.search {
+            Some(s) => s.clone(),
+            None => {
+                let s = cx.new(|cx| {
+                    TextInput::new(t::slim_search(), cx).with_look(crate::composer::Look {
+                        family: INTER,
+                        weight: FontWeight::NORMAL,
+                        size: px(15.),
+                        line_height: px(24.),
+                        color: c(0xffffff),
+                        placeholder: white_a(0.55),
+                        ..Default::default()
+                    })
+                });
+                cx.subscribe_in(&s, window, |app, _, _: &crate::composer::InputChanged, _, cx| {
+                    app.slim.list.scroll_to(gpui::ListOffset::default());
+                    cx.notify();
+                })
+                .detach();
+                self.slim.search = Some(s.clone());
+                s
+            }
+        };
+        let typed = !search.read(cx).text().is_empty();
+        let me = store.my_npub.clone();
+        let btn = |id: &'static str, icon: &'static str| {
+            div()
+                .id(id)
+                .size(px(36.))
+                .flex_shrink_0()
+                .rounded(px(9.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(white_a(0.85))
+                .hover(|s| s.bg(white_a(0.06)).text_color(c(0xffffff)))
+                .child(svg().path(icon).size(px(24.)).text_color(white_a(0.85)))
+        };
+        div()
+            .h(px(HEADER_H))
+            .flex_shrink_0()
+            .pl(px(12.))
+            .pr(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .bg(c(SURFACE))
+            .child(
+                div()
+                    .id("cc-account")
+                    .aria_label(t::slim_switch_profile())
+                    .h(px(40.))
+                    .pr(px(2.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| {
+                        if app.switcher.is_some() {
+                            app.switcher = None;
+                            cx.notify();
+                        } else {
+                            app.open_switcher(cx);
+                        }
+                    }))
+                    .child(avatar(store, &me, 32.))
+                    .child(svg().path("ui/cc-caret.svg").w(px(9.)).h(px(6.)).text_color(white_a(0.75))),
+            )
+            .child(
+                div()
+                    .id("cc-search")
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(36.))
+                    .ml(px(4.))
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(white_a(0.12))
+                    .cursor_text()
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        if let Some(s) = &app.slim.search {
+                            window.focus(&s.focus_handle(cx), cx);
+                        }
+                        if app.open.is_some() || app.community.is_some() {
+                            app.leave_community();
+                            app.open = None;
+                            app.slim.drawer = false;
+                        }
+                    }))
+                    .child(svg().path("ui/cc-search.svg").size(px(22.)).flex_shrink_0().text_color(white_a(0.55)))
+                    .child(div().flex_1().min_w_0().child(search))
+                    .when(typed, |d| {
+                        d.child(
+                            div()
+                                .id("cc-search-clear")
+                                .aria_label(t::slim_clear_search())
+                                .size(px(26.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|app, _, window, cx| {
+                                    if let Some(s) = &app.slim.search {
+                                        s.update(cx, |t, cx| t.clear(window, cx));
+                                    }
+                                    window.blur(cx);
+                                    cx.notify();
+                                }))
+                                .child(svg().path("ui/cc-clear.svg").size(px(16.)).text_color(white_a(0.6))),
+                        )
+                    }),
+            )
+            .child(btn("cc-scan", "ui/cc-scan.svg").aria_label(t::slim_scan()).on_click(cx.listener(|app, _, window, cx| {
+                app.open_qr_scanner(window, cx);
+            })))
+            .child(
+                btn("cc-new", "ui/cc-plus.svg")
+                    .aria_label(t::slim_new())
+                    .ml(px(-4.))
+                    .on_click(cx.listener(|app, _, _, cx| app.slim_new_menu(cx)))
+                    .child({
+                        let probe = self.slim.new_btn.clone();
+                        gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().size_full()
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// `.cc-body`: the rail beside the pane, which is the filtered list or a community.
+    fn slim_body(
+        &mut self,
+        store: &Store,
+        width: f32,
+        on_community: &crate::community::OnAct,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let query = self.slim_query(cx);
+        let p = if self.slim.hidden || !query.is_empty() { 0. } else { self.slim.rail_p.get(window) };
+        let rail = p > 0.;
+        let pane_w = width - RAIL_W * p;
+        let community = self
+            .community
+            .as_ref()
+            .filter(|_| query.is_empty())
+            .and_then(|v| Some((v, store.community(&v.id)?)));
+        let pane: AnyElement = match community {
+            Some((view, com)) => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(white_a(0.025))
+                .child(crate::community::sidebar(
+                    store,
+                    view,
+                    com,
+                    self.open.as_deref(),
+                    self.raid.get(&com.community_id).is_some_and(|r| r.0 || r.1 > 0),
+                    self.community_caps(&com.community_id).contains("manage_channels"),
+                    on_community,
+                    (&self.voice, &self.on_voice_handler(cx), &self.anchors),
+                    pane_w,
+                    true,
+                ))
+                .into_any_element(),
+            // A cached pane: scrolling the list redraws it alone.
+            None => crate::pane::cached(
+                &self.panes.side,
+                gpui::StyleRefinement::default().flex_1().min_w_0().h_full(),
+                |app, window, cx| {
+                    let query = app.slim_query(cx);
+                    let store = app.store.clone();
+                    let store = store.borrow();
+                    // The pane's root fills it, so the list grows into a flex row as it does in place.
+                    div().size_full().flex().child(app.slim_pane(&store, &query, window, cx)).into_any_element()
+                },
+                cx,
+            ),
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .on_scroll(cx.listener(|app, e: &gpui::ScrollEvent, _, cx| app.rail_scroll(e, cx)))
+            .when(rail, |d| {
+                // The rail's room grows with how far out it is, and the rail rides in with that edge.
+                d.child(
+                    div()
+                        .w(px(RAIL_W * p))
+                        .flex_shrink_0()
+                        .h_full()
+                        .overflow_hidden()
+                        .child(div().relative().left(px((p - 1.) * RAIL_W)).w(px(RAIL_W)).h_full().child(self.slim_rail(store, on_community, cx))),
+                )
+            })
+            .child(pane)
+            .into_any_element()
+    }
+
+    /// `.cc-rail`: the Messages door, the communities, a tile to make one and the fold.
+    fn slim_rail(&self, store: &Store, on_community: &crate::community::OnAct, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.community.as_ref().map(|v| v.id.as_str());
+        let home = active.is_none();
+        let any_unread = store.chats.iter().any(|c| store.listed(c) && store.unread_count(c) > 0);
+        let voice: HashMap<String, bool> = store
+            .communities
+            .iter()
+            .filter_map(|c| Some((c.community_id.clone(), self.voice.badge(store, &c.community_id)?)))
+            .collect();
+        let on = on_community.clone();
+        let door = div()
+            .id("cc-rail-messages")
+            .aria_label(t::rail_messages())
+            .relative()
+            .size(px(45.))
+            .mx_auto()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_click(move |_, window, cx| on(crate::community::Act::Home, window, cx))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|app, e: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    app.messages_menu(e.position, cx);
+                }),
+            )
+            .child(
+                svg()
+                    .path("ui/rail-mail.svg")
+                    .w(px(33.))
+                    .h(px(27.))
+                    .text_color(if home { c(0xffffff) } else { white_a(0.6) }),
+            )
+            .when(home, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px((45. - (RAIL_W - 1.5)) / 2.))
+                        .top(px(3.))
+                        .bottom(px(3.))
+                        .w(px(4.))
+                        .rounded_r(px(4.))
+                        .bg(c(ACCENT)),
+                )
+            })
+            .when(any_unread, |d| {
+                d.child(
+                    slim_badge(c(PRIMARY))
+                        .top(px(4.))
+                        .left(px(34.))
+                        .size(px(10.))
+                        .border_2()
+                        .border_color(c(SURFACE)),
+                )
+            });
+        let tiles = crate::rail::render_slim(store, &store.rail, &self.rail_open, active, RAIL_W - 1.5, &voice, on_community);
+        div()
+            .id("cc-rail")
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|app, e: &gpui::MouseDownEvent, _, cx| {
+                    let rows = vec![(kit::MenuItem::new(t::rail_collapse(), "chevron-double-left"), super::MenuAct::FoldRail)];
+                    app.show_menu(e.position, rows, cx);
+                }),
+            )
+            .w(px(RAIL_W))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .pb(px(4.))
+            .bg(c(SURFACE))
+            .border_t(px(1.5))
+            .border_r(px(1.5))
+            .border_color(c(EDGE))
+            .rounded_tr(px(14.))
+            .overflow_y_scroll()
+            .restrict_scroll_to_axis()
+            .child(div().pt(px(10.)).child(door))
+            .child(div().mt(px(16.)).mx(px(14.)).mb(px(4.)).h(px(1.5)).flex_shrink_0().bg(c(EDGE)))
+            .child(tiles)
+            .child(
+                div()
+                    .id("cc-rail-add")
+                    .tip(t::rail_create_community())
+                    .mt(px(5.))
+                    .size(px(45.))
+                    .flex_shrink_0()
+                    .mx_auto()
+                    .rounded(px(8.5))
+                    .bg(white_a(0.05))
+                    .hover(|s| s.bg(white_a(0.1)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, window, cx| app.open_create_community(window, cx)))
+                    .child(svg().path("ui/plus-thin.svg").size(px(22.)).text_color(c(PRIMARY))),
+            )
+            .child(
+                div()
+                    .id("cc-rail-fold")
+                    .group("cc-rail-fold")
+                    .tip(t::slim_hide_communities())
+                    .mt(px(13.))
+                    .w(px(45.))
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .mx_auto()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.slim_set_rail(false, cx)))
+                    .child(
+                        svg()
+                            .path("icons/chevron-double-left.svg")
+                            .size(px(20.))
+                            .text_color(white_a(0.45))
+                            .group_hover("cc-rail-fold", |s| s.text_color(c(0xffffff))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The list's pane: the filters (or, searching, every match) over the rows.
+    fn slim_pane(&mut self, store: &Store, query: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let searching = !query.is_empty();
+        let filter = self.slim.active();
+        let mut items: Vec<(Item, u64)> = Vec::new();
+        let mut archived: Vec<(String, u64)> = Vec::new();
+        let mut dots: HashMap<Filter, bool> = HashMap::new();
+        if store.has_invites() {
+            dots.insert(Filter::Requests, true);
+        }
+        let mut communities_seen = std::collections::HashSet::new();
+        for chat in &store.chats {
+            if !store.listed(chat) {
+                continue;
+            }
+            let request = store.is_request(chat);
+            let at = chat.messages.last().map(|m| m.at).unwrap_or(0);
+            let unread = store.unread_count(chat) > 0;
+            if unread {
+                dots.insert(if request { Filter::Requests } else { Filter::Messages }, true);
+            }
+            let name_hit = || store.name(&chat.id).to_lowercase().contains(query);
+            let keep = if searching {
+                name_hit()
+            } else {
+                match filter {
+                    Filter::Requests => request,
+                    Filter::Messages | Filter::All => !request,
+                    Filter::Communities => false,
+                }
+            };
+            if keep && !searching && store.is_archived(chat) {
+                archived.push((chat.id.clone(), at));
+            } else if keep {
+                items.push((Item::Chat(chat.id.clone()), at));
+            }
+        }
+        for com in &store.communities {
+            if !communities_seen.insert(com.community_id.clone()) {
+                continue;
+            }
+            if community_unread(store, com) {
+                dots.insert(Filter::Communities, true);
+            }
+            let keep = if searching {
+                com.name.to_lowercase().contains(query)
+            } else {
+                matches!(filter, Filter::All | Filter::Communities)
+            };
+            if keep {
+                let at = community_latest(store, com).map(|(_, at)| at).unwrap_or(0);
+                items.push((Item::Community(com.community_id.clone()), at));
+            }
+        }
+        items.sort_by(|a, b| {
+            let pin = |i: &Item| match i {
+                Item::Chat(id) => store.pin_rank(id).unwrap_or(usize::MAX),
+                _ => usize::MAX,
+            };
+            pin(&a.0).cmp(&pin(&b.0)).then(b.1.cmp(&a.1))
+        });
+        archived.sort_by(|a, b| {
+            let pin = |id: &str| store.pin_rank(id).unwrap_or(usize::MAX);
+            pin(&a.0).cmp(&pin(&b.0)).then(b.1.cmp(&a.1))
+        });
+        let forced = items.is_empty();
+        let shown = self.archive.shown(forced);
+        let has_archive = !archived.is_empty();
+        let mut rows: Vec<Item> = Vec::with_capacity(items.len() + archived.len() + 1);
+        if has_archive && (shown || self.archive.height(false) > 0.5) {
+            rows.push(Item::Archive);
+            if shown && self.archive.expanded {
+                let n = archived.len();
+                rows.extend(archived.iter().enumerate().map(|(k, (id, _))| Item::Archived(id.clone(), k + 1 == n)));
+            }
+        }
+        rows.extend(items.into_iter().map(|(i, _)| i));
+        let items = rows;
+        let archive_row = (items.first() == Some(&Item::Archive))
+            .then(|| self.slim_archive_row(store, &archived, forced, cx));
+        {
+            let mut last = self.slim.keys.borrow_mut();
+            if *last != items {
+                let top = self.slim.list.logical_scroll_top();
+                self.slim.list.reset(items.len());
+                self.slim.list.scroll_to(top);
+                *last = items.clone();
+            } else if items.first() == Some(&Item::Archive) {
+                self.slim.list.remeasure_items(0..1);
+            }
+        }
+        let tabs = (!searching).then(|| self.slim_tabs(filter, &dots, window, cx));
+        let note = |text: String| {
+            div()
+                .mx(px(24.))
+                .my(px(28.))
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .text_center()
+                .text_color(white_a(0.45))
+                .child(text)
+                .into_any_element()
+        };
+        let empty = items.is_empty().then(|| {
+            if searching {
+                note(t::slim_no_match(self.slim_raw_query(cx)).into())
+            } else {
+                match filter {
+                    Filter::Requests => note(t::chats_requests_empty().into()),
+                    Filter::Communities => note(t::slim_communities_empty().into()),
+                    Filter::All | Filter::Messages => super::get_started(f32::from(window.viewport_size().width) - 14., cx).into_any_element(),
+                }
+            }
+        });
+        let items = Rc::new(items);
+        let archive_row = Rc::new(std::cell::RefCell::new(archive_row));
+        let shared = self.store.clone();
+        let view = cx.entity().downgrade();
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .children(tabs)
+            .children(empty)
+            .child(
+                div()
+                    .id("cc-list-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(8.))
+                    .on_scroll(cx.listener(move |app, e: &gpui::ScrollEvent, _, cx| {
+                        app.archive_wheel(e, forced, has_archive, cx);
+                        app.archive_scrolled(forced);
+                    }))
+                    .child(
+                    list(self.slim.list.clone(), move |i, _, _| {
+                        let Some(item) = items.get(i) else {
+                            return div().into_any_element();
+                        };
+                        if *item == Item::Archive {
+                            let row = archive_row.borrow_mut().take().unwrap_or_else(|| div().into_any_element());
+                            return div().pt(px(8.)).child(row).into_any_element();
+                        }
+                        let store = shared.borrow();
+                        let rule = matches!(item, Item::Archived(_, true));
+                        let (exists, hash) = match item {
+                            Item::Chat(id) | Item::Archived(id, _) => (store.chat(id).is_some(), id),
+                            Item::Community(id) => (store.community(id).is_some(), id),
+                            Item::Archive => (false, &String::new()),
+                        };
+                        // A row redraws when the list's data changes; a scroll only moves its last drawing.
+                        let row = exists.then(|| {
+                            let (item, shared, view) = (item.clone(), shared.clone(), view.clone());
+                            let id = gpui::ElementId::NamedInteger("slim-row".into(), str_hash(hash));
+                            let style = gpui::StyleRefinement::default().w_full().h(px(70.));
+                            // Its "2m"-style time ages with the clock, which notifies nothing.
+                            let ago = match &item {
+                                Item::Chat(id) | Item::Archived(id, _) => store
+                                    .chat(id)
+                                    .map_or(0, |c| data::ago_key(store.now_ms(), c.messages.last().map_or(0, |m| m.at))),
+                                _ => store.now_ms() / 60_000,
+                            };
+                            gpui::keyed(id, ago, style, move |_, _| {
+                                slim_list_row(&item, &shared.borrow(), &view).unwrap_or_else(|| div().into_any_element())
+                            })
+                            .into_any_element()
+                        });
+                        drop(store);
+                        let top = if i == 0 { 8. } else { 0. };
+                        div()
+                            .pt(px(top))
+                            .pb(px(2.))
+                            .children(row)
+                            .when(rule, |d| d.pb(px(8.)).border_b_1().border_color(white_a(0.06)).mb(px(6.)))
+                            .into_any_element()
+                    })
+                    .size_full(),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// `CommunityOverview.svelte` slid over a channel: the community, the channel, and its roster.
+    fn slim_details(&mut self, store: &Store, chat: &str, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let view = self.community.as_ref()?;
+        let com = store.community(&view.id)?;
+        let ch = com.channel(chat)?;
+        let cid = com.community_id.clone();
+        let caps = self.community_caps(&cid);
+        let me = store.my_npub.clone();
+        let owner = com.owner_npub.as_deref() == Some(me.as_str());
+        let raid = caps.contains("ban") && self.raid.get(&cid).is_some_and(|r| r.0);
+        let muted = self.live
+            && super::backend::prefs::notify_views(Some(cid.clone()), vec![cid.clone()])
+                .iter()
+                .any(|v| v.scope_id == cid && v.muted);
+        let n = view.members.len();
+        let app = cx.entity().downgrade();
+        let on: crate::community::OnAct = Rc::new(move |act, window, cx| {
+            app.update(cx, |app, cx| app.on_community(act, window, cx)).ok();
+        });
+        let button = |id: &'static str, icon: &'static str, ink: u32, edge: gpui::Hsla, label: SharedString| {
+            div()
+                .id(id)
+                .h(px(41.2))
+                .px(px(20.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(edge)
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .hover(|d| d.bg(white_a(0.04)))
+                .child(svg().path(icon).size(px(16.)).flex_shrink_0().text_color(c(ink)))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(16.)).text_color(c(0xffffff)).child(label))
+        };
+        let mut actions = div().flex().justify_center().gap(px(6.));
+        if caps.contains("create_invite") || !self.live {
+            let id = cid.clone();
+            actions = actions.child(
+                button("group-invite-member-btn", "icons/add-user.svg", ACCENT, crate::theme::ta(crate::theme::ACCENT, 0.65), t::slim_invite())
+                    .on_click(cx.listener(move |app, _, window, cx| app.open_invite(id.clone(), window, cx))),
+            );
+        }
+        if raid {
+            let id = cid.clone();
+            let suspects = self.raid.get(&cid).map_or(0, |r| r.1);
+            actions = actions.child(
+                button("group-moderate-btn", "icons/vector_warning.svg", crate::timeline::DANGER, c(crate::timeline::DANGER), t::slim_moderate())
+                    .tip(t::slim_raid_flagged(suspects))
+                    .on_click(cx.listener(move |app, _, window, cx| app.open_moderation(id.clone(), window, cx))),
+            );
+        } else if caps.contains("manage_channels") {
+            let (id, channel) = (cid.clone(), ch.channel_id.clone());
+            actions = actions.child(
+                button("group-edit-channel-btn", "icons/edit.svg", ACCENT, crate::theme::ta(crate::theme::ACCENT, 0.65), t::community_channel_edit()).on_click(
+                    cx.listener(move |app, _, window, cx| app.open_channel_editor(id.clone(), channel.clone(), false, window, cx)),
+                ),
+            );
+        }
+        if !owner {
+            let (id, name) = (cid.clone(), com.name.clone());
+            actions = actions.child(
+                button("group-leave-btn", "icons/x-user.svg", crate::timeline::DANGER, white_a(0.1), t::slim_leave())
+                    .bg(white_a(0.06))
+                    .on_click(cx.listener(move |app, _, window, cx| {
+                        app.ask_leave_community(id.clone(), name.clone(), false, window, cx)
+                    })),
+            );
+        }
+        let notify_id = cid.clone();
+        let notify = div()
+            .id("group-mute-btn")
+            .absolute()
+            .top(px(50.))
+            .right(px(26.))
+            .size(px(58.))
+            .rounded(px(12.))
+            .border_2()
+            .border_color(c(0x393b3c))
+            .bg(c(0x030303))
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(6.))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |app, e: &gpui::MouseDownEvent, _, cx| {
+                    let rows = app.notify_rows(&notify_id, Some(&notify_id));
+                    app.show_menu(e.position, rows, cx);
+                }),
+            )
+            .child(svg().path(if muted { "icons/volume-mute.svg" } else { "icons/bell.svg" }).size(px(30.)).text_color(c(0xffffff)))
+            .child(div().mt(px(-4.)).text_size(px(10.)).line_height(px(16.)).text_color(c(0xb2b2b2)).child(if muted { t::slim_muted() } else { t::slim_notify() }));
+        let manage = caps.contains("manage_metadata");
+        let settings_id = cid.clone();
+        let uploading = self.overview_icon.as_ref().filter(|o| o.0 == cid).and_then(|o| o.1);
+        let face = div()
+            .id("group-overview-avatar")
+            .group("group-overview-avatar")
+            .relative()
+            .mt(px(40.))
+            .mx_auto()
+            .size(px(100.))
+            .when(manage, |d| {
+                d.cursor_pointer().on_click(cx.listener(move |app, _, window, cx| {
+                    app.pick_overview_icon(settings_id.clone(), window, cx)
+                }))
+            })
+            .child(crate::community::logo(store, &cid, 100., 50.).size(px(100.)).rounded_full())
+            .when(manage, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .bottom_0()
+                        .size(px(30.))
+                        .rounded_full()
+                        .bg(gpui::black().opacity(0.7))
+                        .opacity(if uploading.is_some() { 1. } else { 0. })
+                        .group_hover("group-overview-avatar", |d| d.opacity(1.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(match uploading {
+                            Some(p) => div().size(px(20.)).child(crate::attachments::spinner(20., 2.5, 1., p as f32 / 100., white_a(0.2), c(PRIMARY))).into_any_element(),
+                            None => svg().path("icons/edit.svg").size(px(16.)).text_color(c(0xffffff)).into_any_element(),
+                        }),
+                )
+            });
+        let topic = ch.topic.clone().filter(|t| !t.is_empty());
+        let roster = crate::community::roster(
+            div().id("group-overview-members").p(px(6.)).rounded(px(8.)).border_1().border_color(ca(57, 57, 57, 0.5)),
+            store,
+            chat,
+            view,
+            com,
+            &on,
+            &self.anchors,
+            None,
+            cx,
+        );
+        let search = div()
+            .relative()
+            .h(px(62.))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .w_full()
+                    .h(px(42.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(ca(57, 57, 57, 0.5))
+                    .pl(px(44.))
+                    .pr(px(12.))
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(view.search.clone())),
+            )
+            .child(svg().path("icons/search.svg").absolute().left(px(12.)).top(px(19.)).size(px(24.)).text_color(white_a(0.4)));
+        let header = div()
+            .h(px(60.))
+            .flex_shrink_0()
+            .relative()
+            .bg(ca(22, 22, 22, 0.9))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .pt(px(3.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .mt(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(crate::community::logo(store, &cid, 22., 11.).size(px(22.)).rounded_full())
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(RUBIK)
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_size(px(18.72))
+                                    .line_height(px(24.))
+                                    .text_color(c(TEXT))
+                                    .child(com.name.clone()),
+                            ),
+                    )
+                    .when(n > 0, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(14.))
+                                .line_height(px(24.))
+                                .text_color(c(TEXT))
+                                .opacity(0.8)
+                                .child(t::community_member_count(n)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("group-overview-back-btn")
+                    .absolute()
+                    .left(px(5.))
+                    .top(px(10.))
+                    .size(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|app, _, _, cx| app.slim_close_details(cx)))
+                    .child(svg().path("icons/chevron-double-left.svg").size(px(30.)).text_color(c(ACCENT))),
+            );
+        let _ = window;
+        let body = div()
+            .id("group-overview-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .relative()
+            .child(notify)
+            .child(face)
+            .child(
+                div()
+                    .mt(px(8.))
+                    .px(gpui::relative(0.05))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .max_w_full()
+                            .truncate()
+                            .font_weight(FontWeight::BOLD)
+                            .text_size(px(18.72))
+                            .line_height(px(24.))
+                            .text_color(c(TEXT))
+                            .child(format!("{}{}", if ch.view == "voice" { "" } else { "#" }, ch.name)),
+                    )
+                    .children(topic.map(|t| {
+                        div().mt(px(10.)).text_center().text_size(px(14.)).line_height(px(24.)).text_color(c(TEXT)).child(t)
+                    })),
+            )
+            .child(
+                div()
+                    .mt(px(40.))
+                    .mb(px(30.))
+                    .mx(gpui::relative(0.05))
+                    .flex()
+                    .flex_col()
+                    .child(actions)
+                    .child(div().mt(px(10.)).child(search))
+                    .child(roster),
+            );
+        Some(
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .bg(c(0x030303))
+                .child(header)
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    /// `ArchiveRow.svelte` at phone size: the folded chats' names and count.
+    fn slim_archive_row(&self, store: &Store, archived: &[(String, u64)], forced: bool, cx: &mut Context<Self>) -> AnyElement {
+        let f = &self.archive;
+        let shown = f.shown(forced);
+        let names = archived.iter().map(|(id, _)| store.name(id)).collect::<Vec<_>>().join(", ");
+        let unread = archived.iter().any(|(id, _)| store.chat(id).is_some_and(|c| store.unread_count(c) > 0));
+        let expanded = f.expanded;
+        div()
+            .h(px(f.height(shown)))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(
+                div()
+                    .id("cc-archive")
+                    .h(px(ROW_PITCH))
+                    .pb(px(2.))
+                    .flex_shrink_0()
+                    .opacity(f.opacity(shown))
+                    .when(shown, |d| {
+                        d.cursor_pointer().on_click(cx.listener(|app, _, _, cx| {
+                            app.archive.expanded = !app.archive.expanded;
+                            cx.notify();
+                        }))
+                    })
+                    .child(
+                        div()
+                            .h(px(70.))
+                            .px(px(9.))
+                            .rounded(px(14.))
+                            .flex()
+                            .items_center()
+                            .hover(|s| s.bg(white_a(0.04)))
+                            .child(
+                                div()
+                                    .size(px(50.))
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .bg(white_a(0.06))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(svg().path("icons/archive.svg").size(px(22.)).text_color(c(ACCENT))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.))
+                                    .child(
+                                        div()
+                                            .pl(px(12.))
+                                            .pr(px(10.))
+                                            .flex()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .font_family(RUBIK)
+                                                    .text_size(px(16.))
+                                                    .line_height(px(20.))
+                                                    .text_color(c(0xb2b2b2))
+                                                    .child(t::chats_archived()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .ml_auto()
+                                                    .flex_shrink_0()
+                                                    .min_w(px(16.))
+                                                    .px(px(5.5))
+                                                    .py(px(2.5))
+                                                    .rounded_full()
+                                                    .bg(if unread { c(PRIMARY).into() } else { white_a(0.14) })
+                                                    .text_center()
+                                                    .font_family(INTER)
+                                                    .text_size(px(11.))
+                                                    .line_height(px(11.))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(if unread { c(0x000000).into() } else { white_a(0.8) })
+                                                    .child(crate::lang::num(archived.len())),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .pl(px(12.))
+                                            .pr(px(10.))
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family(RUBIK)
+                                            .text_size(px(14.))
+                                            .line_height(px(19.))
+                                            .text_color(c(0x737373))
+                                            .child(names),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(26.))
+                                    .ml(px(2.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(0.45)
+                                    .hover(|s| s.opacity(1.))
+                                    .child(
+                                        svg()
+                                            .path("icons/chevron-down.svg")
+                                            .size(px(16.))
+                                            .text_color(white_a(0.75))
+                                            .with_transformation(crate::kit::turn(
+                                                "chatlist-expander",
+                                                expanded,
+                                                std::f32::consts::PI,
+                                                0.16,
+                                                crate::kit::bezier(0.33, 1., 0.68, 1.),
+                                            )),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// `.cc-tabs-row`: the pull for a folded rail, then the filters with their sliding bar.
+    fn slim_tabs(
+        &mut self,
+        active: Filter,
+        dots: &HashMap<Filter, bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let filters = self.slim.filters();
+        let many = filters.len() > 2;
+        let probes = self.slim.tabs.clone();
+        // At rest the bar is the active tab's own, laid out with it wherever its row is drawn;
+        // only a slide between tabs places it from measured bounds.
+        let sliding = self.slim.bar_from.is_some_and(|(to, _, _)| to == active)
+            && self.slim.bar_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(260));
+        if sliding {
+            window.request_animation_frame();
+        }
+        let tabs = filters.iter().map(|&f| {
+            let on = f == active;
+            let dot = dots.get(&f).copied().unwrap_or(false) && !on;
+            let probe = probes.clone();
+            let tab = div()
+                .id(SharedString::from(format!("cc-tab-{}", f.id())))
+                .relative()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .font_family(RUBIK)
+                .text_size(px(if many { 14. } else { 15. }))
+                .font_weight(if on { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                .text_color(if on { c(0xffffff) } else { white_a(0.38) })
+                .cursor_pointer()
+                .when(!on, |d| d.hover(|s| s.text_color(white_a(0.75))))
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    if app.slim.active() != f {
+                        let from = app.slim.active();
+                        if let Some(b) = app.slim.tabs.borrow().get(&from) {
+                            app.slim.bar_from = Some((f, f32::from(b.left()), f32::from(b.size.width)));
+                            app.slim.bar_at = Some(std::time::Instant::now());
+                        }
+                        app.slim.filter = f;
+                    }
+                    app.slim.list.scroll_to(gpui::ListOffset::default());
+                    cx.notify();
+                }))
+                .child(
+                    div().relative().child(f.label()).when(dot, |d| {
+                        d.child(div().absolute().top(px(-1.)).right(px(-9.)).size(px(8.)).rounded_full().bg(c(ACCENT)))
+                    }),
+                )
+                .child(gpui::canvas(move |b, _, _| { probe.borrow_mut().insert(f, b); }, |_, _, _, _| {}).absolute().size_full())
+                .when(on && !sliding, |d| d.child(div().absolute().left_0().right_0().bottom(px(-1.)).h(px(2.)).bg(c(PRIMARY))));
+            if many { tab.flex_grow(1.).px(px(6.)) } else { tab.flex_1() }
+        });
+        let row_probe = Rc::new(std::cell::Cell::new(None::<Bounds<Pixels>>));
+        let bar = {
+            let tabs = self.slim.tabs.borrow();
+            let row = tabs.get(&active).copied();
+            row.map(|b| {
+                let (left, w) = (f32::from(b.left()), f32::from(b.size.width));
+                let bar = div().absolute().bottom(px(-1.)).h(px(2.)).bg(c(PRIMARY));
+                match self.slim.bar_from.filter(|(to, _, _)| *to == active && sliding) {
+                    Some((_, l0, w0)) => bar
+                        .with_animation(
+                            SharedString::from(format!("cc-tab-bar-{}", active.id())),
+                            gpui::Animation::new(std::time::Duration::from_millis(240))
+                                .with_easing(kit::bezier(0.2, 0.8, 0.2, 1.)),
+                            move |d, t| d.left(px(l0 + (left - l0) * t)).w(px(w0 + (w - w0) * t)),
+                        )
+                        .into_any_element(),
+                    None => div().into_any_element(),
+                }
+            })
+        };
+        if bar.is_none() && sliding {
+            window.request_animation_frame();
+        }
+        // The bar is placed relative to the row; tabs are measured in window space.
+        let origin = self.slim.tabs.borrow().get(&filters[0]).map(|b| f32::from(b.left())).unwrap_or(0.);
+        let bar = bar.map(|b| div().absolute().inset_0().ml(px(-origin)).child(b));
+        let _ = row_probe;
+        // The grab area, wider and taller than the tab it draws, which tucks into the rail's
+        // edge as it comes out.
+        let p = self.slim.rail_p.value();
+        let probe = self.slim.tab_probe.clone();
+        div()
+            .h(px(49.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .child(if !self.slim.hidden {
+                div()
+                    .id("cc-rail-pull")
+                    .when(p < 1., |d| d.tip(t::slim_show_communities()).cursor_pointer())
+                    .group("cc-rail-pull")
+                    .w(px(GUTTER + (26. - GUTTER) * (1. - p)))
+                    .h(px(44.))
+                    .mt(px(2.))
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .when(p < 1., |d| d.on_click(cx.listener(|app, _, _, cx| app.slim_set_rail(true, cx))))
+                    .when(p < 1., |d| {
+                        d.child(gpui::canvas(move |b, _, _| probe.set(Some(b)), |_, _, _, _| {}).absolute().size_full())
+                    })
+                    .child(
+                        div()
+                            .relative()
+                            .left(px(-16. * p))
+                            .w(px(16.))
+                            .h(px(32.))
+                            .bg(c(SURFACE))
+                            .border_t(px(1.5))
+                            .border_b(px(1.5))
+                            .border_r(px(1.5))
+                            .border_color(c(EDGE))
+                            .rounded_r(px(9.))
+                            .flex()
+                            .items_center()
+                            .child(
+                                svg()
+                                    .path("icons/chevron-right.svg")
+                                    .size(px(12.))
+                                    .text_color(white_a(0.55))
+                                    .group_hover("cc-rail-pull", |s| s.text_color(c(0xffffff))),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                div().w(px(GUTTER)).flex_shrink_0().into_any_element()
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(47.))
+                    .mt(px(2.))
+                    .mr(px(GUTTER))
+                    .relative()
+                    .flex()
+                    .border_b_1()
+                    .border_color(white_a(0.2))
+                    .children(tabs)
+                    .children(bar),
+            )
+            .into_any_element()
+    }
+
+    /// `.navbar`: Profile, Chat and Settings.
+    fn slim_navbar(&self, store: &Store, cx: &mut Context<Self>) -> AnyElement {
+        let me = store.my_npub.clone();
+        let on_profile = self.profile.as_ref().is_some_and(|p| p.npub == me);
+        let on_settings = self.settings.is_some();
+        let on_chat = !on_profile && !on_settings;
+        let tab = |id: &'static str, icon: &'static str, label: SharedString, on: bool| {
+            div()
+                .id(id)
+                .flex()
+                .flex_col()
+                .items_center()
+                .cursor_pointer()
+                .when(!on, |d| d.opacity(0.5))
+                .child(svg().path(icon).size(px(30.)).text_color(c(0xffffff)))
+                .child(div().mt(px(-2.)).text_size(px(12.)).line_height(px(24.)).text_color(c(TEXT)).child(label))
+        };
+        div()
+            .h(px(NAV_H))
+            .flex_shrink_0()
+            .w_full()
+            .bg(c(0x131313))
+            .flex()
+            .items_center()
+            .justify_evenly()
+            .child(tab("nav-profile", "icons/user-circle.svg", t::start_profile(), on_profile).on_click(cx.listener(
+                move |app, _, _, cx| {
+                    app.slim_home(cx);
+                    let me = app.store.borrow().my_npub.clone();
+                    app.open_profile(me, cx);
+                },
+            )))
+            .child(tab("nav-chat", "icons/chats.svg", t::start_chat(), on_chat).on_click(cx.listener(|app, _, _, cx| {
+                app.slim_home(cx);
+            })))
+            .child(tab("nav-settings", "icons/settings.svg", t::start_settings(), on_settings).on_click(cx.listener(
+                |app, _, window, cx| {
+                    app.slim_home(cx);
+                    app.open_settings("appearance", window, cx);
+                },
+            )))
+            .into_any_element()
+    }
+}
+
+/// `body.cc .chatlist-contact`: a chat at thumb size.
+fn slim_row(store: &Store, chat: &SerializableChat) -> gpui::Stateful<gpui::Div> {
+    let unread = store.unread_count(chat) > 0;
+    let last = chat.messages.last().map(|m| m.at).unwrap_or(0);
+    let pinned = store.pin_rank(&chat.id).is_some();
+    row_shell(
+        SharedString::from(format!("cc-row-{}", chat.id)),
+        avatar(store, &chat.id, 52.),
+        store.name(&chat.id),
+        unread,
+        pinned,
+        (false, crate::pings::text(crate::pings::badge(store, chat))),
+        preview_line_at(store, chat, if unread { c(0xb2b2b2) } else { c(0x737373) }, 14., 19.),
+        data::time_ago(store.now_ms(), last),
+    )
+}
+
+/// One chat or Community row of the phone-width list, with its taps.
+fn slim_list_row(item: &Item, store: &Store, view: &gpui::WeakEntity<VectorApp>) -> Option<AnyElement> {
+    match item {
+        Item::Archive => None,
+        Item::Chat(chat_id) | Item::Archived(chat_id, _) => store.chat(chat_id).map(|chat| {
+            let id: SharedString = chat.id.clone().into();
+            let (open_view, menu_view, menu_id) = (view.clone(), view.clone(), id.to_string());
+            slim_row(store, chat)
+                .on_click(move |_, window, cx| {
+                    let id = id.clone();
+                    open_view
+                        .update(cx, |app, cx| {
+                            app.slim.drawer = false;
+                            app.open_chat(id, window, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                })
+                .on_mouse_down(gpui::MouseButton::Right, move |e, _, cx| {
+                    let (id, at) = (menu_id.clone(), e.position);
+                    menu_view.update(cx, |app, cx| app.chat_row_menu(id, at, cx)).ok();
+                })
+                .into_any_element()
+        }),
+        Item::Community(id) => store.community(id).map(|com| {
+            let (v, key) = (view.clone(), id.clone());
+            community_row(store, com)
+                .on_click(move |_, window, cx| {
+                    let key = key.clone();
+                    v.update(cx, |app, cx| app.on_community(crate::community::Act::Open(key), window, cx)).ok();
+                })
+                .into_any_element()
+        }),
+    }
+}
+
+pub(super) fn str_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// A community as one row of the folded list: its newest channel's line.
+fn community_row(store: &Store, com: &Community) -> gpui::Stateful<gpui::Div> {
+    let unread = community_unread(store, com);
+    let latest = community_latest(store, com);
+    let color = if unread { c(0xb2b2b2) } else { c(0x737373) };
+    let face = match store.icon(&com.community_id) {
+        Some(path) => img(path).object_fit(gpui::ObjectFit::Cover).size(px(52.)).rounded(px(52. * 0.188_889)).flex_shrink_0().into_any_element(),
+        None => img("icons/group-placeholder.svg").size(px(52.)).rounded(px(52. * 0.188_889)).flex_shrink_0().into_any_element(),
+    };
+    let preview = match latest {
+        Some((chat, _)) => {
+            let channel = com.channel(&chat.id).map(|ch| ch.name.clone()).unwrap_or_default();
+            div()
+                .flex()
+                .min_w_0()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family(RUBIK)
+                        .text_size(px(14.))
+                        .line_height(px(19.))
+                        .text_color(color)
+                        .child(format!("#{channel}: ")), // i18n-exempt: a channel's tag
+                )
+                .child(div().min_w_0().overflow_hidden().child(preview_line_at(store, chat, color, 14., 19.)))
+                .into_any_element()
+        }
+        None => div().into_any_element(),
+    };
+    // A community's row answers for its whole space, so a collapsed channel still reaches it.
+    let channels = || com.channels.iter().filter_map(|ch| store.chat(&ch.channel_id));
+    let badge: usize = channels().map(|chat| crate::pings::badge(store, chat)).sum();
+    let pinged = channels().any(|chat| crate::pings::badge(store, chat) > 0 && crate::pings::count(store, chat) > 0);
+    // Past one synced page the count is a lower bound.
+    let count = if badge >= 20 && badge <= 99 { format!("{badge}+") } else { crate::pings::text(badge) };
+    row_shell(
+        SharedString::from(format!("cc-com-{}", com.community_id)),
+        face,
+        com.name.clone(),
+        unread,
+        false,
+        (pinged, count),
+        preview,
+        latest.map(|(_, at)| data::time_ago(store.now_ms(), at)).unwrap_or_default(),
+    )
+}
+
+fn row_shell(
+    id: SharedString,
+    face: AnyElement,
+    name: String,
+    unread: bool,
+    pinned: bool,
+    (pinged, count): (bool, String),
+    preview: AnyElement,
+    time: String,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(70.))
+        .px(px(9.))
+        .rounded(px(14.))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(white_a(0.04)))
+        .child(face)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(20.))
+                        .mb(px(3.))
+                        .pl(px(12.))
+                        .pr(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(RUBIK)
+                                .text_size(px(16.))
+                                .line_height(px(20.))
+                                .font_weight(if unread { FontWeight::BOLD } else { FontWeight::NORMAL })
+                                .text_color(if unread { c(0xffffff) } else { c(0xb2b2b2) })
+                                .child(name),
+                        )
+                        .when(pinned, |d| {
+                            d.child(svg().path("icons/pin.svg").size(px(14.)).flex_shrink_0().text_color(c(ACCENT)))
+                        })
+                        // Top-right corner: the @ (a ping waits) then the count.
+                        .when(pinged || count != "0", |d| {
+                            d.child(
+                                div()
+                                    .ml_auto()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .when(pinged, |d| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(17.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .line_height(px(17.))
+                                                .text_color(c(PRIMARY))
+                                                .child("@"),
+                                        )
+                                    })
+                                    .when(count != "0", |d| {
+                                        d.child(
+                                            div()
+                                                .min_w(px(22.))
+                                                .px(px(7.))
+                                                .py(px(3.))
+                                                .rounded_full()
+                                                .bg(c(PRIMARY))
+                                                .text_color(c(0x000000))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::BOLD)
+                                                .line_height(px(13.))
+                                                .text_center()
+                                                .child(count),
+                                        )
+                                    }),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .h(px(24.))
+                        .pr(px(10.))
+                        .flex()
+                        .items_center()
+                        .child(div().flex_1().min_w_0().ml(px(12.)).mr(px(8.)).overflow_hidden().child(preview))
+                        .child(div().flex_shrink_0().text_size(px(12.)).text_color(c(0x808080)).child(time)),
+                ),
+        )
+}

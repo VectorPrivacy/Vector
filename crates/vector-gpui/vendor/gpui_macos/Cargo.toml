@@ -1,0 +1,61 @@
+[package]
+name = "gpui_macos"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_macos.rs"
+doctest = false
+
+[features]
+default = ["gpui/default"]
+bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
+test-support = ["gpui/test-support", "gpui_apple/test-support"]
+runtime_shaders = ["gpui_apple/runtime_shaders"]
+font-kit = ["gpui_apple/font-kit"]
+screen-capture = ["gpui/screen-capture", "dep:objc2-core-media", "dep:objc2-screen-capture-kit"]
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+accesskit = { version = "0.24.0", features = ["enumn"] }
+accesskit_macos = { version = "0.26.0" }
+anyhow = { version = "1.0.86" }
+block2 = { version = "0.6" }
+collections = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+core-foundation = { version = "0.10" }
+core-foundation-sys = { version = "0.8.6" }
+core-graphics = { version = "0.24" }
+ctor = { version = "1.0.12" }
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
+foreign-types = { version = "0.5" }
+futures = { version = "0.3.34" }
+gpui_apple = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+gpui_util = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+image = { version = "0.25.1", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
+itertools = { version = "0.14.0" }
+log = { version = "0.4", default-features = false, features = ["std"] }
+objc2 = { version = "0.6" }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAlert", "NSAppearance", "NSApplication", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSDocumentController", "NSDragging", "NSDraggingItem", "NSEvent", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSScreen", "NSScroller", "NSTrackingArea", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace", "block2", "objc2-core-foundation", "objc2-uniform-type-identifiers"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGDirectDisplay", "CGColor", "objc2"] }
+objc2-core-media = { version = "=0.3.2", default-features = false, features = ["CMSampleBuffer", "objc2-core-video"], optional = true }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = ["CVBuffer", "CVImageBuffer", "CVHostTime"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSAttributedString", "NSBundle", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSNull", "NSObjCRuntime", "NSObject", "NSProcessInfo", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSURL", "NSValue", "objc2-core-foundation", "std"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalDisplayLink", "CAMetalLayer", "objc2-metal"] }
+objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, features = ["block2", "dispatch2", "objc2-core-graphics", "objc2-core-media", "SCShareableContent", "SCStream", "std"], optional = true }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+parking_lot = { version = "0.12.1" }
+raw-window-handle = { version = "0.6" }
+scheduler = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+semver = { version = "1.0", features = ["serde"] }
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+strum = { version = "0.28", features = ["derive"] }
+uuid = { version = "1.1", features = ["serde"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false, features = ["test-support"] }
+gpui_apple = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", features = ["test-support"] }

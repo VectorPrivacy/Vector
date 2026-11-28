@@ -1,0 +1,326 @@
+//! A folder, or a selection of files and folders, zipped to send as one attachment.
+
+use std::collections::HashSet;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The entries a preview lists: at most this many, the rest counted.
+const LISTED: usize = 200;
+const MAX_DEPTH: u32 = 128;
+
+pub struct Entry {
+    pub path: String,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+pub struct Zipped {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub file_count: u32,
+    pub dir_count: u32,
+    pub entries: Vec<Entry>,
+}
+
+struct Item {
+    source: PathBuf,
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// Where a send's plaintext working copies go: the account's own folder, not a shared temp dir.
+pub fn work_dir() -> PathBuf {
+    vector_core::db::current_account_dir()
+        .map(|d| d.join("outgoing").join("work").join("gpui"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("vector-gpui-work"))
+}
+
+/// A fresh folder under `work_dir` for one send's copy.
+pub fn work_slot() -> std::io::Result<PathBuf> {
+    // device-clock: a folder name, never compared with a time.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = work_dir().join(nanos.to_string());
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// A working copy goes once it has sent or been dismissed.
+pub fn forget(path: &Path) {
+    super::pasted::forget(path);
+    crate::picked::release(path);
+    let root = work_dir();
+    if let Some(dir) = path.parent().filter(|d| d.starts_with(&root) && *d != root) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+trait WriteSeek: std::io::Write + std::io::Seek {}
+impl<T: std::io::Write + std::io::Seek> WriteSeek for T {}
+
+fn walk(
+    current: &Path,
+    prefix: &str,
+    items: &mut Vec<Item>,
+    total: &mut u64,
+    depth: u32,
+) -> Result<(), String> {
+    if depth > MAX_DEPTH {
+        return Err(crate::t::preview_zip_too_deep().into());
+    }
+    let read = std::fs::read_dir(current)
+        .map_err(|e| crate::t::preview_zip_read_dir_failed(e.to_string(), current.display().to_string()).to_string())?;
+    for entry in read {
+        let entry = entry.map_err(|e| crate::t::preview_zip_read_entry_failed(e.to_string()).to_string())?;
+        let path = entry.path();
+        // Symlinks are skipped: no traversal out of the folder, no cycles.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+        if meta.is_dir() {
+            items.push(Item {
+                source: path.clone(),
+                name: name.clone(),
+                is_dir: true,
+                size: 0,
+            });
+            walk(&path, &format!("{name}/"), items, total, depth + 1)?;
+        } else if meta.is_file() {
+            *total += meta.len();
+            items.push(Item {
+                source: path,
+                name,
+                is_dir: false,
+                size: meta.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `name`, or `name-1`, `name-2`… when the root already holds it, case-blind.
+fn unique_root_name(name: &str, is_dir: bool, taken: &mut HashSet<String>) -> String {
+    if taken.insert(name.to_lowercase()) {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let (stem, ext) = match (is_dir, path.file_stem(), path.extension()) {
+        (false, Some(stem), Some(ext)) => (
+            stem.to_string_lossy().into_owned(),
+            Some(ext.to_string_lossy().into_owned()),
+        ),
+        _ => (name.to_string(), None),
+    };
+    (1u32..)
+        .map(|n| match &ext {
+            Some(ext) => format!("{stem}-{n}.{ext}"),
+            None => format!("{stem}-{n}"),
+        })
+        .find(|c| taken.insert(c.to_lowercase()))
+        .expect("an unused suffix exists")
+}
+
+/// The archive's name: a lone folder's own, else "Archive".
+pub fn archive_name(paths: &[PathBuf]) -> String {
+    match paths {
+        [only] if only.is_dir() => only
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::t::preview_zip_folder().to_string()),
+        _ => crate::t::preview_zip_name().to_string(),
+    }
+}
+
+fn collect(paths: &[PathBuf]) -> Result<(String, Vec<Item>, u64), String> {
+    let (mut items, mut total) = (Vec::new(), 0u64);
+    if let [only] = paths
+        && only.is_dir()
+    {
+        walk(only, "", &mut items, &mut total, 0)?;
+        if items.is_empty() {
+            return Err(crate::t::preview_zip_empty().into());
+        }
+        return Ok((archive_name(paths), items, total));
+    }
+    let mut taken = HashSet::new();
+    for picked in paths {
+        let Some(file_name) = picked.file_name() else {
+            continue;
+        };
+        if let Some(bytes) = super::pasted::get(picked) {
+            let name = unique_root_name(&file_name.to_string_lossy(), false, &mut taken);
+            total += bytes.len() as u64;
+            items.push(Item { source: picked.clone(), name, is_dir: false, size: bytes.len() as u64 });
+            continue;
+        }
+        // The user chose these roots, so an alias is followed; the walk still skips symlinks inside.
+        let Ok(source) = std::fs::canonicalize(picked) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::metadata(&source) else {
+            continue;
+        };
+        if !meta.is_dir() && !meta.is_file() {
+            continue;
+        }
+        let name = unique_root_name(&file_name.to_string_lossy(), meta.is_dir(), &mut taken);
+        if meta.is_dir() {
+            items.push(Item {
+                source: source.clone(),
+                name: name.clone(),
+                is_dir: true,
+                size: 0,
+            });
+            walk(&source, &format!("{name}/"), &mut items, &mut total, 1)?;
+        } else {
+            total += meta.len();
+            items.push(Item {
+                source,
+                name,
+                is_dir: false,
+                size: meta.len(),
+            });
+        }
+    }
+    if items.is_empty() {
+        return Err(crate::t::preview_zip_nothing().into());
+    }
+    Ok((crate::t::preview_zip_name().to_string(), items, total))
+}
+
+/// Zip `paths`, reporting whole percents into `percent`; a set `cancel` stops it and removes the partial file.
+pub fn zip_paths(
+    paths: &[PathBuf],
+    cancel: &AtomicBool,
+    percent: &Arc<AtomicU64>,
+) -> Result<Zipped, String> {
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
+
+    let (name, items, total) = collect(paths)?;
+    // Zipped from picks held in memory, the zip is held there too.
+    let memory = items.iter().any(|i| super::pasted::get(&i.source).is_some());
+    let file_name = format!("{name}.zip");
+    let path = work_slot()
+        .map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?
+        .join(&file_name);
+    let cancelled = || cancel.load(Ordering::Relaxed);
+
+    let mut kept = Vec::new();
+    let mut run = || -> Result<(u32, u32, Vec<Entry>), String> {
+        let out: Box<dyn WriteSeek + '_> = if memory {
+            Box::new(std::io::Cursor::new(&mut kept))
+        } else {
+            let file = std::fs::File::create(&path)
+                .map_err(|e| crate::t::preview_zip_create_failed(e.to_string()).to_string())?;
+            Box::new(BufWriter::new(file))
+        };
+        let mut zw = zip::ZipWriter::new(out);
+        // Level 2: zlib-rs's level 1 is deflate_quick (up to ~20% larger); 2 still beats C zlib's 1.
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .compression_level(Some(2));
+        let (mut entries, mut files, mut dirs, mut written) = (Vec::new(), 0u32, 0u32, 0u64);
+        const CHUNK: usize = 512 * 1024;
+        for item in &items {
+            let rel = item.name.replace('\\', "/");
+            if item.is_dir {
+                dirs += 1;
+                let dir = format!("{rel}/");
+                zw.add_directory(&dir, options)
+                    .map_err(|e| crate::t::preview_zip_add_dir_failed(e.to_string()).to_string())?;
+                if entries.len() < LISTED {
+                    entries.push(Entry {
+                        path: dir,
+                        size: 0,
+                        is_dir: true,
+                    });
+                }
+                continue;
+            }
+            if cancelled() {
+                return Err("Cancelled".into()); // i18n-exempt: never shown, the preview drops a cancelled zip
+            }
+            // Re-checked at zip time: a file swapped for a link since the walk is skipped.
+            let held = super::pasted::get(&item.source);
+            if held.is_none() {
+                match std::fs::symlink_metadata(&item.source) {
+                    Ok(m) if m.file_type().is_symlink() => continue,
+                    Err(_) => continue,
+                    _ => {}
+                }
+            }
+            files += 1;
+            zw.start_file(&rel, options.large_file(item.size >= u32::MAX as u64))
+                .map_err(|e| crate::t::preview_zip_start_file_failed(e.to_string()).to_string())?;
+            if item.size > 0 {
+                let data = match held {
+                    Some(bytes) => bytes,
+                    None => std::sync::Arc::new(std::fs::read(&item.source).map_err(|e| {
+                        crate::t::preview_zip_read_file_failed(e.to_string(), item.source.display().to_string()).to_string()
+                    })?),
+                };
+                for chunk in data.chunks(CHUNK) {
+                    if cancelled() {
+                        return Err("Cancelled".into()); // i18n-exempt: never shown, the preview drops a cancelled zip
+                    }
+                    zw.write_all(chunk)
+                        .map_err(|e| crate::t::preview_zip_write_failed(e.to_string()).to_string())?;
+                    written += chunk.len() as u64;
+                    if let Some(p) = (written * 100).checked_div(total) {
+                        percent.store(p.min(100), Ordering::Relaxed);
+                    }
+                }
+            }
+            if entries.len() < LISTED {
+                entries.push(Entry {
+                    path: rel,
+                    size: item.size,
+                    is_dir: false,
+                });
+            }
+        }
+        zw.finish()
+            .map_err(|e| crate::t::preview_zip_finish_failed(e.to_string()).to_string())?;
+        Ok((files, dirs, entries))
+    };
+    let done = run();
+    for p in paths {
+        super::pasted::forget(p);
+        crate::picked::release(p);
+    }
+    match done {
+        Ok((file_count, dir_count, entries)) => {
+            let size = if memory {
+                let size = kept.len() as u64;
+                super::pasted::hold_at(path.clone(), kept);
+                size
+            } else {
+                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            };
+            Ok(Zipped {
+                path,
+                name: file_name,
+                size,
+                file_count,
+                dir_count,
+                entries,
+            })
+        }
+        Err(e) => {
+            forget(&path);
+            Err(e)
+        }
+    }
+}

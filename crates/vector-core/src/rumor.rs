@@ -332,8 +332,8 @@ fn process_text_message(
     // The URL usually IS the whole content on such a message; rendering the
     // attachment AND the raw link would show the file twice.
     let content = crate::community::attachments::strip_attachment_urls(&rumor.content, &attachments);
-    // Spans count chars of the content as sent; a stripped link would shift them.
-    let text_spans = if content == rumor.content {
+    // Spans count chars of the content as sent; links stripped from its tail shift none.
+    let text_spans = if rumor.content.starts_with(content.as_str()) {
         crate::text_spans::from_tags(rumor.tags.iter(), &content)
     } else {
         Vec::new()
@@ -1313,6 +1313,25 @@ mod tests {
                 assert!(msg.content.is_empty(), "the URL renders as the file, not also as a link");
             }
             _ => panic!("Expected TextMessage carrying an attachment"),
+        }
+    }
+
+    #[test]
+    fn a_kind_14_carries_a_caption_and_several_files_in_order() {
+        let keys = test_keypair();
+        let (a, b) = ("https://blossom.example/aaa.png", "https://blossom.example/bbb.mp4");
+        let tags = Tags::from_list(vec![
+            Tag::custom("imeta", vec![format!("url {a}"), "m image/png".into(), "name cat.png".into(), "content-warning spoiler".into()]),
+            Tag::custom("imeta", vec![format!("url {b}"), "m video/mp4".into(), "name clip.mp4".into()]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::PrivateDirectMessage, &format!("two things\n{a}\n{b}"), tags);
+        match process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap() {
+            RumorProcessingResult::TextMessage(msg) => {
+                assert_eq!(msg.content, "two things");
+                let names: Vec<_> = msg.attachments.iter().map(|a| a.name.as_str()).collect();
+                assert_eq!(names, ["SPOILER_cat.png", "clip.mp4"]);
+            }
+            _ => panic!("Expected TextMessage"),
         }
     }
 

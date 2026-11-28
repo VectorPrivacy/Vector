@@ -1,0 +1,4 @@
+[env]
+# The oldest macOS this client supports, for rustc, cc and cmake alike; bundle-macos.sh copies it
+# into the app's LSMinimumSystemVersion. GPUI's Metal shaders are compiled for the same floor.
+MACOSX_DEPLOYMENT_TARGET = "12.0"

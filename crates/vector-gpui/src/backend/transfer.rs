@@ -1,0 +1,91 @@
+//! Device transfer: sign this account in on another device, or this device in from another. The
+//! protocol is core's; this adds the proof that opens the key, and the sign-in at the far end.
+
+use vector_core::transfer::service;
+use vector_core::transfer::session::{ApproveError, Bundle, Role};
+use zeroize::Zeroizing;
+
+
+pub struct Started {
+    pub id: u64,
+    pub code: Option<String>,
+    pub qr: Option<String>,
+}
+
+/// `send` when this device holds the account; `code` to join the other device's code.
+pub async fn start(send: bool, code: Option<String>) -> Result<Started, String> {
+    let identity = if send {
+        if vector_core::is_keyless() {
+            return Err(crate::t::transfer_signer_account().into());
+        }
+        Some(vector_core::state::my_public_key().ok_or_else(|| crate::t::transfer_sign_in_first().to_string())?)
+    } else {
+        None
+    };
+    let role = if send { Role::Sender } else { Role::Receiver };
+    let s = service::start(role, code.as_deref(), identity).await?;
+    Ok(Started {
+        id: s.id,
+        code: s.code,
+        qr: s.qr,
+    })
+}
+
+/// Sender: the number from the new device's screen. `Err(Some(n))` when wrong, `n` tries left.
+pub async fn check_number(number: String) -> Result<(), Result<u32, String>> {
+    service::check_number(&number).await.map_err(|e| match e {
+        ApproveError::WrongNumber { tries_left } => Ok(tries_left as u32),
+        _ => Err(crate::t::transfer_not_waiting().to_string()),
+    })
+}
+
+/// Sender: hand the account over, its key opened under the user's own proof.
+pub async fn approve(credential: Option<Zeroizing<String>>) -> Result<(), String> {
+    if vector_core::is_keyless() || !service::sender_is_current() {
+        return Err(crate::t::transfer_not_waiting().into());
+    }
+    let session = vector_core::db::current_session();
+    let key = if vector_core::state::is_encryption_enabled_fast() {
+        Some(super::security::prove(credential).await?)
+    } else {
+        None
+    };
+    let (nsec, seed) = vector_core::db::at_rest::open_identity_secrets(key.as_deref())?;
+    if !session.is_live() {
+        return Err(crate::t::transfer_account_changed().into());
+    }
+    let bundle = Bundle::from_stored(&nsec, seed.as_deref().map(|s| s.as_str()));
+    service::approve(bundle).await.map_err(|e| match e {
+        ApproveError::NotYours => {
+            crate::t::transfer_key_mismatch().to_string()
+        }
+        _ => crate::t::transfer_not_waiting().to_string(),
+    })
+}
+
+pub fn deny() {
+    service::deny();
+}
+
+pub fn cancel() {
+    service::cancel();
+}
+
+/// Receiver: sign in with the account that arrived. It stays held until this succeeds, so a
+/// failed sign-in can be tried again.
+pub async fn finish(add: Option<(Option<String>, Option<serde_json::Value>)>) -> Result<super::account::Imported, String> {
+    let bundle = service::received().ok_or("Nothing has arrived to sign in with")?; // i18n-exempt: matched by the transfer screen
+    let nsec = bundle.nsec.clone();
+    let seed = bundle.seed.clone().map(Zeroizing::new);
+    drop(bundle);
+    if let Some((kind, opts)) = add {
+        super::account::enter_add_mode(kind, opts).await?;
+    }
+    let imported = super::account::import(nsec).await?;
+    if matches!(imported, super::account::Imported::Staged(_)) {
+        *vector_core::state::MNEMONIC_SEED.lock().unwrap_or_else(|e| e.into_inner()) = seed.map(|s| s.to_string());
+        super::account::connect().await;
+    }
+    service::forget_received();
+    Ok(imported)
+}

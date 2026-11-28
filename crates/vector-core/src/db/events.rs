@@ -20,6 +20,17 @@ fn seal_event_fields(event: &StoredEvent, sealer: &mut crate::crypto::AtRestSeal
     Ok((content, preview))
 }
 
+/// A file message's caption: its stored content less the file's own URL, which NIP-17 puts there.
+fn file_caption(content: &str, attachments: &[crate::types::Attachment]) -> String {
+    let rest = crate::community::attachments::strip_attachment_urls(content, attachments);
+    let bare_link = !rest.contains(char::is_whitespace) && (rest.starts_with("https://") || rest.starts_with("http://"));
+    let names_a_file = bare_link
+        && attachments.iter().any(|a| {
+            rest.contains(a.id.as_str()) || a.original_hash.as_deref().is_some_and(|h| !h.is_empty() && rest.contains(h))
+        });
+    if names_a_file { String::new() } else { rest }
+}
+
 // A stored message's text and tags are its original, written once: edits are their own rows, so a
 // re-save from memory (which holds the latest edit, or whatever a failed open left) never replaces them.
 const _: () = assert!(
@@ -1265,6 +1276,8 @@ pub async fn get_events(
         if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
             event.content = at_rest.open(event.content)
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        } else if event.kind == event_kind::FILE_ATTACHMENT {
+            event.content = at_rest.open_or_keep(event.content);
         }
         event
     }).collect());
@@ -1661,7 +1674,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
         let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
 
         let original_content = if event.kind == event_kind::FILE_ATTACHMENT {
-            String::new()
+            file_caption(&event.content, &attachments)
         } else {
             event.content.clone()
         };
@@ -1770,7 +1783,8 @@ pub async fn get_message_by_id(message_id: &str) -> Result<Option<(String, Messa
     let Some((mut event, chat_identifier)) = found else { return Ok(None) };
     if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
         event.content = crate::crypto::open_batch(|at_rest| at_rest.open(event.content))
-            .unwrap_or_else(|_| "[Decryption failed]".to_string());
+            .unwrap_or_else(|_| "[Decryption failed]".to_string());    } else if event.kind == event_kind::FILE_ATTACHMENT {
+        event.content = crate::crypto::open_batch(|at_rest| at_rest.open_or_keep(event.content));
     }
     Ok(compose_message_views(vec![event]).await?.pop().map(|m| (chat_identifier, m)))
 }
@@ -1890,6 +1904,8 @@ pub async fn get_messages_around(
         if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
             event.content = at_rest.open(event.content)
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
+        } else if event.kind == event_kind::FILE_ATTACHMENT {
+            event.content = at_rest.open_or_keep(event.content);
         }
         event
     }).collect());
@@ -2093,6 +2109,8 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             {
                 at_rest.open(event.content.clone())
                     .unwrap_or_else(|_| "[Decryption failed]".to_string())
+            } else if event.kind == event_kind::FILE_ATTACHMENT {
+                file_caption(&at_rest.open_or_keep(event.content.clone()), &attachments)
             } else {
                 String::new()
             };
@@ -2170,6 +2188,10 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     Ok(result)
 }
 
+/// The most unread a chat is counted to. Badges stop at 99+, and a channel never opened would
+/// otherwise have its whole history read on every recount.
+pub const UNREAD_COUNT_CAP: i64 = 1000;
+
 /// Per-chat unread count, computed straight from the DB so it's correct even when only the last
 /// message is in RAM (the boot state). Mirrors the in-memory walk-back exactly: unread = non-mine
 /// messages newer than the most recent "anchor" (our own message OR the `last_read` marker,
@@ -2204,7 +2226,7 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
              ), \
              counts AS MATERIALIZED ( \
                 SELECT a.chat_identifier AS chat_identifier, ( \
-                    SELECT COUNT(*) FROM events e \
+                    SELECT COUNT(*) FROM (SELECT 1 FROM events e \
                     WHERE e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
                       AND e.created_at >= COALESCE(a.from_ts, a.anchor_ts + 1) \
                       AND instr(e.tags, '[\"unauthorized\"]') = 0 \
@@ -2215,7 +2237,8 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                       AND NOT EXISTS ( \
                             SELECT 1 FROM community_channels cc \
                             WHERE cc.channel_id = a.chat_identifier \
-                              AND (cc.community_id || ' ' || e.npub) IN (SELECT value FROM json_each(?4))) \
+                              AND (cc.community_id || ' ' || e.npub) IN (SELECT value FROM json_each(?5))) \
+                    LIMIT ?4) \
                 ) AS unread \
                 FROM anchors a \
              ) \
@@ -2228,6 +2251,7 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                 event_kind::CHAT_MESSAGE as i32,
                 event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                 event_kind::FILE_ATTACHMENT as i32,
+                UNREAD_COUNT_CAP,
                 bans
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32)),
@@ -2261,14 +2285,15 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                 (SELECT created_at FROM events WHERE c.unread_from != '' AND id = c.unread_from AND chat_id = c.id) AS from_ts \
                 FROM chats c WHERE c.chat_identifier = ?4 \
              ) \
-             SELECT COUNT(*) FROM a JOIN events e ON e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
+             SELECT COUNT(*) FROM (SELECT 1 FROM a JOIN events e ON e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
                AND e.created_at >= COALESCE(a.from_ts, a.anchor_ts + 1) \
              WHERE instr(e.tags, '[\"unauthorized\"]') = 0 \
                AND (e.npub IS NULL OR e.npub NOT IN ( \
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
-               AND (?5 IS NULL OR e.npub IS NULL OR e.npub NOT IN (SELECT value FROM json_each(?5)))",
+               AND (?5 IS NULL OR e.npub IS NULL OR e.npub NOT IN (SELECT value FROM json_each(?5))) \
+             LIMIT ?6)",
         )
         .and_then(|mut stmt| {
             stmt.query_row(
@@ -2277,7 +2302,8 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                     event_kind::PRIVATE_DIRECT_MESSAGE as i32,
                     event_kind::FILE_ATTACHMENT as i32,
                     chat_identifier,
-                    bans
+                    bans,
+                    UNREAD_COUNT_CAP
                 ],
                 |row| row.get(0),
             )
@@ -2769,6 +2795,27 @@ mod tests {
         let map = unread_counts().await.unwrap().get(chat).copied().unwrap_or(0);
         assert_eq!(map, 0, "read to 'new'; the empty-id row is not an unread_from marker");
         assert_eq!(unread_count_for_chat(chat).await.unwrap(), 0);
+    }
+
+    // A chat never read counts to the cap and no further, in both counts.
+    #[tokio::test]
+    async fn an_unread_count_stops_at_the_cap() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1unreadcap";
+        save_message(chat, &Message { id: "first".into(), content: "x".into(), at: 1000, npub: Some("npub1sender".into()), ..Default::default() }).await.unwrap();
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1) \
+                 INSERT INTO events (id, kind, chat_id, user_id, content, tags, created_at, received_at, mine, pending, failed, npub) \
+                 SELECT 'n' || i, kind, chat_id, user_id, content, tags, created_at + i, received_at, 0, 0, 0, npub \
+                 FROM events, n WHERE id = 'first'",
+                [UNREAD_COUNT_CAP + 10],
+            )
+            .unwrap();
+        }
+        assert_eq!(unread_count_for_chat(chat).await.unwrap() as i64, UNREAD_COUNT_CAP);
+        assert_eq!(unread_counts().await.unwrap().get(chat).copied().unwrap_or(0) as i64, UNREAD_COUNT_CAP);
     }
 
     // The mark persists, moves on when its message is deleted, and a read save clears it.

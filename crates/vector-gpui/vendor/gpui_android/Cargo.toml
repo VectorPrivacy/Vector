@@ -1,0 +1,28 @@
+[package]
+name = "gpui_android"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/gpui_android.rs"
+doctest = false
+
+[target.'cfg(target_os = "android")'.dependencies]
+accesskit = "0.24.1"
+accesskit_android = "0.7.5"
+anyhow = "1.0.86"
+calloop = "0.14.3"
+futures = "0.3.34"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc", default-features = false }
+gpui_wgpu = { git = "https://github.com/zed-industries/zed", rev = "f8cfc7ed9e57503def9479138894f3139f5400cc" }
+jni = "0.21"
+libc = "0.2"
+log = { version = "0.4", default-features = false, features = ["std"] }
+ndk = { version = "0.9", default-features = false, features = ["rwh_06", "api-level-26"] }
+ndk-context = "0.1"
+ndk-sys = "0.6"
+parking_lot = "0.12.1"
+raw-window-handle = "0.6"
+uuid = { version = "1.1", features = ["v5"] }

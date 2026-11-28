@@ -192,3 +192,145 @@ mod tests {
         }
     }
 }
+
+/// The second string of the first tag named `name` in a stored `tags` column, as
+/// `serde_json::from_str::<Vec<Vec<String>>>` and a `find` would give it, without building the
+/// tags: `None` where that parse fails, `Some(None)` where the tag is absent or has no value.
+pub fn first_tag_value<'a>(tags_json: &'a str, name: &str) -> Option<Option<std::borrow::Cow<'a, str>>> {
+    use serde::de::{DeserializeSeed, Deserializer, SeqAccess, Visitor};
+    use std::borrow::Cow;
+    use std::fmt;
+
+    /// A string, borrowed where the JSON holds it unescaped.
+    struct Text<'de>(Cow<'de, str>);
+    impl<'de> serde::Deserialize<'de> for Text<'de> {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Text<'de>;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a string")
+                }
+                fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+                    Ok(Text(Cow::Borrowed(v)))
+                }
+                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                    Ok(Text(Cow::Owned(v.to_owned())))
+                }
+            }
+            d.deserialize_string(V)
+        }
+    }
+
+    /// A string, checked and dropped.
+    struct Skip;
+    impl<'de> serde::Deserialize<'de> for Skip {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl Visitor<'_> for V {
+                type Value = Skip;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a string")
+                }
+                fn visit_str<E>(self, _: &str) -> Result<Skip, E> {
+                    Ok(Skip)
+                }
+            }
+            d.deserialize_string(V)
+        }
+    }
+
+    struct Tag<'n, 'f, 'de> {
+        name: &'n str,
+        found: &'f mut Option<Option<Cow<'de, str>>>,
+    }
+    impl<'de> DeserializeSeed<'de> for Tag<'_, '_, 'de> {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_seq(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Tag<'_, '_, 'de> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a tag")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            if self.found.is_none() {
+                if let Some(first) = seq.next_element::<Text>()? {
+                    if first.0 == self.name {
+                        *self.found = Some(seq.next_element::<Text>()?.map(|t| t.0));
+                    }
+                }
+            }
+            while seq.next_element::<Skip>()?.is_some() {}
+            Ok(())
+        }
+    }
+
+    struct Tags<'n, 'de> {
+        name: &'n str,
+        found: Option<Option<Cow<'de, str>>>,
+    }
+    impl<'de> Visitor<'de> for &mut Tags<'_, 'de> {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a list of tags")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while seq.next_element_seed(Tag { name: self.name, found: &mut self.found })?.is_some() {}
+            Ok(())
+        }
+    }
+
+    let mut tags = Tags { name, found: None };
+    let mut de = serde_json::Deserializer::from_str(tags_json);
+    de.deserialize_seq(&mut tags).ok()?;
+    de.end().ok()?;
+    Some(tags.found.unwrap_or(None))
+}
+
+#[cfg(test)]
+mod tag_tests {
+    #[test]
+    fn first_tag_value_reads_as_the_full_parse_does() {
+        let full = |s: &str| {
+            serde_json::from_str::<Vec<Vec<String>>>(s)
+                .ok()
+                .map(|tags| tags.into_iter().find(|t| t.first().is_some_and(|f| f == "event-type")).and_then(|t| t.into_iter().nth(1)))
+        };
+        const PARTS: &[&str] = &[
+            "[", "]", ",", "\"event-type\"", "\"event\\u002dtype\"", "\"1\"", "\"0\"", "\"x\"", "1", "null", " ", "{}", "\"\\n\"", "\"é\"",
+        ];
+        let mut seed = 0x1357_9bdfu64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut hits = 0;
+        const STRS: &[&str] = &["\"event-type\"", "\"event\\u002dtype\"", "\"1\"", "\"0\"", "\"x\"", "\"é\\n\"", "1", "null"];
+        for i in 0..200_000 {
+            let s: String = if i % 2 == 0 {
+                (0..1 + next() % 12).map(|_| PARTS[(next() % PARTS.len() as u64) as usize]).collect()
+            } else {
+                let tag = |next: &mut dyn FnMut() -> u64| {
+                    let n = next() % 4;
+                    let items: Vec<&str> = (0..n).map(|_| STRS[(next() % STRS.len() as u64) as usize]).collect();
+                    format!("[{}]", items.join(","))
+                };
+                let n = next() % 4;
+                let tags: Vec<String> = (0..n).map(|_| tag(&mut next)).collect();
+                format!(" [{}] ", tags.join(", "))
+            };
+            let want = full(&s);
+            hits += want.as_ref().is_some_and(|w| w.is_some()) as usize;
+            assert_eq!(super::first_tag_value(&s, "event-type").map(|v| v.map(|c| c.into_owned())), want, "{s:?}");
+        }
+        for s in [r#"[["event-type","1"],["e","x"]]"#, r#"[["a"],["event-type"],["event-type","0"]]"#, r#"[["event-type","0", "z"]] "#, "[]", "[[]]"] {
+            assert_eq!(super::first_tag_value(s, "event-type").map(|v| v.map(|c| c.into_owned())), full(s), "{s:?}");
+        }
+        assert!(hits > 100, "{hits}");
+    }
+}

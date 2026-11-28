@@ -483,6 +483,7 @@ fn reread_moved_channels(before: &CommunityV2) {
             if !crate::db::current_session().is_live() {
                 return;
             }
+            crate::community::cache::after_foreground().await;
             crate::VectorCore::v2_backfill_channel(&id, &channel, 50, 8, None, None, crate::community::transport::Evidence::Fast, 12).await;
         }
     });
@@ -1908,6 +1909,7 @@ async fn adopt_parked_keys(
     // A few rooms at a time: a Role that opens several fills them together.
     let rooms: Vec<String> = rooms.iter().map(|ch| crate::simd::hex::bytes_to_hex_32(&ch.0)).collect();
     for rooms in rooms.chunks(KEYED_BACKFILL_CONCURRENCY) {
+        crate::community::cache::after_foreground().await;
         let fills = futures_util::future::join_all(rooms.iter().map(|hex| {
             crate::VectorCore::v2_backfill_channel(id, hex, 50, 2, None, None, crate::community::transport::Evidence::Fast, 12)
         }))

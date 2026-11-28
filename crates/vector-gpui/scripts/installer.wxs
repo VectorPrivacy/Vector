@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Per-machine MSI that upgrades the Tauri client's MSI in place: tauri-bundler 2.10's main.wxs
+     with its upgrade code (uuid5(DNS, "Vector.exe.app.x64"), for arm64 too), exe component GUID,
+     folders, registry keys, shortcuts and `vector://` handler. AUTOLAUNCHAPP is what the updaters
+     pass to start the app after a passive install.
+       candle -arch x64|arm64 -dVersion=<a.b.c[.d]> -dSource=<vector-gpui.exe> -dIcon=<icon.ico> -ext WixUIExtension installer.wxs
+       light -ext WixUIExtension -cultures:en-us -o <out.msi> installer.wixobj -->
+<?if $(sys.BUILDARCH)="x64" or $(sys.BUILDARCH)="arm64"?>
+    <?define Win64 = "yes" ?>
+<?else?>
+    <?error Unsupported value of sys.BUILDARCH=$(sys.BUILDARCH)?>
+<?endif?>
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*" Name="Vector" UpgradeCode="A8F2521A-D511-575C-A67A-D354BEDB8517" Language="1033" Codepage="1252"
+             Manufacturer="vectorapp" Version="$(var.Version)">
+        <Package Id="*" Keywords="Installer" InstallerVersion="450" Languages="0" Compressed="yes"
+                 InstallScope="perMachine" SummaryCodepage="1252"/>
+
+        <Property Id="REINSTALLMODE" Value="amus"/>
+        <Property Id="AUTOLAUNCHAPP" Secure="yes"/>
+        <Property Id="LAUNCHAPPARGS" Secure="yes"/>
+
+        <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes"/>
+
+        <InstallExecuteSequence>
+            <RemoveShortcuts>Installed AND NOT UPGRADINGPRODUCTCODE</RemoveShortcuts>
+        </InstallExecuteSequence>
+
+        <Media Id="1" Cabinet="app.cab" EmbedCab="yes"/>
+
+        <Icon Id="ProductIcon" SourceFile="$(var.Icon)"/>
+        <Property Id="ARPPRODUCTICON" Value="ProductIcon"/>
+        <Property Id="ARPNOREPAIR" Value="yes" Secure="yes"/>
+        <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute"/>
+        <Property Id="ARPURLINFOABOUT" Value="https://vectorapp.io"/>
+        <Property Id="ARPHELPLINK" Value="https://vectorapp.io"/>
+        <Property Id="ARPURLUPDATEINFO" Value="https://vectorapp.io"/>
+
+        <!-- The last search that matches wins: the MSI's own InstallDir over the NSIS default value. -->
+        <Property Id="INSTALLDIR">
+            <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\vectorapp\Vector" Type="raw"/>
+            <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\vectorapp\Vector" Name="InstallDir" Type="raw"/>
+        </Property>
+
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Vector"/>
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1"/>
+        <CustomAction Id="LaunchApplication" Impersonate="yes" FileKey="Path" ExeCommand="[LAUNCHAPPARGS]" Return="asyncNoWait"/>
+
+        <UI>
+            <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+            <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR"/>
+            <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2">1</Publish>
+            <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">1</Publish>
+        </UI>
+        <UIRef Id="WixUI_InstallDir"/>
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="DesktopFolder" Name="Desktop">
+                <Component Id="ApplicationShortcutDesktop" Guid="*">
+                    <Shortcut Id="ApplicationDesktopShortcut" Name="Vector" Description="Runs Vector" Target="[!Path]" WorkingDirectory="INSTALLDIR"/>
+                    <RemoveFolder Id="DesktopFolder" On="uninstall"/>
+                    <RegistryValue Root="HKCU" Key="Software\vectorapp\Vector" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes"/>
+                </Component>
+            </Directory>
+            <Directory Id="ProgramFiles64Folder" Name="PFiles">
+                <Directory Id="INSTALLDIR" Name="Vector"/>
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Vector"/>
+            </Directory>
+        </Directory>
+
+        <DirectoryRef Id="INSTALLDIR">
+            <Component Id="RegistryEntries" Guid="*">
+                <RegistryKey Root="HKCU" Key="Software\vectorapp\Vector">
+                    <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes"/>
+                </RegistryKey>
+                <RegistryKey Root="HKLM" Key="Software\Classes\vector">
+                    <RegistryValue Type="string" Name="URL Protocol" Value=""/>
+                    <RegistryValue Type="string" Value="URL:io.vectorapp protocol"/>
+                    <RegistryKey Key="DefaultIcon">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot;,0"/>
+                    </RegistryKey>
+                    <RegistryKey Key="shell\open\command">
+                        <RegistryValue Type="string" Value="&quot;[!Path]&quot; &quot;%1&quot;"/>
+                    </RegistryKey>
+                </RegistryKey>
+            </Component>
+            <Component Id="Path" Guid="2E71CB10-560F-5EEF-8DFB-5F439B5DEC09" Win64="$(var.Win64)">
+                <File Id="Path" Name="Vector.exe" Source="$(var.Source)" KeyPath="yes" Checksum="yes"/>
+            </Component>
+            <Component Id="CMP_UninstallShortcut" Guid="*">
+                <Shortcut Id="UninstallShortcut" Name="Uninstall Vector" Description="Uninstalls Vector"
+                          Target="[System64Folder]msiexec.exe" Arguments="/x [ProductCode]"/>
+                <RemoveFolder Id="INSTALLDIR" On="uninstall"/>
+                <RegistryValue Root="HKCU" Key="Software\vectorapp\Vector" Name="Uninstaller Shortcut" Type="integer" Value="1" KeyPath="yes"/>
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="ApplicationProgramsFolder">
+            <Component Id="ApplicationShortcut" Guid="*">
+                <Shortcut Id="ApplicationStartMenuShortcut" Name="Vector" Description="Runs Vector" Target="[!Path]"
+                          Icon="ProductIcon" WorkingDirectory="INSTALLDIR">
+                    <ShortcutProperty Key="System.AppUserModel.ID" Value="io.vectorapp"/>
+                </Shortcut>
+                <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
+                <RegistryValue Root="HKCU" Key="Software\vectorapp\Vector" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
+            </Component>
+        </DirectoryRef>
+
+        <Feature Id="MainProgram" Title="Application" Description="Installs Vector." Level="1"
+                 ConfigurableDirectory="INSTALLDIR" AllowAdvertise="no" Display="expand" Absent="disallow">
+            <ComponentRef Id="RegistryEntries"/>
+            <Feature Id="ShortcutsFeature" Title="Shortcuts" Level="1">
+                <ComponentRef Id="Path"/>
+                <ComponentRef Id="CMP_UninstallShortcut"/>
+                <ComponentRef Id="ApplicationShortcut"/>
+                <ComponentRef Id="ApplicationShortcutDesktop"/>
+            </Feature>
+        </Feature>
+
+        <!-- Mini Apps run in WebView2: fetched with Microsoft's bootstrapper when it is missing. -->
+        <Property Id="INSTALLED_WEBVIEW2_VERSION">
+            <RegistrySearch Id="Webview2VersionSystemx64" Root="HKLM" Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw"/>
+            <RegistrySearch Id="Webview2VersionSystemx86" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw"/>
+            <RegistrySearch Id="Webview2VersionUser" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw"/>
+        </Property>
+        <CustomAction Id="DownloadAndInvokeBootstrapper" Directory="INSTALLDIR" Execute="deferred" ExeCommand='powershell.exe -NoProfile -windowstyle hidden try [\{] [\[]Net.ServicePointManager[\]]::SecurityProtocol = [\[]Net.SecurityProtocolType[\]]::Tls12 [\}] catch [\{][\}]; Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" ; Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -ArgumentList (&apos;/silent&apos;, &apos;/install&apos;) -Wait' Return="check"/>
+        <InstallExecuteSequence>
+            <Custom Action="DownloadAndInvokeBootstrapper" Before="InstallFinalize">
+                <![CDATA[NOT(REMOVE OR INSTALLED_WEBVIEW2_VERSION)]]>
+            </Custom>
+        </InstallExecuteSequence>
+
+        <InstallExecuteSequence>
+            <Custom Action="LaunchApplication" After="InstallFinalize">AUTOLAUNCHAPP AND NOT Installed</Custom>
+        </InstallExecuteSequence>
+
+        <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize"/>
+    </Product>
+</Wix>

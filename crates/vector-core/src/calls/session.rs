@@ -266,6 +266,16 @@ fn with_call<R>(f: impl FnOnce(&mut Call) -> R) -> Option<R> {
     guard.as_mut().map(f)
 }
 
+/// The live call's (mic, peer) levels as they stand: for meters a client draws every frame,
+/// between the ten-a-second events.
+pub fn levels_now() -> Option<(f32, f32)> {
+    with_call(|c| c.media.as_ref().map(|m| {
+        let s = m.stats();
+        (s.mic_level(), s.peer_level())
+    }))
+    .flatten()
+}
+
 fn with_call_id<R>(id: &str, f: impl FnOnce(&mut Call) -> R) -> Option<R> {
     let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
     match guard.as_mut() {

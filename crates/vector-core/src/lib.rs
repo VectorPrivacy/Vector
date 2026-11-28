@@ -114,6 +114,9 @@ pub mod deep_link;
 pub mod golink;
 pub mod badges;
 pub mod history_gaps;
+pub mod boot_probe;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod resume;
 pub mod bot_interface;
 pub mod webxdc;
 pub mod webxdc_permissions;
@@ -447,6 +450,7 @@ pub mod requests;
 
 // === Message Deletion (NIP-09 against retained gift-wraps) ===
 pub mod deletion;
+pub mod search;
 pub mod early;
 pub mod self_destruct;
 pub mod transfer;
@@ -3002,6 +3006,24 @@ impl VectorCore {
             crate::community::transport::Evidence::Fast, 12,
         ).await;
         Ok((count, warnings))
+    }
+
+    /// The newest page of a channel alone, ingested as soon as it lands: what a reader opening it
+    /// waits on, ahead of the deeper catch-up [`sync_community_channel_page`](Self::sync_community_channel_page) does.
+    pub async fn sync_community_channel_head(&self, channel_id: &str, limit: usize) -> Result<BackfillCount> {
+        let id = self.v2_community_for_channel(channel_id)?.ok_or_else(|| VectorError::Other("unknown community channel".into()))?;
+        let ch_id = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
+        let keyless = crate::db::community::load_community_v2(&id)
+            .map_err(VectorError::Other)?
+            .and_then(|c| c.channel(&ch_id).map(|ch| ch.private && ch.key.is_none()))
+            .unwrap_or(true);
+        if keyless {
+            return Ok(BackfillCount::default());
+        }
+        Ok(Self::v2_backfill_channel_counted(
+            &id, channel_id, limit, 1, None, None,
+            crate::community::transport::Evidence::Fast, 12,
+        ).await)
     }
 
     /// Fill the hole in a channel's held history that a scroll up from `before_ms` is about to

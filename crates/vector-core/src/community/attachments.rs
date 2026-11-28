@@ -31,6 +31,10 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
     if !att.name.is_empty() {
         fields.push(format!("name {}", att.name));
     }
+    // NIP-92 readers (Armada) blur on `content-warning`; Vector reads the name's prefix.
+    if is_spoiler_name(&att.name) {
+        fields.push("content-warning spoiler".to_string());
+    }
     if let Some(meta) = &att.img_meta {
         if !meta.thumbhash.is_empty() {
             fields.push(format!("thumb {}", meta.thumbhash));
@@ -47,6 +51,12 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
         fields.push(format!("fallback {}", fb));
     }
     Tag::custom(IMETA, fields)
+}
+
+const SPOILER_PREFIX: &str = "SPOILER_";
+
+fn is_spoiler_name(name: &str) -> bool {
+    name.get(..SPOILER_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(SPOILER_PREFIX))
 }
 
 /// Read a single `key value` field from an `imeta` tag's entries (value is everything
@@ -93,7 +103,7 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
     let encrypted = !key.is_empty();
 
     let mime = field(body, "m").unwrap_or("application/octet-stream");
-    let name = field(body, "name").map(crate::crypto::sanitize_filename).unwrap_or_default();
+    let mut name = field(body, "name").map(crate::crypto::sanitize_filename).unwrap_or_default();
     // Prefer the filename's extension (accurate for .toml/.rs/etc. that MIME maps to
     // octet-stream); fall back to the MIME-derived extension.
     let extension = name
@@ -102,6 +112,14 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         .filter(|e| !e.is_empty() && *e != name)
         .map(|e| e.to_lowercase())
         .unwrap_or_else(|| crate::crypto::extension_from_mime(mime));
+    let warned = body.iter().any(|e| e == "content-warning" || e.starts_with("content-warning "));
+    if warned && !is_spoiler_name(&name) {
+        name = if name.is_empty() {
+            format!("{SPOILER_PREFIX}file.{extension}")
+        } else {
+            format!("{SPOILER_PREFIX}{name}")
+        };
+    }
 
     let size = field(body, "size").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
     // Vector stamps the plaintext sha256 as `ox`; NIP-92 uses `x`. Either serves
@@ -110,7 +128,10 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         .map(|s| s.to_string()).filter(|s| !s.is_empty());
 
     let img_meta = {
-        let thumb = field(body, "thumb").map(|s| s.to_string());
+        // Other NIP-92 clients put a preview URL in `thumb`, never a thumbhash.
+        let thumb = field(body, "thumbhash")
+            .or_else(|| field(body, "thumb").filter(|t| !t.contains("://")))
+            .map(|s| s.to_string());
         let dim = field(body, "dim").and_then(|s| {
             let (w, h) = s.split_once('x')?;
             Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
@@ -395,6 +416,28 @@ mod tests {
         assert_eq!(field(&["decryption-key-x abc".to_string()], "decryption-key"), None);
         // A key present with no value (no following space) yields None, not a panic.
         assert_eq!(field(&["url".to_string()], "url"), None);
+    }
+
+    #[test]
+    fn a_spoiler_travels_as_a_content_warning_too() {
+        let dir = std::env::temp_dir();
+        let tag = attachment_to_imeta(&sample("SPOILER_x.png", "png", false));
+        assert!(tag.as_slice().iter().any(|e| e == "content-warning spoiler"));
+        let plain = attachment_to_imeta(&sample("x.png", "png", false));
+        assert!(!plain.as_slice().iter().any(|e| e.starts_with("content-warning")));
+        let foreign = Tag::custom(IMETA, ["url https://b.example/f.png", "m image/png", "name f.png", "content-warning"]);
+        assert_eq!(attachment_from_imeta(&foreign, &dir).unwrap().name, "SPOILER_f.png");
+        let nameless = Tag::custom(IMETA, ["url https://b.example/g", "m image/png", "content-warning nsfw"]);
+        assert_eq!(attachment_from_imeta(&nameless, &dir).unwrap().name, "SPOILER_file.png");
+    }
+
+    #[test]
+    fn a_thumb_url_is_not_read_as_a_thumbhash() {
+        let dir = std::env::temp_dir();
+        let tag = Tag::custom(IMETA, ["url https://b.example/f.png", "m image/png", "dim 10x10", "thumb https://b.example/t.png"]);
+        assert!(attachment_from_imeta(&tag, &dir).unwrap().img_meta.is_none());
+        let tag = Tag::custom(IMETA, ["url https://b.example/f.png", "m image/png", "dim 10x10", "thumbhash 1QcSHQRnh493V4dIh4eXh1h4kJUI"]);
+        assert_eq!(attachment_from_imeta(&tag, &dir).unwrap().img_meta.unwrap().thumbhash, "1QcSHQRnh493V4dIh4eXh1h4kJUI");
     }
 
     #[test]

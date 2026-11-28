@@ -922,6 +922,9 @@ impl Session {
             self.readers_out.fetch_add(1, Ordering::Relaxed);
         }
         drop(pool);
+        if !pooled {
+            crate::boot_probe::note(&crate::boot_probe::DB_PASSING_READS);
+        }
         match create_connection(&path) {
             Ok(conn) => Ok(ConnectionGuard::new(conn, self.clone(), pooled)),
             Err(e) => {
@@ -974,6 +977,7 @@ impl Session {
         let path = self.path()?;
         self.writers_out.fetch_add(1, Ordering::Relaxed);
         drop(slot);
+        crate::boot_probe::note(&crate::boot_probe::DB_OWN_WRITES);
         match create_connection(&path) {
             Ok(conn) => Ok(WriteConnectionGuard::new(conn, self.clone())),
             Err(e) => {
@@ -1284,6 +1288,7 @@ fn page_cache_bytes(conn: &rusqlite::Connection) -> i32 {
 
 fn trim_for_idle(conn: &rusqlite::Connection) {
     if page_cache_bytes(conn) > IDLE_CACHE_BYTES {
+        crate::boot_probe::note(&crate::boot_probe::DB_TRIMS);
         let _ = conn.release_memory();
     }
 }
@@ -1302,7 +1307,10 @@ impl Drop for ConnectionGuard {
         if !self.pooled {
             return;
         }
-        trim_for_idle(&conn);
+        // Only the last reader home trims: amid a burst, a released cache is read back at once.
+        if self.session.readers_out.load(std::sync::atomic::Ordering::Relaxed) <= 1 {
+            trim_for_idle(&conn);
+        }
         let mut pool = self.session.read_pool.lock().unwrap_or_else(|e| e.into_inner());
         // fetch_update: its rename, try_update, is newer than the toolchains Vector builds with.
         #[allow(deprecated)]
@@ -1362,7 +1370,9 @@ impl Drop for WriteConnectionGuard {
             }
         }
         if let Some(conn) = self.conn.take() {
-            trim_for_idle(&conn);
+            if self.session.readers_out.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                trim_for_idle(&conn);
+            }
             let mut spare = None;
             {
                 let mut slot = self.session.write_conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -1521,7 +1531,10 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
 /// Get a READ connection (headless-safe — no AppHandle).
 #[track_caller]
 pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
-    current_session().acquire_read()
+    let asked = web_time::Instant::now();
+    let conn = current_session().acquire_read();
+    crate::boot_probe::note_db(&crate::boot_probe::DB_READS, asked);
+    conn
 }
 
 /// Process-wide serialization lock for tests that install into the global DB pool.
@@ -1535,7 +1548,10 @@ pub(crate) static DB_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(()
 /// Get the WRITE connection (headless-safe — no AppHandle).
 #[track_caller]
 pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
-    current_session().acquire_write()
+    let asked = web_time::Instant::now();
+    let conn = current_session().acquire_write();
+    crate::boot_probe::note_db(&crate::boot_probe::DB_WRITES, asked);
+    conn
 }
 
 // ============================================================================
@@ -2013,6 +2029,61 @@ mod pool_generation_tests {
         assert!(waited < READER_WAIT, "woken by the return: {waited:?}");
         assert_eq!(session.read_pool.lock().unwrap().len(), MAX_READERS, "the pool never grew past its cap");
         assert_eq!(session.readers_out.load(std::sync::atomic::Ordering::Relaxed), 0, "every reader counted home");
+    }
+
+    /// Not a check: many threads reading a large database at once, as a catch-up does.
+    /// `cargo nextest run -p vector-core read_storm --run-ignored only --no-capture`
+    #[test]
+    #[ignore]
+    #[cfg(unix)]
+    fn read_storm() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::bound(dir.path().join("storm.db"));
+        {
+            let w = session.acquire_write().unwrap();
+            w.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, chat INTEGER, body BLOB); CREATE INDEX t_chat ON t(chat);").unwrap();
+            w.execute_batch("BEGIN").unwrap();
+            let body = vec![7u8; 2048];
+            for i in 0..120_000i64 {
+                w.execute("INSERT INTO t(chat, body) VALUES (?1, ?2)", rusqlite::params![i % 1000, body]).unwrap();
+            }
+            w.execute_batch("COMMIT").unwrap();
+        }
+        fn usage() -> (f64, f64, i64, i64) {
+            let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
+            let t = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
+            (t(u.ru_utime), t(u.ru_stime), u.ru_minflt as i64, (u.ru_nvcsw + u.ru_nivcsw) as i64)
+        }
+        let (p0, t0) = (crate::boot_probe::DB_PASSING_READS.load(Relaxed), crate::boot_probe::DB_TRIMS.load(Relaxed));
+        let (u0, s0, f0, c0) = usage();
+        let started = std::time::Instant::now();
+        let threads: Vec<_> = (0..32)
+            .map(|k| {
+                let s = session.clone();
+                std::thread::spawn(move || {
+                    for i in 0..400i64 {
+                        let r = s.acquire_read().unwrap();
+                        let _: i64 = r.query_row("SELECT sum(length(body)) FROM t WHERE chat = ?1", [(i * 37 + k) % 1000], |row| row.get(0)).unwrap();
+                        if i % 8 == 0 {
+                            let w = s.acquire_write().unwrap();
+                            w.execute("UPDATE t SET chat = chat WHERE id = ?1", [i * 32 + k]).unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let (u1, s1, f1, c1) = usage();
+        println!(
+            "storm: {:?} user {:.2}s sys {:.2}s faults {} switches {} passing reads {} trims {}",
+            started.elapsed(), u1 - u0, s1 - s0, f1 - f0, c1 - c0,
+            crate::boot_probe::DB_PASSING_READS.load(Relaxed) - p0,
+            crate::boot_probe::DB_TRIMS.load(Relaxed) - t0,
+        );
     }
 
     #[test]
@@ -2578,3 +2649,4 @@ mod downgrade_tests {
         assert!(!exists, "a blocked open must not write to the database");
     }
 }
+

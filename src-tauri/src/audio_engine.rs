@@ -50,6 +50,11 @@ impl AudioInput {
         }
     }
 
+    /// Its bytes are still on the network.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, AudioInput::Held(src) if src.remote())
+    }
+
     pub fn read_all(&self) -> Result<Vec<u8>, String> {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -849,7 +854,8 @@ impl AudioEngine {
 
         self.evict_if_needed();
 
-        if est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
+        // A remote file decoded whole would be downloaded whole, by every segment worker at once.
+        if input.is_remote() || est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
             return self.load_windowed(id, input, sample_rate, channels, src_channels, duration_ms);
         }
 
@@ -938,7 +944,8 @@ impl AudioEngine {
                 .spawn(move || window_decode_worker(id, &input, channels, sample_rate, ctl, &shared))
                 .map_err(|e| format!("Failed to spawn window decoder: {}", e))?;
         }
-        {
+        // A waveform reads the whole file: not worth downloading a streamed one for.
+        if !input.is_remote() {
             let (input, shared) = (input.clone(), Arc::clone(&self.shared));
             let est_frames = duration_ms * sample_rate as u64 / 1000;
             std::thread::Builder::new()

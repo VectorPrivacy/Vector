@@ -1,0 +1,14 @@
+{
+  "decimal": ",",
+  "group": " ",
+  "list_last": " og ",
+  "list_pair": " og ",
+  "dates": {
+    "months": ["januar", "februar", "mars", "april", "mai", "juni", "juli", "august", "september", "oktober", "november", "desember"],
+    "months_short": ["jan.", "feb.", "mars", "apr.", "mai", "juni", "juli", "aug.", "sep.", "okt.", "nov.", "des."],
+    "weekdays": ["søndag", "mandag", "tirsdag", "onsdag", "torsdag", "fredag", "lørdag"],
+    "weekdays_short": ["søn.", "man.", "tir.", "ons.", "tor.", "fre.", "lør."],
+    "am_pm": ["a.m.", "p.m."],
+    "patterns": ["d.M.y", "dd.MM.y", "d. MMM y", "d. MMMM y", "EEEE d. MMMM y", "d. MMM", "E d. MMM", "E d. MMM y", "ccc"]
+  }
+}

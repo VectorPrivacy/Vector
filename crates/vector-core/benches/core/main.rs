@@ -12,6 +12,7 @@ mod compact;
 mod db_reads;
 mod parse;
 mod pool;
+mod search;
 
 use nostr_sdk::prelude::{Keys, ToBech32};
 use vector_core::crypto::guarded_key::bench as vault;
@@ -38,6 +39,7 @@ const ALL: &[(&str, fn())] = &[
     ("crypto::chacha20_raw", parse::chacha20_raw),
     ("crypto::nip44_decrypt", parse::nip44_decrypt),
     ("crypto::chacha20_backends", parse::chacha20_backends),
+    ("search::scan", search::scan),
     ("profile::processor", vector_core::profile::sync::bench::processor),
     ("vault::designs", vault::designs),
     ("vault::set_sources", vault::set_sources),
