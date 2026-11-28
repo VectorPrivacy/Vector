@@ -6,6 +6,41 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 /// Plane connections built: authed per plane key, and open per relay.
 pub static PLANE_DIALS: AtomicU64 = AtomicU64::new(0);
 pub static OPEN_DIALS: AtomicU64 = AtomicU64::new(0);
+/// Relay frames that reached a community read's listener, its own or another read's.
+pub static READ_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// Events those reads kept.
+pub static READ_KEPT: AtomicU64 = AtomicU64::new(0);
+/// Community reads listening on a relay now, and the most at once.
+pub static READERS: AtomicU64 = AtomicU64::new(0);
+pub static READERS_PEAK: AtomicU64 = AtomicU64::new(0);
+
+/// Database connections taken, and the microseconds spent waiting for them.
+pub static DB_READS: AtomicU64 = AtomicU64::new(0);
+pub static DB_WRITES: AtomicU64 = AtomicU64::new(0);
+pub static DB_WAIT_US: AtomicU64 = AtomicU64::new(0);
+
+pub fn note_db(c: &AtomicU64, asked: web_time::Instant) {
+    note(c);
+    DB_WAIT_US.fetch_add(asked.elapsed().as_micros() as u64, Relaxed);
+}
+
+/// A read listening until dropped.
+pub struct Reader;
+
+impl Reader {
+    pub fn new() -> Self {
+        let now = READERS.fetch_add(1, Relaxed) + 1;
+        READERS_PEAK.fetch_max(now, Relaxed);
+        Reader
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        READERS.fetch_sub(1, Relaxed);
+    }
+}
+
 /// Community reads asked of relays.
 pub static FETCHES: AtomicU64 = AtomicU64::new(0);
 
@@ -59,7 +94,7 @@ pub async fn run() {
         let now = rusage();
         let tasks = tokio::runtime::Handle::try_current().map_or(0, |h| h.metrics().num_alive_tasks());
         crate::log_net_fail!(
-            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} ({} distinct) open={} fetches={} tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
+            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} ({} distinct) open={} fetches={} frames {} kept {} readers peak {} db r {} w {} wait {}ms tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
             start.elapsed().as_secs(),
             clients.len(),
             pooled,
@@ -70,6 +105,12 @@ pub async fn run() {
             planes_seen(),
             OPEN_DIALS.load(Relaxed),
             FETCHES.load(Relaxed),
+            READ_FRAMES.load(Relaxed),
+            READ_KEPT.load(Relaxed),
+            READERS_PEAK.load(Relaxed),
+            DB_READS.load(Relaxed),
+            DB_WRITES.load(Relaxed),
+            DB_WAIT_US.load(Relaxed) / 1000,
             tasks,
             now.0 - last.0,
             now.1 - last.1,

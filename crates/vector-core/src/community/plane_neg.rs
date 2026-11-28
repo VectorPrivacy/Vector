@@ -69,6 +69,7 @@ pub(crate) async fn reconcile(relay: &Relay, filter: Filter, held: &[(EventId, u
 
     // Listening before the open, so its answer can't slip past.
     let mut notifications = relay.notifications();
+    let _reader = crate::boot_probe::Reader::new();
     let sub_id = SubscriptionId::generate();
     // The relay holds the exchange open until told: close it on every way out.
     struct CloseGuard(Relay, SubscriptionId);
@@ -96,7 +97,10 @@ pub(crate) async fn reconcile(relay: &Relay, filter: Filter, held: &[(EventId, u
     loop {
         let deadline = crate::rt::time::Instant::now() + if answered { idle } else { first };
         let notification = match crate::rt::time::timeout_at(deadline, notifications.next()).await {
-            Ok(Some(n)) => n,
+            Ok(Some(n)) => {
+                crate::boot_probe::note(&crate::boot_probe::READ_FRAMES);
+                n
+            }
             Ok(None) => return Err(Ended::Fail(ReconcileFail::Unreached)),
             Err(_) if answered => return Err(failed("the relay stopped answering")),
             Err(_) => return Err(Ended::Silent),

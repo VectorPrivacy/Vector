@@ -1521,7 +1521,10 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
 /// Get a READ connection (headless-safe — no AppHandle).
 #[track_caller]
 pub fn get_db_connection_guard_static() -> Result<ConnectionGuard, String> {
-    current_session().acquire_read()
+    let asked = web_time::Instant::now();
+    let conn = current_session().acquire_read();
+    crate::boot_probe::note_db(&crate::boot_probe::DB_READS, asked);
+    conn
 }
 
 /// Process-wide serialization lock for tests that install into the global DB pool.
@@ -1535,7 +1538,10 @@ pub(crate) static DB_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(()
 /// Get the WRITE connection (headless-safe — no AppHandle).
 #[track_caller]
 pub fn get_write_connection_guard_static() -> Result<WriteConnectionGuard, String> {
-    current_session().acquire_write()
+    let asked = web_time::Instant::now();
+    let conn = current_session().acquire_write();
+    crate::boot_probe::note_db(&crate::boot_probe::DB_WRITES, asked);
+    conn
 }
 
 // ============================================================================
