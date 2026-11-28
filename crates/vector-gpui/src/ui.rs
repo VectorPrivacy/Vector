@@ -318,6 +318,9 @@ pub struct VectorApp {
     login_out: Option<(Entity<LoginView>, std::time::Instant)>,
     /// A frame callback is set to step the speaking glows.
     glows_armed: std::cell::Cell<bool>,
+    /// A recount of unread is running, and whether another was asked for meanwhile.
+    unread_running: bool,
+    unread_again: bool,
     /// A frame callback or its timer is set to step the streaming animations.
     streams_armed: std::cell::Cell<bool>,
     /// The same for the chat's 3D models.
@@ -1190,6 +1193,8 @@ impl VectorApp {
             fades: Fades::default(),
             login_out: None,
             glows_armed: Default::default(),
+            unread_running: false,
+            unread_again: false,
             streams_armed: Default::default(),
             models_armed: Default::default(),
             booted: false,
@@ -3423,13 +3428,26 @@ impl VectorApp {
         cx.notify();
     }
 
+    /// One recount at a time: asks that arrive while one runs become a single recount after it,
+    /// as each reads every chat's unread from the database.
     fn refresh_unread(&mut self, cx: &mut Context<Self>) {
+        if self.unread_running {
+            self.unread_again = true;
+            return;
+        }
+        self.unread_running = true;
         let rx = backend::run(messaging::unread_counts());
         cx.spawn(async move |this, cx| {
-            let Ok(counts) = rx.await else { return };
+            let counts = rx.await.ok();
             this.update(cx, |this, cx| {
-                this.store.borrow_mut().unread = Some(counts);
-                cx.notify();
+                this.unread_running = false;
+                if let Some(counts) = counts {
+                    this.store.borrow_mut().unread = Some(counts);
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.unread_again) {
+                    this.refresh_unread(cx);
+                }
             })
             .ok();
         })

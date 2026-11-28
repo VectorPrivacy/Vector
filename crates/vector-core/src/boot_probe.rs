@@ -19,6 +19,11 @@ pub static DB_READS: AtomicU64 = AtomicU64::new(0);
 pub static DB_WRITES: AtomicU64 = AtomicU64::new(0);
 pub static DB_WAIT_US: AtomicU64 = AtomicU64::new(0);
 
+/// Connections opened past the pools, and page caches released on a connection's return.
+pub static DB_PASSING_READS: AtomicU64 = AtomicU64::new(0);
+pub static DB_OWN_WRITES: AtomicU64 = AtomicU64::new(0);
+pub static DB_TRIMS: AtomicU64 = AtomicU64::new(0);
+
 pub fn note_db(c: &AtomicU64, asked: web_time::Instant) {
     note(c);
     DB_WAIT_US.fetch_add(asked.elapsed().as_micros() as u64, Relaxed);
@@ -94,7 +99,7 @@ pub async fn run() {
         let now = rusage();
         let tasks = tokio::runtime::Handle::try_current().map_or(0, |h| h.metrics().num_alive_tasks());
         crate::log_net_fail!(
-            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} ({} distinct) open={} fetches={} frames {} kept {} readers peak {} db r {} w {} wait {}ms tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
+            "[boot-probe] t={}s clients={} (pooled {} open {}) relays={} connected={} dials plane={} ({} distinct) open={} fetches={} frames {} kept {} readers peak {} db r {} w {} wait {}ms passing {} own-writes {} trims {} tasks={} cpu+10s user={:.1}s sys={:.1}s csw={}",
             start.elapsed().as_secs(),
             clients.len(),
             pooled,
@@ -111,6 +116,9 @@ pub async fn run() {
             DB_READS.load(Relaxed),
             DB_WRITES.load(Relaxed),
             DB_WAIT_US.load(Relaxed) / 1000,
+            DB_PASSING_READS.load(Relaxed),
+            DB_OWN_WRITES.load(Relaxed),
+            DB_TRIMS.load(Relaxed),
             tasks,
             now.0 - last.0,
             now.1 - last.1,
